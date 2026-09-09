@@ -50,6 +50,16 @@ fn main() -> Result<()> {
             bench_encode(secs, out_size, bitrate * 1_000_000)
         }
         #[cfg(windows)]
+        "bench-audio" => {
+            let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(5);
+            let source = match args.get(2).map(String::as_str) {
+                Some("mic") => relay_capture::audio::AudioSource::Microphone,
+                Some(pid) => relay_capture::audio::AudioSource::Process { pid: pid.parse()? },
+                None => relay_capture::audio::AudioSource::Desktop,
+            };
+            bench_audio(secs, source)
+        }
+        #[cfg(windows)]
         "bench-capture" => {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(10);
             bench_capture(secs)
@@ -99,6 +109,39 @@ fn bench_capture(secs: u64) -> Result<()> {
             "fps": frames as f64 / elapsed,
             "present_to_receive_ms": { "p50": p50, "p99": p99, "max": max },
             "dropped_by_source": src.dropped(),
+        })
+    );
+    Ok(())
+}
+
+/// Capture audio for `secs`, Opus-encode 10 ms frames, report packet flow.
+#[cfg(windows)]
+fn bench_audio(secs: u64, source: relay_capture::audio::AudioSource) -> Result<()> {
+    use relay_capture::audio::OpusStream;
+    use std::time::{Duration, Instant};
+
+    eprintln!("audio source: {source:?}, {secs}s");
+    let mut stream = OpusStream::new(source, 160_000)?;
+    let mut packets = 0u64;
+    let mut bytes = 0u64;
+    let mut peak = 0.0f32;
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(secs) {
+        if let Some(p) = stream.next(Duration::from_millis(200))? {
+            packets += 1;
+            bytes += p.data.len() as u64;
+            peak = peak.max(stream.peak);
+        }
+    }
+    let elapsed = start.elapsed().as_secs_f64();
+    println!(
+        "{}",
+        serde_json::json!({
+            "stage": "audio",
+            "packets": packets,
+            "expected_packets": (elapsed * 100.0) as u64,
+            "kbps": bytes as f64 * 8.0 / elapsed / 1e3,
+            "peak": peak,
         })
     );
     Ok(())

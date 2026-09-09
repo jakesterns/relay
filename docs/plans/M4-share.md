@@ -47,7 +47,7 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 - [x] Decision gate: capture + encode p99 ≈ 10.8 ms « 20 ms → **Media Foundation holds the budget; direct NVENC not needed.** (Sender: NVIDIA HEVC Encoder MFT on the RTX 3090.)
 
 ### Audio
-- [ ] WASAPI loopback of the default render endpoint; process-loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) for game-only capture; Opus 48 kHz stereo 128–256 kb/s, 10 ms frames.
+- [x] WASAPI loopback of the default render endpoint; process-loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) for game-only capture; Opus 48 kHz stereo 160 kb/s default, 10 ms frames. All three paths (desktop / process / mic) verified with `relay-share bench-audio`.
 - [ ] Optional microphone track.
 
 ### Transport

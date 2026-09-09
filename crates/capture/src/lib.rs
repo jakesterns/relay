@@ -13,6 +13,8 @@
 //! surface. No frame ever crosses to system memory on the send path.
 
 #[cfg(windows)]
+pub mod audio;
+#[cfg(windows)]
 pub mod d3d;
 #[cfg(windows)]
 pub mod encode;

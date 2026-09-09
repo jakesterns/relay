@@ -23,6 +23,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+opus = "0.4"
+windows-core = "0.62"
 windows = { workspace = true, features = [
     "Foundation",
     "Graphics",
