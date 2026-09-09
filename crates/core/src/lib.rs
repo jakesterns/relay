@@ -11,14 +11,19 @@
 //! other processes and is loaded on demand.
 
 pub mod apply;
+pub mod autostart;
 pub mod backup;
 pub mod config;
 pub mod footprint;
 pub mod hardware;
 pub mod hotkeys;
+pub mod instance;
 pub mod ipc;
+pub mod logging;
+pub mod processes;
 pub mod profiles;
 pub mod service;
+pub mod status;
 pub mod types;
 pub mod winloop;
 

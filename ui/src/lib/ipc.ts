@@ -3,7 +3,8 @@
  * Keep field names and enum spellings identical to the serde output.
  *
  * In the browser (plain `pnpm dev` without Tauri) the commands are not
- * available, so every call falls back to mock data shaped like the mocks/.
+ * available, so every call falls back to an in-memory mock store shaped like
+ * the mocks/ so the forms can still be exercised.
  */
 
 export type HeadsetId = string;
@@ -29,6 +30,7 @@ export interface ProfileSummary {
   headset: HeadsetId | null; monitor: MonitorId | null; share: SharePreset; status: ProfileStatus;
 }
 export interface Foreground { pid: number; exe: string; title: string }
+export interface ProcessInfo { pid: number; exe: string; title: string }
 export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
 export type DisplayState = "default" | "applied";
@@ -46,6 +48,33 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return invoke<T>(cmd, args);
 }
 
+/** A fresh profile with the same defaults as `Profile::new` in Rust. */
+export function newProfile(name = "", exe = ""): Profile {
+  return {
+    id: crypto.randomUUID(),
+    name,
+    note: "",
+    game: { exe },
+    audio: { bands: [], hrtf: false, apply_to_share: false },
+    display: {
+      gpu: { vibrance: 50, gamma: 1.0, contrast: 0, shadow_lift: 0, hue_deg: 0 },
+      monitor: {},
+      follow_focus: true,
+      leave_other_monitors: true,
+      share_true_colors: true,
+    },
+    share: "off",
+    status: "draft",
+  };
+}
+
+export function summarize(p: Profile): ProfileSummary {
+  return {
+    id: p.id, name: p.name, note: p.note, exe: p.game.exe,
+    headset: p.headset ?? null, monitor: p.monitor ?? null, share: p.share, status: p.status,
+  };
+}
+
 export const mockState: CoreState = {
   active_profile: null,
   foreground: null,
@@ -55,13 +84,35 @@ export const mockState: CoreState = {
   footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
 };
 
-export const mockProfiles: ProfileSummary[] = [
-  { id: "1", name: "Call of Duty", note: "Footsteps · dark-map colors", exe: "cod.exe", headset: "HD 560S", monitor: "LG 27GP850", share: "game", status: "ready" },
-  { id: "2", name: "Call of Duty", note: "Same tuning · IEM set", exe: "cod.exe", headset: "Moondrop Blessing 3", monitor: "LG 27GP850", share: "game", status: "ready" },
-  { id: "3", name: "Valorant", note: "Neutral EQ · vivid", exe: "valorant.exe", headset: "HD 560S", monitor: "Zowie XL2566K", share: "game", status: "ready" },
-  { id: "4", name: "FL Studio", note: "Relay Send on master", exe: "fl64.exe", headset: "Scarlett 2i2 → DT 770", monitor: null, share: "daw", status: "ready" },
-  { id: "5", name: "Elden Ring", note: "Untouched audio · warm colors", exe: "eldenring.exe", headset: null, monitor: "LG C2", share: "off", status: "draft" },
+function mockProfile(id: string, name: string, note: string, exe: string, headset: string | null, monitor: string | null, share: SharePreset, status: ProfileStatus): Profile {
+  const p = newProfile(name, exe);
+  p.id = id; p.note = note; p.share = share; p.status = status;
+  if (headset) p.headset = headset;
+  if (monitor) p.monitor = monitor;
+  return p;
+}
+
+/** Browser-only store so New / Edit / Delete work without the core. */
+const mockStore: Map<string, Profile> = new Map(
+  [
+    mockProfile("1", "Call of Duty", "Footsteps · dark-map colors", "cod.exe", "HD 560S", "LG 27GP850", "game", "ready"),
+    mockProfile("2", "Call of Duty", "Same tuning · IEM set", "cod.exe", "Moondrop Blessing 3", "LG 27GP850", "game", "ready"),
+    mockProfile("3", "Valorant", "Neutral EQ · vivid", "valorant.exe", "HD 560S", "Zowie XL2566K", "game", "ready"),
+    mockProfile("4", "FL Studio", "Relay Send on master", "fl64.exe", "Scarlett 2i2 → DT 770", null, "daw", "ready"),
+    mockProfile("5", "Elden Ring", "Untouched audio · warm colors", "eldenring.exe", null, "LG C2", "off", "draft"),
+  ].map((p) => [p.id, p]),
+);
+
+export const mockProfiles: ProfileSummary[] = [...mockStore.values()].map(summarize);
+
+const mockProcesses: ProcessInfo[] = [
+  { pid: 1001, exe: "cod.exe", title: "Call of Duty" },
+  { pid: 1002, exe: "valorant.exe", title: "VALORANT" },
+  { pid: 1003, exe: "fl64.exe", title: "FL Studio 21" },
+  { pid: 1004, exe: "discord.exe", title: "Discord" },
 ];
+
+let mockAutostart = false;
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -69,14 +120,24 @@ export const api = {
     return invoke<CoreState>("core_status");
   },
   async listProfiles(): Promise<ProfileSummary[]> {
-    if (!isTauri()) return mockProfiles;
+    if (!isTauri()) return [...mockStore.values()].map(summarize);
     return invoke<ProfileSummary[]>("list_profiles");
   },
   async getProfile(id: string): Promise<Profile> {
+    if (!isTauri()) {
+      const p = mockStore.get(id);
+      if (!p) throw new Error("no such profile");
+      return structuredClone(p);
+    }
     return invoke<Profile>("get_profile", { id });
   },
   async saveProfile(profile: Profile): Promise<void> {
+    if (!isTauri()) { mockStore.set(profile.id, structuredClone(profile)); return; }
     return invoke<void>("save_profile", { profile });
+  },
+  async deleteProfile(id: string): Promise<void> {
+    if (!isTauri()) { mockStore.delete(id); return; }
+    return invoke<void>("delete_profile", { id });
   },
   async applyProfile(id: string): Promise<void> {
     if (!isTauri()) return;
@@ -85,6 +146,18 @@ export const api = {
   async restoreAll(): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("restore_all");
+  },
+  async listProcesses(): Promise<ProcessInfo[]> {
+    if (!isTauri()) return mockProcesses;
+    return invoke<ProcessInfo[]>("list_processes");
+  },
+  async getAutostart(): Promise<boolean> {
+    if (!isTauri()) return mockAutostart;
+    return invoke<boolean>("get_autostart");
+  },
+  async setAutostart(enabled: boolean): Promise<boolean> {
+    if (!isTauri()) { mockAutostart = enabled; return enabled; }
+    return invoke<boolean>("set_autostart", { enabled });
   },
 };
 

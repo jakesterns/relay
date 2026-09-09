@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{info, warn};
 
-use crate::apply::{Applier, AudioControl, DisplayControl, Noop};
+use crate::apply::{Applier, AudioControl, DisplayControl, FileRecorder, Noop};
 use crate::backup::BackupFile;
 use crate::config::Paths;
 use crate::footprint::FootprintMeter;
@@ -30,6 +30,23 @@ impl Default for Backends {
     fn default() -> Self {
         let noop = Arc::new(Noop);
         Self { audio: noop.clone(), display: noop, hardware: Arc::new(NoopHardwareProbe) }
+    }
+}
+
+/// Environment variable naming a file for the [`FileRecorder`] test backend.
+pub const RECORDING_ENV: &str = "RELAY_RECORDING_BACKEND";
+
+impl Backends {
+    /// Production no-op backends, or the file-backed recorder when
+    /// `RELAY_RECORDING_BACKEND=<path>` is set (integration tests only).
+    pub fn from_env() -> Self {
+        match std::env::var(RECORDING_ENV) {
+            Ok(path) if !path.is_empty() => {
+                let rec = Arc::new(FileRecorder::at(path));
+                Self { audio: rec.clone(), display: rec, hardware: Arc::new(NoopHardwareProbe) }
+            }
+            _ => Self::default(),
+        }
     }
 }
 
@@ -56,7 +73,7 @@ impl Service {
     /// restores on the way out.
     pub fn run(paths: Paths, backends: Backends) -> Result<()> {
         paths.ensure()?;
-        info!(dir = %paths.dir().display(), "relay-core starting");
+        info!(root = %paths.root().display(), "relay-core starting");
 
         let store = ProfileStore::load(paths.profiles_file())?;
         let mut applier =
@@ -260,6 +277,17 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }
+            Method::ListProcesses => {
+                Reply::Processes { processes: crate::processes::list_windowed() }
+            }
+            Method::GetAutostart => match crate::autostart::is_enabled() {
+                Ok(enabled) => Reply::Autostart { enabled },
+                Err(e) => Reply::Error { message: e.to_string() },
+            },
+            Method::SetAutostart { enabled } => match crate::autostart::set(enabled) {
+                Ok(()) => Reply::Autostart { enabled },
+                Err(e) => Reply::Error { message: e.to_string() },
+            },
             Method::Subscribe => Reply::Ok,
             Method::Shutdown => {
                 let _ = self.shutdown.send(CoreEvent::Shutdown);

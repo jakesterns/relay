@@ -65,6 +65,13 @@ impl Drop for WinLoop {
     }
 }
 
+/// Full image path of a process, or `None` if it cannot be queried.
+#[cfg(windows)]
+pub fn process_image_path(pid: u32) -> Option<String> {
+    // SAFETY: only limited-information access is requested; see `imp::process_image`.
+    unsafe { imp::process_image(pid) }
+}
+
 /// `C:\Games\CoD\cod.exe` → `cod.exe`
 pub fn exe_name(path: &str) -> String {
     PathBuf::from(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
@@ -247,7 +254,7 @@ mod imp {
         Some(Foreground { pid, exe, title })
     }
 
-    unsafe fn process_image(pid: u32) -> Option<String> {
+    pub(super) unsafe fn process_image(pid: u32) -> Option<String> {
         let h: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;

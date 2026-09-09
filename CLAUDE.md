@@ -62,7 +62,13 @@ relay-handoff/        original handoff bundle; do not edit
 - `backup.rs` — original-state snapshot written atomically to disk *before* any apply; restored on start if left pending (crash/reboot path).
 - `apply.rs` — `AudioControl` / `DisplayControl` traits and the `Applier` that enforces backup-then-apply and restore-on-blur. Real backends live in `audio/` and `display/` later; `Noop` today.
 - `winloop.rs` — one Win32 message-loop thread: `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` focus watcher + `RegisterHotKey`. Emits `CoreEvent`.
-- `ipc.rs` — newline-delimited JSON over named pipe `\\.\pipe\relay-core`. Server in core, client used by the Tauri shell.
+- `ipc.rs` — newline-delimited JSON over named pipe `\\.\pipe\relay-core`. Server in core, client used by the Tauri shell. Pipe DACL = current user only, remote clients rejected, lines capped at 1 MB, idle and request timeouts.
+- `config.rs` — data root (`%LOCALAPPDATA%\Relay`; `--data-dir` overrides), pipe and mutex names. `RELAY_INSTANCE=<suffix>` namespaces both so tests and the footprint gate can run beside a live core.
+- `instance.rs` — single-instance guard (named mutex `Local\RelayCore`).
+- `logging.rs` — `logs/core.log`, 1 MB × 3 rotation, plus stderr when attached. `--verbose` or `RELAY_LOG=` sets the level (no `EnvFilter`: its regex engine is too big for the budget).
+- `autostart.rs` — the one Run-key value (`HKCU\...\Run\Relay`); `relay-core autostart on|off`.
+- `processes.rs` — windowed processes for the exe picker (`Method::ListProcesses`).
+- `status.rs` — human summary for `relay-core status` (`--json` for the raw state).
 - `service.rs` — wires the above; single-threaded tokio runtime.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.
 
@@ -71,7 +77,11 @@ relay-handoff/        original handoff bundle; do not edit
 cargo build                         # whole workspace
 cargo test -p relay-core
 cargo run -p relay-core -- run      # start the service (foreground, logs to stderr)
-cargo run -p relay-core -- status   # query it over IPC
+cargo run -p relay-core -- status   # human summary; --json for raw state
+cargo run -p relay-core -- autostart on|off
+cargo test -p relay-core --test crash_restore   # spawns a real core, taskkill /F, checks restore
+pwsh scripts/footprint.ps1          # release footprint gate (<=10 MB WS, <=0.5 % CPU); also in CI
 cd ui && pnpm install && pnpm tauri dev   # UI (needs the service running for live data; falls back to mock data otherwise)
 ```
 IPC contract lives in `crates/core/src/ipc.rs`; the TypeScript mirror is `ui/src/lib/ipc.ts`. Keep them in sync.
+CI (`.github/workflows/ci.yml`, windows-latest) builds the UI first because `tauri::generate_context!` embeds `ui/dist` at compile time. Test backend: `RELAY_RECORDING_BACKEND=<file>` swaps in `apply::FileRecorder`.

@@ -56,6 +56,57 @@ impl DisplayControl for Noop {
     }
 }
 
+/// Test harness backend: appends one line per call to a file so an external
+/// process (the crash-restore integration test) can see what the core did.
+/// Selected with `RELAY_RECORDING_BACKEND=<path>`; never used in production.
+#[derive(Debug)]
+pub struct FileRecorder {
+    path: std::path::PathBuf,
+}
+
+impl FileRecorder {
+    pub fn at(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    fn record(&self, what: &str) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            let _ = writeln!(f, "{what}");
+        }
+    }
+}
+
+impl AudioControl for FileRecorder {
+    fn capture(&self) -> Result<AudioState> {
+        self.record("audio.capture");
+        Ok(AudioState { bypass: true })
+    }
+    fn apply(&self, _: &AudioSettings) -> Result<AudioChainState> {
+        self.record("audio.apply");
+        Ok(AudioChainState::Active)
+    }
+    fn restore(&self, _: &AudioState) -> Result<()> {
+        self.record("audio.restore");
+        Ok(())
+    }
+}
+
+impl DisplayControl for FileRecorder {
+    fn capture(&self, _: &DisplaySettings) -> Result<DisplayStateSnapshot> {
+        self.record("display.capture");
+        Ok(DisplayStateSnapshot::default())
+    }
+    fn apply(&self, _: &DisplaySettings) -> Result<()> {
+        self.record("display.apply");
+        Ok(())
+    }
+    fn restore(&self, _: &DisplayStateSnapshot) -> Result<()> {
+        self.record("display.restore");
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Applied {
     pub audio: AudioChainState,

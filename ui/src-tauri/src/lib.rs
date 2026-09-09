@@ -5,7 +5,7 @@
 //! error and the frontend shows its offline / mock state.
 
 use relay_core::ipc::{Method, Reply};
-use relay_core::types::{CoreState, Profile, ProfileSummary};
+use relay_core::types::{CoreState, ProcessInfo, Profile, ProfileSummary};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
@@ -76,6 +76,14 @@ async fn save_profile(profile: Profile) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn delete_profile(id: Uuid) -> CmdResult<()> {
+    match call(Method::DeleteProfile { id }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn apply_profile(id: Uuid) -> CmdResult<()> {
     match call(Method::ApplyProfile { id }).await? {
         Reply::Ok => Ok(()),
@@ -87,6 +95,30 @@ async fn apply_profile(id: Uuid) -> CmdResult<()> {
 async fn restore_all() -> CmdResult<()> {
     match call(Method::RestoreAll).await? {
         Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn list_processes() -> CmdResult<Vec<ProcessInfo>> {
+    match call(Method::ListProcesses).await? {
+        Reply::Processes { processes } => Ok(processes),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn get_autostart() -> CmdResult<bool> {
+    match call(Method::GetAutostart).await? {
+        Reply::Autostart { enabled } => Ok(enabled),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_autostart(enabled: bool) -> CmdResult<bool> {
+    match call(Method::SetAutostart { enabled }).await? {
+        Reply::Autostart { enabled } => Ok(enabled),
         other => Err(unexpected(other).into()),
     }
 }
@@ -128,9 +160,7 @@ fn spawn_event_bridge(_app: AppHandle) {}
 
 pub fn run() {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .compact()
         .init();
@@ -145,8 +175,12 @@ pub fn run() {
             list_profiles,
             get_profile,
             save_profile,
+            delete_profile,
             apply_profile,
             restore_all,
+            list_processes,
+            get_autostart,
+            set_autostart,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

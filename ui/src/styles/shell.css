@@ -212,3 +212,28 @@ a { color: inherit; text-decoration: none; }
 .offline code { font-family: GeistMono; color: var(--ink); font-size: 11.5px; }
 
 .empty { color: var(--dim); padding: 18px 0; text-align: center; }
+
+/* Forms (profile editor, settings) */
+.form { display: flex; flex-direction: column; gap: 12px; }
+.form .two { gap: 12px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span { color: var(--mute); font-size: 12px; }
+.field input, .field select {
+  font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line2);
+  border-radius: 6px; padding: 8px 10px; outline: none; width: 100%;
+  transition: border-color .25s var(--ease);
+}
+.field input:focus, .field select:focus { border-color: rgba(201,169,106,.5); }
+.field input::placeholder { color: var(--dim); }
+.field input.mono { font-family: GeistMono; font-size: 12px; }
+.field .row { display: grid; grid-template-columns: 1fr 220px auto; gap: 8px; align-items: center; }
+.field select { color: var(--mute); }
+.field select option { background: var(--raised); color: var(--ink); }
+.form .actions { display: flex; gap: 8px; align-items: center; padding-top: 4px; border-top: 1px solid var(--line); }
+.form .actions .btn:last-child { margin-left: auto; }
+.btn.danger { border-color: rgba(201,106,106,.5); color: var(--rec); }
+.btn:disabled { cursor: default; }
+.p.small { font-size: 12px; }
+.p b { color: var(--ink); font-weight: 500; }
+.tbl tbody tr { cursor: default; }
+.tbl tbody tr:hover td { background: rgba(255,255,255,.02); }

@@ -25,16 +25,16 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ---
 
 ## M0 — Foundation hardening
-Small items that unblock everything else.
+Small items that unblock everything else. **Done 2026-09-09** (session log in `docs/plans/M0-foundation.md`; the GitHub remote / first CI run and the autostart console flash are deferred there).
 
-- [ ] Initial commit; GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `pnpm build`.
-- [ ] Release-footprint gate: script that builds `relay-core` in release, runs it for 30 s idle, asserts RSS ≤ 10 MB and CPU ≈ 0. Runs in CI.
-- [ ] Single-instance guard for the core (named mutex) and a `--foreground/--tray`-less headless mode that is the default.
-- [ ] Log to `%LOCALAPPDATA%\Relay\logs\core.log` with size-based rotation; `--verbose` flag.
-- [ ] Opt-in autostart at login (Run key under HKCU only; removable from Settings and by the uninstaller).
-- [ ] IPC hardening: pipe DACL limited to the current user; reject messages > 1 MB.
-- [ ] Profile CRUD in the UI: New / Edit / Delete profile forms wired to `save_profile` / `delete_profile`. Today the UI is read-only.
-- [ ] Crash-restore test harness: apply a profile, kill the core with `taskkill /F`, restart, assert restore ran. Automated, uses the `Recorder` backends.
+- [x] Initial commit; GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `pnpm build`.
+- [x] Release-footprint gate: script that builds `relay-core` in release, runs it for 30 s idle, asserts RSS ≤ 10 MB and CPU ≈ 0. Runs in CI.
+- [x] Single-instance guard for the core (named mutex) and a `--foreground/--tray`-less headless mode that is the default.
+- [x] Log to `%LOCALAPPDATA%\Relay\logs\core.log` with size-based rotation; `--verbose` flag.
+- [x] Opt-in autostart at login (Run key under HKCU only; removable from Settings and by the uninstaller).
+- [x] IPC hardening: pipe DACL limited to the current user; reject messages > 1 MB.
+- [x] Profile CRUD in the UI: New / Edit / Delete profile forms wired to `save_profile` / `delete_profile`. Today the UI is read-only.
+- [x] Crash-restore test harness: apply a profile, kill the core with `taskkill /F`, restart, assert restore ran. Automated, uses the `Recorder` backends.
 
 ## M1 — Hardware library and probe
 Profiles only match "Any" until the core knows what is plugged in.
@@ -100,7 +100,7 @@ Profiles only match "Any" until the core knows what is plugged in.
 ## Plan files
 | Milestone | Plan | Session status |
 |---|---|---|
-| M0 Foundation hardening | `docs/plans/M0-foundation.md` | not started |
+| M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09 (remote / first CI run deferred) |
 | M4 Share MVP | `docs/plans/M4-share.md` | not started |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | not started |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |

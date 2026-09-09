@@ -227,6 +227,14 @@ pub struct Foreground {
     pub title: String,
 }
 
+/// A running process that owns a visible window (for the exe picker).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: u32,
+    pub exe: String,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum ShareState {
