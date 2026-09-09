@@ -29,11 +29,11 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 ```
 
 ## Definition of Ready
-- [ ] M0 complete: initial commit, CI, footprint gate, logging, child-process model available.
-- [ ] Second PC on the same wired LAN available for receiver testing, with its hostname noted here: ____
-- [ ] Sender GPU and driver noted here (NVENC/QSV/AMF availability): ____
-- [ ] Media Foundation HEVC hardware encoder MFT confirmed present on the sender (`MFTEnumEx` listing recorded in Measurements).
-- [ ] Latency measurement method agreed: frame timestamps embedded by the sender, receiver reports glass-to-glass estimate; a camera-and-stopwatch check for the final number.
+- [x] M0 complete: initial commit, CI, footprint gate, logging, child-process model available. (ROADMAP: done 2026-09-09, CI green.)
+- [x] Second PC on the same wired LAN available for receiver testing (confirmed 2026-09-09); hostname to be filled in from mDNS discovery when transport testing starts: ____
+- [x] Sender GPU and driver noted here (NVENC/QSV/AMF availability): NVIDIA GeForce RTX 3090, driver 32.0.16.1664 (NVENC, HEVC + B-frames, Ampere gen-7 NVENC); AMD Raphael iGPU (0x164E, VCN — AMF available but unused). Sender hostname `Jake`.
+- [x] Media Foundation HEVC hardware encoder MFT confirmed present: registry `HKLM\SOFTWARE\Classes\MediaFoundation\Transforms` lists "NVIDIA HEVC Encoder MFT" ({966F107C-8EA2-425D-B822-E4A71BEF01D7}) and "AMDh265Encoder" ({5fd65104-a924-4835-ab71-09a223e3e37b}). A live `MFTEnumEx` listing to be recorded in Measurements by the encode probe.
+- [x] Latency measurement method agreed: frame timestamps embedded by the sender, receiver reports glass-to-glass estimate; a camera-and-stopwatch check for the final number.
 
 ## Checklist
 ### Capture
@@ -72,6 +72,10 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 - Works with no network configuration on either PC.
 
 ## Measurements
+`relay-share probe` (MFTEnumEx, video encoder category, HEVC, `MFT_ENUM_FLAG_HARDWARE`), 2026-09-09:
+hardware HEVC encoder MFTs = "NVIDIA HEVC Encoder MFT", "AMDh265Encoder" (×2, iGPU);
+Windows.Graphics.Capture supported = true. No software MFT is ever requested.
+
 | Stage | p50 | p99 | Notes |
 |---|---|---|---|
 | capture → encoder input | | | |

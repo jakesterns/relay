@@ -1,12 +1,65 @@
-//! Relay capture — spun up per share, torn down fully afterwards.
+//! Relay capture — the share engine. Spun up per share as the `relay-share`
+//! process, torn down fully afterwards.
 //!
-//! Planned layout:
-//! - `source/`   DXGI Desktop Duplication (primary) and Windows.Graphics.Capture.
-//! - `encode/`   hardware-only encoders: NVENC, QSV, AMF. HEVC 4K60, 40–80 Mb/s.
-//! - `transport/` webrtc-rs with ICE/STUN, mDNS discovery, DTLS-SRTP. LAN-first.
-//! - `record/`   local high-bitrate recording + replay buffer.
+//! Layout:
+//! - `probe`     MFTEnumEx / WGC capability checks (`relay-share probe`).
+//! - `source/`   Windows.Graphics.Capture (primary), DXGI Desktop Duplication (fallback).
+//! - `encode/`   Media Foundation HEVC hardware MFT (NVENC/QSV/AMF). No CPU path.
+//! - `transport/` webrtc-rs, mDNS discovery, pairing, DTLS-SRTP. LAN only.
 //! - `stats`     the instrument-strip feed: bitrate, latency, drops, load, audio level.
+//!
+//! Everything GPU-side stays GPU-side: the capture texture is converted to
+//! NV12 with the D3D11 video processor and handed to the encoder as a DXGI
+//! surface. No frame ever crosses to system memory on the send path.
 
-#![forbid(unsafe_code)]
+#[cfg(windows)]
+pub mod probe;
 
-pub const CRATE: &str = "relay-capture";
+/// Timing helper: p50/p99 over a recorded series of durations, in milliseconds.
+#[derive(Debug, Default)]
+pub struct Percentiles {
+    samples_ms: Vec<f64>,
+}
+
+impl Percentiles {
+    pub fn push(&mut self, d: std::time::Duration) {
+        self.samples_ms.push(d.as_secs_f64() * 1e3);
+    }
+
+    pub fn len(&self) -> usize {
+        self.samples_ms.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples_ms.is_empty()
+    }
+
+    /// (p50, p99, max) in milliseconds. `None` when empty.
+    pub fn summary(&self) -> Option<(f64, f64, f64)> {
+        if self.samples_ms.is_empty() {
+            return None;
+        }
+        let mut s = self.samples_ms.clone();
+        s.sort_by(|a, b| a.total_cmp(b));
+        let at = |q: f64| s[((s.len() - 1) as f64 * q).round() as usize];
+        Some((at(0.50), at(0.99), *s.last().unwrap()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn percentiles_pick_the_right_samples() {
+        let mut p = Percentiles::default();
+        for i in 1..=100 {
+            p.push(Duration::from_millis(i));
+        }
+        let (p50, p99, max) = p.summary().unwrap();
+        assert!((p50 - 50.0).abs() <= 1.0, "p50 {p50}");
+        assert!((p99 - 99.0).abs() <= 1.0, "p99 {p99}");
+        assert_eq!(max, 100.0);
+    }
+}
