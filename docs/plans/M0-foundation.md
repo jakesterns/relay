@@ -55,7 +55,6 @@ Notes:
 - Before that change the gate correctly **failed** at 11.0 MB, which is the first proof the gate bites.
 
 ## Deferred
-- **GitHub remote and "CI green on a fresh clone".** No remote existed when M0 ran, so `.github/workflows/ci.yml` is written and every step it runs (`fmt --check`, `clippy -D warnings`, `test --workspace`, `pnpm install --frozen-lockfile && pnpm build`, `scripts/footprint.ps1`) was executed locally and passes, but the workflow itself has not run on GitHub. The first push to a private `main` will verify it; watch the footprint margin noted above.
 - **Console window flash on autostart.** `relay-core` is a console-subsystem binary so the CLI (`status`, `autostart`, ...) behaves like a normal tool. When Explorer or the Run key launches it, Windows allocates a console that `run` hides immediately, but with Windows Terminal as the default host that can still flash for a frame. The proper fix is a tiny GUI-subsystem launcher or `conhost --headless` in the Run value; it belongs with the installer work in M7.
 - **Driving the Tauri UI automatically.** New / Edit / Delete are implemented and type-checked, the window renders, and the create -> kill -> restart -> still-listed path is proven over IPC by `crash_restore.rs`, but no automated test clicks through the WebView. Manual UI testing stays with each milestone smoke check.
 
@@ -64,4 +63,5 @@ Notes:
 - `cargo test --workspace`: 27 unit tests + 2 integration tests pass (`crash_restore.rs`: hard kill mid-apply restores on restart and clears `original-state.json`; a second instance exits 0 with "already running").
 - `pnpm build` in `ui/`: passes (`tsc --noEmit` + Vite).
 - `scripts/footprint.ps1`: PASS with the numbers above.
+- First GitHub Actions run on a fresh clone (`windows-latest`, Windows Server 2025): **green**. Same 27 + 2 tests; footprint on the runner 0.69 MB exe, 9.79 MB peak working set (1.12 MB private), 0 % CPU. Only 0.21 MB of headroom on total working set there, so treat that gate as the first thing to revisit if it ever flakes.
 - CLI against a live release core: `status` summary, `status --json`, `autostart` -> `on` (Run value written with the quoted exe path) -> `off` (value removed), a second `run` prints "relay-core is already running", `shutdown` restores and exits, `logs/core.log` written.

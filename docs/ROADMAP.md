@@ -25,7 +25,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ---
 
 ## M0 — Foundation hardening
-Small items that unblock everything else. **Done 2026-09-09** (session log in `docs/plans/M0-foundation.md`; the GitHub remote / first CI run and the autostart console flash are deferred there).
+Small items that unblock everything else. **Done 2026-09-09** (session log in `docs/plans/M0-foundation.md`; CI green on the first run; the autostart console flash is deferred to M7).
 
 - [x] Initial commit; GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `pnpm build`.
 - [x] Release-footprint gate: script that builds `relay-core` in release, runs it for 30 s idle, asserts RSS ≤ 10 MB and CPU ≈ 0. Runs in CI.
@@ -100,7 +100,7 @@ Profiles only match "Any" until the core knows what is plugged in.
 ## Plan files
 | Milestone | Plan | Session status |
 |---|---|---|
-| M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09 (remote / first CI run deferred) |
+| M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
 | M4 Share MVP | `docs/plans/M4-share.md` | not started |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | not started |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
