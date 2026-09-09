@@ -14,6 +14,7 @@ name = "relay-share"
 path = "src/bin/relay-share.rs"
 
 [dependencies]
+relay-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -34,9 +35,12 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_DirectShow",
+    "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",
     "Win32_Media_Audio",
     "Win32_System_Com",
+    "Win32_System_Ole",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Performance",
     "Win32_System_Threading",

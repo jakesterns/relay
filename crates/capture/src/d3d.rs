@@ -1,0 +1,91 @@
+//! D3D11 device creation bound to the adapter that owns the captured monitor,
+//! so capture, colour conversion and encode all live on one GPU with no
+//! cross-adapter copies.
+
+use anyhow::{bail, Context, Result};
+use windows::core::Interface;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_1};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+};
+use windows::Win32::Graphics::Gdi::HMONITOR;
+
+pub struct Gpu {
+    pub device: ID3D11Device,
+    pub context: ID3D11DeviceContext,
+    pub adapter_name: String,
+    /// Adapter LUID — used to bind MFT enumeration to this GPU.
+    pub adapter_luid: windows::Win32::Foundation::LUID,
+}
+
+/// The DXGI adapter and output for `hmonitor`, plus the adapter's name.
+fn adapter_for_monitor(hmonitor: HMONITOR) -> Result<(IDXGIAdapter1, IDXGIOutput, String)> {
+    // SAFETY: standard DXGI enumeration; interfaces are ref-counted.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+        let mut ai = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(ai) {
+            ai += 1;
+            let mut oi = 0;
+            while let Ok(output) = adapter.EnumOutputs(oi) {
+                oi += 1;
+                let desc = output.GetDesc()?;
+                if desc.Monitor == hmonitor {
+                    let ad = adapter.GetDesc1()?;
+                    let name = String::from_utf16_lossy(
+                        &ad.Description[..ad.Description.iter().position(|c| *c == 0).unwrap_or(0)],
+                    );
+                    return Ok((adapter, output, name));
+                }
+            }
+        }
+    }
+    bail!("no DXGI output matches the requested monitor")
+}
+
+/// D3D11 device on the monitor's adapter with BGRA + video support (the video
+/// flag enables the D3D11 video processor used for BGRA→NV12 on the GPU).
+pub fn device_for_monitor(hmonitor: HMONITOR) -> Result<Gpu> {
+    let (adapter, _output, adapter_name) = adapter_for_monitor(hmonitor)?;
+    // SAFETY: adapter is live.
+    let adapter_luid = unsafe { adapter.GetDesc1()? }.AdapterLuid;
+    let mut device = None;
+    let mut context = None;
+    // SAFETY: standard device creation; out params filled on success.
+    unsafe {
+        D3D11CreateDevice(
+            &adapter.cast::<windows::Win32::Graphics::Dxgi::IDXGIAdapter>()?,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_1]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut context),
+        )
+    }
+    .context("D3D11CreateDevice")?;
+    let device = device.context("no device")?;
+    let context = context.context("no context")?;
+    // The WGC callback thread and the encoder both touch this device.
+    let mt: windows::Win32::Graphics::Direct3D11::ID3D11Multithread = context.cast()?;
+    // SAFETY: enabling the context's internal lock.
+    unsafe {
+        let _ = mt.SetMultithreadProtected(true);
+    }
+    Ok(Gpu { device, context, adapter_name, adapter_luid })
+}
+
+/// Primary monitor handle.
+pub fn primary_monitor() -> HMONITOR {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTOPRIMARY};
+    // SAFETY: always returns a monitor with DEFAULTTOPRIMARY.
+    unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
+}

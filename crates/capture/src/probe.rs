@@ -5,10 +5,10 @@
 use anyhow::{Context, Result};
 use windows::Graphics::Capture::GraphicsCaptureSession;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, MFShutdown, MFStartup, MFTEnumEx, MFMediaType_Video, MFSTARTUP_LITE,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFT_REGISTER_TYPE_INFO,
-    MFVideoFormat_HEVC, MF_VERSION,
+    IMFActivate, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx,
+    MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_HEVC,
+    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]

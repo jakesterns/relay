@@ -13,7 +13,15 @@
 //! surface. No frame ever crosses to system memory on the send path.
 
 #[cfg(windows)]
+pub mod d3d;
+#[cfg(windows)]
+pub mod encode;
+#[cfg(windows)]
 pub mod probe;
+#[cfg(windows)]
+pub mod source;
+#[cfg(windows)]
+pub mod time;
 
 /// Timing helper: p50/p99 over a recorded series of durations, in milliseconds.
 #[derive(Debug, Default)]
@@ -24,6 +32,12 @@ pub struct Percentiles {
 impl Percentiles {
     pub fn push(&mut self, d: std::time::Duration) {
         self.samples_ms.push(d.as_secs_f64() * 1e3);
+    }
+
+    /// Signed sample in milliseconds (capture timestamps can sit slightly in
+    /// the future of the receive time: WGC stamps the DWM present slot).
+    pub fn push_ms(&mut self, ms: f64) {
+        self.samples_ms.push(ms);
     }
 
     pub fn len(&self) -> usize {
