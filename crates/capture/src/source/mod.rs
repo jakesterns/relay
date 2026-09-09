@@ -5,6 +5,7 @@
 //! timestamp. It is never copied to system memory on the send path; the
 //! consumer converts it to NV12 on the GPU and closes it.
 
+pub mod dxgi;
 pub mod wgc;
 
 use std::time::Duration;
@@ -35,6 +36,21 @@ impl Drop for CapturedFrame {
         if let Some(f) = self.wgc_frame.take() {
             let _ = f.Close();
         }
+    }
+}
+
+/// WGC when available (it is, on Win10 1903+), Desktop Duplication otherwise.
+pub fn create(
+    gpu: &crate::d3d::Gpu,
+    hmonitor: windows::Win32::Graphics::Gdi::HMONITOR,
+    cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
+    let force_dxgi = std::env::var("RELAY_CAPTURE").is_ok_and(|v| v == "dxgi");
+    if crate::probe::wgc_supported() && !force_dxgi {
+        Ok(Box::new(wgc::WgcCapture::monitor(gpu, hmonitor, cursor)?))
+    } else {
+        tracing::info!("WGC unavailable; falling back to DXGI Desktop Duplication");
+        Ok(Box::new(dxgi::DxgiCapture::monitor(gpu, hmonitor)?))
     }
 }
 

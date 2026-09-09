@@ -18,6 +18,19 @@ pub fn qpc_now_100ns() -> i64 {
     secs * 10_000_000 + rem * 10_000_000 / freq
 }
 
+/// Convert a raw QPC counter value (e.g. `DXGI_OUTDUPL_FRAME_INFO::LastPresentTime`)
+/// to 100 ns ticks on the same scale as [`qpc_now_100ns`].
+pub fn qpc_raw_to_100ns(counter: i64) -> i64 {
+    let mut freq = 0i64;
+    // SAFETY: plain out-pointer query.
+    unsafe {
+        let _ = QueryPerformanceFrequency(&mut freq);
+    }
+    let secs = counter / freq;
+    let rem = counter % freq;
+    secs * 10_000_000 + rem * 10_000_000 / freq
+}
+
 pub fn ticks_to_ms(ticks_100ns: i64) -> f64 {
     ticks_100ns as f64 / 10_000.0
 }

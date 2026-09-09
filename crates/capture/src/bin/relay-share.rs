@@ -66,14 +66,13 @@ fn main() -> Result<()> {
 /// latency percentiles, delivered fps and source-side drops.
 #[cfg(windows)]
 fn bench_capture(secs: u64) -> Result<()> {
-    use relay_capture::source::{wgc::WgcCapture, FrameSource};
-    use relay_capture::{d3d, time, Percentiles};
+    use relay_capture::{d3d, source, time, Percentiles};
     use std::time::{Duration, Instant};
 
     let hmon = d3d::primary_monitor();
     let gpu = d3d::device_for_monitor(hmon)?;
     eprintln!("capturing primary monitor on adapter: {}", gpu.adapter_name);
-    let mut src = WgcCapture::monitor(&gpu, hmon, true)?;
+    let mut src = source::create(&gpu, hmon, true)?;
     let (w, h) = src.size();
     eprintln!("capture size {w}x{h}, running {secs}s");
 

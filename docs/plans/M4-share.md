@@ -38,7 +38,7 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 ## Checklist
 ### Capture
 - [x] `relay-capture::source::wgc`: Windows.Graphics.Capture of a monitor (window later), `Direct3D11CaptureFramePool` with 2 buffers, cursor toggle via `IsCursorCaptureEnabled`, border suppression on Win11.
-- [ ] `relay-capture::source::dxgi`: Desktop Duplication fallback when WGC is unavailable; same trait.
+- [x] `relay-capture::source::dxgi`: Desktop Duplication fallback when WGC is unavailable; same trait. (`RELAY_CAPTURE=dxgi` forces it for testing; verified: present→receive p50 0.10 ms.)
 - [x] Frame timing: capture at display refresh, drop to target fps without CPU copies (bounded channel; a busy consumer closes the frame, no copy); measure capture→encoder-input latency.
 
 ### Encode

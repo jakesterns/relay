@@ -48,6 +48,12 @@ fn adapter_for_monitor(hmonitor: HMONITOR) -> Result<(IDXGIAdapter1, IDXGIOutput
     bail!("no DXGI output matches the requested monitor")
 }
 
+/// The DXGI output for `hmonitor` (Desktop Duplication needs it).
+pub fn output_for_monitor(hmonitor: HMONITOR) -> Result<IDXGIOutput> {
+    let (_adapter, output, _name) = adapter_for_monitor(hmonitor)?;
+    Ok(output)
+}
+
 /// D3D11 device on the monitor's adapter with BGRA + video support (the video
 /// flag enables the D3D11 video processor used for BGRA→NV12 on the GPU).
 pub fn device_for_monitor(hmonitor: HMONITOR) -> Result<Gpu> {
