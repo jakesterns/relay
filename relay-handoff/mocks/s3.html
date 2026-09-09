@@ -1,0 +1,58 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="shell.css"><style>
+.cmp{position:relative;border-radius:8px;border:1px solid var(--line2);overflow:hidden;height:300px;display:grid;grid-template-columns:1fr 1fr}
+.cmp>div{position:relative}
+.cmp .a{background:radial-gradient(70% 60% at 40% 40%,#2a2f33,#121416 70%);}
+.cmp .b{background:radial-gradient(70% 60% at 60% 40%,#3a4048,#161a1e 70%);}
+.cmp .fig{position:absolute;width:14px;height:34px;border-radius:7px 7px 3px 3px;background:#3b3f42}
+.cmp .b .fig{background:#6a706e}
+.cmp .win{position:absolute;border:1px solid rgba(255,255,255,.08)}
+.cmp .cap{position:absolute;left:12px;top:10px;background:rgba(14,13,12,.75);border:1px solid var(--line2);padding:4px 8px;border-radius:4px;font-size:11.5px;color:var(--mute)}
+.cmp .b .cap{color:var(--brass);border-color:rgba(201,169,106,.3)}
+.cmp .div{position:absolute;left:50%;top:0;bottom:0;width:1px;background:var(--brass)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.hw{display:flex;align-items:center;gap:10px}.hw b{display:block;font-weight:500}.hw span{color:var(--dim);font-size:11.5px}
+.hw .ic{width:30px;height:20px;border:1.25px solid var(--brass);border-radius:3px;flex:none}
+.tog{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid var(--line)}.tog:first-child{border-top:0;padding-top:0}
+.tog span{color:var(--mute)}.tog b{display:block;font-weight:450;color:var(--ink)}
+</style></head><body><div class="app">
+<div class="title"><div class="brand"><i></i>Relay <span>Call of Duty · profile active</span></div><div class="win"><b></b><b></b><b></b></div></div>
+<div class="body three">
+<nav class="rail"><a><i></i>Share</a><a class="on"><i class="round"></i>Games</a><a><i></i>Audio</a><a><i></i>Display</a><a><i></i>Profiles</a><a><i></i>Settings</a>
+<div class="grp">Now</div><div class="st"><i></i>Sharing<small>off</small></div><div class="st on"><i></i>Game profile<small>CoD</small></div>
+<div class="sp"></div><small>Applies only while the game has focus. Restored the moment you alt-tab.</small></nav>
+<section class="main">
+ <div class="hdr"><h1>Call of Duty <em>— Display</em></h1><div class="live"><i></i>Active · in focus</div></div>
+ <div class="chips"><span>Section</span><div class="chip">Audio</div><div class="chip on">Display</div><div class="chip">Sharing</div></div>
+ <div class="cmp">
+  <div class="a"><div class="cap">Monitor default</div><div class="win" style="left:60px;top:70px;width:120px;height:90px"></div><div class="win" style="left:250px;top:60px;width:90px;height:110px"></div><div class="fig" style="left:120px;top:150px"></div><div class="fig" style="left:300px;top:200px"></div></div>
+  <div class="b"><div class="cap">Call of Duty profile</div><div class="win" style="left:60px;top:70px;width:120px;height:90px"></div><div class="win" style="left:250px;top:60px;width:90px;height:110px"></div><div class="fig" style="left:120px;top:150px"></div><div class="fig" style="left:300px;top:200px"></div></div>
+  <div class="div"></div>
+ </div>
+ <div class="two">
+  <div class="card"><h3>GPU color<a>Reset</a></h3>
+   <div class="sl"><span>Vibrance</span><div class="tr" style="--w:68%"></div><div class="val">+68</div></div>
+   <div class="sl"><span>Gamma</span><div class="tr" style="--w:36%"></div><div class="val">0.86</div></div>
+   <div class="sl"><span>Contrast</span><div class="tr" style="--w:55%"></div><div class="val">+5</div></div>
+   <div class="sl"><span>Shadow lift</span><div class="tr" style="--w:60%"></div><div class="val">+12</div></div>
+   <div class="sl"><span>Hue</span><div class="tr" style="--w:50%"></div><div class="val">0°</div></div>
+  </div>
+  <div class="card"><h3>Monitor<a>Reset</a></h3>
+   <div class="sl"><span>Brightness</span><div class="tr" style="--w:80%"></div><div class="val">80</div></div>
+   <div class="sl"><span>Contrast</span><div class="tr" style="--w:70%"></div><div class="val">70</div></div>
+   <div class="sl"><span>Black equalizer</span><div class="tr" style="--w:65%"></div><div class="val">14</div></div>
+   <div class="sl"><span>Response</span><div class="tr" style="--w:66%"></div><div class="val">Fast</div></div>
+   <div class="sl dis"><span>Sharpness</span><div class="tr" style="--w:50%"></div><div class="val">—</div></div>
+  </div>
+ </div>
+</section>
+<aside class="side">
+ <div class="card"><h3>Monitor<a>Change</a></h3><div class="hw"><div class="ic"></div><div><b>LG 27GP850</b><span>Nano IPS · 165 Hz · DDC/CI ok</span></div></div></div>
+ <div class="card">
+  <div class="tog"><div><b>Follow game focus</b><span>Apply on launch, restore on exit</span></div><div class="sw on"></div></div>
+  <div class="tog"><div><b>Second monitor</b><span>Leave untouched</span></div><div class="sw on"></div></div>
+  <div class="tog"><div><b>Send true colors to share</b><span>Call sees the unfiltered feed</span></div><div class="sw on"></div></div>
+ </div>
+ <div class="card"><div class="kv"><span>Applied via</span><strong>NvAPI + DDC/CI</strong></div><div class="kv"><span>In-game hooks</span><strong>None</strong></div><div class="kv"><span>Backup</span><strong>Saved before change</strong></div></div>
+ <button class="btn acc">Save to profile</button>
+ <p class="note">Original monitor and GPU settings are stored on disk and restored on exit, crash, or reboot.</p>
+</aside></div></div></body></html>

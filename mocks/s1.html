@@ -1,0 +1,46 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="shell.css"><style>
+.preview{position:relative;border-radius:8px;overflow:hidden;border:1px solid var(--line2);background:#000;flex:1;min-height:0}
+.preview .scene{position:absolute;inset:0;background:radial-gradient(60% 50% at 30% 30%,rgba(120,90,50,.35),transparent 60%),radial-gradient(45% 40% at 78% 70%,rgba(60,70,90,.45),transparent 60%),linear-gradient(180deg,#2a2622,#141210 60%,#0a0908)}
+.preview .horizon{position:absolute;left:0;right:0;top:58%;height:1px;background:linear-gradient(90deg,transparent,rgba(201,169,106,.5),transparent)}
+.preview .tag{position:absolute;left:14px;top:12px;display:flex;gap:6px}
+.preview .tag span{background:rgba(14,13,12,.75);border:1px solid var(--line2);padding:4px 8px;border-radius:4px;font-family:GeistMono;font-size:11px}
+.preview .cap{position:absolute;right:14px;bottom:12px;color:rgba(236,230,220,.6);font-size:12px}
+.meter{display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr 1.2fr;border:1px solid var(--line2);border-radius:8px;background:var(--surface)}
+.meter>div{padding:14px 18px 12px;border-right:1px solid var(--line)}.meter>div:last-child{border-right:0}
+.meter label{display:block;color:var(--mute);font-size:12px;margin-bottom:6px}
+.meter .v{font-family:GeistMono;font-size:22px;font-variant-numeric:tabular-nums;letter-spacing:-.01em;line-height:1}
+.meter .v u{text-decoration:none;font-size:12px;color:var(--mute);margin-left:4px}
+.bars{display:flex;gap:2px;margin-top:10px;height:14px;align-items:flex-end}
+.bars b{flex:1;background:var(--brass2);border-radius:1px}.bars b.hi{background:var(--brass)}.bars b.off{background:#2A2622}
+.seg{display:flex;gap:3px;margin-top:11px}.seg b{flex:1;height:5px;border-radius:1px;background:var(--brass)}.seg b.off{background:#2A2622}
+.meter .hint{color:var(--dim);font-size:11.5px;margin-top:9px}
+.dev{display:flex;align-items:center;gap:12px}
+.dev .ic{width:36px;height:26px;border:1.25px solid var(--brass);border-radius:4px;position:relative}
+.dev .ic:after{content:"";position:absolute;left:50%;bottom:-6px;width:16px;height:2px;background:var(--brass);transform:translateX(-50%)}
+.dev b{display:block;font-weight:500;font-size:14px}.dev span{color:var(--mute);font-size:12px}
+.tog{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid var(--line)}.tog:first-child{border-top:0;padding-top:0}
+</style></head><body><div class="app">
+<div class="title"><div class="brand"><i></i>Relay <span>Sending to Studio-PC</span></div><div class="win"><b></b><b></b><b></b></div></div>
+<div class="body three">
+<nav class="rail"><a class="on"><i></i>Share</a><a><i class="round"></i>Games</a><a><i></i>Audio</a><a><i></i>Display</a><a><i></i>Profiles</a><a><i></i>Settings</a>
+<div class="grp">Now</div><div class="st on"><i></i>Sharing<small>11 ms</small></div><div class="st"><i></i>Game profile<small>none</small></div>
+<div class="sp"></div><small>Everything stays on your local network. Nothing on this PC was changed.</small></nav>
+<section class="main">
+ <div class="hdr"><h1>Display 1 <em>— Gaming-PC</em></h1><div class="live"><i></i>Sharing</div></div>
+ <div class="chips"><span>Preset</span><div class="chip on">Game</div><div class="chip">DAW</div><div class="chip">Desktop</div></div>
+ <div class="preview"><div class="scene"></div><div class="horizon"></div><div class="tag"><span>3840×2160</span><span>60 fps</span><span>HEVC</span></div><div class="cap">Preview — press P to hide</div></div>
+ <div class="meter">
+  <div><label>Bitrate</label><div class="v">62.4<u>Mb/s</u></div><div class="bars"><b style="height:30%"></b><b style="height:45%"></b><b style="height:40%"></b><b style="height:60%"></b><b style="height:55%"></b><b style="height:70%"></b><b style="height:65%"></b><b style="height:80%"></b><b style="height:75%"></b><b style="height:85%"></b><b style="height:80%"></b><b style="height:90%"></b><b class="hi" style="height:95%"></b><b class="hi" style="height:88%"></b><b class="hi" style="height:92%"></b><b class="off" style="height:100%"></b><b class="off" style="height:100%"></b><b class="off" style="height:100%"></b></div></div>
+  <div><label>Latency</label><div class="v">11<u>ms</u></div><div class="hint">Wired · stable</div></div>
+  <div><label>Dropped frames</label><div class="v">0</div><div class="hint">of 41,880 sent</div></div>
+  <div><label>Load</label><div class="v">4<u>% GPU</u></div><div class="hint">NVENC · CPU 1%</div></div>
+  <div><label>Audio</label><div class="v">−6.2<u>dB</u></div><div class="seg"><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b class="off"></b><b class="off"></b></div></div>
+ </div>
+</section>
+<aside class="side">
+ <div class="card"><h3>Receiving on</h3><div class="dev"><div class="ic"></div><div><b>Studio-PC</b><span>Paired · appears as “Relay Camera”</span></div></div></div>
+ <div class="card"><div class="kv"><span>Connection</span><strong>Direct, encrypted</strong></div><div class="kv"><span>Path</span><strong class="m">192.168.1.24 → .31</strong></div><div class="kv"><span>Uptime</span><strong class="m">11:38</strong></div></div>
+ <div class="card"><div class="tog"><span>System audio</span><div class="sw on"></div></div><div class="tog"><span>Microphone</span><div class="sw"></div></div><div class="tog"><span>Cursor</span><div class="sw on"></div></div><div class="tog"><span>Local recording</span><div class="sw on"></div></div></div>
+ <button class="btn acc">Stop sharing</button>
+ <p class="note">Captures the screen the same way Windows does. Never touches games or other apps.</p>
+</aside></div></div></body></html>

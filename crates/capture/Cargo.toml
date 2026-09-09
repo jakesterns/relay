@@ -1,0 +1,11 @@
+[package]
+name = "relay-capture"
+description = "Relay capture: DXGI Desktop Duplication / Windows.Graphics.Capture → NVENC/QSV/AMF → WebRTC"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true

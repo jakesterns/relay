@@ -1,0 +1,63 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="shell.css"><style>
+.eq{position:relative;border-radius:8px;border:1px solid var(--line2);background:var(--surface);height:270px;overflow:hidden}
+.eq svg{position:absolute;inset:0;width:100%;height:100%}
+.eq .lbl{position:absolute;bottom:8px;display:flex;justify-content:space-between;left:52px;right:16px;color:var(--dim);font-family:GeistMono;font-size:10.5px}
+.eq .band{position:absolute;top:10px;left:52%;padding:4px 8px;border-radius:4px;background:rgba(201,169,106,.12);border:1px solid rgba(201,169,106,.3);color:var(--brass);font-size:11.5px}
+.eq .leg{position:absolute;top:12px;left:14px;display:flex;gap:14px;color:var(--mute);font-size:11.5px}
+.eq .leg i{display:inline-block;width:14px;height:2px;vertical-align:middle;margin-right:6px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ab{display:flex;gap:8px;margin-top:10px}
+.ab .btn{flex:1}
+.hw{display:flex;align-items:center;gap:10px}
+.hw b{display:block;font-weight:500}.hw span{color:var(--dim);font-size:11.5px}
+.hw .ic{width:26px;height:26px;border:1.25px solid var(--brass);border-radius:50%;flex:none}
+.tog{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-top:1px solid var(--line)}.tog:first-child{border-top:0;padding-top:0}
+.tog span{color:var(--mute)}.tog b{display:block;font-weight:450;color:var(--ink)}
+</style></head><body><div class="app">
+<div class="title"><div class="brand"><i></i>Relay <span>Call of Duty · profile active</span></div><div class="win"><b></b><b></b><b></b></div></div>
+<div class="body three">
+<nav class="rail"><a><i></i>Share</a><a class="on"><i class="round"></i>Games</a><a><i></i>Audio</a><a><i></i>Display</a><a><i></i>Profiles</a><a><i></i>Settings</a>
+<div class="grp">Now</div><div class="st"><i></i>Sharing<small>off</small></div><div class="st on"><i></i>Game profile<small>CoD</small></div>
+<div class="sp"></div><small>Applies only while the game has focus. Restored the moment you alt-tab.</small></nav>
+<section class="main">
+ <div class="hdr"><h1>Call of Duty <em>— Audio</em></h1><div class="live"><i></i>Active · in focus</div></div>
+ <div class="chips"><span>Section</span><div class="chip on">Audio</div><div class="chip">Display</div><div class="chip">Sharing</div></div>
+ <div class="eq">
+  <svg viewBox="0 0 900 270" preserveAspectRatio="none">
+   <g stroke="rgba(255,255,255,.06)"><line x1="52" y1="55" x2="884" y2="55"/><line x1="52" y1="135" x2="884" y2="135" stroke="rgba(255,255,255,.12)"/><line x1="52" y1="215" x2="884" y2="215"/>
+   <line x1="190" y1="20" x2="190" y2="250"/><line x1="330" y1="20" x2="330" y2="250"/><line x1="470" y1="20" x2="470" y2="250"/><line x1="610" y1="20" x2="610" y2="250"/><line x1="750" y1="20" x2="750" y2="250"/></g>
+   <rect x="470" y="20" width="170" height="230" fill="rgba(201,169,106,.06)"/>
+   <text x="14" y="59" fill="#5A544C" font-family="GeistMono" font-size="10">+6</text><text x="20" y="139" fill="#5A544C" font-family="GeistMono" font-size="10">0</text><text x="14" y="219" fill="#5A544C" font-family="GeistMono" font-size="10">−6</text>
+   <path d="M52 150 C150 148 220 132 330 138 S470 160 560 145 S700 120 780 128 S860 150 884 150" fill="none" stroke="#5A544C" stroke-width="1.5" stroke-dasharray="4 4"/>
+   <path d="M52 205 C120 200 170 170 240 150 S380 135 470 128 S560 78 640 88 S760 140 820 150 S870 165 884 168" fill="none" stroke="#C9A96A" stroke-width="2"/>
+   <g fill="#ECE6DC"><circle cx="120" cy="196" r="4"/><circle cx="330" cy="140" r="4"/><circle cx="555" cy="82" r="4"/><circle cx="700" cy="118" r="4"/><circle cx="830" cy="156" r="4"/></g>
+  </svg>
+  <div class="leg"><span><i style="background:#C9A96A"></i>Profile</span><span><i style="background:#5A544C"></i>HD 560S raw response</span></div>
+  <div class="band">Footsteps · 1.8–4.5 kHz</div>
+  <div class="lbl"><span>20</span><span>100</span><span>500</span><span>1k</span><span>4k</span><span>10k</span><span>20k</span></div>
+ </div>
+ <div class="two">
+  <div class="card"><h3>Bands<a>Reset</a></h3>
+   <div class="sl"><span>Sub · 60 Hz</span><div class="tr" style="--w:22%"></div><div class="val">−5.0 dB</div></div>
+   <div class="sl"><span>Low · 250 Hz</span><div class="tr" style="--w:45%"></div><div class="val">−1.0 dB</div></div>
+   <div class="sl"><span>Mid · 1 kHz</span><div class="tr" style="--w:52%"></div><div class="val">+0.5 dB</div></div>
+   <div class="sl"><span>Presence · 3 kHz</span><div class="tr" style="--w:82%"></div><div class="val">+4.5 dB</div></div>
+   <div class="sl"><span>Air · 10 kHz</span><div class="tr" style="--w:40%"></div><div class="val">−1.5 dB</div></div>
+  </div>
+  <div class="card"><h3>Tune with your assistant</h3>
+   <p style="color:var(--mute);line-height:1.55">Compares footsteps against explosions and ambience in live game audio, then adjusts the profile for this headset. Uses your own API key.</p>
+   <div class="ab"><button class="btn acc">Run listening test</button><button class="btn q">Last run: 2 days ago</button></div>
+  </div>
+ </div>
+</section>
+<aside class="side">
+ <div class="card"><h3>Headset<a>Change</a></h3><div class="hw"><div class="ic"></div><div><b>Sennheiser HD 560S</b><span>Measured curve · oratory1990</span></div></div></div>
+ <div class="card">
+  <div class="tog"><div><b>Spatial audio</b><span>HRTF · Relay Arena</span></div><div class="sw on"></div></div>
+  <div class="tog"><div><b>Explosion tamer</b><span>Soft limiter under 120 Hz</span></div><div class="sw on"></div></div>
+  <div class="tog"><div><b>Apply to share feed</b><span>Call hears what you hear</span></div><div class="sw"></div></div>
+ </div>
+ <div class="card"><div class="kv"><span>Processing</span><strong class="m">0.4 ms</strong></div><div class="kv"><span>CPU</span><strong class="m">0.3 %</strong></div><div class="kv"><span>Route</span><strong>Endpoint · no virtual device</strong></div></div>
+ <button class="btn acc">Save to profile</button>
+ <p class="note">Runs inside Windows audio on this headset only. Other apps and your desktop are unaffected.</p>
+</aside></div></div></body></html>

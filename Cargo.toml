@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/audio",
+    "crates/capture",
+    "crates/vdevice",
+    "crates/display",
+    "ui/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+relay-core = { path = "crates/core" }
+relay-audio = { path = "crates/audio" }
+relay-capture = { path = "crates/capture" }
+relay-vdevice = { path = "crates/vdevice" }
+relay-display = { path = "crates/display" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.53", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+directories = "6.0"
+parking_lot = "0.12"
+uuid = { version = "1.26", features = ["v4", "serde"] }
+windows = "0.62"
+
+# The always-on core must stay small. Optimise for size and strip symbols in
+# release; per-crate overrides can relax this for the encoder later.
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0

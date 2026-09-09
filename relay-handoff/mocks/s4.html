@@ -1,0 +1,50 @@
+<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="shell.css"><style>
+.two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.stat{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line2);border-radius:8px;background:var(--surface)}
+.stat>div{padding:14px 18px 12px;border-right:1px solid var(--line)}.stat>div:last-child{border-right:0}
+.stat label{display:block;color:var(--mute);font-size:12px;margin-bottom:6px}
+.stat .v{font-family:GeistMono;font-size:22px;font-variant-numeric:tabular-nums;line-height:1}
+.stat .v u{text-decoration:none;font-size:12px;color:var(--mute);margin-left:4px}
+.stat .hint{color:var(--dim);font-size:11.5px;margin-top:9px}
+.hwl{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}.hwl:first-of-type{border-top:0;padding-top:0}
+.hwl b{display:block;font-weight:450}.hwl span{color:var(--dim);font-size:11.5px}
+.hwl .ic{width:22px;height:16px;border:1.25px solid var(--mute);border-radius:3px;flex:none}.hwl .ic.r{border-radius:50%;width:18px;height:18px}
+.hwl .pill{margin-left:auto}
+</style></head><body><div class="app">
+<div class="title"><div class="brand"><i class="idle"></i>Relay <span>Idle</span></div><div class="win"><b></b><b></b><b></b></div></div>
+<div class="body three">
+<nav class="rail"><a><i></i>Share</a><a><i class="round"></i>Games</a><a><i></i>Audio</a><a><i></i>Display</a><a class="on"><i></i>Profiles</a><a><i></i>Settings</a>
+<div class="grp">Now</div><div class="st"><i></i>Sharing<small>off</small></div><div class="st"><i></i>Game profile<small>none</small></div>
+<div class="sp"></div><small>Nothing is applied right now. Your desktop, apps, and audio are exactly as Windows set them.</small></nav>
+<section class="main">
+ <div class="hdr"><h1>Profiles</h1><div class="live off"><i></i>Nothing active</div></div>
+ <div class="stat">
+  <div><label>Memory</label><div class="v">9<u>MB</u></div><div class="hint">Core service only</div></div>
+  <div><label>CPU</label><div class="v">0.0<u>%</u></div><div class="hint">Waiting for a game</div></div>
+  <div><label>Audio chain</label><div class="v">Bypass</div><div class="hint">Pass-through · 0 ms</div></div>
+  <div><label>Display</label><div class="v">Default</div><div class="hint">Windows settings</div></div>
+ </div>
+ <div class="card"><h3>Game profiles<a>New profile</a></h3>
+  <table class="tbl"><tr><th>Game</th><th>Headset</th><th>Monitor</th><th>Share</th><th></th></tr>
+   <tr><td><b>Call of Duty</b><span>Footsteps · dark-map colors</span></td><td>HD 560S</td><td>LG 27GP850</td><td>Game · 4K60</td><td class="r"><span class="pill ready"><i></i>Ready</span></td></tr>
+   <tr><td><b>Call of Duty</b><span>Same tuning · IEM set</span></td><td>Moondrop Blessing 3</td><td>LG 27GP850</td><td>Game · 4K60</td><td class="r"><span class="pill ready"><i></i>Ready</span></td></tr>
+   <tr><td><b>Valorant</b><span>Neutral EQ · vivid</span></td><td>HD 560S</td><td>Zowie XL2566K</td><td>Game · 1080p240</td><td class="r"><span class="pill ready"><i></i>Ready</span></td></tr>
+   <tr><td><b>FL Studio</b><span>Relay Send on master</span></td><td>Scarlett 2i2 → DT 770</td><td>Any</td><td>DAW · 1440p60</td><td class="r"><span class="pill ready"><i></i>Ready</span></td></tr>
+   <tr><td><b>Elden Ring</b><span>Untouched audio · warm colors</span></td><td>Any</td><td>LG C2</td><td>Off</td><td class="r"><span class="pill"><i></i>Draft</span></td></tr>
+  </table>
+ </div>
+</section>
+<aside class="side">
+ <div class="card"><h3>Headsets & IEMs<a>Add</a></h3>
+  <div class="hwl"><div class="ic r"></div><div><b>Sennheiser HD 560S</b><span>Measured · oratory1990</span></div><span class="pill on"><i></i>Plugged</span></div>
+  <div class="hwl"><div class="ic r"></div><div><b>Moondrop Blessing 3</b><span>Measured · crinacle</span></div><span class="pill"><i></i></span></div>
+  <div class="hwl"><div class="ic r"></div><div><b>beyerdynamic DT 770</b><span>via Scarlett 2i2</span></div><span class="pill"><i></i></span></div>
+ </div>
+ <div class="card"><h3>Monitors<a>Add</a></h3>
+  <div class="hwl"><div class="ic"></div><div><b>LG 27GP850</b><span>Nano IPS · DDC/CI</span></div><span class="pill on"><i></i>Main</span></div>
+  <div class="hwl"><div class="ic"></div><div><b>LG C2 42"</b><span>OLED · DDC/CI</span></div><span class="pill on"><i></i>Second</span></div>
+  <div class="hwl"><div class="ic"></div><div><b>Zowie XL2566K</b><span>TN · not connected</span></div><span class="pill"><i></i></span></div>
+ </div>
+ <div class="card"><div class="kv"><span>Auto-switch</span><strong>By plugged hardware</strong></div><div class="kv"><span>Backup</span><strong>Synced · encrypted</strong></div></div>
+ <p class="note">Profiles are matched to whatever headset and monitor are connected, so swapping gear swaps the tuning.</p>
+</aside></div></div></body></html>
