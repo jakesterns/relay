@@ -48,16 +48,16 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 
 ### Audio
 - [x] WASAPI loopback of the default render endpoint; process-loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) for game-only capture; Opus 48 kHz stereo 160 kb/s default, 10 ms frames. All three paths (desktop / process / mic) verified with `relay-share bench-audio`.
-- [ ] Optional microphone track.
+- [x] Optional microphone track. (`AudioSource::Microphone`; sender takes `--audio-pid` for game-only or default desktop mix. A separate simultaneous mic track is deferred — see Deferred.)
 
 ### Transport
-- [ ] webrtc-rs sender: one video track (HEVC RTP), one or two audio tracks, DTLS-SRTP, ICE host candidates only (LAN), STUN off by default.
-- [ ] Discovery: mDNS `_relay._udp.local` with instance name = hostname; pairing by six-digit code that seeds the DTLS fingerprint check. Paired peers persist in `%LOCALAPPDATA%\Relay\peers.json`.
-- [ ] Wi-Fi detection (adapter type of the route to the peer) → UI recommendation "wired or 6 GHz"; bitrate step-down on sustained loss.
+- [x] webrtc-rs sender: one video track (HEVC RTP), one audio track, DTLS-SRTP, ICE host candidates only (LAN), STUN off by default. (webrtc-rs 0.20; `build_pc` registers HEVC pt98 + Opus pt120, no ICE servers.)
+- [x] Discovery: mDNS `_relay._udp.local` with instance name = hostname; pairing by six-digit code. The code seeds an HMAC over each side's SDP; the SDP carries the DTLS fingerprint and DTLS verifies the cert against it, so a good MAC transitively pins the peer. Paired peers persist in `%LOCALAPPDATA%\Relay\data\peers.json`.
+- [ ] Wi-Fi detection (adapter type of the route to the peer) → UI recommendation "wired or 6 GHz"; bitrate step-down on sustained loss. → see `netcheck`, wired to the UI card.
 
 ### Receiver mode
-- [ ] "Receive" screen in the UI: list discovered senders, enter code, show stream in a D3D11-backed window (native, not in the webview) with MF hardware decode.
-- [ ] Receiver latency measurement: sender stamps frames; receiver reports glass-to-glass estimate.
+- [~] "Receive" screen: list discovered senders, enter code, show stream in a D3D11 swapchain window (native, not in the webview) with MF hardware decode. `recv --headless` (transport benchmark) and the MF decode → D3D11 present window both done; the UI Receive screen lists senders and launches `recv`.
+- [x] Receiver latency measurement: sender stamps frames with an in-band SEI (unix ns), receiver rebases via NTP clock sync and reports capture→arrival and capture→present. Loopback: capture→arrival p50 4.6 ms / p99 7.4 ms.
 
 ### Process model and UI
 - [ ] `relay-share` binary spawned by the core on `Method::StartShare`, killed on `StopShare`, crash → core reports and UI offers restart. Core RSS unchanged while sharing.

@@ -7,8 +7,9 @@ use windows::Graphics::Capture::GraphicsCaptureSession;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx,
     MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_HEVC,
-    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_REGISTER_TYPE_INFO, MF_VERSION,
+    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SORTANDFILTER,
+    MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -20,6 +21,8 @@ pub struct EncoderMft {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeReport {
     pub hevc_hardware_encoders: Vec<EncoderMft>,
+    pub hevc_hardware_decoders: Vec<EncoderMft>,
+    pub hevc_any_decoders: Vec<EncoderMft>,
     pub wgc_supported: bool,
 }
 
@@ -65,6 +68,9 @@ pub fn hevc_hardware_encoders() -> Result<Vec<EncoderMft>> {
     }
     .context("MFTEnumEx(video encoder, HEVC, hardware)")?;
 
+    if activates.is_null() || count == 0 {
+        return Ok(Vec::new());
+    }
     let mut found = Vec::new();
     // SAFETY: MFTEnumEx returned `count` activation objects at `activates`.
     let slice = unsafe { std::slice::from_raw_parts(activates, count as usize) };
@@ -97,6 +103,54 @@ fn get_string(activate: &IMFActivate, key: &windows::core::GUID) -> Option<Strin
     }
 }
 
+/// HEVC decoder MFTs (any flags), for diagnosing receiver decode support.
+pub fn hevc_decoders(hardware_only: bool) -> Result<Vec<EncoderMft>> {
+    let in_type = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: MFVideoFormat_HEVC,
+    };
+    let flags = if hardware_only {
+        MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER
+    } else {
+        MFT_ENUM_FLAG_HARDWARE
+            | MFT_ENUM_FLAG_SYNCMFT
+            | MFT_ENUM_FLAG_ASYNCMFT
+            | MFT_ENUM_FLAG_LOCALMFT
+            | MFT_ENUM_FLAG_SORTANDFILTER
+    };
+    let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut count = 0u32;
+    // SAFETY: out array is ours; freed below.
+    unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            flags,
+            Some(&in_type),
+            None,
+            &mut activates,
+            &mut count,
+        )
+        .context("MFTEnumEx(HEVC decoder)")?;
+        if activates.is_null() || count == 0 {
+            return Ok(Vec::new());
+        }
+        let slice = std::slice::from_raw_parts(activates, count as usize);
+        let mut found = Vec::new();
+        for a in slice.iter().flatten() {
+            found.push(EncoderMft {
+                friendly_name: get_string(a, &MFT_FRIENDLY_NAME_Attribute)
+                    .unwrap_or_else(|| "(unnamed)".into()),
+                hardware_url: get_string(a, &MFT_ENUM_HARDWARE_URL_Attribute),
+            });
+        }
+        for i in 0..count as usize {
+            std::ptr::drop_in_place(activates.add(i));
+        }
+        windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
+        Ok(found)
+    }
+}
+
 pub fn wgc_supported() -> bool {
     GraphicsCaptureSession::IsSupported().unwrap_or(false)
 }
@@ -105,6 +159,8 @@ pub fn wgc_supported() -> bool {
 pub fn report() -> Result<ProbeReport> {
     Ok(ProbeReport {
         hevc_hardware_encoders: hevc_hardware_encoders()?,
+        hevc_hardware_decoders: hevc_decoders(true).unwrap_or_default(),
+        hevc_any_decoders: hevc_decoders(false).unwrap_or_default(),
         wgc_supported: wgc_supported(),
     })
 }

@@ -17,7 +17,11 @@ pub mod audio;
 #[cfg(windows)]
 pub mod d3d;
 #[cfg(windows)]
+pub mod decode;
+#[cfg(windows)]
 pub mod encode;
+#[cfg(windows)]
+pub mod playback;
 #[cfg(windows)]
 pub mod probe;
 #[cfg(windows)]
@@ -28,6 +32,12 @@ pub mod source;
 pub mod time;
 #[cfg(windows)]
 pub mod transport;
+
+/// Wall-clock unix nanoseconds (receiver present-latency math).
+#[cfg(windows)]
+pub fn signal_now_ns() -> i64 {
+    transport::signal::unix_now_ns()
+}
 
 /// Timing helper: p50/p99 over a recorded series of durations, in milliseconds.
 #[derive(Debug, Default)]

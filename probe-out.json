@@ -1,0 +1,24 @@
+{
+  "hevc_hardware_encoders": [
+    {
+      "friendly_name": "AMDh265Encoder",
+      "hardware_url": "AMDh265Encoder"
+    },
+    {
+      "friendly_name": "NVIDIA HEVC Encoder MFT",
+      "hardware_url": "NVIDIA HEVC Encoder MFT"
+    },
+    {
+      "friendly_name": "AMDh265Encoder",
+      "hardware_url": "AMDh265Encoder"
+    }
+  ],
+  "hevc_hardware_decoders": [],
+  "hevc_any_decoders": [
+    {
+      "friendly_name": "HEVCVideoExtension",
+      "hardware_url": null
+    }
+  ],
+  "wgc_supported": true
+}

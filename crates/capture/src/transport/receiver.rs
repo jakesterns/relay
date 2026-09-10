@@ -35,6 +35,14 @@ pub struct AccessUnit {
     pub rtp_timestamp: u32,
 }
 
+impl AccessUnit {
+    /// A decode PTS in 100 ns ticks derived from the 90 kHz RTP timestamp.
+    pub fn pts_or_zero(&self) -> i64 {
+        // 90 kHz → 100 ns ticks: ×(10_000_000/90_000).
+        self.rtp_timestamp as i64 * 1000 / 9
+    }
+}
+
 #[derive(Default)]
 pub struct RecvStats {
     pub video_bytes: AtomicU64,
