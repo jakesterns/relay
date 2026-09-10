@@ -104,34 +104,43 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
 
     // Serve clock pings; the sender pushes its offset estimate when done.
     let clock_offset_ns = Arc::new(AtomicI64::new(0));
+    // Loss fractions computed by the video loop, forwarded to the sender.
+    let (loss_tx, mut loss_rx) = mpsc::channel::<f32>(4);
     {
         let offset = clock_offset_ns.clone();
         let mut sig = sig;
         tokio::spawn(async move {
             loop {
-                match sig.recv().await {
-                    Ok(signal::SigMsg::Ping { seq, t1_ns }) => {
-                        let t2 = signal::unix_now_ns();
-                        let msg = signal::SigMsg::Pong {
-                            seq,
-                            t1_ns,
-                            t2_ns: t2,
-                            t3_ns: signal::unix_now_ns(),
-                        };
-                        if sig.send(&msg).await.is_err() {
+                tokio::select! {
+                    incoming = sig.recv() => match incoming {
+                        Ok(signal::SigMsg::Ping { seq, t1_ns }) => {
+                            let t2 = signal::unix_now_ns();
+                            let msg = signal::SigMsg::Pong {
+                                seq,
+                                t1_ns,
+                                t2_ns: t2,
+                                t3_ns: signal::unix_now_ns(),
+                            };
+                            if sig.send(&msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(signal::SigMsg::Clock { offset_ns, rtt_ns }) => {
+                            info!(
+                                offset_ms = offset_ns as f64 / 1e6,
+                                rtt_ms = rtt_ns as f64 / 1e6,
+                                "clock offset from sender"
+                            );
+                            offset.store(offset_ns, Ordering::Relaxed);
+                        }
+                        Ok(signal::SigMsg::Bye) | Err(_) => break,
+                        Ok(_) => {}
+                    },
+                    Some(fraction) = loss_rx.recv() => {
+                        if sig.send(&signal::SigMsg::Loss { fraction }).await.is_err() {
                             break;
                         }
                     }
-                    Ok(signal::SigMsg::Clock { offset_ns, rtt_ns }) => {
-                        info!(
-                            offset_ms = offset_ns as f64 / 1e6,
-                            rtt_ms = rtt_ns as f64 / 1e6,
-                            "clock offset from sender"
-                        );
-                        offset.store(offset_ns, Ordering::Relaxed);
-                    }
-                    Ok(signal::SigMsg::Bye) | Err(_) => break,
-                    Ok(_) => {}
                 }
             }
         });
@@ -157,7 +166,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         let stats = stats.clone();
                         let offset = offset.clone();
                         let au_tx = au_tx.clone();
-                        runtime2.spawn(Box::pin(video_track_loop(track, stats, offset, au_tx)));
+                        let loss_tx = loss_tx.clone();
+                        runtime2.spawn(Box::pin(video_track_loop(
+                            track, stats, offset, au_tx, loss_tx,
+                        )));
                     }
                     _ => {
                         let stats = stats.clone();
@@ -236,13 +248,35 @@ async fn video_track_loop(
     stats: Arc<RecvStats>,
     clock_offset_ns: Arc<AtomicI64>,
     au_tx: mpsc::Sender<AccessUnit>,
+    loss_tx: mpsc::Sender<f32>,
 ) {
     use super::depay::H265Depay;
 
     let mut depkt = H265Depay::default();
     let mut au: Vec<u8> = Vec::with_capacity(256 * 1024);
+    // RTP-sequence loss estimation over ~1 s windows.
+    let mut last_seq: Option<u16> = None;
+    let mut expected = 0u64;
+    let mut lost = 0u64;
+    let mut window_start = std::time::Instant::now();
     while let Some(ev) = track.poll().await {
         let TrackRemoteEvent::OnRtpPacket(pkt) = ev else { continue };
+        let seq = pkt.header.sequence_number;
+        if let Some(prev) = last_seq {
+            let gap = seq.wrapping_sub(prev);
+            if gap != 0 {
+                expected += gap as u64;
+                lost += gap.saturating_sub(1) as u64;
+            }
+        }
+        last_seq = Some(seq);
+        if window_start.elapsed() >= std::time::Duration::from_secs(1) {
+            let fraction = if expected > 0 { lost as f32 / expected as f32 } else { 0.0 };
+            let _ = loss_tx.try_send(fraction);
+            expected = 0;
+            lost = 0;
+            window_start = std::time::Instant::now();
+        }
         depkt.push(&pkt.payload, &mut au);
         if pkt.header.marker && !au.is_empty() {
             stats.video_bytes.fetch_add(au.len() as u64, Ordering::Relaxed);

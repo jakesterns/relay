@@ -50,8 +50,8 @@ impl H265Depay {
             // Reconstruct the original NAL header from the FU's payload header.
             let layer_id = ((payload[0] & 0x01) << 5) | (payload[1] >> 3);
             let tid = payload[1] & 0x07;
-            let b0 = ((payload[0] & 0x80) | ((fu_type as u8) << 1) | (layer_id >> 5)) as u8;
-            let b1 = ((layer_id << 3) | tid) as u8;
+            let b0 = (payload[0] & 0x80) | ((fu_type as u8) << 1) | (layer_id >> 5);
+            let b1 = (layer_id << 3) | tid;
             self.fu_header = Some([b0, b1]);
         }
         if self.fu_header.is_none() {

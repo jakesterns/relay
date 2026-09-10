@@ -13,9 +13,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use windows::core::{w, Interface, PCWSTR};
+use windows::core::{w, Interface};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
@@ -87,7 +86,6 @@ struct Window {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain1,
-    luid: windows::Win32::Foundation::LUID,
     vp_device: ID3D11VideoDevice,
     vp_context: ID3D11VideoContext,
 }
@@ -194,7 +192,6 @@ impl Window {
         let gpu = crate::d3d::device_for_monitor(crate::d3d::primary_monitor())?;
         let device = gpu.device;
         let context = gpu.context;
-        let luid = gpu.adapter_luid;
 
         let dxgi_device: IDXGIDevice = device.cast()?;
         // SAFETY: live DXGI device.
@@ -220,7 +217,7 @@ impl Window {
         let vp_device: ID3D11VideoDevice = device.cast()?;
         let vp_context: ID3D11VideoContext = context.cast()?;
 
-        Ok(Self { hwnd, device, context, swapchain, luid, vp_device, vp_context })
+        Ok(Self { hwnd, device, context, swapchain, vp_device, vp_context })
     }
 }
 

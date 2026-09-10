@@ -4,7 +4,6 @@
 use std::sync::mpsc::Receiver;
 
 use anyhow::{Context, Result};
-use windows::core::Interface;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,

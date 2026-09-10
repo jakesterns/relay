@@ -16,7 +16,7 @@ use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
 };
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::{TrackLocal, TrackLocalEvent};
 use webrtc::media_stream::Track;
@@ -192,9 +192,55 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         serde_json::json!({ "event": "connected", "peer": peer_name, "rtt_ms": rtt_ns as f64 / 1e6 })
     );
 
+    // Warn if the route to the peer leaves over Wi-Fi.
+    match super::netcheck::link_kind_for(local_ip) {
+        Ok(kind) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "link",
+                    "kind": kind,
+                    "recommendation": kind.recommendation(),
+                })
+            );
+            if let Some(rec) = kind.recommendation() {
+                warn!("{rec}");
+            }
+        }
+        Err(e) => debug!(error = %e, "link check failed"),
+    }
+
     let stats = Arc::new(Stats::default());
     let stop = Arc::new(AtomicBool::new(false));
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
+    // Adaptive target bitrate, read by the pipeline each frame.
+    let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
+
+    // Loss feedback from the receiver → AIMD bitrate control.
+    {
+        let target = target_bps.clone();
+        let floor = (opts.bitrate_bps / 6).max(8_000_000); // never below ~8 Mb/s or 1/6 ceiling
+        let ceiling = opts.bitrate_bps;
+        runtime.spawn(Box::pin(async move {
+            loop {
+                match sig.recv().await {
+                    Ok(signal::SigMsg::Loss { fraction }) => {
+                        let cur = target.load(Ordering::Relaxed);
+                        let next = if fraction > 0.02 {
+                            // Multiplicative decrease on sustained loss.
+                            ((cur as f32) * 0.8) as u32
+                        } else {
+                            // Additive increase (~2 Mb/s) when clean.
+                            cur + 2_000_000
+                        };
+                        target.store(next.clamp(floor, ceiling), Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }));
+    }
 
     // PLI from the receiver → force an IDR.
     {
@@ -224,8 +270,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let bitrate = opts.bitrate_bps;
         let fps = opts.fps;
         let cursor = opts.cursor;
+        let target = target_bps.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
-            if let Err(e) = video_pipeline(bitrate, fps, cursor, vtx, stats, stop, kf) {
+            if let Err(e) = video_pipeline(bitrate, fps, cursor, vtx, stats, stop, kf, target) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
                     "{}",
@@ -250,7 +297,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     };
 
     // Async writers: channels → tracks.
-    let video_writer = {
+    {
         let track = video_track.clone();
         let sender = video_sender.clone();
         let stats = stats.clone();
@@ -287,8 +334,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 }
             }
         }));
-    };
-    let _ = video_writer;
+    }
 
     if let Some((track, sender)) = audio_track {
         runtime.spawn(Box::pin(async move {
@@ -370,13 +416,15 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     if let Some(j) = audio_join {
         let _ = j.join();
     }
-    let _ = sig.send(&signal::SigMsg::Bye).await;
+    // `sig` is owned by the loss-feedback task; closing the peer connection and
+    // exiting closes the TCP, which the receiver reads as end-of-share.
     pc.close().await?;
     println!("{}", serde_json::json!({ "event": "stopped" }));
     result
 }
 
 /// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC MFT → SEI → channel.
+#[allow(clippy::too_many_arguments)]
 fn video_pipeline(
     bitrate_bps: u32,
     fps: u32,
@@ -385,6 +433,7 @@ fn video_pipeline(
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
     keyframe_wanted: Arc<AtomicBool>,
+    target_bps: Arc<AtomicU32>,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -416,14 +465,15 @@ fn video_pipeline(
     );
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    let mut n_in = 0u64;
-    let mut n_out = 0u64;
+    let mut applied_bps = bitrate_bps;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
             EncoderEvent::NeedInput => {
-                n_in += 1;
-                if n_in % 120 == 1 {
-                    tracing::debug!(n_in, n_out, "pipeline heartbeat");
+                // Apply any adaptive bitrate change from the loss controller.
+                let want = target_bps.load(Ordering::Relaxed);
+                if want != applied_bps && enc.set_bitrate(want).is_ok() {
+                    applied_bps = want;
+                    tracing::debug!(bps = want, "bitrate adjusted");
                 }
                 let Some(frame) = src.next(Duration::from_millis(250))? else {
                     tracing::debug!("no capture frame in 250ms");
@@ -438,7 +488,6 @@ fn video_pipeline(
                 stats.dropped.store(src.dropped(), Ordering::Relaxed);
             }
             EncoderEvent::Output(out) => {
-                n_out += 1;
                 let now_qpc = time::qpc_now_100ns();
                 if let Some(t_in) = inflight.remove(&out.pts_100ns) {
                     stats.encode_us_last.store(((now_qpc - t_in) / 10) as u64, Ordering::Relaxed);

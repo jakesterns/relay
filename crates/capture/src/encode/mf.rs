@@ -197,6 +197,16 @@ impl MfHevcEncoder {
         }
     }
 
+    /// Change the target mean bitrate at runtime (adaptive step-down/up).
+    pub fn set_bitrate(&self, bps: u32) -> Result<()> {
+        // SAFETY: documented runtime-settable codec property.
+        unsafe {
+            self.codec_api
+                .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(bps))
+                .context("set bitrate")
+        }
+    }
+
     /// Ask for an IDR on the next frame (new receiver joined / loss recovery).
     pub fn request_keyframe(&self) -> Result<()> {
         // SAFETY: documented codec property.

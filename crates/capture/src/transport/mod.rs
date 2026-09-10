@@ -7,6 +7,7 @@
 
 pub mod depay;
 pub mod discovery;
+pub mod netcheck;
 pub mod receiver;
 pub mod sei;
 pub mod sender;
@@ -45,7 +46,6 @@ pub fn video_codec() -> RTCRtpCodecParameters {
             rtcp_feedback: vec![],
         },
         payload_type: VIDEO_PT,
-        ..Default::default()
     }
 }
 
@@ -59,7 +59,6 @@ pub fn audio_codec() -> RTCRtpCodecParameters {
             rtcp_feedback: vec![],
         },
         payload_type: AUDIO_PT,
-        ..Default::default()
     }
 }
 

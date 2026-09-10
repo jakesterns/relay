@@ -50,6 +50,11 @@ pub enum SigMsg {
         offset_ns: i64,
         rtt_ns: i64,
     },
+    /// Receiver→sender health: fraction of expected AUs missing in the last
+    /// window (0.0..=1.0). Drives the sender's bitrate step-down.
+    Loss {
+        fraction: f32,
+    },
     Bye,
 }
 

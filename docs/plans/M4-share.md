@@ -53,7 +53,7 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 ### Transport
 - [x] webrtc-rs sender: one video track (HEVC RTP), one audio track, DTLS-SRTP, ICE host candidates only (LAN), STUN off by default. (webrtc-rs 0.20; `build_pc` registers HEVC pt98 + Opus pt120, no ICE servers.)
 - [x] Discovery: mDNS `_relay._udp.local` with instance name = hostname; pairing by six-digit code. The code seeds an HMAC over each side's SDP; the SDP carries the DTLS fingerprint and DTLS verifies the cert against it, so a good MAC transitively pins the peer. Paired peers persist in `%LOCALAPPDATA%\Relay\data\peers.json`.
-- [ ] Wi-Fi detection (adapter type of the route to the peer) → UI recommendation "wired or 6 GHz"; bitrate step-down on sustained loss. → see `netcheck`, wired to the UI card.
+- [x] Wi-Fi detection (adapter type of the route to the peer, `GetAdaptersAddresses` → `IF_TYPE_IEEE80211`) → `link` event with a "wired or 6 GHz" recommendation; AIMD bitrate step-down driven by receiver RTP-sequence loss feedback (`SigMsg::Loss`), applied live via `ICodecAPI` mean-bitrate. Verified: link=wired on the test LAN.
 
 ### Receiver mode
 - [~] "Receive" screen: list discovered senders, enter code, show stream in a D3D11 swapchain window (native, not in the webview) with MF hardware decode. `recv --headless` (transport benchmark) and the MF decode → D3D11 present window both done; the UI Receive screen lists senders and launches `recv`.
