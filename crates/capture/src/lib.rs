@@ -21,9 +21,13 @@ pub mod encode;
 #[cfg(windows)]
 pub mod probe;
 #[cfg(windows)]
+pub mod render;
+#[cfg(windows)]
 pub mod source;
 #[cfg(windows)]
 pub mod time;
+#[cfg(windows)]
+pub mod transport;
 
 /// Timing helper: p50/p99 over a recorded series of durations, in milliseconds.
 #[derive(Debug, Default)]

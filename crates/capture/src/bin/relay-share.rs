@@ -64,6 +64,68 @@ fn main() -> Result<()> {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(10);
             bench_capture(secs)
         }
+        #[cfg(windows)]
+        "send" => {
+            let mut opts = relay_capture::transport::sender::SendOpts {
+                peer: None,
+                code: String::new(),
+                bitrate_bps: 60_000_000,
+                fps: 60,
+                audio: Some(relay_capture::audio::AudioSource::Desktop),
+                mic: false,
+                cursor: true,
+            };
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--peer" => opts.peer = it.next().cloned(),
+                    "--code" => opts.code = it.next().cloned().unwrap_or_default(),
+                    "--bitrate" => {
+                        opts.bitrate_bps =
+                            it.next().context("--bitrate Mb/s")?.parse::<u32>()? * 1_000_000
+                    }
+                    "--fps" => opts.fps = it.next().context("--fps N")?.parse()?,
+                    "--no-audio" => opts.audio = None,
+                    "--audio-pid" => {
+                        opts.audio = Some(relay_capture::audio::AudioSource::Process {
+                            pid: it.next().context("--audio-pid PID")?.parse()?,
+                        })
+                    }
+                    "--no-cursor" => opts.cursor = false,
+                    other => bail!("unknown send flag `{other}`"),
+                }
+            }
+            if opts.code.is_empty() {
+                bail!("send needs --code <six digits from the receiver>");
+            }
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(relay_capture::transport::sender::run(opts))
+        }
+        #[cfg(windows)]
+        "recv" => {
+            let mut opts = relay_capture::transport::receiver::RecvOpts {
+                name: None,
+                headless: false,
+                code: None,
+            };
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--name" => opts.name = it.next().cloned(),
+                    "--headless" => opts.headless = true,
+                    "--code" => opts.code = it.next().cloned(),
+                    other => bail!("unknown recv flag `{other}`"),
+                }
+            }
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(relay_capture::transport::receiver::run(opts))
+        }
         "" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
