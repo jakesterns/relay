@@ -27,6 +27,7 @@ use crate::audio::{AudioSource, OpusStream};
 use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
 use crate::time;
 
+#[derive(Debug)]
 pub struct SendOpts {
     /// Receiver instance name (mDNS) or `ip:port`; `None` = first discovered.
     pub peer: Option<String>,
@@ -75,6 +76,26 @@ impl Drop for ComMta {
     }
 }
 
+/// Pick a discovered receiver: by (case-insensitive) name when given, else
+/// the first found. Pure selection so it is unit-testable.
+fn pick_discovered<'a>(
+    found: &'a [discovery::Discovered],
+    want: &Option<String>,
+) -> Result<&'a discovery::Discovered> {
+    if found.is_empty() {
+        bail!("no Relay receivers found on the LAN (is the other PC on the Receive screen?)");
+    }
+    match want {
+        Some(name) => found.iter().find(|d| d.name.eq_ignore_ascii_case(name)).with_context(|| {
+            format!(
+                "receiver `{name}` not found; saw: {:?}",
+                found.iter().map(|d| d.name.clone()).collect::<Vec<_>>()
+            )
+        }),
+        None => Ok(&found[0]),
+    }
+}
+
 /// Resolve the receiver: explicit `ip:port`, or mDNS by (optional) name.
 async fn resolve_peer(peer: &Option<String>) -> Result<(SocketAddr, String)> {
     if let Some(p) = peer {
@@ -85,20 +106,7 @@ async fn resolve_peer(peer: &Option<String>) -> Result<(SocketAddr, String)> {
     let want = peer.clone();
     let found =
         tokio::task::spawn_blocking(move || discovery::browse(Duration::from_secs(3))).await??;
-    if found.is_empty() {
-        bail!("no Relay receivers found on the LAN (is the other PC on the Receive screen?)");
-    }
-    let pick = match &want {
-        Some(name) => {
-            found.iter().find(|d| d.name.eq_ignore_ascii_case(name)).with_context(|| {
-                format!(
-                    "receiver `{name}` not found; saw: {:?}",
-                    found.iter().map(|d| d.name.clone()).collect::<Vec<_>>()
-                )
-            })?
-        }
-        None => &found[0],
-    };
+    let pick = pick_discovered(&found, &want)?;
     Ok((SocketAddr::new(pick.addr, pick.port), pick.name.clone()))
 }
 
@@ -219,21 +227,13 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     // Loss feedback from the receiver → AIMD bitrate control.
     {
         let target = target_bps.clone();
-        let floor = (opts.bitrate_bps / 6).max(8_000_000); // never below ~8 Mb/s or 1/6 ceiling
-        let ceiling = opts.bitrate_bps;
+        let aimd = super::control::AimdBitrate::new(opts.bitrate_bps);
         runtime.spawn(Box::pin(async move {
             loop {
                 match sig.recv().await {
                     Ok(signal::SigMsg::Loss { fraction }) => {
                         let cur = target.load(Ordering::Relaxed);
-                        let next = if fraction > 0.02 {
-                            // Multiplicative decrease on sustained loss.
-                            ((cur as f32) * 0.8) as u32
-                        } else {
-                            // Additive increase (~2 Mb/s) when clean.
-                            cur + 2_000_000
-                        };
-                        target.store(next.clamp(floor, ceiling), Ordering::Relaxed);
+                        target.store(aimd.next(cur, fraction), Ordering::Relaxed);
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -526,4 +526,49 @@ fn audio_pipeline(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::discovery::Discovered;
+
+    fn found() -> Vec<Discovered> {
+        vec![
+            Discovered {
+                name: "gaming-pc".into(),
+                addr: "192.168.1.10".parse().unwrap(),
+                port: 7001,
+            },
+            Discovered { name: "Laptop".into(), addr: "192.168.1.11".parse().unwrap(), port: 7002 },
+        ]
+    }
+
+    #[test]
+    fn pick_first_when_no_name_given() {
+        let f = found();
+        let d = pick_discovered(&f, &None).unwrap();
+        assert_eq!(d.name, "gaming-pc");
+    }
+
+    #[test]
+    fn pick_by_name_is_case_insensitive() {
+        let f = found();
+        let d = pick_discovered(&f, &Some("LAPTOP".into())).unwrap();
+        assert_eq!(d.port, 7002);
+    }
+
+    #[test]
+    fn pick_unknown_name_errors_and_lists_candidates() {
+        let f = found();
+        let err = pick_discovered(&f, &Some("den-pc".into())).unwrap_err().to_string();
+        assert!(err.contains("den-pc"), "{err}");
+        assert!(err.contains("gaming-pc"), "should list what was seen: {err}");
+    }
+
+    #[test]
+    fn pick_from_empty_errors() {
+        let err = pick_discovered(&[], &None).unwrap_err().to_string();
+        assert!(err.contains("no Relay receivers"), "{err}");
+    }
 }

@@ -59,11 +59,7 @@ pub fn browse(timeout: Duration) -> Result<Vec<Discovered>> {
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match rx.recv_timeout(left) {
             Ok(ServiceEvent::ServiceResolved(info)) => {
-                let name = info
-                    .get_fullname()
-                    .strip_suffix(&format!(".{SERVICE_TYPE}"))
-                    .unwrap_or(info.get_fullname())
-                    .to_string();
+                let name = instance_name(info.get_fullname());
                 // IPv4 only for signalling; every LAN we target has it.
                 if let Some(addr) = info.get_addresses_v4().into_iter().next() {
                     found.insert(
@@ -80,6 +76,43 @@ pub fn browse(timeout: Duration) -> Result<Vec<Discovered>> {
     Ok(found.into_values().collect())
 }
 
+/// The instance part of an mDNS fullname: `den-pc._relay._udp.local.` → `den-pc`.
+fn instance_name(fullname: &str) -> String {
+    fullname.strip_suffix(&format!(".{SERVICE_TYPE}")).unwrap_or(fullname).to_string()
+}
+
 pub fn hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "relay".into()).to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_name_strips_the_service_suffix() {
+        assert_eq!(instance_name("den-pc._relay._udp.local."), "den-pc");
+        // Names with dots keep everything before the service type.
+        assert_eq!(instance_name("jake.desktop._relay._udp.local."), "jake.desktop");
+        // A foreign fullname passes through untouched.
+        assert_eq!(instance_name("den-pc._other._tcp.local."), "den-pc._other._tcp.local.");
+    }
+
+    #[test]
+    fn hostname_is_lowercase_and_nonempty() {
+        let h = hostname();
+        assert!(!h.is_empty());
+        assert_eq!(h, h.to_lowercase());
+    }
+
+    #[test]
+    fn discovered_serializes_for_the_ui() {
+        // `relay-share discover` prints these; the core forwards them verbatim.
+        let d =
+            Discovered { name: "den-pc".into(), addr: "192.168.1.5".parse().unwrap(), port: 7001 };
+        assert_eq!(
+            serde_json::to_string(&d).unwrap(),
+            r#"{"name":"den-pc","addr":"192.168.1.5","port":7001}"#
+        );
+    }
 }

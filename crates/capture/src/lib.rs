@@ -92,4 +92,25 @@ mod tests {
         assert!((p99 - 99.0).abs() <= 1.0, "p99 {p99}");
         assert_eq!(max, 100.0);
     }
+
+    #[test]
+    fn percentiles_edge_cases() {
+        let p = Percentiles::default();
+        assert!(p.summary().is_none());
+        assert!(p.is_empty());
+
+        let mut p = Percentiles::default();
+        p.push_ms(7.5);
+        assert_eq!(p.summary(), Some((7.5, 7.5, 7.5)));
+        assert_eq!(p.len(), 1);
+
+        // Negative samples (WGC future-stamped frames) sort correctly.
+        let mut p = Percentiles::default();
+        p.push_ms(-3.0);
+        p.push_ms(1.0);
+        p.push_ms(-1.0);
+        let (p50, _, max) = p.summary().unwrap();
+        assert_eq!(p50, -1.0);
+        assert_eq!(max, 1.0);
+    }
 }

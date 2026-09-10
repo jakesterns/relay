@@ -5,6 +5,7 @@
 //! six-digit code and syncs clocks, `sei` carries capture timestamps in-band,
 //! `sender`/`receiver` are the two ends of a share.
 
+pub mod control;
 pub mod depay;
 pub mod discovery;
 pub mod netcheck;

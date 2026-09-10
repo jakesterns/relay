@@ -127,4 +127,59 @@ mod tests {
         nal.push(0x80);
         assert_eq!(extract_timestamp(&nal), None);
     }
+
+    #[test]
+    fn sei_found_after_other_nals_and_with_3_byte_start_codes() {
+        let ts = 1_726_000_000_123_456_789i64;
+        // AU: VPS-ish NAL first, then our SEI re-prefixed with a 3-byte start code.
+        let mut au = vec![0, 0, 0, 1, 0x40, 0x01, 0x0c];
+        let sei = timestamp_sei(ts);
+        au.extend_from_slice(&[0, 0, 1]); // 3-byte start code
+        au.extend_from_slice(&sei[4..]); // SEI NAL without its 4-byte start code
+        au.extend_from_slice(&[0, 0, 0, 1, 0x28, 0x01, 0xaa]);
+        assert_eq!(extract_timestamp(&au), Some(ts));
+    }
+
+    #[test]
+    fn timestamps_with_zero_runs_survive_emulation_prevention() {
+        // Big-endian encodings containing 00 00 0x runs, which must be
+        // EP-escaped in the NAL and still parse back.
+        for ts in [0x0000_0000_0000_0001i64, 0x0100_0000_0200_0003, 0x0000_0100_0000_0200, i64::MIN]
+        {
+            let nal = timestamp_sei(ts);
+            assert_eq!(extract_timestamp(&nal), Some(ts), "ts {ts:#x}");
+        }
+    }
+
+    #[test]
+    fn truncated_and_garbage_input_does_not_panic() {
+        let good = timestamp_sei(42);
+        for cut in 0..good.len() {
+            let _ = extract_timestamp(&good[..cut]); // must not panic
+        }
+        assert_eq!(extract_timestamp(&[]), None);
+        assert_eq!(extract_timestamp(&[0, 0, 0, 1]), None);
+        assert_eq!(extract_timestamp(&[0, 0, 1, 0x4E]), None);
+        // Deterministic pseudo-random bytes: no crash, no false positive.
+        let mut x = 0x12345678u32;
+        let junk: Vec<u8> = (0..4096)
+            .map(|_| {
+                x = x.wrapping_mul(1664525).wrapping_add(1013904223);
+                (x >> 24) as u8
+            })
+            .collect();
+        let _ = extract_timestamp(&junk);
+    }
+
+    #[test]
+    fn wrong_payload_size_is_ignored() {
+        // Same UUID but a payload size that is not 24: not ours.
+        let mut rbsp = vec![5u8, 23];
+        rbsp.extend_from_slice(&UUID);
+        rbsp.extend_from_slice(&[0u8; 7]);
+        rbsp.push(0x80);
+        let mut nal = vec![0, 0, 0, 1, 0x4E, 0x01];
+        ep_encode(&rbsp, &mut nal);
+        assert_eq!(extract_timestamp(&nal), None);
+    }
 }

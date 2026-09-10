@@ -333,3 +333,22 @@ impl InflightClock {
         self.map.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::InflightClock;
+
+    #[test]
+    fn inflight_clock_matches_output_to_input() {
+        let mut c = InflightClock::default();
+        c.submitted(100, 1_000);
+        c.submitted(200, 2_000);
+        assert_eq!(c.in_flight(), 2);
+        // Out-of-order completion still matches by PTS.
+        assert_eq!(c.completed(200, 2_500), Some(500));
+        assert_eq!(c.completed(100, 4_000), Some(3_000));
+        assert_eq!(c.in_flight(), 0);
+        // An unknown PTS (encoder-generated frame) yields no sample.
+        assert_eq!(c.completed(999, 5_000), None);
+    }
+}

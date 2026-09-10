@@ -17,6 +17,7 @@ use webrtc::peer_connection::PeerConnection;
 
 use super::{build_pc, discovery, sei, signal};
 
+#[derive(Debug)]
 pub struct RecvOpts {
     /// mDNS instance name; default = hostname.
     pub name: Option<String>,
@@ -255,26 +256,13 @@ async fn video_track_loop(
     let mut depkt = H265Depay::default();
     let mut au: Vec<u8> = Vec::with_capacity(256 * 1024);
     // RTP-sequence loss estimation over ~1 s windows.
-    let mut last_seq: Option<u16> = None;
-    let mut expected = 0u64;
-    let mut lost = 0u64;
+    let mut loss = super::control::LossWindow::default();
     let mut window_start = std::time::Instant::now();
     while let Some(ev) = track.poll().await {
         let TrackRemoteEvent::OnRtpPacket(pkt) = ev else { continue };
-        let seq = pkt.header.sequence_number;
-        if let Some(prev) = last_seq {
-            let gap = seq.wrapping_sub(prev);
-            if gap != 0 {
-                expected += gap as u64;
-                lost += gap.saturating_sub(1) as u64;
-            }
-        }
-        last_seq = Some(seq);
+        loss.push(pkt.header.sequence_number);
         if window_start.elapsed() >= std::time::Duration::from_secs(1) {
-            let fraction = if expected > 0 { lost as f32 / expected as f32 } else { 0.0 };
-            let _ = loss_tx.try_send(fraction);
-            expected = 0;
-            lost = 0;
+            let _ = loss_tx.try_send(loss.take_fraction());
             window_start = std::time::Instant::now();
         }
         depkt.push(&pkt.payload, &mut au);
@@ -297,5 +285,25 @@ async fn video_track_loop(
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pts_converts_90khz_to_100ns_ticks() {
+        // One second of 90 kHz clock = 10^7 100-ns ticks.
+        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 90_000 };
+        assert_eq!(au.pts_or_zero(), 10_000_000);
+        // One 60 fps frame = 1500 ticks of 90 kHz = 166_666 (truncated) 100-ns ticks.
+        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 1_500 };
+        assert_eq!(au.pts_or_zero(), 166_666);
+        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 0 };
+        assert_eq!(au.pts_or_zero(), 0);
+        // u32::MAX must not overflow the i64 math.
+        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: u32::MAX };
+        assert_eq!(au.pts_or_zero(), u32::MAX as i64 * 1000 / 9);
     }
 }

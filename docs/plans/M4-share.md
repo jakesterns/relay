@@ -86,8 +86,40 @@ Windows.Graphics.Capture supported = true. No software MFT is ever requested.
 ## Out of scope (this milestone)
 Virtual camera/mic on the receiver (M5), recording and replay (M6), DAW/Desktop presets (M6), WAN.
 
+## Unit coverage (decision 2026-09-10)
+The dual-PC run cannot be executed now, so the pipeline's logic is unit-tested
+thoroughly instead and **live integration testing moves to the future MVP
+pass**. 101 tests across the workspace (63 in `relay-capture`, 36+2 in
+`relay-core`); everything that runs without a second machine or GPU session is
+covered:
+- H265 RTP depacketization (single NAL / AP / FU, orphan and stale fragments,
+  truncated payloads, PACI), SEI timestamp round-trip incl. emulation
+  prevention, 3-byte start codes, garbage input.
+- Pairing/signalling: HMAC verify (case, truncation, tamper), SDP fingerprint
+  extraction, `SigMsg` wire format, `SigStream` over real localhost TCP
+  (round-trip, close, garbage, 256 KB cap), NTP-style `clock_sync` recovering
+  a simulated 250 ms skew end-to-end, peer store upsert/corrupt-file recovery.
+- Feedback control (`transport/control.rs`, extracted pure): AIMD
+  increase/decrease/clamp — this extraction also fixed a panic when the
+  requested bitrate is below the 8 Mb/s floor (`clamp` with floor > ceiling) —
+  and RTP-sequence loss windows incl. u16 wraparound; reordered/duplicate
+  packets no longer count as ~65 k losses.
+- Peer pick (name match, case-insensitivity, empty LAN), mDNS instance-name
+  parsing, `Discovered` JSON shape, Wi-Fi recommendation gating + `link_kind`
+  wire format, loopback adapter never classed as Wi-Fi.
+- QPC time scale/monotonicity, 90 kHz→100 ns PTS math, `InflightClock`
+  encode-latency bookkeeping, `Percentiles` edge cases.
+- CLI parsing of `relay-share send|recv` flags; core↔engine contract:
+  `send_args`/`recv_args` command-line mapping (extracted pure) and NDJSON
+  `decode_line` for every event incl. junk tolerance, plus `ShareRequest`
+  serde defaults and `ShareEvent` UI tag format.
+
+Still hardware/two-machine-bound (not unit-testable): WGC/DXGI capture, MF
+encode/decode sessions, WASAPI capture, D3D11 present, webrtc DTLS/ICE
+end-to-end — exercised by the bench commands and the loopback run instead.
+
 ## Deferred
-- **Two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Requires the second PC actively on the Receive screen; the receiver's hostname is discovered over mDNS at test time. Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Reason: the physical two-machine measurement is the user's to run; the harness here has only one PC. Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
+- **Live integration testing: two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Moved to the future MVP validation pass (decision 2026-09-10: dual-PC testing not currently possible; unit coverage above stands in). Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
 - **Simultaneous microphone track.** The mic path is built and benchmarked (`AudioSource::Microphone`), but the sender currently sends one audio track (desktop mix *or* a chosen process, not desktop + mic together). A second Opus track is a small addition; folded into the call-audio/mix-minus work in v1.1. The Share screen's Microphone toggle is present but wired to the single-track selection.
 - **In-webview preview surface.** The receiver renders in a native D3D11 window (correct for latency); a live sender-side preview inside the Tauri webview (and the P hotkey toggling it) is not wired — P currently emits a notice. Deferred to avoid a second capture/encode path purely for preview; the native path already proves the frame.
 - **HEVC Video Extension dependency on the receiver.** Hardware HEVC *decode* uses the Microsoft HEVC Video Extension MFT (DXVA); vendor GPUs register only encode MFTs. If a receiver lacks it, `recv` fails with a clear install message. A DXVA-direct decoder (no MFT) or bundling the OEM extension is an installer-time concern (M7).

@@ -124,4 +124,60 @@ mod tests {
         assert_eq!(au[5], 0x01, "reconstructed NAL header b1");
         assert_eq!(&au[6..], &[0xde, 0xad, 0xbe, 0xef, 0x00]);
     }
+
+    #[test]
+    fn fu_without_start_is_dropped() {
+        let mut d = H265Depay::default();
+        let mut au = Vec::new();
+        // Middle and end fragments with no preceding start (lost packet).
+        d.push(&[0x62, 0x01, 33, 0xbe, 0xef], &mut au);
+        d.push(&[0x62, 0x01, 0x40 | 33, 0x00], &mut au);
+        assert!(au.is_empty(), "orphan fragments must not emit a NAL");
+        // A fresh complete FU afterwards still reassembles.
+        d.push(&[0x62, 0x01, 0x80 | 33, 0xaa], &mut au);
+        d.push(&[0x62, 0x01, 0x40 | 33, 0xbb], &mut au);
+        assert_eq!(&au[6..], &[0xaa, 0xbb]);
+    }
+
+    #[test]
+    fn new_fu_start_discards_stale_fragment() {
+        let mut d = H265Depay::default();
+        let mut au = Vec::new();
+        d.push(&[0x62, 0x01, 0x80 | 33, 0x11, 0x22], &mut au); // start, never ended
+        d.push(&[0x62, 0x01, 0x80 | 33, 0x33], &mut au); // new start
+        d.push(&[0x62, 0x01, 0x40 | 33, 0x44], &mut au); // end
+        assert_eq!(au.len(), 4 + 2 + 2, "only the second FU's payload survives");
+        assert_eq!(&au[6..], &[0x33, 0x44]);
+    }
+
+    #[test]
+    fn truncated_and_tiny_payloads_are_ignored() {
+        let mut d = H265Depay::default();
+        let mut au = Vec::new();
+        d.push(&[], &mut au);
+        d.push(&[0x40], &mut au); // 1 byte: below the 2-byte NAL header
+        d.push(&[0x62, 0x01], &mut au); // FU with no FU header
+        assert!(au.is_empty());
+    }
+
+    #[test]
+    fn aggregation_with_truncated_size_stops_cleanly() {
+        let mut d = H265Depay::default();
+        let mut au = Vec::new();
+        // First NAL complete, second claims 200 bytes but has 1.
+        let mut p = vec![0x60, 0x01];
+        p.extend_from_slice(&[0, 2, 0x40, 0x01]);
+        p.extend_from_slice(&[0, 200, 0xff]);
+        d.push(&p, &mut au);
+        assert_eq!(au, vec![0, 0, 0, 1, 0x40, 0x01], "only the complete NAL is emitted");
+    }
+
+    #[test]
+    fn paci_is_skipped() {
+        let mut d = H265Depay::default();
+        let mut au = Vec::new();
+        // Type 50 = PACI: (50<<1)=0x64.
+        d.push(&[0x64, 0x01, 0xaa, 0xbb], &mut au);
+        assert!(au.is_empty());
+    }
 }

@@ -97,20 +97,7 @@ impl ShareEngine {
             bin.display()
         );
         let mut cmd = Command::new(&bin);
-        cmd.arg("send").arg("--code").arg(&req.code);
-        if let Some(peer) = req.peer.as_deref().filter(|p| !p.is_empty()) {
-            cmd.arg("--peer").arg(peer);
-        }
-        cmd.arg("--bitrate").arg(req.bitrate_mbps.to_string());
-        cmd.arg("--fps").arg(req.fps.to_string());
-        if !req.audio {
-            cmd.arg("--no-audio");
-        } else if let Some(pid) = req.audio_pid {
-            cmd.arg("--audio-pid").arg(pid.to_string());
-        }
-        if !req.cursor {
-            cmd.arg("--no-cursor");
-        }
+        cmd.args(send_args(req));
         // The engine watches for a closed stdin to know the core died.
         cmd.env("RELAY_SPAWNED", "1");
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
@@ -127,13 +114,7 @@ impl ShareEngine {
             bin.display()
         );
         let mut cmd = Command::new(&bin);
-        cmd.arg("recv");
-        if let Some(name) = req.name.as_deref().filter(|n| !n.is_empty()) {
-            cmd.arg("--name").arg(name);
-        }
-        if let Some(code) = req.code.as_deref().filter(|c| !c.is_empty()) {
-            cmd.arg("--code").arg(code);
-        }
+        cmd.args(recv_args(req));
         cmd.env("RELAY_SPAWNED", "1");
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         Self::spawn_with(cmd, tx)
@@ -195,6 +176,44 @@ impl Drop for ShareEngine {
     }
 }
 
+/// The `relay-share send` command line for a request. Kept pure for tests:
+/// this mapping is half of the core↔engine contract (NDJSON is the other).
+fn send_args(req: &ShareRequest) -> Vec<String> {
+    let mut args = vec!["send".into(), "--code".into(), req.code.clone()];
+    if let Some(peer) = req.peer.as_deref().filter(|p| !p.is_empty()) {
+        args.push("--peer".into());
+        args.push(peer.into());
+    }
+    args.push("--bitrate".into());
+    args.push(req.bitrate_mbps.to_string());
+    args.push("--fps".into());
+    args.push(req.fps.to_string());
+    if !req.audio {
+        args.push("--no-audio".into());
+    } else if let Some(pid) = req.audio_pid {
+        args.push("--audio-pid".into());
+        args.push(pid.to_string());
+    }
+    if !req.cursor {
+        args.push("--no-cursor".into());
+    }
+    args
+}
+
+/// The `relay-share recv` command line for a request.
+fn recv_args(req: &ReceiveRequest) -> Vec<String> {
+    let mut args = vec!["recv".to_string()];
+    if let Some(name) = req.name.as_deref().filter(|n| !n.is_empty()) {
+        args.push("--name".into());
+        args.push(name.into());
+    }
+    if let Some(code) = req.code.as_deref().filter(|c| !c.is_empty()) {
+        args.push("--code".into());
+        args.push(code.into());
+    }
+    args
+}
+
 fn decode_line(line: &str) -> Option<ShareEvent> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     match v.get("event").and_then(|e| e.as_str()) {
@@ -240,5 +259,135 @@ pub fn discover_receivers(timeout_ms: u64) -> Result<serde_json::Value> {
 pub fn pump(rx: Receiver<ShareEvent>, mut on_event: impl FnMut(ShareEvent)) {
     while let Ok(ev) = rx.recv() {
         on_event(ev);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_request_minimal_json_gets_defaults() {
+        let req: ShareRequest = serde_json::from_str(r#"{"code":"123456"}"#).unwrap();
+        assert_eq!(req.code, "123456");
+        assert_eq!(req.peer, None);
+        assert_eq!(req.bitrate_mbps, 60);
+        assert_eq!(req.fps, 60);
+        assert!(req.audio);
+        assert_eq!(req.audio_pid, None);
+        assert!(req.cursor);
+    }
+
+    #[test]
+    fn send_args_default_request() {
+        let req: ShareRequest = serde_json::from_str(r#"{"code":"123456"}"#).unwrap();
+        assert_eq!(send_args(&req), ["send", "--code", "123456", "--bitrate", "60", "--fps", "60"]);
+    }
+
+    #[test]
+    fn send_args_full_request() {
+        let req: ShareRequest = serde_json::from_str(
+            r#"{"code":"1","peer":"den-pc","bitrate_mbps":80,"fps":30,"audio":true,"audio_pid":4321,"cursor":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            send_args(&req),
+            [
+                "send",
+                "--code",
+                "1",
+                "--peer",
+                "den-pc",
+                "--bitrate",
+                "80",
+                "--fps",
+                "30",
+                "--audio-pid",
+                "4321",
+                "--no-cursor"
+            ]
+        );
+    }
+
+    #[test]
+    fn send_args_no_audio_suppresses_audio_pid() {
+        let req: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","audio":false,"audio_pid":4321}"#).unwrap();
+        let args = send_args(&req);
+        assert!(args.contains(&"--no-audio".to_string()));
+        assert!(!args.iter().any(|a| a == "--audio-pid"));
+    }
+
+    #[test]
+    fn send_args_empty_peer_is_skipped() {
+        let req: ShareRequest = serde_json::from_str(r#"{"code":"1","peer":""}"#).unwrap();
+        assert!(!send_args(&req).iter().any(|a| a == "--peer"));
+    }
+
+    #[test]
+    fn recv_args_variants() {
+        let req: ReceiveRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
+
+        let req: ReceiveRequest =
+            serde_json::from_str(r#"{"name":"den-pc","code":"555555"}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv", "--name", "den-pc", "--code", "555555"]);
+
+        // Empty strings behave like absent fields.
+        let req: ReceiveRequest = serde_json::from_str(r#"{"name":"","code":""}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
+    }
+
+    #[test]
+    fn decode_line_maps_engine_events() {
+        let ev = decode_line(r#"{"event":"stats","bitrate_mbps":57.2,"fps":60.0}"#).unwrap();
+        let ShareEvent::Stats { data } = ev else { panic!("want Stats") };
+        assert_eq!(data["bitrate_mbps"], 57.2);
+
+        let ev = decode_line(r#"{"event":"connected","peer":"den-pc","rtt_ms":0.4}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Connected { peer } if peer == "den-pc"));
+
+        let ev = decode_line(r#"{"event":"waiting","code":"123456","name":"jake"}"#).unwrap();
+        assert!(
+            matches!(ev, ShareEvent::Waiting { code, name } if code == "123456" && name == "jake")
+        );
+
+        let ev = decode_line(r#"{"event":"paired","sender":"jake"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Paired { sender } if sender == "jake"));
+
+        let ev = decode_line(r#"{"event":"error","where":"video","message":"boom"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Error { message } if message == "boom"));
+
+        let ev = decode_line(r#"{"event":"stopped"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Exited { ok: true, code: Some(0) }));
+    }
+
+    #[test]
+    fn decode_line_tolerates_missing_fields_and_junk() {
+        // Missing fields fall back to empty strings, not a dropped event.
+        let ev = decode_line(r#"{"event":"connected"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Connected { peer } if peer.is_empty()));
+        let ev = decode_line(r#"{"event":"error"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Error { message } if message == "error"));
+
+        // Unknown events, non-JSON, and JSON without `event` are ignored.
+        assert!(decode_line(r#"{"event":"video_up","encoder":"NVIDIA"}"#).is_none());
+        assert!(decode_line(r#"{"event":"link","kind":"wired"}"#).is_none());
+        assert!(decode_line("not json at all").is_none());
+        assert!(decode_line(r#"{"no_event":true}"#).is_none());
+        assert!(decode_line("").is_none());
+    }
+
+    #[test]
+    fn share_event_serializes_tagged_for_the_ui() {
+        // The Tauri shell matches on `event` — lock the tag format.
+        let s = serde_json::to_string(&ShareEvent::Exited { ok: false, code: Some(1) }).unwrap();
+        assert_eq!(s, r#"{"event":"exited","ok":false,"code":1}"#);
+        let s = serde_json::to_string(&ShareEvent::Waiting {
+            code: "123456".into(),
+            name: "jake".into(),
+        })
+        .unwrap();
+        assert_eq!(s, r#"{"event":"waiting","code":"123456","name":"jake"}"#);
     }
 }

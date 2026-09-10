@@ -152,11 +152,16 @@ pub fn peers_file() -> Result<PathBuf> {
 }
 
 pub fn remember_peer(name: &str, fingerprint: &str) -> Result<()> {
-    let path = peers_file()?;
+    remember_peer_at(&peers_file()?, name, fingerprint)
+}
+
+/// Upsert `name` in the peer store at `path` (one entry per name; re-pairing
+/// replaces the fingerprint). Tolerates a missing or corrupt store.
+pub fn remember_peer_at(path: &std::path::Path, name: &str, fingerprint: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut store: Peers = std::fs::read_to_string(&path)
+    let mut store: Peers = std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
@@ -166,7 +171,7 @@ pub fn remember_peer(name: &str, fingerprint: &str) -> Result<()> {
         fingerprint: fingerprint.to_string(),
         paired_unix: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
     });
-    std::fs::write(&path, serde_json::to_vec_pretty(&store)?)?;
+    std::fs::write(path, serde_json::to_vec_pretty(&store)?)?;
     Ok(())
 }
 
@@ -218,5 +223,166 @@ mod tests {
     fn fingerprint_is_extracted() {
         let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 AA:BB\r\n";
         assert_eq!(sdp_fingerprint(sdp).as_deref(), Some("sha-256 AA:BB"));
+    }
+
+    #[test]
+    fn fingerprint_absent_is_none() {
+        assert_eq!(sdp_fingerprint("v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98\r\n"), None);
+        assert_eq!(sdp_fingerprint(""), None);
+    }
+
+    #[test]
+    fn mac_accepts_uppercase_hex() {
+        let m = mac("123456", "payload").to_uppercase();
+        assert!(verify_mac("123456", "payload", &m));
+    }
+
+    #[test]
+    fn mac_rejects_odd_and_truncated_hex() {
+        let m = mac("123456", "payload");
+        assert!(!verify_mac("123456", "payload", &m[..m.len() - 1])); // odd length
+        assert!(!verify_mac("123456", "payload", &m[..m.len() - 2])); // truncated
+        assert!(!verify_mac("123456", "payload", ""));
+    }
+
+    fn temp_store(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("relay-test-peers-{tag}-{}.json", std::process::id()))
+    }
+
+    #[test]
+    fn peer_store_round_trips_and_dedupes_by_name() {
+        let path = temp_store("dedupe");
+        let _ = std::fs::remove_file(&path);
+        remember_peer_at(&path, "gaming-pc", "sha-256 AA").unwrap();
+        remember_peer_at(&path, "laptop", "sha-256 BB").unwrap();
+        // Re-pairing the same name replaces its fingerprint, no duplicate row.
+        remember_peer_at(&path, "gaming-pc", "sha-256 CC").unwrap();
+
+        let store: Peers = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(store.peers.len(), 2);
+        let gp = store.peers.iter().find(|p| p.name == "gaming-pc").unwrap();
+        assert_eq!(gp.fingerprint, "sha-256 CC");
+        assert!(gp.paired_unix > 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn peer_store_survives_corrupt_file() {
+        let path = temp_store("corrupt");
+        std::fs::write(&path, b"{ not json !!").unwrap();
+        remember_peer_at(&path, "laptop", "sha-256 DD").unwrap();
+        let store: Peers = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(store.peers.len(), 1);
+        assert_eq!(store.peers[0].name, "laptop");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn sig_msg_wire_format_is_stable() {
+        // The receiver of the other version must parse these exact shapes.
+        let m = SigMsg::Loss { fraction: 0.25 };
+        assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"type":"loss","fraction":0.25}"#);
+        let m: SigMsg =
+            serde_json::from_str(r#"{"type":"offer","name":"pc","sdp":"v=0","mac":"ab"}"#).unwrap();
+        assert!(matches!(m, SigMsg::Offer { .. }));
+        let m: SigMsg = serde_json::from_str(r#"{"type":"bye"}"#).unwrap();
+        assert!(matches!(m, SigMsg::Bye));
+        let m: SigMsg =
+            serde_json::from_str(r#"{"type":"clock","offset_ns":-5,"rtt_ns":9}"#).unwrap();
+        assert!(matches!(m, SigMsg::Clock { offset_ns: -5, rtt_ns: 9 }));
+    }
+
+    /// A connected localhost TCP pair wrapped in SigStreams.
+    async fn sig_pair() -> (SigStream, SigStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (a, b) = tokio::join!(tokio::net::TcpStream::connect(addr), async {
+            listener.accept().await.map(|(s, _)| s)
+        });
+        (SigStream::new(a.unwrap()), SigStream::new(b.unwrap()))
+    }
+
+    #[tokio::test]
+    async fn sig_stream_round_trips_every_variant() {
+        let (mut a, mut b) = sig_pair().await;
+        a.send(&SigMsg::Offer { name: "pc".into(), sdp: "v=0".into(), mac: "ab".into() })
+            .await
+            .unwrap();
+        a.send(&SigMsg::Ping { seq: 3, t1_ns: 42 }).await.unwrap();
+        a.send(&SigMsg::Bye).await.unwrap();
+        assert!(matches!(b.recv().await.unwrap(), SigMsg::Offer { .. }));
+        assert!(matches!(b.recv().await.unwrap(), SigMsg::Ping { seq: 3, t1_ns: 42 }));
+        assert!(matches!(b.recv().await.unwrap(), SigMsg::Bye));
+    }
+
+    #[tokio::test]
+    async fn sig_stream_errors_on_close_garbage_and_oversize() {
+        // Closed connection.
+        let (a, mut b) = sig_pair().await;
+        drop(a);
+        assert!(b.recv().await.is_err());
+
+        // Non-JSON line.
+        let (mut a, mut b) = sig_pair().await;
+        {
+            use tokio::io::AsyncWriteExt;
+            a.writer.write_all(b"not json\n").await.unwrap();
+        }
+        assert!(b.recv().await.is_err());
+
+        // A message over the 256 KB cap is rejected even if it is valid JSON.
+        let (mut a, mut b) = sig_pair().await;
+        let big =
+            SigMsg::Offer { name: "pc".into(), sdp: "x".repeat(300 * 1024), mac: "ab".into() };
+        let send = a.send(&big);
+        let recv = b.recv();
+        let (sent, got) = tokio::join!(send, recv);
+        sent.unwrap();
+        assert!(got.unwrap_err().to_string().contains("too large"));
+    }
+
+    #[tokio::test]
+    async fn clock_sync_recovers_a_simulated_offset() {
+        const SKEW_NS: i64 = 250_000_000; // receiver clock runs 250 ms ahead
+        let (mut sender, mut receiver) = sig_pair().await;
+
+        // Fake receiver: answer pings with a skewed clock, then hand back the
+        // Clock message the sender pushes.
+        let receiver_task = tokio::spawn(async move {
+            loop {
+                match receiver.recv().await.unwrap() {
+                    SigMsg::Ping { seq, t1_ns } => {
+                        let t = unix_now_ns() + SKEW_NS;
+                        receiver
+                            .send(&SigMsg::Pong { seq, t1_ns, t2_ns: t, t3_ns: t })
+                            .await
+                            .unwrap();
+                    }
+                    SigMsg::Clock { offset_ns, rtt_ns } => return (offset_ns, rtt_ns),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+        });
+
+        let (offset, rtt) = clock_sync(&mut sender, 5).await.unwrap();
+        let (pushed_offset, pushed_rtt) = receiver_task.await.unwrap();
+        assert_eq!(offset, pushed_offset, "sender pushes its estimate to the receiver");
+        assert_eq!(rtt, pushed_rtt);
+        // Localhost RTT is far under the tolerance, so the estimate must land
+        // within a few ms of the simulated skew, and RTT must be sane.
+        assert!((offset - SKEW_NS).abs() < 10_000_000, "offset {} vs skew {SKEW_NS}", offset);
+        assert!((0..1_000_000_000).contains(&rtt), "rtt {rtt}");
+    }
+
+    #[tokio::test]
+    async fn clock_sync_rejects_wrong_reply() {
+        let (mut sender, mut receiver) = sig_pair().await;
+        let feeder = tokio::spawn(async move {
+            let _ = receiver.recv().await; // swallow the ping
+            let _ = receiver.send(&SigMsg::Bye).await;
+            receiver
+        });
+        assert!(clock_sync(&mut sender, 1).await.is_err());
+        let _ = feeder.await;
     }
 }

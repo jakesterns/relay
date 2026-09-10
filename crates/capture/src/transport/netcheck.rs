@@ -98,3 +98,47 @@ pub fn local_ip_towards(peer: IpAddr) -> Result<IpAddr> {
     s.connect((peer, 9)).context("no route to peer")?;
     Ok(s.local_addr()?.ip())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_wifi_gets_a_recommendation() {
+        assert!(LinkKind::WiFi.recommendation().is_some());
+        assert!(LinkKind::Wired.recommendation().is_none());
+        assert!(LinkKind::Other.recommendation().is_none());
+        assert!(LinkKind::Unknown.recommendation().is_none());
+    }
+
+    #[test]
+    fn link_kind_serializes_snake_case() {
+        // Locks the wire format of the `link` event's `kind` field.
+        assert_eq!(serde_json::to_string(&LinkKind::WiFi).unwrap(), r#""wi_fi""#);
+        assert_eq!(serde_json::to_string(&LinkKind::Wired).unwrap(), r#""wired""#);
+        assert_eq!(serde_json::to_string(&LinkKind::Unknown).unwrap(), r#""unknown""#);
+    }
+
+    #[test]
+    fn local_ip_towards_loopback_is_loopback() {
+        let ip = local_ip_towards("127.0.0.1".parse().unwrap()).unwrap();
+        assert!(ip.is_loopback(), "{ip}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn loopback_adapter_is_never_reported_as_wifi() {
+        // The loopback pseudo-interface always exists on Windows; whatever it
+        // classifies as, it must not trigger the Wi-Fi warning.
+        let kind = link_kind_for("127.0.0.1".parse().unwrap()).unwrap();
+        assert_ne!(kind, LinkKind::WiFi);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unassigned_address_is_unknown() {
+        // TEST-NET-3 (RFC 5737) is never a local adapter address.
+        let kind = link_kind_for("203.0.113.7".parse().unwrap()).unwrap();
+        assert_eq!(kind, LinkKind::Unknown);
+    }
+}

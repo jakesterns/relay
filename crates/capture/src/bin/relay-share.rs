@@ -66,38 +66,7 @@ fn main() -> Result<()> {
         }
         #[cfg(windows)]
         "send" => {
-            let mut opts = relay_capture::transport::sender::SendOpts {
-                peer: None,
-                code: String::new(),
-                bitrate_bps: 60_000_000,
-                fps: 60,
-                audio: Some(relay_capture::audio::AudioSource::Desktop),
-                mic: false,
-                cursor: true,
-            };
-            let mut it = args[1..].iter();
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--peer" => opts.peer = it.next().cloned(),
-                    "--code" => opts.code = it.next().cloned().unwrap_or_default(),
-                    "--bitrate" => {
-                        opts.bitrate_bps =
-                            it.next().context("--bitrate Mb/s")?.parse::<u32>()? * 1_000_000
-                    }
-                    "--fps" => opts.fps = it.next().context("--fps N")?.parse()?,
-                    "--no-audio" => opts.audio = None,
-                    "--audio-pid" => {
-                        opts.audio = Some(relay_capture::audio::AudioSource::Process {
-                            pid: it.next().context("--audio-pid PID")?.parse()?,
-                        })
-                    }
-                    "--no-cursor" => opts.cursor = false,
-                    other => bail!("unknown send flag `{other}`"),
-                }
-            }
-            if opts.code.is_empty() {
-                bail!("send needs --code <six digits from the receiver>");
-            }
+            let opts = parse_send_args(&args[1..])?;
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -121,20 +90,7 @@ fn main() -> Result<()> {
         }
         #[cfg(windows)]
         "recv" => {
-            let mut opts = relay_capture::transport::receiver::RecvOpts {
-                name: None,
-                headless: false,
-                code: None,
-            };
-            let mut it = args[1..].iter();
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--name" => opts.name = it.next().cloned(),
-                    "--headless" => opts.headless = true,
-                    "--code" => opts.code = it.next().cloned(),
-                    other => bail!("unknown recv flag `{other}`"),
-                }
-            }
+            let opts = parse_recv_args(&args[1..])?;
             tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -147,6 +103,60 @@ fn main() -> Result<()> {
         }
         other => bail!("unknown command `{other}`\n{USAGE}"),
     }
+}
+
+/// Parse `relay-share send` flags into [`SendOpts`].
+#[cfg(windows)]
+fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::SendOpts> {
+    let mut opts = relay_capture::transport::sender::SendOpts {
+        peer: None,
+        code: String::new(),
+        bitrate_bps: 60_000_000,
+        fps: 60,
+        audio: Some(relay_capture::audio::AudioSource::Desktop),
+        mic: false,
+        cursor: true,
+    };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--peer" => opts.peer = it.next().cloned(),
+            "--code" => opts.code = it.next().cloned().unwrap_or_default(),
+            "--bitrate" => {
+                opts.bitrate_bps = it.next().context("--bitrate Mb/s")?.parse::<u32>()? * 1_000_000
+            }
+            "--fps" => opts.fps = it.next().context("--fps N")?.parse()?,
+            "--no-audio" => opts.audio = None,
+            "--audio-pid" => {
+                opts.audio = Some(relay_capture::audio::AudioSource::Process {
+                    pid: it.next().context("--audio-pid PID")?.parse()?,
+                })
+            }
+            "--no-cursor" => opts.cursor = false,
+            other => bail!("unknown send flag `{other}`"),
+        }
+    }
+    if opts.code.is_empty() {
+        bail!("send needs --code <six digits from the receiver>");
+    }
+    Ok(opts)
+}
+
+/// Parse `relay-share recv` flags into [`RecvOpts`].
+#[cfg(windows)]
+fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver::RecvOpts> {
+    let mut opts =
+        relay_capture::transport::receiver::RecvOpts { name: None, headless: false, code: None };
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--name" => opts.name = it.next().cloned(),
+            "--headless" => opts.headless = true,
+            "--code" => opts.code = it.next().cloned(),
+            other => bail!("unknown recv flag `{other}`"),
+        }
+    }
+    Ok(opts)
 }
 
 /// Capture the primary monitor for `secs` and report present→received
@@ -331,3 +341,79 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
   send           share to a paired peer (spawned by relay-core)
   recv           receive a share and render it to a window
 ";
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use relay_capture::audio::AudioSource;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn send_defaults() {
+        let o = parse_send_args(&s(&["--code", "123456"])).unwrap();
+        assert_eq!(o.code, "123456");
+        assert_eq!(o.peer, None);
+        assert_eq!(o.bitrate_bps, 60_000_000);
+        assert_eq!(o.fps, 60);
+        assert!(matches!(o.audio, Some(AudioSource::Desktop)));
+        assert!(o.cursor);
+    }
+
+    #[test]
+    fn send_all_flags() {
+        let o = parse_send_args(&s(&[
+            "--code",
+            "000042",
+            "--peer",
+            "den-pc",
+            "--bitrate",
+            "80",
+            "--fps",
+            "30",
+            "--audio-pid",
+            "4321",
+            "--no-cursor",
+        ]))
+        .unwrap();
+        assert_eq!(o.peer.as_deref(), Some("den-pc"));
+        assert_eq!(o.bitrate_bps, 80_000_000, "--bitrate is Mb/s");
+        assert_eq!(o.fps, 30);
+        assert!(matches!(o.audio, Some(AudioSource::Process { pid: 4321 })));
+        assert!(!o.cursor);
+    }
+
+    #[test]
+    fn send_no_audio_wins_over_default() {
+        let o = parse_send_args(&s(&["--code", "1", "--no-audio"])).unwrap();
+        assert!(o.audio.is_none());
+    }
+
+    #[test]
+    fn send_requires_code_and_rejects_unknown_flags() {
+        assert!(parse_send_args(&s(&[])).unwrap_err().to_string().contains("--code"));
+        assert!(parse_send_args(&s(&["--code", "1", "--nope"]))
+            .unwrap_err()
+            .to_string()
+            .contains("--nope"));
+        assert!(parse_send_args(&s(&["--code", "1", "--bitrate", "lots"])).is_err());
+    }
+
+    #[test]
+    fn recv_flags() {
+        let o = parse_recv_args(&s(&[])).unwrap();
+        assert_eq!(o.name, None);
+        assert!(!o.headless);
+        assert_eq!(o.code, None);
+
+        let o =
+            parse_recv_args(&s(&["--name", "den-pc", "--headless", "--code", "555555"])).unwrap();
+        assert_eq!(o.name.as_deref(), Some("den-pc"));
+        assert!(o.headless);
+        assert_eq!(o.code.as_deref(), Some("555555"));
+
+        assert!(parse_recv_args(&s(&["--wat"])).is_err());
+    }
+}
