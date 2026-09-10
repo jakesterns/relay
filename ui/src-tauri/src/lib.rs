@@ -140,6 +140,22 @@ async fn stop_share() -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn start_receive(request: relay_core::share::ReceiveRequest) -> CmdResult<()> {
+    match call(Method::StartReceive { request: Box::new(request) }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn stop_receive() -> CmdResult<()> {
+    match call(Method::StopReceive).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
         Reply::Receivers { receivers } => Ok(receivers),
@@ -174,6 +190,17 @@ fn spawn_event_bridge(app: AppHandle) {
                                         serde_json::json!({
                                             "sharing": sharing,
                                             "peer": peer,
+                                            "message": message,
+                                        }),
+                                    );
+                                }
+                                Event::ReceiveStatus { receiving, code, sender, message } => {
+                                    let _ = app.emit(
+                                        "core://receive-status",
+                                        serde_json::json!({
+                                            "receiving": receiving,
+                                            "code": code,
+                                            "sender": sender,
                                             "message": message,
                                         }),
                                     );
@@ -220,6 +247,8 @@ pub fn run() {
             set_autostart,
             start_share,
             stop_share,
+            start_receive,
+            stop_receive,
             discover_receivers,
         ])
         .run(tauri::generate_context!())

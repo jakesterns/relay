@@ -4,6 +4,7 @@ import { TitleBar } from "./components/TitleBar";
 import { CoreProvider, useCore } from "./lib/core";
 import { Games, type Section } from "./screens/Games";
 import { Profiles } from "./screens/Profiles";
+import { Receive } from "./screens/Receive";
 import { Settings } from "./screens/Settings";
 import { Share } from "./screens/Share";
 
@@ -49,6 +50,7 @@ function Shell() {
       <div className="body three">
         <Rail screen={railKey} onNav={nav} state={state} note={note} />
         {screen === "share" && <Share />}
+        {screen === "receive" && <Receive />}
         {screen === "games" && <Games section={section} onSection={setSection} />}
         {screen === "profiles" && <Profiles />}
         {screen === "settings" && <Settings />}

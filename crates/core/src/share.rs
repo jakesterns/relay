@@ -43,6 +43,17 @@ fn default_true() -> bool {
     true
 }
 
+/// How to run the receiver side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReceiveRequest {
+    /// mDNS instance name; empty = hostname.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Fixed pairing code; None = the engine generates one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
@@ -51,6 +62,10 @@ pub enum ShareEvent {
     Stats { data: serde_json::Value },
     /// The engine connected to a receiver.
     Connected { peer: String },
+    /// Receiver is advertising and waiting with this pairing code.
+    Waiting { code: String, name: String },
+    /// Receiver paired with a sender.
+    Paired { sender: String },
     /// The engine exited; `ok` is false on crash or non-zero exit.
     Exited { ok: bool, code: Option<i32> },
     /// A structured error line from the engine.
@@ -100,7 +115,32 @@ impl ShareEngine {
         cmd.env("RELAY_SPAWNED", "1");
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
 
-        let mut child = cmd.spawn().with_context(|| format!("spawning {}", bin.display()))?;
+        Self::spawn_with(cmd, tx)
+    }
+
+    /// Spawn `relay-share recv` for `req`, forwarding decoded events on `tx`.
+    pub fn start_receive(req: &ReceiveRequest, tx: Sender<ShareEvent>) -> Result<Self> {
+        let bin = share_binary()?;
+        anyhow::ensure!(
+            bin.exists(),
+            "share engine not found at {} (build relay-capture)",
+            bin.display()
+        );
+        let mut cmd = Command::new(&bin);
+        cmd.arg("recv");
+        if let Some(name) = req.name.as_deref().filter(|n| !n.is_empty()) {
+            cmd.arg("--name").arg(name);
+        }
+        if let Some(code) = req.code.as_deref().filter(|c| !c.is_empty()) {
+            cmd.arg("--code").arg(code);
+        }
+        cmd.env("RELAY_SPAWNED", "1");
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        Self::spawn_with(cmd, tx)
+    }
+
+    fn spawn_with(mut cmd: Command, tx: Sender<ShareEvent>) -> Result<Self> {
+        let mut child = cmd.spawn().context("spawning relay-share")?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("no child stdout")?;
         std::thread::Builder::new().name("relay-share-reader".into()).spawn(move || {
@@ -161,6 +201,13 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         Some("stats") => Some(ShareEvent::Stats { data: v }),
         Some("connected") => Some(ShareEvent::Connected {
             peer: v.get("peer").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+        }),
+        Some("waiting") => Some(ShareEvent::Waiting {
+            code: v.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string(),
+            name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+        }),
+        Some("paired") => Some(ShareEvent::Paired {
+            sender: v.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string(),
         }),
         Some("error") => Some(ShareEvent::Error {
             message: v.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string(),

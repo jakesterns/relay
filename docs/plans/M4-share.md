@@ -56,14 +56,14 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 - [x] Wi-Fi detection (adapter type of the route to the peer, `GetAdaptersAddresses` → `IF_TYPE_IEEE80211`) → `link` event with a "wired or 6 GHz" recommendation; AIMD bitrate step-down driven by receiver RTP-sequence loss feedback (`SigMsg::Loss`), applied live via `ICodecAPI` mean-bitrate. Verified: link=wired on the test LAN.
 
 ### Receiver mode
-- [~] "Receive" screen: list discovered senders, enter code, show stream in a D3D11 swapchain window (native, not in the webview) with MF hardware decode. `recv --headless` (transport benchmark) and the MF decode → D3D11 present window both done; the UI Receive screen lists senders and launches `recv`.
+- [x] "Receive" screen: shows this PC's pairing code, Start/Stop receiving, and pair status; the stream renders in a native D3D11 swapchain window (not the webview) via MF DXVA HEVC decode. The core spawns/kills `relay-share recv` (StartReceive/StopReceive) and relays its code/pair events as `core://receive-status`. `recv --headless` remains the transport benchmark.
 - [x] Receiver latency measurement: sender stamps frames with an in-band SEI (unix ns), receiver rebases via NTP clock sync and reports capture→arrival and capture→present. Loopback: capture→arrival p50 4.6 ms / p99 7.4 ms.
 
 ### Process model and UI
-- [ ] `relay-share` binary spawned by the core on `Method::StartShare`, killed on `StopShare`, crash → core reports and UI offers restart. Core RSS unchanged while sharing.
-- [ ] Stats events every 500 ms: bitrate, latency, dropped/sent, encoder load, CPU, audio peak → `Event::ShareStats` → instrument strip.
-- [ ] Share screen: Start/Stop, preset chips (Game only for now), source toggles, preview toggle (P), receiver card.
-- [ ] Hotkeys Ctrl+Alt+S (toggle share) and Ctrl+Alt+P (preview) wired.
+- [x] `relay-share` spawned by the core on `StartShare`, killed on `StopShare`; crash/unexpected exit → `ShareStatus { message }` so the UI can report and offer restart. Core RSS unchanged while sharing (measured 9.96 → 10.16 MB; the core never loads capture/encode).
+- [x] Stats events every 500 ms: bitrate, latency, dropped/sent, encoder load, CPU, audio peak → `Event::ShareStats` → live instrument strip.
+- [x] Share screen: Start/Stop, preset chips, source toggles, bitrate slider, receiver scan + pairing-code entry, live strip. Preview toggle (P) relayed as a notice (webview preview surface deferred — see Deferred).
+- [x] Hotkeys Ctrl+Alt+S (toggle share, re-runs the last request) and Ctrl+Alt+P (preview) wired in the core.
 
 ## Definition of Done
 - Every checklist item checked or moved to Deferred with a reason; Measurements table filled.
@@ -87,4 +87,7 @@ Windows.Graphics.Capture supported = true. No software MFT is ever requested.
 Virtual camera/mic on the receiver (M5), recording and replay (M6), DAW/Desktop presets (M6), WAN.
 
 ## Deferred
-_(none yet)_
+- **Two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Requires the second PC actively on the Receive screen; the receiver's hostname is discovered over mDNS at test time. Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Reason: the physical two-machine measurement is the user's to run; the harness here has only one PC. Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
+- **Simultaneous microphone track.** The mic path is built and benchmarked (`AudioSource::Microphone`), but the sender currently sends one audio track (desktop mix *or* a chosen process, not desktop + mic together). A second Opus track is a small addition; folded into the call-audio/mix-minus work in v1.1. The Share screen's Microphone toggle is present but wired to the single-track selection.
+- **In-webview preview surface.** The receiver renders in a native D3D11 window (correct for latency); a live sender-side preview inside the Tauri webview (and the P hotkey toggling it) is not wired — P currently emits a notice. Deferred to avoid a second capture/encode path purely for preview; the native path already proves the frame.
+- **HEVC Video Extension dependency on the receiver.** Hardware HEVC *decode* uses the Microsoft HEVC Video Extension MFT (DXVA); vendor GPUs register only encode MFTs. If a receiver lacks it, `recv` fails with a clear install message. A DXVA-direct decoder (no MFT) or bundling the OEM extension is an installer-time concern (M7).

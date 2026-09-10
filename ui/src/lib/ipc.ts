@@ -40,6 +40,23 @@ export interface CoreState {
   sharing: ShareState; audio_chain: AudioChainState; display_state: DisplayState; footprint: Footprint;
 }
 
+export interface ShareRequest {
+  peer?: string | null; code: string; bitrate_mbps: number; fps: number;
+  audio: boolean; audio_pid?: number; cursor: boolean;
+}
+export interface ReceiveRequest { name?: string | null; code?: string }
+export interface DiscoveredReceiver { name: string; addr: string; port: number }
+/** One `stats` NDJSON line from the share/receive engine (loose shape). */
+export interface ShareStats {
+  event: string;
+  bitrate_mbps?: number; fps?: number; frames?: number; keyframes?: number;
+  dropped?: number; encode_ms?: number; capture_to_send_ms?: number;
+  capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
+  cpu_percent?: number; rss_mb?: number;
+}
+export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
+export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
+
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -159,6 +176,26 @@ export const api = {
     if (!isTauri()) { mockAutostart = enabled; return enabled; }
     return invoke<boolean>("set_autostart", { enabled });
   },
+  async startShare(request: ShareRequest): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("start_share", { request });
+  },
+  async stopShare(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("stop_share");
+  },
+  async startReceive(request: ReceiveRequest): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("start_receive", { request });
+  },
+  async stopReceive(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("stop_receive");
+  },
+  async discoverReceivers(): Promise<DiscoveredReceiver[]> {
+    if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];
+    return invoke<DiscoveredReceiver[]>("discover_receivers");
+  },
 };
 
 /** Subscribe to pushed core events. Returns an unsubscribe fn. */
@@ -166,6 +203,9 @@ export async function onCoreEvents(handlers: {
   state?: (s: CoreState) => void;
   notice?: (text: string) => void;
   offline?: () => void;
+  shareStats?: (s: ShareStats) => void;
+  shareStatus?: (s: ShareStatus) => void;
+  receiveStatus?: (s: ReceiveStatus) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
@@ -173,6 +213,9 @@ export async function onCoreEvents(handlers: {
     listen<CoreState>("core://state", (e) => handlers.state?.(e.payload)),
     listen<string>("core://notice", (e) => handlers.notice?.(e.payload)),
     listen<void>("core://offline", () => handlers.offline?.()),
+    listen<ShareStats>("core://share-stats", (e) => handlers.shareStats?.(e.payload)),
+    listen<ShareStatus>("core://share-status", (e) => handlers.shareStatus?.(e.payload)),
+    listen<ReceiveStatus>("core://receive-status", (e) => handlers.receiveStatus?.(e.payload)),
   ]);
   return () => unlisteners.forEach((u) => u());
 }

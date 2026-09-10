@@ -1,9 +1,10 @@
 import type { CoreState } from "../lib/ipc";
 
-export type Screen = "share" | "games" | "audio" | "display" | "profiles" | "settings";
+export type Screen = "share" | "receive" | "games" | "audio" | "display" | "profiles" | "settings";
 
 const items: { key: Screen; label: string; round?: boolean }[] = [
   { key: "share", label: "Share" },
+  { key: "receive", label: "Receive" },
   { key: "games", label: "Games", round: true },
   { key: "audio", label: "Audio" },
   { key: "display", label: "Display" },

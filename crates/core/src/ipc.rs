@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
-use crate::share::ShareRequest;
+use crate::share::{ReceiveRequest, ShareRequest};
 use crate::types::{CoreState, ProcessInfo, Profile, ProfileSummary};
 
 /// A connection that has neither subscribed nor sent a request for this long is closed.
@@ -60,6 +60,12 @@ pub enum Method {
     },
     /// Stop the running share engine.
     StopShare,
+    /// Start receiving: advertise over mDNS and render an incoming share.
+    StartReceive {
+        request: Box<ReceiveRequest>,
+    },
+    /// Stop receiving.
+    StopReceive,
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
     Subscribe,
@@ -104,6 +110,13 @@ pub enum Event {
     ShareStatus {
         sharing: bool,
         peer: Option<String>,
+        message: Option<String>,
+    },
+    /// The receive engine's state: advertising with a code, paired, or stopped.
+    ReceiveStatus {
+        receiving: bool,
+        code: Option<String>,
+        sender: Option<String>,
         message: Option<String>,
     },
 }
