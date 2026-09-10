@@ -65,15 +65,16 @@ Profiles only match "Any" until the core knows what is plugged in.
 - [ ] `AudioControl` adapter; Settings opt-in card goes live.
 
 ## M4 — Share MVP (headline)
-- [ ] `relay-capture::source`: Windows.Graphics.Capture first (monitor and window, cursor toggle), DXGI Desktop Duplication fallback.
-- [ ] `relay-capture::encode`: Media Foundation HEVC hardware encoder (drives NVENC/QSV/AMF through vendor MFTs) with low-latency settings; direct NVENC SDK later if MF latency is not good enough. CPU fallback is deliberately absent.
-- [ ] Audio: WASAPI loopback (process loopback for game-only audio), Opus.
-- [ ] `relay-capture::transport`: webrtc-rs, mDNS discovery, six-digit pairing code, DTLS-SRTP. LAN only.
-- [ ] Receiver mode in the same app: "Receive" screen renders the stream to a window (virtual camera is M5).
-- [ ] Instrument strip fed by real stats events over IPC (bitrate, latency, drops, encoder load, audio level).
-- [ ] Share engine runs as a child process of the core, spawned per share and fully torn down after.
-- [ ] Wi-Fi detection → wired / 6 GHz recommendation, automatic bitrate step-down.
-- [ ] Hotkeys Ctrl+Alt+S / Ctrl+Alt+P actually toggle share and preview.
+**In progress 2026-09-09** (branch `m4-share`; plan + measurements in `docs/plans/M4-share.md`). Full capture→encode→transport→decode→present pipeline built and green on loopback: capture→present ~4–6 ms, zero AU loss; MF HEVC encode 4K60 p99 10.8 ms (« 20 ms gate, so direct NVENC not needed); core RSS unchanged while sharing. **Remaining: the physical two-PC wired 10-minute 4K60 zero-drop DoD run** (needs the second PC; runbook in the plan's Deferred).
+- [x] `relay-capture::source`: Windows.Graphics.Capture (monitor, cursor toggle, border off), DXGI Desktop Duplication fallback. (Window capture: monitor only for now.)
+- [x] `relay-capture::encode`: Media Foundation HEVC hardware encoder (NVENC/QSV/AMF via vendor MFTs), low-latency CBR, B-frames off, keyframe-on-request; no software path (hardware-only enum bound to the capture adapter). Decision gate passed — MF holds the budget.
+- [x] Audio: WASAPI loopback + process loopback (game-only) + mic, Opus 48 kHz stereo 10 ms.
+- [x] `relay-capture::transport`: webrtc-rs, mDNS discovery, six-digit pairing (HMAC over SDP → DTLS fingerprint pin), DTLS-SRTP, host candidates only. LAN only.
+- [x] Receiver mode in the same app: "Receive" screen; native D3D11 swapchain window, DXVA HEVC decode, WASAPI playback (virtual camera is M5).
+- [x] Instrument strip fed by real `ShareStats` events over IPC (bitrate, latency, drops, encoder load, audio level).
+- [x] Share engine runs as a child process of the core, spawned per share and fully torn down after; core RSS unchanged.
+- [x] Wi-Fi detection → wired / 6 GHz recommendation; AIMD bitrate step-down on receiver-reported loss.
+- [x] Hotkeys Ctrl+Alt+S (toggle share) / Ctrl+Alt+P (preview) wired in the core.
 
 ## M5 — Virtual devices on the receiver
 - [ ] Virtual camera via the Windows 11 frame-server API (`MFCreateVirtualCamera` + a registered media source). OBS VirtualCam detection as fallback.
@@ -101,7 +102,7 @@ Profiles only match "Any" until the core knows what is plugged in.
 | Milestone | Plan | Session status |
 |---|---|---|
 | M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
-| M4 Share MVP | `docs/plans/M4-share.md` | not started |
+| M4 Share MVP | `docs/plans/M4-share.md` | in progress 2026-09-09; pipeline complete & measured on loopback, two-PC DoD run pending |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | not started |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | not started |

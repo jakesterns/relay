@@ -20,3 +20,8 @@ Thumbs.db
 
 # Local runtime data (never commit backups of a user's machine state)
 *.log
+
+# Scratch test artifacts from manual share runs
+/probe-out.json
+/*-out.log
+/*-err.log
