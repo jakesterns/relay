@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
+use crate::share::ShareRequest;
 use crate::types::{CoreState, ProcessInfo, Profile, ProfileSummary};
 
 /// A connection that has neither subscribed nor sent a request for this long is closed.
@@ -53,6 +54,14 @@ pub enum Method {
     SetAutostart {
         enabled: bool,
     },
+    /// Spawn the share engine (a child process) to share this PC to a peer.
+    StartShare {
+        request: Box<ShareRequest>,
+    },
+    /// Stop the running share engine.
+    StopShare,
+    /// Browse the LAN for Relay receivers (blocks briefly).
+    DiscoverReceivers,
     Subscribe,
     Shutdown,
 }
@@ -73,6 +82,7 @@ pub enum Reply {
     Profile { profile: Box<Profile> },
     Processes { processes: Vec<ProcessInfo> },
     Autostart { enabled: bool },
+    Receivers { receivers: serde_json::Value },
     Ok,
     Error { message: String },
 }
@@ -80,8 +90,22 @@ pub enum Reply {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    StateChanged { state: Box<CoreState> },
-    Notice { text: String },
+    StateChanged {
+        state: Box<CoreState>,
+    },
+    Notice {
+        text: String,
+    },
+    /// Instrument-strip stats from the share engine (verbatim JSON).
+    ShareStats {
+        data: serde_json::Value,
+    },
+    /// The share engine started, connected, or stopped.
+    ShareStatus {
+        sharing: bool,
+        peer: Option<String>,
+        message: Option<String>,
+    },
 }
 
 /// One line on the wire is exactly one of these.

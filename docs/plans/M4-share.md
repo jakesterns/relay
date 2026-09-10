@@ -80,8 +80,8 @@ Windows.Graphics.Capture supported = true. No software MFT is ever requested.
 |---|---|---|---|
 | capture → encoder input | −3.28 ms | −2.80 ms | WGC stamps the DWM present slot, so frames reach the encoder ~3 ms *before* they hit glass; max 75 ms is the one first-frame warm-up outlier. 1440p60, 0 drops. |
 | encode | 10.2 ms | 10.8 ms | MF (NVIDIA HEVC Encoder MFT, RTX 3090), 4K60 CBR 60 Mb/s, 60 s, 3601 frames, 0 drops, max 12.0 ms. 1440p60 native: p50 4.9 / p99 5.1 ms. |
-| network + decode + present | | | |
-| glass-to-glass | | | |
+| network + decode + present | ~1 ms | ~3 ms | Loopback delta: capture→present p50 5.6 ms minus capture→arrival 4.6 ms ≈ decode + video-processor + swapchain present. DXVA decode via HEVCVideoExtension MFT, D3D11 flip-discard swapchain, RTX 3090. |
+| glass-to-glass (loopback) | 5.6 ms | 7–9 ms | Full pipeline capture→present, single machine (no LAN transit, no monitor scan-out). 1200+ AUs, 0 decode errors, 1440p60. Real two-PC wired glass-to-glass (camera+stopwatch) is the user's final DoD run — see Deferred. |
 
 ## Out of scope (this milestone)
 Virtual camera/mic on the receiver (M5), recording and replay (M6), DAW/Desktop presets (M6), WAN.

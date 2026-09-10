@@ -74,9 +74,9 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(windows)]
-        "status" | "restore" | "shutdown" => {
+        "status" | "restore" | "shutdown" | "share-start" | "share-stop" => {
             logging::init_console(args.verbose);
-            client_command(&args.cmd, args.json)
+            client_command(&args.cmd, args.arg.as_deref(), args.json)
         }
         other => anyhow::bail!("unknown command `{other}`\n{USAGE}"),
     }
@@ -122,17 +122,42 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   restore    restore original audio/display state now
   shutdown   stop the running service (it restores first)
   autostart  show, enable or disable start-at-login (HKCU Run key only)
+  share-start <code>  spawn the share engine (RELAY_PEER, RELAY_BITRATE_MBPS optional)
+  share-stop          stop the running share engine
 ";
 
 #[cfg(windows)]
-fn client_command(cmd: &str, json: bool) -> Result<()> {
+fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
     use relay_core::ipc::{client::Client, Method, Reply};
+    use relay_core::share::ShareRequest;
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     rt.block_on(async {
         let mut c = Client::connect().await?;
         let method = match cmd {
             "status" => Method::Status,
             "restore" => Method::RestoreAll,
+            "share-start" => {
+                // `relay-core share-start <code>`; peer from RELAY_PEER, else mDNS.
+                let code = arg
+                    .map(str::to_string)
+                    .or_else(|| std::env::var("RELAY_CODE").ok())
+                    .ok_or_else(|| anyhow::anyhow!("usage: relay-core share-start <code>"))?;
+                Method::StartShare {
+                    request: Box::new(ShareRequest {
+                        peer: std::env::var("RELAY_PEER").ok(),
+                        code,
+                        bitrate_mbps: std::env::var("RELAY_BITRATE_MBPS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(60),
+                        fps: 60,
+                        audio: std::env::var("RELAY_NO_AUDIO").is_err(),
+                        audio_pid: None,
+                        cursor: true,
+                    }),
+                }
+            }
+            "share-stop" => Method::StopShare,
             _ => Method::Shutdown,
         };
         match c.call(method).await? {

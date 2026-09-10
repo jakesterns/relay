@@ -60,6 +60,10 @@ struct Inner {
     /// Set by `ApplyProfile` over IPC: stay applied regardless of focus until
     /// `RestoreAll` or the profile is applied automatically anyway.
     pinned: bool,
+    /// The running share engine (a child process), if any.
+    share: Option<crate::share::ShareEngine>,
+    /// Last share request, so the Ctrl+Alt+S hotkey can re-start it.
+    last_share: Option<crate::share::ShareRequest>,
 }
 
 pub struct Service {
@@ -89,6 +93,8 @@ impl Service {
             meter: FootprintMeter::new(),
             hardware: backends.hardware,
             pinned: false,
+            share: None,
+            last_share: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -96,6 +102,11 @@ impl Service {
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let result = rt.block_on(service.main(tx, rx));
+
+        // Stop any share child so it never outlives the core.
+        if let Some(engine) = service.inner.lock().share.take() {
+            engine.stop();
+        }
 
         // Belt and braces: whatever happened, put the machine back.
         let mut g = service.inner.lock();
@@ -113,8 +124,11 @@ impl Service {
     ) -> Result<()> {
         let winloop = WinLoop::spawn(tx, hotkeys::defaults())?;
 
-        let handler =
-            Arc::new(IpcHandler { inner: self.inner.clone(), shutdown: self.shutdown.clone() });
+        let handler = Arc::new(IpcHandler {
+            inner: self.inner.clone(),
+            shutdown: self.shutdown.clone(),
+            events: self.events.clone(),
+        });
         let events_tx = self.events.clone();
         #[cfg(windows)]
         tokio::spawn(async move {
@@ -203,11 +217,27 @@ impl Service {
                     let _ = self.events.send(Event::StateChanged { state });
                 }
             }
-            HotkeyAction::ToggleShare | HotkeyAction::TogglePreview => {
-                // Share is a separate on-demand process; the core only relays the intent.
-                let _ = self.events.send(Event::Notice {
-                    text: format!("{action:?} pressed (share engine not wired yet)"),
-                });
+            HotkeyAction::ToggleShare => {
+                let sharing = self.inner.lock().share.is_some();
+                if sharing {
+                    kill_share(&self.inner, &self.events);
+                } else {
+                    let last = self.inner.lock().last_share.clone();
+                    match last {
+                        Some(req) => {
+                            spawn_share(&self.inner, &self.events, req);
+                        }
+                        None => {
+                            let _ = self.events.send(Event::Notice {
+                                text: "Ctrl+Alt+S: open Relay and press Start to configure the first share".into(),
+                            });
+                        }
+                    }
+                }
+            }
+            HotkeyAction::TogglePreview => {
+                // Preview is a UI concern; relay the intent for the UI to toggle.
+                let _ = self.events.send(Event::Notice { text: "preview toggled".into() });
             }
         }
     }
@@ -216,6 +246,94 @@ impl Service {
 struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
+    events: broadcast::Sender<Event>,
+}
+
+/// Spawn the share engine and a thread that relays its NDJSON as IPC events.
+fn spawn_share(
+    inner: &Arc<Mutex<Inner>>,
+    events: &broadcast::Sender<Event>,
+    req: crate::share::ShareRequest,
+) -> Reply {
+    use crate::share::{ShareEngine, ShareEvent};
+    let mut g = inner.lock();
+    if g.share.is_some() {
+        return Reply::Error { message: "a share is already running".into() };
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
+    let engine = match ShareEngine::start(&req, tx) {
+        Ok(e) => e,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    g.share = Some(engine);
+    g.last_share = Some(req);
+    g.state.sharing = crate::types::ShareState::Sharing { peer: String::new() };
+    drop(g);
+
+    let events2 = events.clone();
+    let inner2 = inner.clone();
+    std::thread::Builder::new()
+        .name("relay-share-pump".into())
+        .spawn(move || {
+            crate::share::pump(rx, |ev| match ev {
+                ShareEvent::Stats { data } => {
+                    let _ = events2.send(Event::ShareStats { data });
+                }
+                ShareEvent::Connected { peer } => {
+                    inner2.lock().state.sharing =
+                        crate::types::ShareState::Sharing { peer: peer.clone() };
+                    let _ = events2.send(Event::ShareStatus {
+                        sharing: true,
+                        peer: Some(peer),
+                        message: None,
+                    });
+                }
+                ShareEvent::Error { message } => {
+                    let _ = events2.send(Event::ShareStatus {
+                        sharing: true,
+                        peer: None,
+                        message: Some(message),
+                    });
+                }
+                ShareEvent::Exited { ok, .. } => {
+                    let mut ig = inner2.lock();
+                    ig.share = None;
+                    ig.state.sharing = crate::types::ShareState::Off;
+                    drop(ig);
+                    let _ = events2.send(Event::ShareStatus {
+                        sharing: false,
+                        peer: None,
+                        message: (!ok).then(|| "share engine stopped unexpectedly".to_string()),
+                    });
+                }
+            });
+            // Channel closed (child stdout closed): make sure state is cleared.
+            let mut ig = inner2.lock();
+            if ig.share.is_some() {
+                ig.share = None;
+                ig.state.sharing = crate::types::ShareState::Off;
+                drop(ig);
+                let _ =
+                    events2.send(Event::ShareStatus { sharing: false, peer: None, message: None });
+            }
+        })
+        .ok();
+
+    let _ = events.send(Event::ShareStatus { sharing: true, peer: None, message: None });
+    Reply::Ok
+}
+
+fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
+    let engine = inner.lock().share.take();
+    match engine {
+        Some(engine) => {
+            engine.stop();
+            inner.lock().state.sharing = crate::types::ShareState::Off;
+            let _ = events.send(Event::ShareStatus { sharing: false, peer: None, message: None });
+            Reply::Ok
+        }
+        None => Reply::Error { message: "no share is running".into() },
+    }
 }
 
 impl IpcHandler {
@@ -288,6 +406,21 @@ impl IpcHandler {
                 Ok(()) => Reply::Autostart { enabled },
                 Err(e) => Reply::Error { message: e.to_string() },
             },
+            Method::StartShare { request } => {
+                drop(g);
+                spawn_share(&self.inner, &self.events, *request)
+            }
+            Method::StopShare => {
+                drop(g);
+                kill_share(&self.inner, &self.events)
+            }
+            Method::DiscoverReceivers => {
+                drop(g);
+                match crate::share::discover_receivers(2000) {
+                    Ok(receivers) => Reply::Receivers { receivers },
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
             Method::Subscribe => Reply::Ok,
             Method::Shutdown => {
                 let _ = self.shutdown.send(CoreEvent::Shutdown);

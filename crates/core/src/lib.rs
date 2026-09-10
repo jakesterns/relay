@@ -23,6 +23,7 @@ pub mod logging;
 pub mod processes;
 pub mod profiles;
 pub mod service;
+pub mod share;
 pub mod status;
 pub mod types;
 pub mod winloop;

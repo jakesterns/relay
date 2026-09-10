@@ -123,6 +123,30 @@ async fn set_autostart(enabled: bool) -> CmdResult<bool> {
     }
 }
 
+#[tauri::command]
+async fn start_share(request: relay_core::share::ShareRequest) -> CmdResult<()> {
+    match call(Method::StartShare { request: Box::new(request) }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn stop_share() -> CmdResult<()> {
+    match call(Method::StopShare).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn discover_receivers() -> CmdResult<serde_json::Value> {
+    match call(Method::DiscoverReceivers).await? {
+        Reply::Receivers { receivers } => Ok(receivers),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Keep a subscription open to the core and forward its events to the webview
 /// as `core://state` and `core://notice`. Reconnects while the window is open.
 #[cfg(windows)]
@@ -140,6 +164,19 @@ fn spawn_event_bridge(app: AppHandle) {
                                 }
                                 Event::Notice { text } => {
                                     let _ = app.emit("core://notice", text);
+                                }
+                                Event::ShareStats { data } => {
+                                    let _ = app.emit("core://share-stats", data);
+                                }
+                                Event::ShareStatus { sharing, peer, message } => {
+                                    let _ = app.emit(
+                                        "core://share-status",
+                                        serde_json::json!({
+                                            "sharing": sharing,
+                                            "peer": peer,
+                                            "message": message,
+                                        }),
+                                    );
                                 }
                             }
                         }
@@ -181,6 +218,9 @@ pub fn run() {
             list_processes,
             get_autostart,
             set_autostart,
+            start_share,
+            stop_share,
+            discover_receivers,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

@@ -105,6 +105,21 @@ fn main() -> Result<()> {
                 .block_on(relay_capture::transport::sender::run(opts))
         }
         #[cfg(windows)]
+        "discover" => {
+            let mut timeout_ms = 2000u64;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                if a == "--timeout-ms" {
+                    timeout_ms = it.next().context("--timeout-ms N")?.parse()?;
+                }
+            }
+            let found = relay_capture::transport::discovery::browse(
+                std::time::Duration::from_millis(timeout_ms),
+            )?;
+            println!("{}", serde_json::to_string(&found)?);
+            Ok(())
+        }
+        #[cfg(windows)]
         "recv" => {
             let mut opts = relay_capture::transport::receiver::RecvOpts {
                 name: None,
