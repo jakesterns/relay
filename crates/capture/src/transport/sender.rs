@@ -454,7 +454,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             line = stdin_lines.next_line(), if stdin_open => {
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
-                        Some(EngineCmd::Stop) => break Ok(()),
+                        Some(EngineCmd::Stop) => {
+                            info!("stop command received");
+                            break Ok(());
+                        }
                         Some(EngineCmd::Record { on }) => {
                             if let Some(r) = recorder.get() {
                                 r.set_recording(on);
@@ -477,14 +480,22 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                                 debug!(?target, "switch dropped (already live)");
                             }
                         }
-                        None => {}
+                        None => {
+                            debug!(line = %l, "unrecognised stdin line ignored");
+                        }
                     },
-                    _ if spawned_by_core => break Ok(()), // core went away
+                    _ if spawned_by_core => {
+                        info!("stdin closed; core went away");
+                        break Ok(());
+                    }
                     _ => stdin_open = false,
                 }
             }
             _ = events.closed.recv() => break Err(anyhow::anyhow!("peer connection lost")),
-            _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = tokio::signal::ctrl_c() => {
+                info!("ctrl-c");
+                break Ok(());
+            }
         }
     };
 

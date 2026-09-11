@@ -38,7 +38,9 @@ pub enum EngineCmd {
 /// else must be a `cmd`-tagged JSON object. Unknown input → `None` (ignored,
 /// never fatal — the engine must survive a confused core).
 pub fn parse_line(line: &str) -> Option<EngineCmd> {
-    let line = line.trim();
+    // A BOM-happy writer (PowerShell's default stdin encoding, say) prefixes
+    // the first line with U+FEFF; strip it or the first command is lost.
+    let line = line.trim_start_matches('\u{feff}').trim();
     if line == "stop" {
         return Some(EngineCmd::Stop);
     }
@@ -54,6 +56,12 @@ mod tests {
         assert_eq!(parse_line("stop"), Some(EngineCmd::Stop));
         assert_eq!(parse_line("  stop  "), Some(EngineCmd::Stop));
         assert_eq!(parse_line(r#"{"cmd":"stop"}"#), Some(EngineCmd::Stop));
+    }
+
+    #[test]
+    fn leading_bom_is_stripped() {
+        assert_eq!(parse_line("\u{feff}stop"), Some(EngineCmd::Stop));
+        assert_eq!(parse_line("\u{feff}{\"cmd\":\"replay_save\"}"), Some(EngineCmd::ReplaySave));
     }
 
     #[test]
