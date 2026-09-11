@@ -12,22 +12,10 @@ pub mod biquad;
 pub mod hrtf;
 pub mod limiter;
 
-use serde::{Deserialize, Serialize};
-
-pub use biquad::{BandParams, Coeffs, EqCascade, FilterKind, MAX_BANDS};
+pub use crate::params::{BandParams, ChainParams, FilterKind, LimiterParams, MAX_BANDS};
+pub use biquad::{Coeffs, EqCascade};
 pub use hrtf::Hrtf;
-pub use limiter::{Limiter, LimiterParams};
-
-/// Everything `Chain::prepare` needs. Plain data so the core (and later the
-/// APO's shared-memory control block) can build it from a `Profile`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-pub struct ChainParams {
-    /// Up to [`MAX_BANDS`] EQ bands; extras are rejected at prepare.
-    pub bands: Vec<BandParams>,
-    pub limiter: Option<LimiterParams>,
-    /// Spatialize stereo → binaural with the bundled "Relay Arena" IR set.
-    pub hrtf: bool,
-}
+pub use limiter::Limiter;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {

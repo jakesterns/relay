@@ -66,7 +66,7 @@ impl Paths {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        for d in [self.data_dir(), self.log_dir()] {
+        for d in [self.data_dir(), self.log_dir(), self.previews_dir()] {
             std::fs::create_dir_all(&d).with_context(|| format!("creating {}", d.display()))?;
         }
         Ok(())
@@ -90,6 +90,11 @@ impl Paths {
 
     pub fn profiles_file(&self) -> PathBuf {
         self.data_dir().join("profiles.json")
+    }
+
+    /// Rendered A/B listening-test WAVs (`original.wav` / `processed.wav`).
+    pub fn previews_dir(&self) -> PathBuf {
+        self.root.join("previews")
     }
 
     /// Snapshot of the machine's original state. Presence of this file with

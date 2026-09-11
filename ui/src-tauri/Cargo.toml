@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "relay-ui"
 description = "Relay desktop shell (Tauri). Separate process; closing the window costs nothing."
 version.workspace = true
@@ -23,4 +23,4 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "ti
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-tauri = { version = "2.11", features = [] }
+tauri = { version = "2.11", features = ["protocol-asset"] }

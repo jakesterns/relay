@@ -68,6 +68,14 @@ pub enum Method {
     StopReceive,
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
+    /// Render the A/B listening pair for a profile's audio chain into the
+    /// previews directory. `wav` is an optional source clip; without it a
+    /// synthetic demo (footsteps / explosion / reference beep) is used.
+    RenderPreview {
+        id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wav: Option<String>,
+    },
     Subscribe,
     Shutdown,
 }
@@ -89,6 +97,7 @@ pub enum Reply {
     Processes { processes: Vec<ProcessInfo> },
     Autostart { enabled: bool },
     Receivers { receivers: serde_json::Value },
+    Preview { original: String, processed: String, sample_rate: u32, hrtf_applied: bool },
     Ok,
     Error { message: String },
 }

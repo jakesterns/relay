@@ -155,6 +155,24 @@ async fn stop_receive() -> CmdResult<()> {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct PreviewOut {
+    original: String,
+    processed: String,
+    sample_rate: u32,
+    hrtf_applied: bool,
+}
+
+#[tauri::command]
+async fn render_preview(id: Uuid, wav: Option<String>) -> CmdResult<PreviewOut> {
+    match call(Method::RenderPreview { id, wav }).await? {
+        Reply::Preview { original, processed, sample_rate, hrtf_applied } => {
+            Ok(PreviewOut { original, processed, sample_rate, hrtf_applied })
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
@@ -250,6 +268,7 @@ pub fn run() {
             start_receive,
             stop_receive,
             discover_receivers,
+            render_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

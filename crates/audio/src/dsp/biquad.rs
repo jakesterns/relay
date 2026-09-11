@@ -3,44 +3,12 @@
 //! Reference: Robert Bristow-Johnson, "Cookbook formulae for audio equalizer
 //! biquad filter coefficients".
 
-use serde::{Deserialize, Serialize};
-
 use super::PrepareError;
-
-/// Upper bound on EQ bands in one cascade.
-pub const MAX_BANDS: usize = 16;
+pub use crate::params::{BandParams, FilterKind, MAX_BANDS};
 
 /// Any recursive state smaller than this is snapped to zero after each block.
 /// Far below hearing (−500 dB) and far above `f64::MIN_POSITIVE`.
 const DENORMAL_FLOOR: f64 = 1e-25;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FilterKind {
-    Peaking,
-    LowShelf,
-    HighShelf,
-    LowPass,
-    HighPass,
-}
-
-/// One EQ band as stored in a profile.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct BandParams {
-    pub kind: FilterKind,
-    pub freq_hz: f32,
-    /// Ignored for LowPass / HighPass.
-    pub gain_db: f32,
-    pub q: f32,
-    /// A disabled band stays in the cascade as an identity stage.
-    pub enabled: bool,
-}
-
-impl BandParams {
-    pub fn peaking(freq_hz: f32, gain_db: f32, q: f32) -> Self {
-        Self { kind: FilterKind::Peaking, freq_hz, gain_db, q, enabled: true }
-    }
-}
 
 /// Normalised transfer-function coefficients (a0 = 1).
 #[derive(Debug, Clone, Copy, PartialEq)]

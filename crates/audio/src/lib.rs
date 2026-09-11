@@ -17,9 +17,15 @@
 
 #![deny(unsafe_code)]
 
+#[cfg(feature = "dsp")]
 pub mod dsp;
+#[cfg(feature = "dsp")]
 pub mod offline;
+pub mod params;
 #[cfg(windows)]
 pub mod sessions;
 
-pub use dsp::{BandParams, Chain, ChainParams, FilterKind, LimiterParams, PrepareError};
+pub use params::{BandParams, ChainParams, FilterKind, LimiterParams};
+
+#[cfg(feature = "dsp")]
+pub use dsp::{Chain, PrepareError};
