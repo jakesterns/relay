@@ -12,9 +12,9 @@ the APO with WASAPI-exclusive streams.
 M0. Uses headset curves from M1 when available; not required.
 
 ## Definition of Ready
-- [ ] M0 complete.
-- [ ] A default HRTF impulse-response set chosen with a licence that allows bundling (candidates: SADIE II, MIT KEMAR, HUTUBS); decision recorded here: ____
-- [ ] A game known to use WASAPI exclusive mode identified for the detection test: ____
+- [x] M0 complete (done 2026-09-09).
+- [x] A default HRTF impulse-response set chosen with a licence that allows bundling (candidates: SADIE II, MIT KEMAR, HUTUBS); decision recorded here: **SADIE II, subject D1 (Neumann KU100), Apache 2.0 — confirmed by Jake 2026-09-10.** Attribution ships in `crates/audio/assets/hrtf/LICENSE`.
+- [x] A game known to use WASAPI exclusive mode identified for the detection test: **our own test helper** (`relay-audio` opens an `AUDCLNT_SHAREMODE_EXCLUSIVE` stream in-process for the automated test) — confirmed by Jake 2026-09-10. A real game spot-check moves to the MVP validation pass.
 
 ## Checklist
 ### DSP (`relay-audio::dsp`, `#![forbid(unsafe_code)]` where possible)

@@ -9,3 +9,19 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+realfft = "3.4"
+hound = "3.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+[dev-dependencies]
+rustfft = "6"
