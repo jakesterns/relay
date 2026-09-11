@@ -18,7 +18,9 @@ publish = false
 
 [workspace.dependencies]
 relay-core = { path = "crates/core" }
-relay-audio = { path = "crates/audio" }
+# default-features off so the always-on core can take params + sessions
+# without the FFT-heavy DSP; consumers that want the chain add `features = ["dsp"]`.
+relay-audio = { path = "crates/audio", default-features = false }
 relay-capture = { path = "crates/capture" }
 relay-vdevice = { path = "crates/vdevice" }
 relay-display = { path = "crates/display" }

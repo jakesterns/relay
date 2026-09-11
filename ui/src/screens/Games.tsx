@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
+import { api, isTauri, type Preview } from "../lib/ipc";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -27,7 +28,7 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
         <OfflineBanner />
         <Chips label="Section" value={section} onChange={onSection}
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
-        {section === "audio" && <AudioSection />}
+        {section === "audio" && <AudioSection profileId={subject?.id ?? null} />}
         {section === "display" && <DisplaySection />}
         {section === "sharing" && <SharingSection />}
       </section>
@@ -48,11 +49,12 @@ const defaultBands = [
   { label: "Air · 10 kHz", gain: -1.5 },
 ];
 
-function AudioSection() {
+function AudioSection({ profileId }: { profileId: string | null }) {
   const [bands, setBands] = useState(defaultBands);
   const dbFmt = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} dB`;
   return (
     <>
+      <ExclusiveBanner />
       <EqGraph bands={bands.map((b) => b.gain)} />
       <div className="two">
         <Card title="Bands" action="Reset" onAction={() => setBands(defaultBands)}>
@@ -69,7 +71,90 @@ function AudioSection() {
           </div>
         </Card>
       </div>
+      <AbListeningCard profileId={profileId} />
     </>
+  );
+}
+
+/** Shown while the foreground game holds the endpoint in WASAPI-exclusive
+ *  mode — Windows routes its audio around the APO, so the profile is silent. */
+function ExclusiveBanner() {
+  const { state } = useCore();
+  if (state.audio_chain !== "exclusivebypassed") return null;
+  return (
+    <div className="warnbanner">
+      <i />
+      This game opens the headset exclusively, so Relay's EQ is bypassed. If the game has an
+      "exclusive mode" / "WASAPI exclusive" audio option, switch it to shared to use this profile.
+    </div>
+  );
+}
+
+/** Offline A/B listening test: render the saved profile's chain over a demo
+ *  clip in the core, then flip between original and processed playback. */
+function AbListeningCard({ profileId }: { profileId: string | null }) {
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState<"original" | "processed" | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  useEffect(() => () => audioRef.current?.pause(), []);
+
+  const render = async () => {
+    if (!profileId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await api.renderPreview(profileId));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const play = async (which: "original" | "processed") => {
+    if (!preview) return;
+    audioRef.current?.pause();
+    if (playing === which) {
+      setPlaying(null);
+      return;
+    }
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    const el = new Audio(`${convertFileSrc(preview[which])}?t=${Date.now()}`);
+    el.onended = () => setPlaying(null);
+    audioRef.current = el;
+    setPlaying(which);
+    void el.play();
+  };
+
+  return (
+    <Card title="A/B listening test">
+      <p className="p">
+        Hear the saved profile before the audio driver ships: the core renders a demo clip
+        (footsteps, an explosion for the tamer, a reference beep) through this profile's chain.
+        Nothing plays through the game or your endpoint settings.
+      </p>
+      <div className="ab">
+        <button className="btn" disabled={!profileId || busy || !isTauri()} onClick={render}>
+          {busy ? "Rendering…" : preview ? "Re-render" : "Render A/B"}
+        </button>
+        <button className="btn q" disabled={!preview} onClick={() => play("original")}>
+          {playing === "original" ? "■ Original" : "▶ Original"}
+        </button>
+        <button className="btn acc" disabled={!preview} onClick={() => play("processed")}>
+          {playing === "processed" ? "■ Processed" : "▶ Processed"}
+        </button>
+      </div>
+      {preview && (
+        <p className="note" style={{ marginTop: 8 }}>
+          {preview.sample_rate / 1000} kHz · {preview.hrtf_applied ? "EQ + limiter + HRTF" : "EQ + limiter (no HRTF at this rate)"}
+        </p>
+      )}
+      {error && <p className="note" style={{ marginTop: 8 }}>{error}</p>}
+      {!isTauri() && <p className="note" style={{ marginTop: 8 }}>Requires the Relay core (desktop app).</p>}
+    </Card>
   );
 }
 

@@ -86,6 +86,13 @@ struct Inner {
     last_share: Option<crate::share::ShareRequest>,
     /// The running receive engine (a child process), if any.
     receive: Option<crate::share::ShareEngine>,
+    /// Where A/B listening-test renders go.
+    previews_dir: std::path::PathBuf,
+    /// What the applier reported for the active profile's audio chain; the
+    /// exclusive-mode watcher restores this when exclusivity clears.
+    applied_audio: AudioChainState,
+    /// The active profile configures audio processing, so the watcher runs.
+    audio_watch: bool,
 }
 
 pub struct Service {
@@ -129,6 +136,9 @@ impl Service {
             share: None,
             last_share: None,
             receive: None,
+            previews_dir: paths.previews_dir(),
+            applied_audio: AudioChainState::Bypass,
+            audio_watch: false,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -197,7 +207,10 @@ impl Service {
         // pages back so idle RSS reflects steady state.
         crate::footprint::trim_working_set();
 
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        // 1 s cadence for the exclusive-mode watcher (only probes while a
+        // profile with audio processing is active); footprint every 5th tick.
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut ticks = 0u32;
         loop {
             tokio::select! {
                 ev = rx.recv() => {
@@ -211,8 +224,12 @@ impl Service {
                     }
                 }
                 _ = tick.tick() => {
-                    let mut g = self.inner.lock();
-                    g.state.footprint = g.meter.sample();
+                    ticks = ticks.wrapping_add(1);
+                    if ticks % 5 == 0 {
+                        let mut g = self.inner.lock();
+                        g.state.footprint = g.meter.sample();
+                    }
+                    self.refresh_audio_chain();
                 }
             }
         }
@@ -249,6 +266,44 @@ impl Service {
         let state = Box::new(g.state.clone());
         drop(g);
         let _ = self.events.send(Event::StateChanged { state });
+        // Catch a WASAPI-exclusive stream right at game launch, not only on
+        // the next watcher tick (the DoD asks for detection within 1 s).
+        self.refresh_audio_chain();
+    }
+
+    /// While a profile with audio processing is active, probe the default
+    /// render endpoint for an exclusive-mode stream and surface
+    /// `ExclusiveBypassed` in the state (and back) as it changes.
+    fn refresh_audio_chain(&self) {
+        #[cfg(windows)]
+        {
+            let watching = {
+                let g = self.inner.lock();
+                g.audio_watch && g.state.active_profile.is_some()
+            };
+            if !watching {
+                return;
+            }
+            let exclusive = match relay_audio::sessions::probe_default_render() {
+                Ok(s) => s.exclusive,
+                Err(e) => {
+                    tracing::debug!(error = %e, "exclusive-mode probe failed");
+                    false
+                }
+            };
+            let mut g = self.inner.lock();
+            let desired =
+                if exclusive { AudioChainState::ExclusiveBypassed } else { g.applied_audio };
+            if g.state.audio_chain != desired {
+                if exclusive {
+                    info!("foreground game holds the endpoint in WASAPI-exclusive mode; APO chain is bypassed");
+                }
+                g.state.audio_chain = desired;
+                let state = Box::new(g.state.clone());
+                drop(g);
+                let _ = self.events.send(Event::StateChanged { state });
+            }
+        }
     }
 
     fn on_hotkey(&self, action: HotkeyAction) {
@@ -264,6 +319,8 @@ impl Service {
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
+                    g.applied_audio = AudioChainState::Bypass;
+                    g.audio_watch = false;
                     let state = Box::new(g.state.clone());
                     drop(g);
                     let _ = self.events.send(Event::StateChanged { state });
@@ -314,12 +371,16 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
                     g.state.display_state = applied.display;
+                    g.applied_audio = applied.audio;
+                    g.audio_watch = crate::audio_bridge::wants_processing(&profile.audio);
                 }
                 Err(e) => {
                     warn!(error = %e, profile = %profile.name, "apply failed");
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
+                    g.applied_audio = AudioChainState::Bypass;
+                    g.audio_watch = false;
                 }
             }
         }
@@ -333,6 +394,8 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.state.active_profile = None;
             g.state.audio_chain = AudioChainState::Bypass;
             g.state.display_state = DisplayState::Default;
+            g.applied_audio = AudioChainState::Bypass;
+            g.audio_watch = false;
         }
     }
 }
@@ -576,6 +639,8 @@ impl IpcHandler {
                         g.state.active_profile = Some(profile.summary());
                         g.state.audio_chain = applied.audio;
                         g.state.display_state = applied.display;
+                        g.applied_audio = applied.audio;
+                        g.audio_watch = crate::audio_bridge::wants_processing(&profile.audio);
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: e.to_string() },
@@ -588,6 +653,8 @@ impl IpcHandler {
                         g.state.active_profile = None;
                         g.state.audio_chain = AudioChainState::Bypass;
                         g.state.display_state = DisplayState::Default;
+                        g.applied_audio = AudioChainState::Bypass;
+                        g.audio_watch = false;
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: e.to_string() },
@@ -714,6 +781,23 @@ impl IpcHandler {
                 match g.library.save() {
                     Ok(()) => Reply::Curve { points },
                     Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::RenderPreview { id, wav } => {
+                let Some(profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                let dir = g.previews_dir.clone();
+                drop(g);
+                let wav = wav.map(std::path::PathBuf::from);
+                match crate::audio_bridge::render_preview(&profile.audio, wav.as_deref(), &dir) {
+                    Ok(p) => Reply::Preview {
+                        original: p.original.display().to_string(),
+                        processed: p.processed.display().to_string(),
+                        sample_rate: p.sample_rate,
+                        hrtf_applied: p.hrtf_applied,
+                    },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
             Method::Subscribe => Reply::Ok,

@@ -79,6 +79,8 @@ export interface ShareStats {
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
   cpu_percent?: number; rss_mb?: number;
 }
+/** A/B listening-test render (`Method::RenderPreview`). Paths are absolute. */
+export interface Preview { original: string; processed: string; sample_rate: number; hrtf_applied: boolean }
 export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
 export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
 
@@ -281,6 +283,11 @@ export const api = {
       return h.curve;
     }
     return invoke<[number, number][]>("import_curve", { headset, csv });
+  },
+  /** Render the A/B pair for a profile; `wav` optional (demo clip without). */
+  async renderPreview(id: string, wav?: string): Promise<Preview> {
+    if (!isTauri()) throw new Error("A/B rendering needs the Relay core");
+    return invoke<Preview>("render_preview", { id, wav: wav ?? null });
   },
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];

@@ -7,5 +7,34 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# The FFT-heavy signal chain and offline renderer. The always-on core builds
+# this crate with default-features = false (params + sessions only) to stay
+# inside its 10 MB budget; the DSP loads on demand via the `relay-preview`
+# child (and later the APO).
+default = ["dsp"]
+dsp = ["dep:realfft", "dep:hound", "dep:serde_json"]
+
 [dependencies]
 serde.workspace = true
+thiserror.workspace = true
+serde_json = { workspace = true, optional = true }
+realfft = { version = "3.4", optional = true }
+hound = { version = "3.5", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
+
+[[bin]]
+name = "relay-preview"
+path = "src/bin/relay-preview.rs"
+required-features = ["dsp"]
+
+[dev-dependencies]
+rustfft = "6"

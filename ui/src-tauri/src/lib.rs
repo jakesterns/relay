@@ -174,6 +174,24 @@ async fn list_hardware() -> CmdResult<HardwareReply> {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct PreviewOut {
+    original: String,
+    processed: String,
+    sample_rate: u32,
+    hrtf_applied: bool,
+}
+
+#[tauri::command]
+async fn render_preview(id: Uuid, wav: Option<String>) -> CmdResult<PreviewOut> {
+    match call(Method::RenderPreview { id, wav }).await? {
+        Reply::Preview { original, processed, sample_rate, hrtf_applied } => {
+            Ok(PreviewOut { original, processed, sample_rate, hrtf_applied })
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn save_hardware(item: relay_core::ipc::HardwareItem) -> CmdResult<()> {
     match call(Method::SaveHardware { item }).await? {
@@ -306,6 +324,7 @@ pub fn run() {
             delete_hardware,
             probe_hardware,
             import_curve,
+            render_preview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

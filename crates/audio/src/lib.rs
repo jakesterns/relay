@@ -1,18 +1,31 @@
 //! Relay audio.
 //!
-//! Planned layout (nothing here is wired yet):
-//! - `dsp/` biquad EQ cascade, partitioned-convolution HRTF, soft limiter.
-//!   Real-time safe: no allocations after `prepare()`, bypass is a straight
+//! - [`dsp`] biquad EQ cascade, band-split soft limiter, partitioned-convolution
+//!   HRTF. Real-time safe: no allocations after `prepare()`, bypass is a straight
 //!   copy. Runs at the endpoint sample rate; never resamples.
-//! - `apo/` the signed endpoint APO (`cdylib`) hosting `dsp` inside the
-//!   Windows audio engine for one render endpoint only.
-//! - `control` parameter block shared between the core and the APO, and the
-//!   `AudioControl` adapter for `relay_core::apply`.
+//! - [`offline`] renders a WAV through the chain for the A/B listening test.
+//! - [`sessions`] WASAPI render-session enumeration and detection of
+//!   exclusive-mode streams that bypass the APO (Windows only).
+//! - `apo/` (M3b) will host [`dsp`] inside the Windows audio engine as a signed
+//!   endpoint APO; not part of this crate yet.
 //!
 //! Constraints from the brief: OS-layer only (WASAPI / APO), never a global EQ,
 //! detect WASAPI-exclusive streams that bypass the APO and report them.
+//!
+//! Unsafe code is denied crate-wide; only [`sessions`] (raw WASAPI/COM) may
+//! opt back in, with SAFETY comments on every block.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
-/// Placeholder so the crate has a public surface to grow from.
-pub const CRATE: &str = "relay-audio";
+#[cfg(feature = "dsp")]
+pub mod dsp;
+#[cfg(feature = "dsp")]
+pub mod offline;
+pub mod params;
+#[cfg(windows)]
+pub mod sessions;
+
+pub use params::{BandParams, ChainParams, FilterKind, LimiterParams};
+
+#[cfg(feature = "dsp")]
+pub use dsp::{Chain, PrepareError};

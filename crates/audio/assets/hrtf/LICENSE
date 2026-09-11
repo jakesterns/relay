@@ -1,0 +1,25 @@
+The impulse responses in this directory ("Relay Arena" default HRTF set) are
+taken from the SADIE II Database, subject D1 (Neumann KU100 dummy head),
+azimuth ±30°, elevation 0°, published by the University of York.
+
+  https://www.york.ac.uk/sadie-project/database.html
+  Armstrong, C.; Thresh, L.; Murphy, D.; Kearney, G. "A Perceptual Evaluation
+  of Individual and Non-Individual HRTFs: A Case Study of the SADIE II
+  Database". Applied Sciences 2018, 8, 2029. doi:10.3390/app8112029
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License. You may obtain a copy
+of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, data distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
+
+File naming here: `arena-<samplerate>-left.wav` is the SADIE II
+`azi_30,0_ele_0,0` measurement (source 30° to the LEFT of centre — SADIE II
+azimuths are counter-clockwise), `arena-<samplerate>-right.wav` is
+`azi_330,0_ele_0,0` (30° to the right). Each file is a stereo HRIR:
+channel 0 = left ear, channel 1 = right ear.

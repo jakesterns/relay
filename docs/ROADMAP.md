@@ -53,10 +53,11 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [ ] UI: Display section reads/writes the real profile; "Applied via" reflects which path was used.
 
 ## M3 — Audio DSP and detection (no signing needed)
-- [ ] `relay-audio::dsp`: biquad cascade (peaking, low/high shelf), soft limiter with band-split, partitioned-convolution HRTF. Real-time safe: no allocation after `prepare()`. Golden-response unit tests.
-- [ ] `process()` bypass path is a plain copy; benchmark at 48 kHz / 96 kHz stereo.
-- [ ] WASAPI-exclusive detection: `IAudioSessionManager2` enumeration; flag the session and surface "this game bypasses the APO" in the UI (`AudioChainState::ExclusiveBypassed` already exists).
-- [ ] Offline listening test: apply the profile to a WAV and play A/B from the UI so tuning works before the APO ships.
+**Done 2026-09-10** (branch `m3-audio-dsp`; plan + measurements in `docs/plans/M3-audio-dsp.md`). HRTF set: SADIE II D1 (KU100), Apache 2.0. Full chain benchmarks at 0.60 % of a core @48 k / 1.29 % @96 k (< 2 % budget); allocation-free `process` proven by a counting-allocator test; footprint gate stays green because the DSP lives in the on-demand `relay-preview` child, not the core. The listening session itself and a real-game exclusive spot check are deferred (plan's Deferred).
+- [x] `relay-audio::dsp`: biquad cascade (peaking, low/high shelf, LP/HP), soft limiter with band-split, partitioned-convolution HRTF. Real-time safe: no allocation after `prepare()`. Golden-response unit tests.
+- [x] `process()` bypass path is a plain copy (bit-exact test); benchmark at 48 kHz / 96 kHz stereo.
+- [x] WASAPI-exclusive detection: `IAudioSessionManager2` enumeration + device-in-use probe; `AudioChainState::ExclusiveBypassed` set within 1 s and the Games › Audio banner says the game bypasses the APO. Verified live against this machine's endpoint.
+- [x] Offline listening test: apply the profile to a WAV (or a synthesized demo clip) and play A/B from the UI so tuning works before the APO ships.
 
 ## M3b — Endpoint APO (needs EV cert)
 - [ ] Start EV certificate + Hardware Dev Center attestation as soon as M0 lands. External dependency; track in this file.
@@ -105,7 +106,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
-| M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | not started |
+| M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | blocked: EV cert |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | blocked: EV cert (mic) |
 | M6 Recording & presets | `docs/plans/M6-recording-presets.md` | not started |
