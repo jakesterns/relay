@@ -46,7 +46,11 @@ Dark, restrained, hardware-inspired. Warm black `#0E0D0C`, surfaces `#151312`/`#
 ```
 Cargo.toml            workspace (resolver 2, size-optimised release profile)
 crates/core/          relay-core  — lib + `relay-core` binary. The always-on service.
-crates/audio/         relay-audio — placeholder for DSP + APO control plane
+crates/audio/         relay-audio — DSP (biquad EQ, band-split limiter, partitioned-conv HRTF),
+                      WASAPI session/exclusive probing, offline A/B render, `relay-preview` bin.
+                      `dsp` feature (default on) holds the FFT; the core links default-features=false
+                      (params + sessions only) and spawns `relay-preview` on demand — keep it that way
+                      or the footprint gate fails. Bundled HRIRs: SADIE II D1 (assets/hrtf, Apache 2.0).
 crates/capture/       relay-capture — placeholder for DXGI/WGC → encoder → WebRTC
 crates/vdevice/       relay-vdevice — placeholder for virtual camera / mic
 crates/display/       relay-display — placeholder for NvAPI/ADLX + DDC/CI
@@ -69,7 +73,8 @@ relay-handoff/        original handoff bundle; do not edit
 - `autostart.rs` — the one Run-key value (`HKCU\...\Run\Relay`); `relay-core autostart on|off`.
 - `processes.rs` — windowed processes for the exe picker (`Method::ListProcesses`).
 - `status.rs` — human summary for `relay-core status` (`--json` for the raw state).
-- `service.rs` — wires the above; single-threaded tokio runtime.
+- `audio_bridge.rs` — `AudioSettings` → `relay_audio::ChainParams`; spawns `relay-preview` for the A/B render.
+- `service.rs` — wires the above; single-threaded tokio runtime. 1 s tick runs the WASAPI-exclusive watcher (only while a profile with audio processing is active) → `AudioChainState::ExclusiveBypassed`.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.
 
 ### Build & run
