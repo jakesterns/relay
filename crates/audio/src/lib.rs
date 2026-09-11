@@ -12,8 +12,9 @@
 //! Constraints from the brief: OS-layer only (WASAPI / APO), never a global EQ,
 //! detect WASAPI-exclusive streams that bypass the APO and report them.
 //!
-//! Unsafe code is denied crate-wide; only [`sessions`] (raw WASAPI/COM) may
-//! opt back in, with SAFETY comments on every block.
+//! Unsafe code is denied crate-wide; only [`sessions`] (raw WASAPI/COM) and
+//! [`shm`] (the APO's shared-memory parameter block) may opt back in, with
+//! SAFETY comments on every block.
 
 #![deny(unsafe_code)]
 
@@ -24,6 +25,7 @@ pub mod offline;
 pub mod params;
 #[cfg(windows)]
 pub mod sessions;
+pub mod shm;
 
 pub use params::{BandParams, ChainParams, FilterKind, LimiterParams};
 

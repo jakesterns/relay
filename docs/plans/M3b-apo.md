@@ -14,11 +14,16 @@ M3 (DSP). **Blocked on the EV code-signing certificate and Hardware Dev Center a
 - [ ] EV cert received
 - [ ] Hardware Dev Center account + attestation signing working
 
+Verified 2026-09-10 (session start): no code-signing certificate in the
+`CurrentUser`/`LocalMachine` stores and the tracking boxes above are unchecked
+→ the cert is **not available**. All signing-gated install/uninstall items in
+this session are Deferred with that reason; development proceeds unsigned.
+
 ## Definition of Ready
-- [ ] M3 complete (DSP chain with allocation-free `process`).
-- [ ] A Windows VM with test-signing enabled and a checkpoint taken before any APO registration.
-- [ ] Registry export of the target endpoint's FX property store saved as the pre-install baseline.
-- [ ] For the install/uninstall items only: EV cert and attestation signing working (tracked above).
+- [x] M3 complete (DSP chain with allocation-free `process`). Verified 2026-09-10: branch `m3-audio-dsp` closed with measurements; merged into `m3b-apo` (all 144 workspace tests green after the merge).
+- [ ] A Windows VM with test-signing enabled and a checkpoint taken before any APO registration. **Not available 2026-09-10**: no hypervisor on this dev PC (Hyper-V feature absent, no VMware/VirtualBox). Registration code is therefore exercised against exported registry fixtures only; the live VM pass is Deferred with a runbook below. **No live APO registration happens on this dev machine.**
+- [x] Registry export of the target endpoint's FX property store saved as the pre-install baseline. Taken 2026-09-10 from the default render endpoint "Headphones (RODECaster Duo Secondary)" `{f8ae226b-a4e3-45ab-97fc-3977dad232d1}`: `crates/audio/tests/fixtures/fx-baseline-rodecaster.reg` (FxProperties, 7 613 lines — the endpoint ships a real vendor FX chain, which makes it the primary uninstall-diff fixture) and `endpoint-baseline-rodecaster.reg` (full endpoint key).
+- [ ] For the install/uninstall items only: EV cert and attestation signing working (tracked above). **Not available** — see the note under "Depends on".
 
 ## Checklist
 - [ ] `crates/audio/apo`: `cdylib` implementing `IAudioProcessingObject`, `IAudioProcessingObjectRT`, `IAudioProcessingObjectConfiguration` (COM via `windows` crate `implement`). SFX or EFX placement decided by test; MFX considered for per-stream.
