@@ -116,6 +116,9 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         audio: Some(relay_capture::audio::AudioSource::Desktop),
         mic: false,
         cursor: true,
+        record_dir: None,
+        record: false,
+        replay_secs: 0,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -133,6 +136,11 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
                 })
             }
             "--no-cursor" => opts.cursor = false,
+            "--record-dir" => {
+                opts.record_dir = Some(it.next().context("--record-dir PATH")?.into())
+            }
+            "--record" => opts.record = true,
+            "--replay-secs" => opts.replay_secs = it.next().context("--replay-secs N")?.parse()?,
             other => bail!("unknown send flag `{other}`"),
         }
     }
@@ -360,6 +368,30 @@ mod tests {
         assert_eq!(o.fps, 60);
         assert!(matches!(o.audio, Some(AudioSource::Desktop)));
         assert!(o.cursor);
+        assert_eq!(o.record_dir, None);
+        assert!(!o.record);
+        assert_eq!(o.replay_secs, 0);
+    }
+
+    #[test]
+    fn send_recording_flags() {
+        let o = parse_send_args(&s(&[
+            "--code",
+            "1",
+            "--record-dir",
+            r"C:\Users\jake\Videos\Relay",
+            "--record",
+            "--replay-secs",
+            "90",
+        ]))
+        .unwrap();
+        assert_eq!(
+            o.record_dir.as_deref(),
+            Some(std::path::Path::new(r"C:\Users\jake\Videos\Relay"))
+        );
+        assert!(o.record);
+        assert_eq!(o.replay_secs, 90);
+        assert!(parse_send_args(&s(&["--code", "1", "--replay-secs", "soon"])).is_err());
     }
 
     #[test]

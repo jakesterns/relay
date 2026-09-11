@@ -14,6 +14,7 @@
 
 #[cfg(windows)]
 pub mod audio;
+pub mod command;
 #[cfg(windows)]
 pub mod d3d;
 #[cfg(windows)]
