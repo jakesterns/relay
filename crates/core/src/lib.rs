@@ -20,6 +20,7 @@ pub mod hotkeys;
 pub mod instance;
 pub mod ipc;
 pub mod logging;
+pub mod presets;
 pub mod processes;
 pub mod profiles;
 pub mod service;

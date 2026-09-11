@@ -102,6 +102,11 @@ impl Paths {
     pub fn backup_file(&self) -> PathBuf {
         self.data_dir().join("original-state.json")
     }
+
+    /// Share presets and recording settings.
+    pub fn presets_file(&self) -> PathBuf {
+        self.data_dir().join("presets.json")
+    }
 }
 
 #[cfg(test)]

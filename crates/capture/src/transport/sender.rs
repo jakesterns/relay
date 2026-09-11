@@ -42,6 +42,9 @@ pub struct SendOpts {
     pub audio: Option<AudioSource>,
     pub mic: bool,
     pub cursor: bool,
+    /// Encode size cap `(w, h)`; `None` = native capture size. The capture is
+    /// GPU-scaled, so changing source never renegotiates the connection.
+    pub size: Option<(u32, u32)>,
     /// Recording folder; `None` disables recording and the replay ring.
     pub record_dir: Option<PathBuf>,
     /// Start continuous recording as soon as the share is up.
@@ -290,12 +293,23 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let bitrate = opts.bitrate_bps;
         let fps = opts.fps;
         let cursor = opts.cursor;
+        let out_size = opts.size;
         let target = target_bps.clone();
         let rec = recorder.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
-            if let Err(e) =
-                video_pipeline(bitrate, fps, cursor, vtx, stats, stop, kf, target, rec, record_setup)
-            {
+            if let Err(e) = video_pipeline(
+                bitrate,
+                fps,
+                cursor,
+                out_size,
+                vtx,
+                stats,
+                stop,
+                kf,
+                target,
+                rec,
+                record_setup,
+            ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
                     "{}",
@@ -491,6 +505,7 @@ fn video_pipeline(
     bitrate_bps: u32,
     fps: u32,
     cursor: bool,
+    out_size: Option<(u32, u32)>,
     tx: mpsc::Sender<VideoAu>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
@@ -508,8 +523,11 @@ fn video_pipeline(
     let hmon = crate::d3d::primary_monitor();
     let gpu = crate::d3d::device_for_monitor(hmon)?;
     let mut src = crate::source::create(&gpu, hmon, cursor)?;
-    let size = src.size();
-    let mut conv = crate::encode::convert::Converter::new(&gpu, size, size)?;
+    let in_size = src.size();
+    // The encoder's output size is fixed for the life of the share; sources
+    // of any size are GPU-scaled into it, so switching never renegotiates.
+    let size = out_size.unwrap_or(in_size);
+    let mut conv = crate::encode::convert::Converter::new(&gpu, in_size, size)?;
     let enc = MfHevcEncoder::new(
         &gpu,
         &EncoderConfig { width: size.0, height: size.1, fps, bitrate_bps },

@@ -18,6 +18,7 @@ use crate::hardware::{
 };
 use crate::hotkeys::{self, HotkeyAction};
 use crate::ipc::{Event, Method, Reply};
+use crate::presets::PresetStore;
 use crate::profiles::ProfileStore;
 use crate::types::{AudioChainState, CoreState, DisplayState, Foreground};
 use crate::winloop::{CoreEvent, WinLoop};
@@ -86,6 +87,8 @@ struct Inner {
     last_share: Option<crate::share::ShareRequest>,
     /// The running receive engine (a child process), if any.
     receive: Option<crate::share::ShareEngine>,
+    /// Share presets + recording settings (`presets.json`).
+    presets: PresetStore,
 }
 
 pub struct Service {
@@ -108,6 +111,7 @@ impl Service {
             info!("restored original state left over from a previous run");
         }
 
+        let presets = PresetStore::load(paths.presets_file())?;
         let library = HardwareStore::load(paths.hardware_file())?;
         let report = backends.hardware.probe(false);
         let connected = library.connected(&report);
@@ -129,6 +133,7 @@ impl Service {
             share: None,
             last_share: None,
             receive: None,
+            presets,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -291,7 +296,26 @@ impl Service {
                 // Preview is a UI concern; relay the intent for the UI to toggle.
                 let _ = self.events.send(Event::Notice { text: "preview toggled".into() });
             }
+            HotkeyAction::SaveReplay => {
+                let reply = engine_command(&self.inner, &crate::share::EngineCmd::ReplaySave);
+                if let Reply::Error { message } = reply {
+                    let _ =
+                        self.events.send(Event::Notice { text: format!("Ctrl+Alt+R: {message}") });
+                }
+            }
         }
+    }
+}
+
+/// Forward one command to the running share engine's stdin.
+fn engine_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> Reply {
+    let mut g = inner.lock();
+    match g.share.as_mut() {
+        Some(engine) => match engine.command(cmd) {
+            Ok(()) => Reply::Ok,
+            Err(e) => Reply::Error { message: e.to_string() },
+        },
+        None => Reply::Error { message: "no share is running".into() },
     }
 }
 
@@ -405,6 +429,12 @@ fn spawn_share(
                         message: Some(message),
                     });
                 }
+                ShareEvent::Recording { on, path } => {
+                    let _ = events2.send(Event::RecordingStatus { on, path });
+                }
+                ShareEvent::ReplaySaved { path, ms } => {
+                    let _ = events2.send(Event::ReplaySaved { path, ms });
+                }
                 ShareEvent::Waiting { .. } | ShareEvent::Paired { .. } => {}
                 ShareEvent::Exited { ok, .. } => {
                     let mut ig = inner2.lock();
@@ -486,7 +516,10 @@ fn spawn_receive(
                         message: Some(message),
                     });
                 }
-                ShareEvent::Exited { .. } | ShareEvent::Connected { .. } => {}
+                ShareEvent::Exited { .. }
+                | ShareEvent::Connected { .. }
+                | ShareEvent::Recording { .. }
+                | ShareEvent::ReplaySaved { .. } => {}
             });
             let mut ig = inner2.lock();
             if ig.receive.is_some() {
@@ -611,6 +644,63 @@ impl IpcHandler {
             Method::StopShare => {
                 drop(g);
                 kill_share(&self.inner, &self.events)
+            }
+            Method::StartSharePreset { preset, code, peer } => {
+                let Some(def) = g.presets.get(&preset).cloned() else {
+                    return Reply::Error { message: format!("no preset `{preset}`") };
+                };
+                let game_pid = g.state.foreground.as_ref().map(|f| f.pid);
+                let req = crate::presets::to_share_request(
+                    &def,
+                    code,
+                    peer,
+                    game_pid,
+                    &g.presets.recording,
+                );
+                drop(g);
+                spawn_share(&self.inner, &self.events, req)
+            }
+            Method::Record { on } => {
+                drop(g);
+                engine_command(&self.inner, &crate::share::EngineCmd::Record { on })
+            }
+            Method::SaveReplay => {
+                drop(g);
+                engine_command(&self.inner, &crate::share::EngineCmd::ReplaySave)
+            }
+            Method::SwitchSource { target } => {
+                drop(g);
+                engine_command(&self.inner, &crate::share::EngineCmd::Switch { target })
+            }
+            Method::ListPresets => Reply::Presets {
+                presets: g.presets.all().to_vec(),
+                recording: g.presets.recording.clone(),
+            },
+            Method::SavePreset { preset } => {
+                if preset.id.trim().is_empty() || preset.name.trim().is_empty() {
+                    return Reply::Error { message: "preset needs an id and a name".into() };
+                }
+                g.presets.upsert(*preset);
+                match g.presets.save() {
+                    Ok(()) => Reply::Ok,
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::DeletePreset { id } => {
+                if !g.presets.remove(&id) {
+                    return Reply::Error { message: "no such preset".into() };
+                }
+                match g.presets.save() {
+                    Ok(()) => Reply::Ok,
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::SetRecordingSettings { settings } => {
+                g.presets.recording = settings;
+                match g.presets.save() {
+                    Ok(()) => Reply::Ok,
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
             }
             Method::StartReceive { request } => {
                 drop(g);

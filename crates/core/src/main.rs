@@ -151,9 +151,18 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(60),
                         fps: 60,
+                        size: None,
                         audio: std::env::var("RELAY_NO_AUDIO").is_err(),
                         audio_pid: None,
+                        mic: false,
                         cursor: true,
+                        preset: None,
+                        record: std::env::var("RELAY_RECORD").is_ok(),
+                        replay_secs: std::env::var("RELAY_REPLAY_SECS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0),
+                        record_dir: std::env::var("RELAY_RECORD_DIR").ok(),
                     }),
                 }
             }

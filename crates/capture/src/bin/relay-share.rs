@@ -116,6 +116,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         audio: Some(relay_capture::audio::AudioSource::Desktop),
         mic: false,
         cursor: true,
+        size: None,
         record_dir: None,
         record: false,
         replay_secs: 0,
@@ -135,7 +136,16 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
                     pid: it.next().context("--audio-pid PID")?.parse()?,
                 })
             }
+            "--audio-mic" => {
+                opts.mic = true;
+                opts.audio = Some(relay_capture::audio::AudioSource::Microphone);
+            }
             "--no-cursor" => opts.cursor = false,
+            "--size" => {
+                let s = it.next().context("--size WxH")?;
+                let (w, h) = s.split_once('x').context("--size must be WxH")?;
+                opts.size = Some((w.parse()?, h.parse()?));
+            }
             "--record-dir" => {
                 opts.record_dir = Some(it.next().context("--record-dir PATH")?.into())
             }
@@ -371,6 +381,17 @@ mod tests {
         assert_eq!(o.record_dir, None);
         assert!(!o.record);
         assert_eq!(o.replay_secs, 0);
+        assert_eq!(o.size, None);
+    }
+
+    #[test]
+    fn send_size_and_mic_flags() {
+        let o =
+            parse_send_args(&s(&["--code", "1", "--size", "2560x1440", "--audio-mic"])).unwrap();
+        assert_eq!(o.size, Some((2560, 1440)));
+        assert!(o.mic);
+        assert!(matches!(o.audio, Some(AudioSource::Microphone)));
+        assert!(parse_send_args(&s(&["--code", "1", "--size", "huge"])).is_err());
     }
 
     #[test]

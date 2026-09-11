@@ -9,6 +9,7 @@ pub enum HotkeyAction {
     ToggleShare,
     ToggleProfile,
     TogglePreview,
+    SaveReplay,
 }
 
 impl HotkeyAction {
@@ -18,6 +19,7 @@ impl HotkeyAction {
             HotkeyAction::ToggleShare => 1,
             HotkeyAction::ToggleProfile => 2,
             HotkeyAction::TogglePreview => 3,
+            HotkeyAction::SaveReplay => 4,
         }
     }
 
@@ -26,6 +28,7 @@ impl HotkeyAction {
             1 => Some(HotkeyAction::ToggleShare),
             2 => Some(HotkeyAction::ToggleProfile),
             3 => Some(HotkeyAction::TogglePreview),
+            4 => Some(HotkeyAction::SaveReplay),
             _ => None,
         }
     }
@@ -47,13 +50,15 @@ pub struct Hotkey {
     pub vk: u32,
 }
 
-/// Ctrl+Alt+S share, Ctrl+Alt+G profile, Ctrl+Alt+P preview. Chosen to stay out
-/// of the way of common game binds; user-configurable later.
+/// Ctrl+Alt+S share, Ctrl+Alt+G profile, Ctrl+Alt+P preview, Ctrl+Alt+R save
+/// replay. Chosen to stay out of the way of common game binds;
+/// user-configurable later.
 pub fn defaults() -> Vec<Hotkey> {
     let ca = Modifiers { ctrl: true, alt: true, ..Default::default() };
     vec![
         Hotkey { action: HotkeyAction::ToggleShare, modifiers: ca, vk: b'S' as u32 },
         Hotkey { action: HotkeyAction::ToggleProfile, modifiers: ca, vk: b'G' as u32 },
         Hotkey { action: HotkeyAction::TogglePreview, modifiers: ca, vk: b'P' as u32 },
+        Hotkey { action: HotkeyAction::SaveReplay, modifiers: ca, vk: b'R' as u32 },
     ]
 }
