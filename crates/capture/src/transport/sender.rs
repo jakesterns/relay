@@ -691,13 +691,16 @@ fn video_pipeline(
     Ok(())
 }
 
+/// A live capture source plus the crop rect a `Region` target needs.
+type SourceAndCrop = (Box<dyn crate::source::FrameSource>, Option<(u32, u32, u32, u32)>);
+
 /// Build the capture source (and optional crop rect) for a switch target on
 /// the share's existing GPU device.
 fn create_target_source(
     gpu: &crate::d3d::Gpu,
     target: SourceTarget,
     cursor: bool,
-) -> Result<(Box<dyn crate::source::FrameSource>, Option<(u32, u32, u32, u32)>)> {
+) -> Result<SourceAndCrop> {
     use crate::source;
     match target {
         SourceTarget::Display { index } => {
