@@ -13,13 +13,14 @@ use crate::apply::{Applier, AudioControl, DisplayControl, FileRecorder, Noop};
 use crate::backup::BackupFile;
 use crate::config::Paths;
 use crate::footprint::FootprintMeter;
+use crate::hardware::MonitorProbe;
 use crate::hardware::{
     ConnectedHardware, HardwareProbe, HardwareStore, HardwareView, NoopHardwareProbe, ProbeReport,
 };
 use crate::hotkeys::{self, HotkeyAction};
 use crate::ipc::{Event, Method, Reply};
 use crate::profiles::ProfileStore;
-use crate::types::{AudioChainState, CoreState, DisplayState, Foreground};
+use crate::types::{AudioChainState, CoreState, DisplayState, DisplayVia, Foreground};
 use crate::winloop::{CoreEvent, WinLoop};
 
 pub struct Backends {
@@ -53,6 +54,7 @@ impl Backends {
                 {
                     Self {
                         hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
+                        display: Arc::new(crate::display_backend::WinDisplay::new()),
                         ..Self::default()
                     }
                 }
@@ -207,12 +209,15 @@ impl Service {
                         // Bursts are fine: the handler compares against the
                         // last probe and does nothing when nothing changed.
                         Some(CoreEvent::HardwareChanged) => self.on_hardware_changed(),
+                        Some(CoreEvent::SessionLock(locked)) => self.on_session_lock(locked),
                         Some(CoreEvent::Shutdown) | None => break,
                     }
                 }
                 _ = tick.tick() => {
                     let mut g = self.inner.lock();
                     g.state.footprint = g.meter.sample();
+                    drop(g);
+                    self.recheck_monitor();
                 }
             }
         }
@@ -242,6 +247,59 @@ impl Service {
         crate::footprint::trim_working_set();
     }
 
+    /// Lock: restore everything (the user is not looking at the game).
+    /// Unlock: re-select for whatever holds the foreground.
+    fn on_session_lock(&self, locked: bool) {
+        info!(locked, "session lock change");
+        if locked {
+            let mut g = self.inner.lock();
+            if g.applier.is_applied() {
+                if let Err(e) = g.applier.restore() {
+                    warn!(error = %e, "restore on session lock failed");
+                }
+            }
+            g.state.active_profile = None;
+            g.state.audio_chain = AudioChainState::Bypass;
+            g.state.display_state = DisplayState::Default;
+            g.state.display_via = DisplayVia::default();
+            let state = Box::new(g.state.clone());
+            drop(g);
+            let _ = self.events.send(Event::StateChanged { state });
+        } else {
+            reselect(&self.inner, &self.events);
+        }
+    }
+
+    /// Slow-path safety net for monitor moves no hook reports (Win+Shift+
+    /// Arrow, app-initiated moves): while a profile is applied, compare the
+    /// foreground window's monitor against the one we recorded; on change,
+    /// route through the normal foreground path (restore old → apply new).
+    fn recheck_monitor(&self) {
+        #[cfg(windows)]
+        {
+            let needs = {
+                let g = self.inner.lock();
+                g.applier.is_applied() && g.state.foreground.is_some()
+            };
+            if !needs {
+                return;
+            }
+            let Some(now) = crate::winloop::current_foreground() else { return };
+            let stale = {
+                let g = self.inner.lock();
+                g.state
+                    .foreground
+                    .as_ref()
+                    .map(|fg| fg.pid == now.pid && fg.hmonitor != now.hmonitor)
+                    .unwrap_or(false)
+            };
+            if stale {
+                info!(hmonitor = now.hmonitor, "game window moved monitors");
+                self.on_foreground(now);
+            }
+        }
+    }
+
     fn on_foreground(&self, fg: Foreground) {
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
@@ -264,6 +322,7 @@ impl Service {
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
+                    g.state.display_via = DisplayVia::default();
                     let state = Box::new(g.state.clone());
                     drop(g);
                     let _ = self.events.send(Event::StateChanged { state });
@@ -301,6 +360,24 @@ struct IpcHandler {
     events: broadcast::Sender<Event>,
 }
 
+/// The monitor hosting `hmonitor`, falling back to the primary (monitors are
+/// sorted primary-first). Advertised DDC codes are merged in from the library
+/// because the fast probe skips the slow capability query.
+fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
+    let monitors = &g.last_report.monitors;
+    let mut t = monitors
+        .iter()
+        .find(|m| hmonitor != 0 && m.hmonitor == hmonitor)
+        .or_else(|| monitors.first())
+        .cloned()?;
+    if t.ddc.is_none() {
+        if let Some(known) = g.library.monitors.iter().find(|m| m.id == t.id) {
+            t.ddc = known.ddcci.clone();
+        }
+    }
+    Some(t)
+}
+
 /// Pick and apply (or restore) for one foreground window, using the cached
 /// connected-hardware view. Mutates state only; the caller broadcasts.
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
@@ -309,17 +386,20 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     match pick {
         Some(profile) => {
             g.pinned = false;
-            match g.applier.apply(&profile) {
+            let target = resolve_target(g, fg.hmonitor);
+            match g.applier.apply(&profile, target.as_ref()) {
                 Ok(applied) => {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
                     g.state.display_state = applied.display;
+                    g.state.display_via = applied.via;
                 }
                 Err(e) => {
                     warn!(error = %e, profile = %profile.name, "apply failed");
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
+                    g.state.display_via = DisplayVia::default();
                 }
             }
         }
@@ -333,6 +413,7 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.state.active_profile = None;
             g.state.audio_chain = AudioChainState::Bypass;
             g.state.display_state = DisplayState::Default;
+            g.state.display_via = DisplayVia::default();
         }
     }
 }
@@ -570,12 +651,17 @@ impl IpcHandler {
                 let Some(profile) = g.store.get(id).cloned() else {
                     return Reply::Error { message: "no such profile".into() };
                 };
-                match g.applier.apply(&profile) {
+                // Pinned applies target the monitor the user is looking at
+                // (the current foreground window's), or the primary.
+                let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
+                let target = resolve_target(&g, hmon);
+                match g.applier.apply(&profile, target.as_ref()) {
                     Ok(applied) => {
                         g.pinned = true;
                         g.state.active_profile = Some(profile.summary());
                         g.state.audio_chain = applied.audio;
                         g.state.display_state = applied.display;
+                        g.state.display_via = applied.via;
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: e.to_string() },
@@ -588,6 +674,7 @@ impl IpcHandler {
                         g.state.active_profile = None;
                         g.state.audio_chain = AudioChainState::Bypass;
                         g.state.display_state = DisplayState::Default;
+                        g.state.display_via = DisplayVia::default();
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: e.to_string() },

@@ -28,6 +28,41 @@ pub struct DisplayStateSnapshot {
     pub gpu: Option<GpuColor>,
     #[serde(default)]
     pub monitors: Vec<(MonitorId, MonitorSettings)>,
+    /// Raw pre-apply state per touched monitor (the real backend's format).
+    /// Everything needed to put the monitor back without consulting the
+    /// profile: exact VCP values, the exact gamma ramp, raw NvAPI levels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<MonitorStateSnapshot>,
+}
+
+/// Original state of one monitor, captured before any change.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonitorStateSnapshot {
+    /// Stable id — the restore key after a crash/reboot, when the volatile
+    /// handles below have gone stale and must be re-resolved.
+    pub monitor: MonitorId,
+    /// GDI device name at capture time (best-effort fallback for restore).
+    pub gdi_name: String,
+    /// `HMONITOR` at capture time. Valid within the same session only.
+    pub hmonitor: i64,
+    /// (VCP code, original value), in apply order; restore walks in reverse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vcp: Vec<(u8, u32)>,
+    /// Exact pre-apply gamma ramp (preserves f.lux / Night Light curves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gamma: Option<relay_display::gamma::Ramp>,
+    /// Raw NvAPI state, when the NVIDIA path was going to be touched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nvapi: Option<NvApiSnapshot>,
+}
+
+/// Raw NvAPI digital-vibrance + hue state (vendor units, not profile units).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvApiSnapshot {
+    pub dvc: i32,
+    pub dvc_min: i32,
+    pub dvc_max: i32,
+    pub hue_deg: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,11 +166,23 @@ mod tests {
         let snap = Snapshot::new(
             Uuid::new_v4(),
             AudioState { bypass: true },
-            DisplayStateSnapshot { gpu: Some(GpuColor::default()), monitors: vec![] },
+            DisplayStateSnapshot {
+                gpu: Some(GpuColor::default()),
+                monitors: vec![],
+                targets: vec![MonitorStateSnapshot {
+                    monitor: MonitorId("mon:GSM5C7C:402NTCZ9E219".into()),
+                    gdi_name: r"\\.\DISPLAY1".into(),
+                    hmonitor: 0x10001,
+                    vcp: vec![(0x10, 40), (0x12, 70)],
+                    gamma: Some(relay_display::gamma::Ramp::identity()),
+                    nvapi: Some(NvApiSnapshot { dvc: 0, dvc_min: 0, dvc_max: 63, hue_deg: 0 }),
+                }],
+            },
         );
         b.write(&snap).unwrap();
         let pending = b.pending().unwrap().expect("pending after write");
         assert_eq!(pending.display.gpu, Some(GpuColor::default()));
+        assert_eq!(pending.display.targets, snap.display.targets, "raw target state round-trips");
         b.clear().unwrap();
         assert!(b.pending().unwrap().is_none(), "cleared snapshot is not pending");
         assert!(b.path().exists(), "audit trail kept");

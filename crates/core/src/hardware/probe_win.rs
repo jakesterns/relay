@@ -164,7 +164,7 @@ unsafe fn device_props(dev: &IMMDevice) -> (Option<String>, Option<String>) {
 // Monitors
 // ---------------------------------------------------------------------------
 
-fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
+pub(crate) fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
     let gdi = gdi_monitors();
     let mut out = Vec::new();
     for path in active_paths() {
@@ -217,6 +217,7 @@ fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
             refresh_hz,
             primary,
             hmonitor,
+            gdi_name,
             ddc,
         });
     }

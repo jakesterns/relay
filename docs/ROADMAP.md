@@ -45,12 +45,13 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] UI: "Add" flows on the Profiles screen, live "Plugged / Main / Second" pills, headset/monitor pickers on the profile form and Games screen.
 
 ## M2 — Display profiles (first real apply/restore)
-- [ ] `relay-display::ddc`: DDC/CI over `dxva2` (`GetVCPFeatureAndVCPFeatureReply`, `SetVCPFeature`), capabilities string parsing, per-monitor handle from the monitor the game window is on.
-- [ ] `relay-display::gpu`: NvAPI bindings for digital vibrance, hue, and per-display gamma/contrast/brightness; Windows `SetDeviceGammaRamp` as the vendor-neutral fallback for gamma, contrast and shadow lift. ADLX after NVIDIA works.
-- [ ] `DisplayControl` adapter with true capture-before-apply; snapshot includes every VCP code touched.
-- [ ] Multi-monitor: only the game's monitor changes; game moves monitors → restore old, apply new.
-- [ ] Manual test log on the LG 27GP850 and LG C2 (VCP codes that actually work per model go in the hardware library).
-- [ ] UI: Display section reads/writes the real profile; "Applied via" reflects which path was used.
+**Code complete 2026-09-10/11** (branch `m2-display`, worktree `stream-share-m2`; plan in `docs/plans/M2-display.md`). All logic unit-tested (two-monitor fake covers "second monitor untouched", unplug-mid-apply, stale-handle restore); footprint gate green at 5.95 MB / 0 %. **Live pass pending:** the physical monitor was powered off the whole session, so the real-hardware runbook (live read → real crash-restore test → alt-tab timing → lock/unlock) is queued in the plan's Deferred and gates closing this milestone.
+- [x] `relay-display::ddc`: DDC/CI over `dxva2` with retries + per-model write delays; capability parsing from M1; per-monitor handle from the probe's `HMONITOR`.
+- [x] `relay-display`: NvAPI vibrance + hue (dynamic `nvapi64.dll`, raw levels snapshotted); `SetDeviceGammaRamp` per monitor DC for gamma/contrast/shadow lift as the vendor-neutral path (raw original ramp preserved). ADLX after NVIDIA is live-verified.
+- [x] `DisplayControl` adapter (`display_backend.rs`) with true capture-before-apply; snapshot carries every VCP code touched, the raw ramp and raw NvAPI state, keyed by stable monitor id for crash/reboot restore.
+- [x] Multi-monitor: only the game's monitor changes; game moves monitors → restore old, apply new (focus hmonitor + move hook + tick safety net).
+- [ ] Manual test log on the LG ULTRAGEAR+ and LG C2 (VCP codes that actually work per model go in the hardware library) — needs the monitor awake / second panel; runbooks in the plan.
+- [x] UI: Display section reads/writes the real profile; "Applied via" reflects NvAPI / gamma ramp / DDC-CI actually used; unsupported controls disabled.
 
 ## M3 — Audio DSP and detection (no signing needed)
 - [ ] `relay-audio::dsp`: biquad cascade (peaking, low/high shelf), soft limiter with band-split, partitioned-convolution HRTF. Real-time safe: no allocation after `prepare()`. Golden-response unit tests.
@@ -104,7 +105,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
 | M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
-| M2 Display profiles | `docs/plans/M2-display.md` | not started |
+| M2 Display profiles | `docs/plans/M2-display.md` | code + tests done 2026-09-11; live hardware pass pending (monitor was off) — runbook in plan |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | not started |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | blocked: EV cert |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | blocked: EV cert (mic) |

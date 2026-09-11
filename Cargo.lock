@@ -3465,6 +3465,7 @@ dependencies = [
  "anyhow",
  "directories",
  "parking_lot",
+ "relay-display",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -3480,7 +3481,11 @@ dependencies = [
 name = "relay-display"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
+ "serde_json",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

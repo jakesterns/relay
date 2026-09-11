@@ -42,7 +42,7 @@ export interface AudioInterface { id: string; name: string }
 export interface EndpointInfo { key: string; name: string; default: boolean }
 export interface MonitorProbe {
   id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
-  primary: boolean; hmonitor: number; ddc?: number[];
+  primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[];
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
 export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }
@@ -53,15 +53,18 @@ export type HardwareItem =
   | { kind: "headset"; value: Headset }
   | { kind: "monitor"; value: HardwareMonitor };
 
-export interface Foreground { pid: number; exe: string; title: string }
+export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
 export interface ProcessInfo { pid: number; exe: string; title: string }
 export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
 export type DisplayState = "default" | "applied";
+/** Which paths carried the current display apply (`types::DisplayVia`). */
+export interface DisplayVia { nvapi: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
 export interface Footprint { rss_bytes: number; cpu_percent: number }
 export interface CoreState {
   active_profile: ProfileSummary | null; foreground: Foreground | null;
-  sharing: ShareState; audio_chain: AudioChainState; display_state: DisplayState; footprint: Footprint;
+  sharing: ShareState; audio_chain: AudioChainState; display_state: DisplayState;
+  display_via: DisplayVia; footprint: Footprint;
   hardware: HardwareView;
 }
 
@@ -134,7 +137,7 @@ export const mockHardware: HardwareReply = {
       { key: "ep:c:9a11c3d0-hdmi", name: "LG ULTRAGEAR+ (NVIDIA HDA)", default: false },
     ],
     monitors: [
-      { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", native: [3840, 2160], refresh_hz: 144, primary: true, hmonitor: 65537 },
+      { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", native: [3840, 2160], refresh_hz: 144, primary: true, hmonitor: 65537, gdi_name: "\\\\.\\DISPLAY1" },
     ],
     headset: "hd560s",
   },
@@ -146,6 +149,7 @@ export const mockState: CoreState = {
   sharing: { kind: "off" },
   audio_chain: "bypass",
   display_state: "default",
+  display_via: { nvapi: false, gamma: false, ddcci: false },
   footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
   hardware: mockHardware.connected,
 };

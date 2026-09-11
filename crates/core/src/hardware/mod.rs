@@ -72,6 +72,10 @@ pub struct MonitorProbe {
     /// The `HMONITOR` this panel currently maps to (consumed by M2 for
     /// per-monitor apply). Volatile: valid only until the next display change.
     pub hmonitor: i64,
+    /// GDI device name (`\\.\DISPLAY1`) for gamma-ramp DCs and NvAPI display
+    /// matching. Volatile, like `hmonitor`.
+    #[serde(default)]
+    pub gdi_name: String,
     /// Parsed DDC/CI VCP code list, filled by the full probe only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddc: Option<Vec<u8>>,
