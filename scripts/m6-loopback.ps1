@@ -3,6 +3,7 @@
 # Usage: powershell -File scripts\m6-loopback.ps1 [-Record] [-Secs 60] [-OutDir path]
 param(
     [switch]$Record,
+    [switch]$SwitchTest,
     [int]$Secs = 60,
     [string]$OutDir = "$env:TEMP\relay-m6-loopback"
 )
@@ -51,7 +52,19 @@ $sendOut = $send.StandardOutput.ReadToEndAsync()
 $sendErr = $send.StandardError.ReadToEndAsync()
 
 Write-Host "sharing for $Secs s ($tag)..."
-Start-Sleep -Seconds $Secs
+if ($SwitchTest) {
+    Start-Sleep -Seconds ([math]::Max(5, [int]($Secs / 3)))
+    Write-Host 'switching to a region...'
+    $send.StandardInput.WriteLine('{"cmd":"switch","target":{"kind":"region","display":0,"x":100,"y":100,"w":1280,"h":720}}')
+    $send.StandardInput.Flush()
+    Start-Sleep -Seconds ([math]::Max(5, [int]($Secs / 3)))
+    Write-Host 'switching back to display 0...'
+    $send.StandardInput.WriteLine('{"cmd":"switch","target":{"kind":"display","index":0}}')
+    $send.StandardInput.Flush()
+    Start-Sleep -Seconds ([math]::Max(5, $Secs - 2 * [int]($Secs / 3)))
+} else {
+    Start-Sleep -Seconds $Secs
+}
 
 if ($Record) {
     Write-Host 'saving replay...'
