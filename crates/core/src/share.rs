@@ -113,6 +113,8 @@ pub enum ShareEvent {
     Recording { on: bool, path: Option<String> },
     /// A replay clip landed on disk.
     ReplaySaved { path: String, ms: u64 },
+    /// The capture source switched (verbatim target JSON for the UI).
+    SourceChanged { data: serde_json::Value },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -306,6 +308,7 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
             on: v.get("on").and_then(|o| o.as_bool()).unwrap_or(false),
             path: v.get("path").and_then(|p| p.as_str()).map(str::to_string),
         }),
+        Some("source") => Some(ShareEvent::SourceChanged { data: v }),
         Some("replay_saved") => Some(ShareEvent::ReplaySaved {
             path: v.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
             ms: v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0),

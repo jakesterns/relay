@@ -435,6 +435,9 @@ fn spawn_share(
                 ShareEvent::ReplaySaved { path, ms } => {
                     let _ = events2.send(Event::ReplaySaved { path, ms });
                 }
+                ShareEvent::SourceChanged { data } => {
+                    let _ = events2.send(Event::SourceChanged { data });
+                }
                 ShareEvent::Waiting { .. } | ShareEvent::Paired { .. } => {}
                 ShareEvent::Exited { ok, .. } => {
                     let mut ig = inner2.lock();
@@ -519,7 +522,8 @@ fn spawn_receive(
                 ShareEvent::Exited { .. }
                 | ShareEvent::Connected { .. }
                 | ShareEvent::Recording { .. }
-                | ShareEvent::ReplaySaved { .. } => {}
+                | ShareEvent::ReplaySaved { .. }
+                | ShareEvent::SourceChanged { .. } => {}
             });
             let mut ig = inner2.lock();
             if ig.receive.is_some() {

@@ -24,12 +24,13 @@ use webrtc::peer_connection::PeerConnection;
 
 use super::{audio_codec, build_pc, discovery, sei, signal, video_codec};
 use crate::audio::{AudioSource, OpusStream};
-use crate::command::{self, EngineCmd};
+use crate::command::{self, EngineCmd, SourceTarget};
 use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
 use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
+use crate::source::switch::{self, Switcher};
 use crate::time;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
 #[derive(Debug)]
 pub struct SendOpts {
@@ -274,6 +275,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
+    // Source-switch mailbox: stdin queues, the pipeline applies at a frame
+    // boundary. The share always starts on the primary display.
+    let switcher = Arc::new(StdMutex::new(Switcher::new(SourceTarget::Display { index: 0 })));
+
     // Recorder slot: created inside the video pipeline once the capture size
     // is known; every other reader treats "not there yet" as "off".
     let recorder: Arc<OnceLock<Recorder>> = Arc::new(OnceLock::new());
@@ -296,6 +301,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let out_size = opts.size;
         let target = target_bps.clone();
         let rec = recorder.clone();
+        let sw = switcher.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
             if let Err(e) = video_pipeline(
                 bitrate,
@@ -309,6 +315,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 target,
                 rec,
                 record_setup,
+                sw,
             ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
@@ -464,7 +471,11 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             }
                         }
                         Some(EngineCmd::Switch { target }) => {
-                            debug!(?target, "switch requested"); // wired with the source-switch commit
+                            if switcher.lock().unwrap().request(target) {
+                                debug!(?target, "switch queued");
+                            } else {
+                                debug!(?target, "switch dropped (already live)");
+                            }
                         }
                         None => {}
                     },
@@ -513,6 +524,7 @@ fn video_pipeline(
     target_bps: Arc<AtomicU32>,
     recorder: Arc<OnceLock<Recorder>>,
     record_setup: Option<RecordSetup>,
+    switcher: Arc<StdMutex<Switcher>>,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -575,6 +587,8 @@ fn video_pipeline(
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
+    let mut conv_in = in_size;
+    let mut crop: Option<(u32, u32, u32, u32)> = None;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
             EncoderEvent::NeedInput => {
@@ -584,10 +598,64 @@ fn video_pipeline(
                     applied_bps = want;
                     tracing::debug!(bps = want, "bitrate adjusted");
                 }
+                // Swap the capture source if a switch is queued. Encoder,
+                // track and peer connection stay as they are — the new
+                // source scales into the same encode size, then one IDR.
+                let pending = switcher.lock().unwrap().take_pending();
+                if let Some(t) = pending {
+                    match create_target_source(&gpu, t, cursor) {
+                        Ok((new_src, new_crop)) => {
+                            src = new_src;
+                            conv_in = src.size();
+                            conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            conv.set_source_rect(new_crop);
+                            crop = new_crop;
+                            let _ = enc.request_keyframe();
+                            switcher.lock().unwrap().applied(t);
+                            info!(target = ?t, w = conv_in.0, h = conv_in.1, "source switched");
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "source",
+                                    "target": t,
+                                    "width": conv_in.0,
+                                    "height": conv_in.1,
+                                })
+                            );
+                        }
+                        Err(e) => {
+                            warn!(target = ?t, error = %e, "switch failed; keeping current source");
+                            println!(
+                                "{}",
+                                serde_json::json!({ "event": "error", "where": "switch", "message": e.to_string() })
+                            );
+                        }
+                    }
+                }
                 let Some(frame) = src.next(Duration::from_millis(250))? else {
                     tracing::debug!("no capture frame in 250ms");
                     continue;
                 };
+                // A captured window can resize (or a display can change
+                // mode): rebuild the source so the frame pool matches. The
+                // encode size never changes, so nothing renegotiates.
+                if (frame.width, frame.height) != conv_in && crop.is_none() && frame.width > 0 {
+                    let t = switcher.lock().unwrap().current();
+                    tracing::debug!(target = ?t, w = frame.width, h = frame.height, "source resized");
+                    drop(frame); // stale-sized; the rebuilt source delivers the next one
+                    match create_target_source(&gpu, t, cursor) {
+                        Ok((new_src, new_crop)) => {
+                            src = new_src;
+                            conv_in = src.size();
+                            conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            conv.set_source_rect(new_crop);
+                            crop = new_crop;
+                            let _ = enc.request_keyframe();
+                        }
+                        Err(e) => warn!(error = %e, "rebuilding resized source failed"),
+                    }
+                    continue;
+                }
                 if keyframe_wanted.swap(false, Ordering::Relaxed) {
                     let _ = enc.request_keyframe();
                 }
@@ -621,6 +689,39 @@ fn video_pipeline(
         }
     }
     Ok(())
+}
+
+/// Build the capture source (and optional crop rect) for a switch target on
+/// the share's existing GPU device.
+fn create_target_source(
+    gpu: &crate::d3d::Gpu,
+    target: SourceTarget,
+    cursor: bool,
+) -> Result<(Box<dyn crate::source::FrameSource>, Option<(u32, u32, u32, u32)>)> {
+    use crate::source;
+    match target {
+        SourceTarget::Display { index } => {
+            let mons = crate::d3d::monitors();
+            let hmon = *mons
+                .get(index)
+                .with_context(|| format!("no display {index} (this PC has {})", mons.len()))?;
+            Ok((source::create(gpu, hmon, cursor)?, None))
+        }
+        SourceTarget::Window { hwnd } => {
+            let hwnd = windows::Win32::Foundation::HWND(hwnd as usize as *mut _);
+            Ok((Box::new(source::wgc::WgcCapture::window(gpu, hwnd, cursor)?), None))
+        }
+        SourceTarget::Region { display, x, y, w, h } => {
+            let mons = crate::d3d::monitors();
+            let hmon = *mons
+                .get(display)
+                .with_context(|| format!("no display {display} (this PC has {})", mons.len()))?;
+            let src = source::create(gpu, hmon, cursor)?;
+            let crop = switch::clamp_region(src.size(), x, y, w, h)
+                .context("region lies outside the monitor")?;
+            Ok((src, Some(crop)))
+        }
+    }
 }
 
 fn audio_pipeline(

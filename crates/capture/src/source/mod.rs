@@ -6,6 +6,7 @@
 //! consumer converts it to NV12 on the GPU and closes it.
 
 pub mod dxgi;
+pub mod switch;
 pub mod wgc;
 
 use std::time::Duration;

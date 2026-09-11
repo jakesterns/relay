@@ -210,6 +210,10 @@ pub enum Event {
         path: String,
         ms: u64,
     },
+    /// The share's capture source changed (engine `source` line, verbatim).
+    SourceChanged {
+        data: serde_json::Value,
+    },
     /// The receive engine's state: advertising with a code, paired, or stopped.
     ReceiveStatus {
         receiving: bool,
