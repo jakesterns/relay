@@ -24,6 +24,7 @@ pub mod encode;
 pub mod playback;
 #[cfg(windows)]
 pub mod probe;
+pub mod record;
 #[cfg(windows)]
 pub mod render;
 #[cfg(windows)]
