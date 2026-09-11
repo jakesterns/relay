@@ -183,6 +183,92 @@ mod tests {
         assert!(store.select("eldenring.exe", "", &hw(None, &[])).is_none());
     }
 
+    /// The M1 acceptance case: two Call of Duty rows keyed to different
+    /// headsets, and swapping the default endpoint (USB DAC ↔ dongle) flips
+    /// which row wins — driven end-to-end through the hardware library
+    /// (endpoint key → headset binding → ConnectedHardware → select).
+    #[test]
+    fn two_cod_rows_follow_the_default_endpoint_swap() {
+        use crate::hardware::{
+            endpoint_key, EndpointInfo, HardwareStore, Headset, HeadsetKind, MonitorProbe,
+            ProbeReport,
+        };
+
+        // Library: HD 560S behind the ASUS USB DAC, Blessing 3 on a dongle.
+        // Container GUIDs shaped like the real probe reports them.
+        let dac_key =
+            endpoint_key(Some("31f634a2-5a67-4f9c-8ab0-6d1b2a3c4d5e"), "{0.0.0.00000000}.{a1}");
+        let dongle_key =
+            endpoint_key(Some("77c0f2b1-9e2d-4d3f-b1aa-0f9e8d7c6b5a"), "{0.0.0.00000000}.{b2}");
+        let mut lib = HardwareStore::in_memory();
+        lib.upsert_headset(Headset {
+            id: HeadsetId("hd560s".into()),
+            name: "HD 560S".into(),
+            kind: HeadsetKind::Headphone,
+            curve: None,
+            source: String::new(),
+            endpoints: vec![dac_key.clone()],
+        });
+        lib.upsert_headset(Headset {
+            id: HeadsetId("blessing3".into()),
+            name: "Moondrop Blessing 3".into(),
+            kind: HeadsetKind::Iem,
+            curve: None,
+            source: String::new(),
+            endpoints: vec![dongle_key.clone()],
+        });
+
+        let store = ProfileStore::in_memory(vec![
+            ready("CoD HD560S", "cod.exe", Some("hd560s"), Some("mon:GSM5C7C:402NTCZ9E219")),
+            ready("CoD IEM", "cod.exe", Some("blessing3"), Some("mon:GSM5C7C:402NTCZ9E219")),
+            ready("CoD any", "cod.exe", None, None),
+        ]);
+
+        let lg = MonitorProbe {
+            id: MonitorId("mon:GSM5C7C:402NTCZ9E219".into()),
+            name: "LG ULTRAGEAR+".into(),
+            native: Some((3840, 2160)),
+            refresh_hz: Some(144.0),
+            primary: true,
+            hmonitor: 0x10001,
+            ddc: None,
+        };
+        let report_with_default = |default_key: &str| ProbeReport {
+            endpoints: vec![
+                EndpointInfo {
+                    key: dac_key.clone(),
+                    name: "USB Audio 2.0".into(),
+                    default: default_key == dac_key,
+                },
+                EndpointInfo {
+                    key: dongle_key.clone(),
+                    name: "USB-C dongle".into(),
+                    default: default_key == dongle_key,
+                },
+            ],
+            monitors: vec![lg.clone()],
+        };
+
+        let on_dac = lib.connected(&report_with_default(&dac_key));
+        assert_eq!(store.select("cod.exe", "", &on_dac).unwrap().name, "CoD HD560S");
+
+        // Swap the default endpoint — no focus change, only hardware state.
+        let on_dongle = lib.connected(&report_with_default(&dongle_key));
+        assert_eq!(store.select("cod.exe", "", &on_dongle).unwrap().name, "CoD IEM");
+
+        // Unplug both (default falls to an unbound endpoint): the Any row.
+        let unbound = ProbeReport {
+            endpoints: vec![EndpointInfo {
+                key: "ep:c:hdmi".into(),
+                name: "HDMI".into(),
+                default: true,
+            }],
+            monitors: vec![lg.clone()],
+        };
+        let on_hdmi = lib.connected(&unbound);
+        assert_eq!(store.select("cod.exe", "", &on_hdmi).unwrap().name, "CoD any");
+    }
+
     #[test]
     fn save_and_load_round_trip() {
         let dir = std::env::temp_dir().join(format!("relay-test-{}", Uuid::new_v4()));

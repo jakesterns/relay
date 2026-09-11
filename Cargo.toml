@@ -34,6 +34,7 @@ directories = "6.0"
 parking_lot = "0.12"
 uuid = { version = "1.26", features = ["v4", "serde"] }
 windows = "0.62"
+windows-core = "0.62"
 
 # The always-on core must stay small. Optimise for size and strip symbols in
 # release; per-crate overrides can relax this for the encoder later.

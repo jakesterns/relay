@@ -2,18 +2,24 @@ import { useEffect, useState } from "react";
 import { Card, Chips, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, fmtMb, newProfile, type ProcessInfo, type Profile, type ProfileSummary, type SharePreset, type ProfileStatus } from "../lib/ipc";
+import {
+  api, fmtMb, newProfile,
+  type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
+  type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
+} from "../lib/ipc";
 
 const shareLabel: Record<ProfileSummary["share"], string> = { game: "Game", daw: "DAW", desktop: "Desktop", off: "Off" };
+const kindLabel: Record<HeadsetKind, string> = { headphone: "Headphones", iem: "IEM", speakers: "Speakers" };
 
 export function Profiles() {
-  const { state, profiles, refresh } = useCore();
+  const { state, profiles, hardware, refresh } = useCore();
   const active = state.active_profile;
   const fp = state.footprint;
   const chain = state.audio_chain;
 
   const [editing, setEditing] = useState<Profile | null>(null);
   const [isNew, setIsNew] = useState(false);
+  const [adding, setAdding] = useState<"headset" | "monitor" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const apply = async (id: string) => {
@@ -35,6 +41,10 @@ export function Profiles() {
     try { await api.deleteProfile(id); await refresh(); close(); }
     catch (e) { setError(errText(e)); }
   };
+
+  /** Library names for the table; fall back to the raw id. */
+  const headsetName = (id: string | null) => hardware.headsets.find((h) => h.id === id)?.name ?? id ?? "Any";
+  const monitorName = (id: string | null) => hardware.monitors.find((m) => m.id === id)?.name ?? id ?? "Any";
 
   return (
     <>
@@ -61,6 +71,12 @@ export function Profiles() {
             onCancel={close}
           />
         )}
+        {adding === "headset" && (
+          <HeadsetDialog onClose={() => setAdding(null)} onSaved={async () => { setAdding(null); await refresh(); }} />
+        )}
+        {adding === "monitor" && (
+          <MonitorDialog onClose={() => setAdding(null)} onSaved={async () => { setAdding(null); await refresh(); }} />
+        )}
         <Card title="Game profiles" action="New profile" onAction={startNew}>
           {profiles.length === 0 ? (
             <div className="empty">No profiles yet. Add one and it applies the next time that game has focus.</div>
@@ -74,8 +90,8 @@ export function Profiles() {
                   <tr key={p.id} className={active?.id === p.id ? "sel" : ""}
                       onClick={() => void startEdit(p.id)} onDoubleClick={() => void apply(p.id)}>
                     <td><b>{p.name}</b><span>{p.note || p.exe}</span></td>
-                    <td>{p.headset ?? "Any"}</td>
-                    <td>{p.monitor ?? "Any"}</td>
+                    <td>{headsetName(p.headset)}</td>
+                    <td>{monitorName(p.monitor)}</td>
                     <td>{shareLabel[p.share]}</td>
                     <td className="r">
                       {active?.id === p.id
@@ -90,14 +106,40 @@ export function Profiles() {
         </Card>
       </section>
       <aside className="side">
-        <Card title="Headsets & IEMs" action="Add">
-          <div className="empty">Library is empty</div>
+        <Card title="Headsets & IEMs" action="Add" onAction={() => setAdding("headset")}>
+          {hardware.headsets.length === 0 ? (
+            <div className="empty">Library is empty</div>
+          ) : hardware.headsets.map((h) => (
+            <div className="hwl" key={h.id}>
+              <div className="ic r" />
+              <div>
+                <b>{h.name}</b>
+                <span>{kindLabel[h.kind]}{h.curve ? ` · curve (${h.source || "measured"})` : " · no curve"}</span>
+              </div>
+              {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
+            </div>
+          ))}
         </Card>
-        <Card title="Monitors" action="Add">
-          <div className="empty">Library is empty</div>
+        <Card title="Monitors" action="Add" onAction={() => setAdding("monitor")}>
+          {hardware.monitors.length === 0 ? (
+            <div className="empty">Library is empty</div>
+          ) : hardware.monitors.map((m) => {
+            const plugged = hardware.connected.monitors.find((c) => c.id === m.id);
+            return (
+              <div className="hwl" key={m.id}>
+                <div className="ic" />
+                <div>
+                  <b>{m.name}</b>
+                  <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · DDC/CI ${m.ddcci.length} controls` : ""}</span>
+                </div>
+                {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
+              </div>
+            );
+          })}
         </Card>
         <Card>
           <Kv k="Auto-switch" v="By plugged hardware" />
+          <Kv k="Default audio" v={hardware.connected.endpoints.find((e) => e.default)?.name ?? "—"} />
           <Kv k="Foreground" v={state.foreground?.exe || "—"} mono />
         </Card>
         <p className="note">Click a row to edit it, double-click to apply it now. Profiles are matched to whatever headset and monitor are connected, so swapping gear swaps the tuning.</p>
@@ -111,11 +153,152 @@ function errText(e: unknown): string {
   return String(e);
 }
 
-/** New / Edit form. Headset and monitor are free text until M1 lands the hardware library. */
+/** Turn "Moondrop Blessing 3" into a stable-ish library id. */
+function slug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** Add a headset: name it, bind it to an audio endpoint, optionally paste an
+ *  AutoEQ result. The endpoint binding is what makes it "plugged". */
+function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
+  const { hardware } = useCore();
+  const endpoints = hardware.connected.endpoints;
+  const [name, setName] = useState("");
+  const [kind, setKind] = useState<HeadsetKind>("headphone");
+  const [endpoint, setEndpoint] = useState(endpoints.find((e) => e.default)?.key ?? endpoints[0]?.key ?? "");
+  const [curveText, setCurveText] = useState("");
+  const [source, setSource] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const valid = name.trim().length > 0;
+
+  const save = async () => {
+    if (!valid) return;
+    const h: Headset = {
+      id: slug(name),
+      name: name.trim(),
+      kind,
+      source: source.trim(),
+      endpoints: endpoint ? [endpoint] : [],
+    };
+    try {
+      await api.saveHardware({ kind: "headset", value: h });
+      if (curveText.trim()) await api.importCurve(h.id, curveText);
+      await onSaved();
+    } catch (e) { setError(errText(e)); }
+  };
+
+  return (
+    <Card title="Add headset" action="Cancel" onAction={onClose}>
+      <div className="form">
+        <label className="field">
+          <span>Name</span>
+          <input value={name} placeholder="HD 560S" autoFocus onChange={(e) => setName(e.target.value)} />
+        </label>
+        <Chips<HeadsetKind> label="Kind" value={kind} onChange={setKind}
+          options={[{ key: "headphone", label: "Headphones" }, { key: "iem", label: "IEM" }, { key: "speakers", label: "Speakers" }]} />
+        <label className="field">
+          <span>Plugged into</span>
+          <select value={endpoint} onChange={(e) => setEndpoint(e.target.value)}>
+            <option value="">Not bound yet</option>
+            {endpoints.map((e) => (
+              <option key={e.key} value={e.key}>{e.name}{e.default ? " (default)" : ""}</option>
+            ))}
+          </select>
+        </label>
+        <div className="two">
+          <label className="field">
+            <span>Curve source</span>
+            <input value={source} placeholder="oratory1990" onChange={(e) => setSource(e.target.value)} />
+          </label>
+        </div>
+        <label className="field">
+          <span>Measured curve (AutoEQ CSV, optional)</span>
+          <textarea rows={4} className="mono" value={curveText} placeholder={"frequency,raw,…\n20.00,-4.11,…"}
+            onChange={(e) => setCurveText(e.target.value)} />
+        </label>
+        <p className="p small">Paste the contents of an AutoEQ result file. Relay reads only what you paste — it never downloads anything.</p>
+        {error && <div className="offline"><i />{error}</div>}
+        <div className="actions">
+          <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
+          <button className="btn q" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** Add a monitor: pick a detected panel (EDID identity prefilled) or type one in. */
+function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
+  const { hardware } = useCore();
+  const detected = hardware.connected.monitors;
+  const [pick, setPick] = useState(detected[0]?.id ?? "");
+  const picked = detected.find((m) => m.id === pick);
+  const [name, setName] = useState(detected[0]?.name ?? "");
+  const [panel, setPanel] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const valid = (picked ? true : pick.trim().length > 0) && name.trim().length > 0;
+
+  const save = async () => {
+    if (!valid) return;
+    const m: HardwareMonitor = { id: pick.trim(), name: name.trim(), panel: panel.trim() };
+    try {
+      await api.saveHardware({ kind: "monitor", value: m });
+      await onSaved();
+    } catch (e) { setError(errText(e)); }
+  };
+
+  return (
+    <Card title="Add monitor" action="Cancel" onAction={onClose}>
+      <div className="form">
+        <label className="field">
+          <span>Detected</span>
+          <select value={picked ? pick : ""} onChange={(e) => {
+            setPick(e.target.value);
+            const d = detected.find((m) => m.id === e.target.value);
+            if (d) setName(d.name);
+          }}>
+            <option value="">Enter manually…</option>
+            {detected.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}{m.native ? ` · ${m.native[0]}×${m.native[1]}` : ""}{m.primary ? " (main)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {!picked && (
+          <label className="field">
+            <span>Monitor id</span>
+            <input value={pick} className="mono" placeholder="mon:GSM5C7C:402NTCZ9E219"
+              onChange={(e) => setPick(e.target.value)} />
+          </label>
+        )}
+        <div className="two">
+          <label className="field">
+            <span>Name</span>
+            <input value={name} placeholder="LG 27GP850" onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="field">
+            <span>Panel</span>
+            <input value={panel} placeholder="Nano IPS" onChange={(e) => setPanel(e.target.value)} />
+          </label>
+        </div>
+        <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. DDC/CI controls are filled in the first time a display profile probes this panel.</p>
+        {error && <div className="offline"><i />{error}</div>}
+        <div className="actions">
+          <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
+          <button className="btn q" onClick={onClose}>Cancel</button>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+/** New / Edit form. Headset and monitor come from the hardware library. */
 function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel }: {
   initial: Profile; isNew: boolean; error: string | null;
   onSave: (p: Profile) => void; onDelete?: (id: string) => void; onCancel: () => void;
 }) {
+  const { hardware } = useCore();
   const [p, setP] = useState<Profile>(initial);
   const [procs, setProcs] = useState<ProcessInfo[]>([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -139,8 +322,8 @@ function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel }: {
       ...p,
       name: p.name.trim(),
       game: { ...p.game, exe: p.game.exe.trim() },
-      headset: p.headset?.trim() ? p.headset.trim() : undefined,
-      monitor: p.monitor?.trim() ? p.monitor.trim() : undefined,
+      headset: p.headset || undefined,
+      monitor: p.monitor || undefined,
     };
     onSave(clean);
   };
@@ -176,20 +359,24 @@ function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel }: {
         <div className="two">
           <label className="field">
             <span>Headset</span>
-            <input value={p.headset ?? ""} placeholder="Any"
-              onChange={(e) => set("headset", e.target.value || undefined)} />
+            <select value={p.headset ?? ""} onChange={(e) => set("headset", e.target.value || undefined)}>
+              <option value="">Any</option>
+              {hardware.headsets.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+            </select>
           </label>
           <label className="field">
             <span>Monitor</span>
-            <input value={p.monitor ?? ""} placeholder="Any"
-              onChange={(e) => set("monitor", e.target.value || undefined)} />
+            <select value={p.monitor ?? ""} onChange={(e) => set("monitor", e.target.value || undefined)}>
+              <option value="">Any</option>
+              {hardware.monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
           </label>
         </div>
         <Chips<SharePreset> label="Share preset" value={p.share} onChange={(v) => set("share", v)}
           options={[{ key: "game", label: "Game" }, { key: "daw", label: "DAW" }, { key: "desktop", label: "Desktop" }, { key: "off", label: "Off" }]} />
         <Chips<ProfileStatus> label="Status" value={p.status} onChange={(v) => set("status", v)}
           options={[{ key: "draft", label: "Draft" }, { key: "ready", label: "Ready" }]} />
-        <p className="p small">Only <b>Ready</b> profiles apply automatically. Headset and monitor are matched by name until the hardware library lands.</p>
+        <p className="p small">Only <b>Ready</b> profiles apply automatically. With several Ready rows for one game, the row matching the plugged headset and monitor wins.</p>
         {error && <div className="offline"><i />{error}</div>}
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={submit}>{isNew ? "Create profile" : "Save changes"}</button>

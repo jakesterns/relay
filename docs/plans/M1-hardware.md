@@ -11,9 +11,9 @@ that, and the user can build a hardware library with measured headset curves.
 M0. Required by M2 (per-monitor targeting) and M3 (headset curves).
 
 ## Definition of Ready
-- [ ] M0 complete.
-- [ ] At least two headsets/endpoints and two monitors available for testing; list them here: ____
-- [ ] One AutoEQ result file downloaded locally for the importer test.
+- [x] M0 complete (2026-09-09).
+- [x] Test hardware recorded (probed on the dev PC 2026-09-10): audio endpoints — ASUS USB Audio 2.0 (`USB\VID_0B05&PID_1A53`), RØDE USB device (`USB\VID_19F7&PID_004E`), RØDECaster virtual endpoints, second USB audio device (`USB\VID_2E1A&PID_4C05`), NVIDIA HDMI audio through the monitor. Monitors — one physical: LG ULTRAGEAR+ (EDID `GSM5C7C`, serial `402NTCZ9E219`). Only one monitor is attached, so multi-monitor id logic is unit-tested against fixture EDID dumps; live second-monitor verification is Deferred with a runbook.
+- [x] AutoEQ result file: `crates/core/tests/fixtures/autoeq-hd560s.csv` (oratory1990 Sennheiser HD 560S, downloaded 2026-09-10 from the AutoEq repo). Real EDID fixture: `crates/core/tests/fixtures/edid-gsm5c7c.bin` (dumped from this PC's registry).
 
 ## Checklist
 - [ ] `HeadsetId` from the default WASAPI render endpoint: `IMMDeviceEnumerator::GetDefaultAudioEndpoint`, key = container ID or endpoint ID string; friendly name for display. Handles USB DAC → headphone chains by letting the user name the headset attached to an endpoint.

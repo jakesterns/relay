@@ -218,14 +218,15 @@ a { color: inherit; text-decoration: none; }
 .form .two { gap: 12px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field > span { color: var(--mute); font-size: 12px; }
-.field input, .field select {
+.field input, .field select, .field textarea {
   font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line2);
   border-radius: 6px; padding: 8px 10px; outline: none; width: 100%;
   transition: border-color .25s var(--ease);
 }
-.field input:focus, .field select:focus { border-color: rgba(201,169,106,.5); }
-.field input::placeholder { color: var(--dim); }
-.field input.mono { font-family: GeistMono; font-size: 12px; }
+.field input:focus, .field select:focus, .field textarea:focus { border-color: rgba(201,169,106,.5); }
+.field input::placeholder, .field textarea::placeholder { color: var(--dim); }
+.field input.mono, .field textarea.mono { font-family: GeistMono; font-size: 12px; }
+.field textarea { resize: vertical; min-height: 60px; }
 .field .row { display: grid; grid-template-columns: 1fr 220px auto; gap: 8px; align-items: center; }
 .field select { color: var(--mute); }
 .field select option { background: var(--raised); color: var(--ink); }

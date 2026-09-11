@@ -17,6 +17,10 @@ use crate::types::Foreground;
 pub enum CoreEvent {
     ForegroundChanged(Foreground),
     Hotkey(HotkeyAction),
+    /// A monitor or audio endpoint came, went, or changed role: re-probe and
+    /// re-select. Sent by the winloop window (`WM_DISPLAYCHANGE` /
+    /// `WM_DEVICECHANGE`) and by the WASAPI notification client.
+    HardwareChanged,
     /// Console Ctrl-C / close / logoff / shutdown.
     Shutdown,
 }
@@ -99,9 +103,11 @@ mod imp {
         MOD_SHIFT, MOD_WIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowTextW,
-        GetWindowThreadProcessId, PostThreadMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
-        MSG, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_HOTKEY, WM_QUIT,
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
+        GetMessageW, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, RegisterClassW,
+        TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_HOTKEY, WM_QUIT, WNDCLASSW,
+        WS_OVERLAPPED,
     };
 
     /// The hook callback is a bare `extern "system"` fn and cannot capture, so the
@@ -140,6 +146,11 @@ mod imp {
                     }
                 }
 
+                // Hidden top-level window: the only way to receive the
+                // WM_DISPLAYCHANGE / WM_DEVICECHANGE broadcasts (thread
+                // message loops and message-only windows do not get them).
+                let hw_window = create_hardware_window();
+
                 // Seed with whatever is in front right now.
                 if let Some(fg) = describe(GetForegroundWindow()) {
                     emit(CoreEvent::ForegroundChanged(fg));
@@ -157,6 +168,9 @@ mod imp {
                     DispatchMessageW(&msg);
                 }
 
+                if let Some(w) = hw_window {
+                    let _ = DestroyWindow(w);
+                }
                 for id in registered {
                     let _ = UnregisterHotKey(None, id);
                 }
@@ -200,6 +214,67 @@ mod imp {
             m |= MOD_WIN;
         }
         m
+    }
+
+    /// Never-shown window whose only job is to catch hardware broadcasts.
+    unsafe fn create_hardware_window() -> Option<HWND> {
+        unsafe {
+            let class_name = windows::core::w!("RelayCoreHardware");
+            let hinstance =
+                windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(hardware_wnd_proc),
+                lpszClassName: class_name,
+                hInstance: hinstance.into(),
+                ..Default::default()
+            };
+            if RegisterClassW(&class) == 0 {
+                warn!("hardware window class not registered; device-change events disabled");
+                return None;
+            }
+            match CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class_name,
+                class_name,
+                WS_OVERLAPPED,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            ) {
+                Ok(w) => Some(w),
+                Err(e) => {
+                    warn!(error = %e, "hardware window not created");
+                    None
+                }
+            }
+        }
+    }
+
+    unsafe extern "system" fn hardware_wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> windows::Win32::Foundation::LRESULT {
+        match msg {
+            // Coalescing happens in the service; here every signal counts.
+            WM_DISPLAYCHANGE => emit(CoreEvent::HardwareChanged),
+            WM_DEVICECHANGE => {
+                // 0x0007 = DBT_DEVNODES_CHANGED (the catch-all broadcast),
+                // 0x8000/0x8004 = DBT_DEVICEARRIVAL / REMOVECOMPLETE.
+                if matches!(wparam.0, 0x0007 | 0x8000 | 0x8004) {
+                    emit(CoreEvent::HardwareChanged);
+                }
+            }
+            _ => {}
+        }
+        // SAFETY: default handling for everything else.
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
     }
 
     unsafe extern "system" fn win_event_proc(

@@ -218,6 +218,9 @@ pub struct CoreState {
     pub audio_chain: AudioChainState,
     pub display_state: DisplayState,
     pub footprint: Footprint,
+    /// Connected endpoints/monitors and the resolved headset (M1).
+    #[serde(default)]
+    pub hardware: crate::hardware::HardwareView,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

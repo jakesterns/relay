@@ -29,6 +29,30 @@ export interface ProfileSummary {
   id: string; name: string; note: string; exe: string;
   headset: HeadsetId | null; monitor: MonitorId | null; share: SharePreset; status: ProfileStatus;
 }
+/** Mirror of `crates/core/src/hardware/mod.rs`. */
+export type HeadsetKind = "headphone" | "iem" | "speakers";
+export interface Headset {
+  id: HeadsetId; name: string; kind: HeadsetKind;
+  curve?: [number, number][]; source: string; endpoints: string[];
+}
+export interface HardwareMonitor {
+  id: MonitorId; name: string; panel: string; ddcci?: number[];
+}
+export interface AudioInterface { id: string; name: string }
+export interface EndpointInfo { key: string; name: string; default: boolean }
+export interface MonitorProbe {
+  id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
+  primary: boolean; hmonitor: number; ddc?: number[];
+}
+export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
+export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }
+export interface HardwareReply {
+  headsets: Headset[]; monitors: HardwareMonitor[]; interfaces: AudioInterface[]; connected: HardwareView;
+}
+export type HardwareItem =
+  | { kind: "headset"; value: Headset }
+  | { kind: "monitor"; value: HardwareMonitor };
+
 export interface Foreground { pid: number; exe: string; title: string }
 export interface ProcessInfo { pid: number; exe: string; title: string }
 export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
@@ -38,6 +62,7 @@ export interface Footprint { rss_bytes: number; cpu_percent: number }
 export interface CoreState {
   active_profile: ProfileSummary | null; foreground: Foreground | null;
   sharing: ShareState; audio_chain: AudioChainState; display_state: DisplayState; footprint: Footprint;
+  hardware: HardwareView;
 }
 
 export interface ShareRequest {
@@ -92,6 +117,29 @@ export function summarize(p: Profile): ProfileSummary {
   };
 }
 
+/** Browser-only mock hardware, shaped like the dev PC's real probe. */
+export const mockHardware: HardwareReply = {
+  headsets: [
+    { id: "hd560s", name: "HD 560S", kind: "headphone", source: "oratory1990", endpoints: ["ep:c:31f634a2-usb-dac"], curve: [[20, -4.11], [1000, 0], [20000, -6.2]] },
+    { id: "blessing3", name: "Moondrop Blessing 3", kind: "iem", source: "crinacle", endpoints: ["ep:c:77c0f2b1-dongle"] },
+  ],
+  monitors: [
+    { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", panel: "Nano IPS", ddcci: [0x10, 0x12, 0x60] },
+    { id: "mon:GSM7654:311NDX55X942", name: "LG C2", panel: "OLED" },
+  ],
+  interfaces: [],
+  connected: {
+    endpoints: [
+      { key: "ep:c:31f634a2-usb-dac", name: "USB Audio 2.0", default: true },
+      { key: "ep:c:9a11c3d0-hdmi", name: "LG ULTRAGEAR+ (NVIDIA HDA)", default: false },
+    ],
+    monitors: [
+      { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", native: [3840, 2160], refresh_hz: 144, primary: true, hmonitor: 65537 },
+    ],
+    headset: "hd560s",
+  },
+};
+
 export const mockState: CoreState = {
   active_profile: null,
   foreground: null,
@@ -99,6 +147,7 @@ export const mockState: CoreState = {
   audio_chain: "bypass",
   display_state: "default",
   footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
+  hardware: mockHardware.connected,
 };
 
 function mockProfile(id: string, name: string, note: string, exe: string, headset: string | null, monitor: string | null, share: SharePreset, status: ProfileStatus): Profile {
@@ -191,6 +240,47 @@ export const api = {
   async stopReceive(): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("stop_receive");
+  },
+  async listHardware(): Promise<HardwareReply> {
+    if (!isTauri()) return structuredClone(mockHardware);
+    return invoke<HardwareReply>("list_hardware");
+  },
+  async saveHardware(item: HardwareItem): Promise<void> {
+    if (!isTauri()) {
+      if (item.kind === "headset") {
+        const i = mockHardware.headsets.findIndex((h) => h.id === item.value.id);
+        if (i >= 0) mockHardware.headsets[i] = structuredClone(item.value);
+        else mockHardware.headsets.push(structuredClone(item.value));
+      } else {
+        const i = mockHardware.monitors.findIndex((m) => m.id === item.value.id);
+        if (i >= 0) mockHardware.monitors[i] = structuredClone(item.value);
+        else mockHardware.monitors.push(structuredClone(item.value));
+      }
+      return;
+    }
+    return invoke<void>("save_hardware", { item });
+  },
+  async deleteHardware(id: string): Promise<void> {
+    if (!isTauri()) {
+      mockHardware.headsets = mockHardware.headsets.filter((h) => h.id !== id);
+      mockHardware.monitors = mockHardware.monitors.filter((m) => m.id !== id);
+      return;
+    }
+    return invoke<void>("delete_hardware", { id });
+  },
+  async probeHardware(): Promise<ProbeReport> {
+    if (!isTauri()) return structuredClone(mockHardware.connected);
+    return invoke<ProbeReport>("probe_hardware");
+  },
+  /** Parse AutoEQ text and attach it to a headset. Returns the parsed points. */
+  async importCurve(headset: HeadsetId, csv: string): Promise<[number, number][]> {
+    if (!isTauri()) {
+      const h = mockHardware.headsets.find((x) => x.id === headset);
+      if (!h) throw new Error("no such headset");
+      h.curve = [[20, 0], [20000, 0]];
+      return h.curve;
+    }
+    return invoke<[number, number][]>("import_curve", { headset, csv });
   },
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];

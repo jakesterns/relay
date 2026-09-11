@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
+use crate::hardware::{AudioInterface, HardwareView, Headset, Monitor, ProbeReport};
 use crate::share::{ReceiveRequest, ShareRequest};
-use crate::types::{CoreState, ProcessInfo, Profile, ProfileSummary};
+use crate::types::{CoreState, HeadsetId, ProcessInfo, Profile, ProfileSummary};
 
 /// A connection that has neither subscribed nor sent a request for this long is closed.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -68,8 +69,35 @@ pub enum Method {
     StopReceive,
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
+    /// The hardware library plus what is connected right now.
+    ListHardware,
+    /// Create or update a library headset/monitor.
+    SaveHardware {
+        item: HardwareItem,
+    },
+    /// Remove a library entry (headset, monitor or interface) by its id.
+    DeleteHardware {
+        id: String,
+    },
+    /// Full re-probe including the slow DDC/CI capability query; refreshes the
+    /// cached connected state and stores VCP lists on known library monitors.
+    ProbeHardware,
+    /// Parse AutoEQ results text (local file contents or paste — the core
+    /// never fetches) and attach it to a headset as its measured curve.
+    ImportCurve {
+        headset: HeadsetId,
+        csv: String,
+    },
     Subscribe,
     Shutdown,
+}
+
+/// One library entry for `SaveHardware`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum HardwareItem {
+    Headset(Box<Headset>),
+    Monitor(Box<Monitor>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,14 +111,40 @@ pub struct Request {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Reply {
     Pong,
-    Status { state: Box<CoreState> },
-    Profiles { profiles: Vec<ProfileSummary> },
-    Profile { profile: Box<Profile> },
-    Processes { processes: Vec<ProcessInfo> },
-    Autostart { enabled: bool },
-    Receivers { receivers: serde_json::Value },
+    Status {
+        state: Box<CoreState>,
+    },
+    Profiles {
+        profiles: Vec<ProfileSummary>,
+    },
+    Profile {
+        profile: Box<Profile>,
+    },
+    Processes {
+        processes: Vec<ProcessInfo>,
+    },
+    Autostart {
+        enabled: bool,
+    },
+    Receivers {
+        receivers: serde_json::Value,
+    },
+    Hardware {
+        headsets: Vec<Headset>,
+        monitors: Vec<Monitor>,
+        interfaces: Vec<AudioInterface>,
+        connected: Box<HardwareView>,
+    },
+    Probe {
+        report: Box<ProbeReport>,
+    },
+    Curve {
+        points: Vec<(f32, f32)>,
+    },
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

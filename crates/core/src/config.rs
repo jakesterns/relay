@@ -92,6 +92,11 @@ impl Paths {
         self.data_dir().join("profiles.json")
     }
 
+    /// The hardware library (headsets with curves, monitors, interfaces).
+    pub fn hardware_file(&self) -> PathBuf {
+        self.data_dir().join("hardware.json")
+    }
+
     /// Snapshot of the machine's original state. Presence of this file with
     /// `applied = true` on start means we did not get to restore last time.
     pub fn backup_file(&self) -> PathBuf {

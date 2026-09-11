@@ -155,6 +155,57 @@ async fn stop_receive() -> CmdResult<()> {
     }
 }
 
+/// Mirrors `Reply::Hardware`; the frontend gets one object.
+#[derive(Debug, serde::Serialize)]
+struct HardwareReply {
+    headsets: Vec<relay_core::hardware::Headset>,
+    monitors: Vec<relay_core::hardware::Monitor>,
+    interfaces: Vec<relay_core::hardware::AudioInterface>,
+    connected: relay_core::hardware::HardwareView,
+}
+
+#[tauri::command]
+async fn list_hardware() -> CmdResult<HardwareReply> {
+    match call(Method::ListHardware).await? {
+        Reply::Hardware { headsets, monitors, interfaces, connected } => {
+            Ok(HardwareReply { headsets, monitors, interfaces, connected: *connected })
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn save_hardware(item: relay_core::ipc::HardwareItem) -> CmdResult<()> {
+    match call(Method::SaveHardware { item }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn delete_hardware(id: String) -> CmdResult<()> {
+    match call(Method::DeleteHardware { id }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn probe_hardware() -> CmdResult<relay_core::hardware::ProbeReport> {
+    match call(Method::ProbeHardware).await? {
+        Reply::Probe { report } => Ok(*report),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>> {
+    match call(Method::ImportCurve { headset: relay_core::types::HeadsetId(headset), csv }).await? {
+        Reply::Curve { points } => Ok(points),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
@@ -250,6 +301,11 @@ pub fn run() {
             start_receive,
             stop_receive,
             discover_receivers,
+            list_hardware,
+            save_hardware,
+            delete_hardware,
+            probe_hardware,
+            import_curve,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

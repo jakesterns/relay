@@ -13,7 +13,9 @@ use crate::apply::{Applier, AudioControl, DisplayControl, FileRecorder, Noop};
 use crate::backup::BackupFile;
 use crate::config::Paths;
 use crate::footprint::FootprintMeter;
-use crate::hardware::{HardwareProbe, NoopHardwareProbe};
+use crate::hardware::{
+    ConnectedHardware, HardwareProbe, HardwareStore, HardwareView, NoopHardwareProbe, ProbeReport,
+};
 use crate::hotkeys::{self, HotkeyAction};
 use crate::ipc::{Event, Method, Reply};
 use crate::profiles::ProfileStore;
@@ -37,15 +39,26 @@ impl Default for Backends {
 pub const RECORDING_ENV: &str = "RELAY_RECORDING_BACKEND";
 
 impl Backends {
-    /// Production no-op backends, or the file-backed recorder when
-    /// `RELAY_RECORDING_BACKEND=<path>` is set (integration tests only).
+    /// Production backends (real hardware probe), or the file-backed recorder
+    /// when `RELAY_RECORDING_BACKEND=<path>` is set (integration tests only —
+    /// the probe stays no-op there so tests never depend on host hardware).
     pub fn from_env() -> Self {
         match std::env::var(RECORDING_ENV) {
             Ok(path) if !path.is_empty() => {
                 let rec = Arc::new(FileRecorder::at(path));
                 Self { audio: rec.clone(), display: rec, hardware: Arc::new(NoopHardwareProbe) }
             }
-            _ => Self::default(),
+            _ => {
+                #[cfg(windows)]
+                {
+                    Self {
+                        hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
+                        ..Self::default()
+                    }
+                }
+                #[cfg(not(windows))]
+                Self::default()
+            }
         }
     }
 }
@@ -57,6 +70,13 @@ struct Inner {
     state: CoreState,
     meter: FootprintMeter,
     hardware: Arc<dyn HardwareProbe>,
+    /// The user's hardware library (`hardware.json`).
+    library: HardwareStore,
+    /// Last probe, kept so library edits can re-resolve without re-probing.
+    last_report: ProbeReport,
+    /// Cached selection view of `last_report`; focus changes use this instead
+    /// of probing (probing on every alt-tab would cost idle CPU).
+    connected: ConnectedHardware,
     /// Set by `ApplyProfile` over IPC: stay applied regardless of focus until
     /// `RestoreAll` or the profile is applied automatically anyway.
     pinned: bool,
@@ -88,12 +108,23 @@ impl Service {
             info!("restored original state left over from a previous run");
         }
 
+        let library = HardwareStore::load(paths.hardware_file())?;
+        let report = backends.hardware.probe(false);
+        let connected = library.connected(&report);
+        let state = CoreState {
+            hardware: HardwareView::from_report(report.clone(), &library),
+            ..Default::default()
+        };
+
         let inner = Arc::new(Mutex::new(Inner {
             store,
             applier,
-            state: CoreState::default(),
+            state,
             meter: FootprintMeter::new(),
             hardware: backends.hardware,
+            library,
+            last_report: report,
+            connected,
             pinned: false,
             share: None,
             last_share: None,
@@ -132,7 +163,20 @@ impl Service {
         tx: mpsc::UnboundedSender<CoreEvent>,
         mut rx: mpsc::UnboundedReceiver<CoreEvent>,
     ) -> Result<()> {
-        let winloop = WinLoop::spawn(tx, hotkeys::defaults())?;
+        let winloop = WinLoop::spawn(tx.clone(), hotkeys::defaults())?;
+
+        // WASAPI endpoint notifications (default switch, plug/unplug). Display
+        // changes arrive via the winloop's hidden window. Keep the handle
+        // alive; dropping unregisters.
+        #[cfg(windows)]
+        let _audio_watch = match crate::hardware::watch_win::AudioWatcher::start(tx.clone()) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                warn!(error = %e, "audio device watcher unavailable");
+                None
+            }
+        };
+        let _ = tx;
 
         let handler = Arc::new(IpcHandler {
             inner: self.inner.clone(),
@@ -156,6 +200,9 @@ impl Service {
                     match ev {
                         Some(CoreEvent::ForegroundChanged(fg)) => self.on_foreground(fg),
                         Some(CoreEvent::Hotkey(action)) => self.on_hotkey(action),
+                        // Bursts are fine: the handler compares against the
+                        // last probe and does nothing when nothing changed.
+                        Some(CoreEvent::HardwareChanged) => self.on_hardware_changed(),
                         Some(CoreEvent::Shutdown) | None => break,
                     }
                 }
@@ -169,41 +216,31 @@ impl Service {
         Ok(())
     }
 
+    /// Probe, and if anything actually changed, re-run selection for the
+    /// current foreground window — this is the "unplug the headset mid-game
+    /// and the other profile takes over" path, no focus change involved.
+    fn on_hardware_changed(&self) {
+        let mut g = self.inner.lock();
+        let report = g.hardware.probe(false);
+        if report == g.last_report {
+            return;
+        }
+        info!(
+            endpoints = report.endpoints.len(),
+            monitors = report.monitors.len(),
+            "hardware changed"
+        );
+        g.connected = g.library.connected(&report);
+        g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
+        g.last_report = report;
+        drop(g);
+        reselect(&self.inner, &self.events);
+    }
+
     fn on_foreground(&self, fg: Foreground) {
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
-
-        let hw = g.hardware.probe();
-        let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
-        match pick {
-            Some(profile) => {
-                g.pinned = false;
-                match g.applier.apply(&profile) {
-                    Ok(applied) => {
-                        g.state.active_profile = Some(profile.summary());
-                        g.state.audio_chain = applied.audio;
-                        g.state.display_state = applied.display;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, profile = %profile.name, "apply failed");
-                        g.state.active_profile = None;
-                        g.state.audio_chain = AudioChainState::Bypass;
-                        g.state.display_state = DisplayState::Default;
-                    }
-                }
-            }
-            None if g.pinned => {}
-            None => {
-                if g.applier.is_applied() {
-                    if let Err(e) = g.applier.restore() {
-                        warn!(error = %e, "restore on blur failed");
-                    }
-                }
-                g.state.active_profile = None;
-                g.state.audio_chain = AudioChainState::Bypass;
-                g.state.display_state = DisplayState::Default;
-            }
-        }
+        select_and_apply(&mut g, &fg);
         let state = Box::new(g.state.clone());
         drop(g);
         let _ = self.events.send(Event::StateChanged { state });
@@ -257,6 +294,64 @@ struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
     events: broadcast::Sender<Event>,
+}
+
+/// Pick and apply (or restore) for one foreground window, using the cached
+/// connected-hardware view. Mutates state only; the caller broadcasts.
+fn select_and_apply(g: &mut Inner, fg: &Foreground) {
+    let hw = g.connected.clone();
+    let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
+    match pick {
+        Some(profile) => {
+            g.pinned = false;
+            match g.applier.apply(&profile) {
+                Ok(applied) => {
+                    g.state.active_profile = Some(profile.summary());
+                    g.state.audio_chain = applied.audio;
+                    g.state.display_state = applied.display;
+                }
+                Err(e) => {
+                    warn!(error = %e, profile = %profile.name, "apply failed");
+                    g.state.active_profile = None;
+                    g.state.audio_chain = AudioChainState::Bypass;
+                    g.state.display_state = DisplayState::Default;
+                }
+            }
+        }
+        None if g.pinned => {}
+        None => {
+            if g.applier.is_applied() {
+                if let Err(e) = g.applier.restore() {
+                    warn!(error = %e, "restore on blur failed");
+                }
+            }
+            g.state.active_profile = None;
+            g.state.audio_chain = AudioChainState::Bypass;
+            g.state.display_state = DisplayState::Default;
+        }
+    }
+}
+
+/// Re-run selection for whatever is in the foreground (no focus change
+/// needed) and broadcast the new state. Used after hardware or library edits.
+fn reselect(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
+    let mut g = inner.lock();
+    if let Some(fg) = g.state.foreground.clone() {
+        select_and_apply(&mut g, &fg);
+    }
+    let state = Box::new(g.state.clone());
+    drop(g);
+    let _ = events.send(Event::StateChanged { state });
+}
+
+/// Recompute the connected view from the last probe after a library edit
+/// (bindings may resolve differently), then reselect.
+fn library_changed(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
+    let mut g = inner.lock();
+    g.connected = g.library.connected(&g.last_report);
+    g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
+    drop(g);
+    reselect(inner, events);
 }
 
 /// Spawn the share engine and a thread that relays its NDJSON as IPC events.
@@ -524,6 +619,95 @@ impl IpcHandler {
                 drop(g);
                 match crate::share::discover_receivers(2000) {
                     Ok(receivers) => Reply::Receivers { receivers },
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::ListHardware => Reply::Hardware {
+                headsets: g.library.headsets.clone(),
+                monitors: g.library.monitors.clone(),
+                interfaces: g.library.interfaces.clone(),
+                connected: Box::new(g.state.hardware.clone()),
+            },
+            Method::SaveHardware { item } => {
+                match item {
+                    crate::ipc::HardwareItem::Headset(h) => {
+                        if h.id.0.trim().is_empty() || h.name.trim().is_empty() {
+                            return Reply::Error {
+                                message: "headset needs an id and a name".into(),
+                            };
+                        }
+                        g.library.upsert_headset(*h);
+                    }
+                    crate::ipc::HardwareItem::Monitor(m) => {
+                        if m.id.0.trim().is_empty() || m.name.trim().is_empty() {
+                            return Reply::Error {
+                                message: "monitor needs an id and a name".into(),
+                            };
+                        }
+                        g.library.upsert_monitor(*m);
+                    }
+                }
+                match g.library.save() {
+                    Ok(()) => {
+                        drop(g);
+                        library_changed(&self.inner, &self.events);
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::DeleteHardware { id } => {
+                if !g.library.remove(&id) {
+                    return Reply::Error { message: "no such hardware".into() };
+                }
+                match g.library.save() {
+                    Ok(()) => {
+                        drop(g);
+                        library_changed(&self.inner, &self.events);
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::ProbeHardware => {
+                let report = g.hardware.probe(true);
+                // Remember the advertised VCP codes on known library monitors.
+                let mut dirty = false;
+                for probed in &report.monitors {
+                    if let Some(ddc) = &probed.ddc {
+                        if let Some(known) =
+                            g.library.monitors.iter_mut().find(|m| m.id == probed.id)
+                        {
+                            if known.ddcci.as_ref() != Some(ddc) {
+                                known.ddcci = Some(ddc.clone());
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
+                if dirty {
+                    if let Err(e) = g.library.save() {
+                        warn!(error = %e, "saving probed DDC capabilities failed");
+                    }
+                }
+                g.connected = g.library.connected(&report);
+                g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
+                g.last_report = report.clone();
+                drop(g);
+                reselect(&self.inner, &self.events);
+                Reply::Probe { report: Box::new(report) }
+            }
+            Method::ImportCurve { headset, csv } => {
+                let points = match crate::hardware::autoeq::parse_curve(&csv) {
+                    Ok(p) => p,
+                    Err(e) => return Reply::Error { message: format!("curve not imported: {e}") },
+                };
+                let Some(h) = g.library.headset_mut(&headset) else {
+                    return Reply::Error { message: "no such headset".into() };
+                };
+                h.curve = Some(points.clone());
+                match g.library.save() {
+                    Ok(()) => Reply::Curve { points },
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }

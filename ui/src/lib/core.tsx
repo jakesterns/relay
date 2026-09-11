@@ -3,11 +3,13 @@
  * events; falls back to polling every few seconds when the core is offline.
  */
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, isTauri, mockProfiles, mockState, onCoreEvents, type CoreState, type ProfileSummary } from "./ipc";
+import { api, isTauri, mockHardware, mockProfiles, mockState, onCoreEvents, type CoreState, type HardwareReply, type ProfileSummary } from "./ipc";
 
 export interface Core {
   state: CoreState;
   profiles: ProfileSummary[];
+  /** Hardware library + connected view (`list_hardware`). */
+  hardware: HardwareReply;
   offline: boolean;
   mock: boolean;
   notice: string | null;
@@ -19,14 +21,16 @@ const Ctx = createContext<Core | null>(null);
 export function CoreProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<CoreState>(mockState);
   const [profiles, setProfiles] = useState<ProfileSummary[]>(isTauri() ? [] : mockProfiles);
+  const [hardware, setHardware] = useState<HardwareReply>(isTauri() ? { headsets: [], monitors: [], interfaces: [], connected: { endpoints: [], monitors: [], headset: null } } : mockHardware);
   const [offline, setOffline] = useState(isTauri());
   const [notice, setNotice] = useState<string | null>(null);
 
   const refresh = async () => {
     try {
-      const [s, p] = await Promise.all([api.status(), api.listProfiles()]);
+      const [s, p, h] = await Promise.all([api.status(), api.listProfiles(), api.listHardware()]);
       setState(s);
       setProfiles(p);
+      setHardware(h);
       setOffline(false);
     } catch {
       setOffline(true);
@@ -37,7 +41,13 @@ export function CoreProvider({ children }: { children: ReactNode }) {
     void refresh();
     let unsub = () => {};
     void onCoreEvents({
-      state: (s) => { setState(s); setOffline(false); },
+      state: (s) => {
+        setState(s);
+        // Pushed states carry the live connected view; keep the pills fresh
+        // without a round-trip.
+        setHardware((h) => ({ ...h, connected: s.hardware }));
+        setOffline(false);
+      },
       notice: (t) => setNotice(t),
       offline: () => setOffline(true),
     }).then((u) => { unsub = u; });
@@ -53,7 +63,7 @@ export function CoreProvider({ children }: { children: ReactNode }) {
   }, [notice]);
 
   return (
-    <Ctx.Provider value={{ state, profiles, offline, mock: !isTauri(), notice, refresh }}>
+    <Ctx.Provider value={{ state, profiles, hardware, offline, mock: !isTauri(), notice, refresh }}>
       {children}
     </Ctx.Provider>
   );

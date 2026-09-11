@@ -102,15 +102,31 @@ function EqGraph({ bands }: { bands: number[] }) {
 }
 
 function AudioSide() {
-  const { state } = useCore();
+  const { state, hardware } = useCore();
   const [hrtf, setHrtf] = useState(true);
   const [tamer, setTamer] = useState(true);
   const [toShare, setToShare] = useState(false);
+  const [picking, setPicking] = useState(false);
+  // Local pick until the section is wired to save_profile; defaults to the
+  // headset the core resolved from the default endpoint.
+  const [pick, setPick] = useState<string | null>(null);
   const chain = state.audio_chain;
+  const headset = hardware.headsets.find((h) => h.id === (pick ?? hardware.connected.headset));
   return (
     <aside className="side">
-      <Card title="Headset" action="Change">
-        <div className="hw"><div className="ic" /><div><b>No headset selected</b><span>Pick one from the hardware library</span></div></div>
+      <Card title="Headset" action={picking ? "Done" : "Change"} onAction={() => setPicking(!picking)}>
+        {picking ? (
+          <label className="field">
+            <select value={headset?.id ?? ""} onChange={(e) => { setPick(e.target.value || null); setPicking(false); }}>
+              <option value="">From plugged hardware</option>
+              {hardware.headsets.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
+            </select>
+          </label>
+        ) : headset ? (
+          <div className="hw"><div className="ic" /><div><b>{headset.name}</b><span>{headset.curve ? `Measured curve · ${headset.source || "imported"}` : "No measured curve yet"}{hardware.connected.headset === headset.id ? " · plugged" : ""}</span></div></div>
+        ) : (
+          <div className="hw"><div className="ic" /><div><b>No headset selected</b><span>Add one on the Profiles screen</span></div></div>
+        )}
       </Card>
       <Card>
         <Toggle label="Spatial audio" sub="HRTF · Relay Arena" on={hrtf} onChange={setHrtf} />
@@ -173,14 +189,30 @@ function Scene() {
 }
 
 function DisplaySide() {
-  const { state } = useCore();
+  const { state, hardware } = useCore();
   const [follow, setFollow] = useState(true);
   const [second, setSecond] = useState(true);
   const [trueColors, setTrueColors] = useState(true);
+  const [picking, setPicking] = useState(false);
+  const [pick, setPick] = useState<string | null>(null);
+  const mainId = hardware.connected.monitors.find((m) => m.primary)?.id ?? null;
+  const monitor = hardware.monitors.find((m) => m.id === (pick ?? mainId));
+  const plugged = monitor && hardware.connected.monitors.find((c) => c.id === monitor.id);
   return (
     <aside className="side">
-      <Card title="Monitor" action="Change">
-        <div className="hw"><div className="ic sq" /><div><b>No monitor selected</b><span>Pick one from the hardware library</span></div></div>
+      <Card title="Monitor" action={picking ? "Done" : "Change"} onAction={() => setPicking(!picking)}>
+        {picking ? (
+          <label className="field">
+            <select value={monitor?.id ?? ""} onChange={(e) => { setPick(e.target.value || null); setPicking(false); }}>
+              <option value="">Main monitor</option>
+              {hardware.monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+        ) : monitor ? (
+          <div className="hw"><div className="ic sq" /><div><b>{monitor.name}</b><span>{monitor.panel || "Panel unknown"}{plugged ? (plugged.primary ? " · main" : " · second") : ""}{monitor.ddcci ? ` · DDC/CI` : ""}</span></div></div>
+        ) : (
+          <div className="hw"><div className="ic sq" /><div><b>No monitor selected</b><span>Add one on the Profiles screen</span></div></div>
+        )}
       </Card>
       <Card>
         <Toggle label="Follow game focus" sub="Apply on launch, restore on exit" on={follow} onChange={setFollow} />
