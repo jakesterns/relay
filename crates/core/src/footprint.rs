@@ -36,6 +36,24 @@ impl FootprintMeter {
     }
 }
 
+/// Give back working-set pages the OS mapped for one-off work (COM, WASAPI
+/// and display DLLs touched by the hardware probe). Pages fault back in on
+/// demand; what remains resident afterwards is what the core actually uses.
+/// Called after startup init and after each (rare) hardware re-probe so the
+/// ≤10 MB idle budget reflects steady state, not probe residue.
+#[cfg(windows)]
+pub fn trim_working_set() {
+    use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: trimming our own process; purely a paging hint.
+    unsafe {
+        let _ = K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
+#[cfg(not(windows))]
+pub fn trim_working_set() {}
+
 #[cfg(windows)]
 fn rss_bytes() -> u64 {
     use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};

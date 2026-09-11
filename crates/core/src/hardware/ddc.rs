@@ -108,6 +108,30 @@ mod tests {
 vcp(02 04 05 08 10 12 14(05 08 0B) 16 18 1A 52 60(0F 10 11 12) AC AE B2 B6 C0 C6 C8 C9 CA CC(01 02 03) D6(01 04 05) DF E4 E5 E6 E7 E8 E9 EA EB EF F0(00 01) FD)\
 mswhql(1)asset_eep(40)mccs_ver(2.1))";
 
+    /// Captured live from the dev PC's LG ULTRAGEAR+ over DDC/CI
+    /// (`live_ddc_caps`, 2026-09-10) — note the trailing spaces inside nested
+    /// value lists and codes listed out of numeric order.
+    const LG_ULTRAGEAR_LIVE: &str = "(prot(monitor)type(lcd)model(WK95U)cmds(01 02 03 0C E3 F3)\
+vcp(02 04 05 08 10 12 14(05 08 0B ) 16 18 1A 52 60(11 12 0F 10 ) AC AE B2 B6 C0 C6 C8 C9 D6(01 04) \
+DF 62 8D F4 F5(01 02 03 04) F6(00 01 02) 4D 4E 4F 15(01 06 11 13 14 15 18 19 20 22 23 24 28 29 32 48) \
+F7(00 01 02 03) F8(00 01) F9 E4 E5 E6 E7 E8 E9 EA EB EF FA(00 01) FD(00 01) FE(00 01 02) FF)\
+mccs_ver(2.1)mswhql(1))";
+
+    #[test]
+    fn parses_the_live_lg_capabilities_string() {
+        let codes = parse_vcp_codes(LG_ULTRAGEAR_LIVE);
+        assert_eq!(codes.len(), 47);
+        // Brightness, contrast, input select, volume must be advertised.
+        for want in [0x10, 0x12, 0x60, 0x62] {
+            assert!(codes.contains(&want), "missing {want:02X}");
+        }
+        // Values of 15(…)/60(…) are settings, not codes.
+        for not in [0x01, 0x06, 0x0F, 0x11, 0x13] {
+            assert!(!codes.contains(&not), "leaked nested value {not:02X}");
+        }
+        assert_eq!(parse_model(LG_ULTRAGEAR_LIVE).as_deref(), Some("WK95U"));
+    }
+
     #[test]
     fn extracts_top_level_vcp_codes_only() {
         let codes = parse_vcp_codes(LG_STYLE);

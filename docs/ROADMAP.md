@@ -37,12 +37,12 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] Crash-restore test harness: apply a profile, kill the core with `taskkill /F`, restart, assert restore ran. Automated, uses the `Recorder` backends.
 
 ## M1 — Hardware library and probe
-Profiles only match "Any" until the core knows what is plugged in.
+**Done 2026-09-10** (branch `m1-hardware`; plan + live measurements in `docs/plans/M1-hardware.md`). Re-selection on a default-endpoint switch measured live at 26–41 ms (« 1 s gate), no focus change; footprint gate still green (idle RSS 4.4 MB after a post-probe working-set trim). Second-monitor and physical-unplug live passes deferred with runbooks (one monitor attached this session).
 
-- [ ] `relay-core::hardware`: real `HardwareProbe`. Default WASAPI render endpoint (IMMDeviceEnumerator) → stable `HeadsetId`; monitors via `QueryDisplayConfig` + EDID (manufacturer, product code, serial) → stable `MonitorId`.
-- [ ] Hardware library file (`hardware.json`): headsets with measured curves, monitors with panel type and DDC/CI capability. Importer for the AutoEQ results format (oratory1990 / crinacle live there).
-- [ ] Device-change events (WM_DEVICECHANGE / IMMNotificationClient) → re-select profile without a focus change.
-- [ ] UI: "Add" flows on the Profiles screen, live "Plugged / Main / Second" pills, headset/monitor pickers on the Games screen.
+- [x] `relay-core::hardware`: real `HardwareProbe`. Endpoint keys prefer the device container GUID (port-stable for serialised USB gear), library headsets are user-named objects bound to endpoint keys; monitors get EDID-derived `mon:<PNP><product>:<serial>` ids (pure function of the panel, fixture-tested) with `HMONITOR` mapping + DDC/CI VCP lists for M2.
+- [x] Hardware library file (`hardware.json`): headsets with measured curves, monitors with panel type and DDC/CI capability. AutoEQ results importer (local file/paste only; real oratory1990 fixture checked in).
+- [x] Device-change events (IMMNotificationClient + hidden-window WM_DISPLAYCHANGE/WM_DEVICECHANGE) → re-select without a focus change.
+- [x] UI: "Add" flows on the Profiles screen, live "Plugged / Main / Second" pills, headset/monitor pickers on the profile form and Games screen.
 
 ## M2 — Display profiles (first real apply/restore)
 - [ ] `relay-display::ddc`: DDC/CI over `dxva2` (`GetVCPFeatureAndVCPFeatureReply`, `SetVCPFeature`), capabilities string parsing, per-monitor handle from the monitor the game window is on.
@@ -103,7 +103,7 @@ Profiles only match "Any" until the core knows what is plugged in.
 |---|---|---|
 | M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
 | M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass |
-| M1 Hardware library & probe | `docs/plans/M1-hardware.md` | not started |
+| M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | not started |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | blocked: EV cert |

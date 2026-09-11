@@ -413,6 +413,25 @@ mod tests {
         assert_eq!(instance, r"DISPLAY\GSM5C7C\5&3906ed52&0&UID4358");
     }
 
+    /// Manual: prints each monitor's raw MCCS capabilities string and the
+    /// parsed VCP codes. `cargo test -p relay-core live_ddc -- --ignored --nocapture`
+    #[test]
+    #[ignore = "talks DDC/CI to the attached monitor; run by hand"]
+    fn live_ddc_caps() {
+        let _com = ComGuard::init();
+        for m in probe_monitors(false) {
+            let caps = ddc_capabilities(HMONITOR(m.hmonitor as *mut _));
+            println!("== {} ({})", m.name, m.id.0);
+            match caps {
+                Some(raw) => {
+                    println!("raw: {raw}");
+                    println!("vcp: {:02X?}", ddc::parse_vcp_codes(&raw));
+                }
+                None => println!("no DDC/CI reply"),
+            }
+        }
+    }
+
     /// Live smoke test: on this dev machine the probe must see at least one
     /// endpoint and the LG monitor with an EDID-derived id.
     #[test]

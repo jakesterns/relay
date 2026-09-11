@@ -193,6 +193,10 @@ impl Service {
         #[cfg(not(windows))]
         let _ = (handler, events_tx);
 
+        // Startup touched COM/WASAPI/display DLLs (probe, watcher). Hand those
+        // pages back so idle RSS reflects steady state.
+        crate::footprint::trim_working_set();
+
         let mut tick = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
@@ -235,6 +239,7 @@ impl Service {
         g.last_report = report;
         drop(g);
         reselect(&self.inner, &self.events);
+        crate::footprint::trim_working_set();
     }
 
     fn on_foreground(&self, fg: Foreground) {

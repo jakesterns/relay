@@ -536,6 +536,44 @@ mod tests {
         assert!(matches!(back.method, Method::GetProfile { .. }));
     }
 
+    /// Locks the wire shape that `ui/src/lib/ipc.ts` mirrors.
+    #[test]
+    fn hardware_methods_wire_shape() {
+        use crate::hardware::{Headset, HeadsetKind};
+        let m = Method::SaveHardware {
+            item: HardwareItem::Headset(Box::new(Headset {
+                id: crate::types::HeadsetId("hd560s".into()),
+                name: "HD 560S".into(),
+                kind: HeadsetKind::Headphone,
+                curve: Some(vec![(20.0, -4.0)]),
+                source: "oratory1990".into(),
+                endpoints: vec!["ep:c:abc".into()],
+            })),
+        };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "save_hardware");
+        assert_eq!(v["params"]["item"]["kind"], "headset");
+        assert_eq!(v["params"]["item"]["value"]["id"], "hd560s");
+        assert_eq!(v["params"]["item"]["value"]["kind"], "headphone");
+        assert_eq!(v["params"]["item"]["value"]["curve"][0][0], 20.0);
+
+        let r = Reply::Curve { points: vec![(20.0, -4.0)] };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["type"], "curve");
+        assert_eq!(v["points"][0][1], -4.0);
+
+        let v = serde_json::to_value(Request {
+            id: 2,
+            method: Method::ImportCurve {
+                headset: crate::types::HeadsetId("hd560s".into()),
+                csv: "20,-4\n100,0".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(v["method"], "import_curve");
+        assert_eq!(v["params"]["headset"], "hd560s");
+    }
+
     #[test]
     fn outbound_distinguishes_response_from_event() {
         let resp = Outbound::Response { id: 1, result: Reply::Pong };
