@@ -61,6 +61,9 @@ here) and the two HKLM components. Runbook: `docs/dev/uninstall-vm.md`.
       covers executables. `scripts/stage-bundle.ps1` builds and stages all of
       them (both DLLs need their `com` feature explicitly — the workspace
       takes those crates with `default-features = false` through the core).
+      The payload is declared in `ui/src-tauri/tauri.bundle.conf.json`, an
+      overlay passed to `tauri build --config`, **not** in the main
+      `tauri.conf.json` — see the decision below.
       **Autostart: see the decision below** — it is a first-run screen toggle
       plus an `/AUTOSTART` installer switch, not a wizard checkbox.
 - [x] Core started by the installer; UI opens to the first-run consent screen.
@@ -114,6 +117,24 @@ installer's job is to copy files, and Relay's first-run screen is already
 where the user answers every other "may we change something" question.
 Silent and managed installs get `Relay_0.1.0_x64-setup.exe /S /AUTOSTART`,
 which runs the same `relay-core autostart on` the checklist asked for.
+
+**Packaging config lives in an overlay, not in `tauri.conf.json`.**
+`tauri-build` fails the `relay-ui` build script when a declared `externalBin`
+is missing, and the staged payload is a build artifact that is not in the
+repo. With the payload in the main config, a fresh checkout could not run
+`cargo build`, `cargo clippy` or `cargo test` at all — CI would have died
+before compiling a line. `ui/src-tauri/tauri.bundle.conf.json` holds
+`externalBin`, `resources` and `installerHooks`, and is merged in only by the
+packaging step:
+
+```
+pwsh scripts/stage-bundle.ps1
+cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json
+```
+
+Verified by moving the staging directory aside and confirming
+`cargo build -p relay-ui` still succeeds, then confirming the overlay build
+still emits all five payload files and the hook include.
 
 **The uninstall plan is a pure function of a probed `MachineState`.** Only
 `probe()` reads the machine; the plan, its ordering and its rendering are pure,

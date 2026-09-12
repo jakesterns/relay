@@ -40,8 +40,17 @@ machine cannot:
 3. Inside the guest: WebView2 (usually already present on 11), and an audio
    endpoint. A virtual audio device is enough; the APO registers against
    whatever the default render endpoint is.
-4. Copy the repo's `scripts/` folder and
-   `target/release/bundle/nsis/Relay_<version>_x64-setup.exe` into the guest.
+4. Build the installer on the host and copy it, with the repo's `scripts/`
+   folder, into the guest:
+
+   ```powershell
+   pwsh scripts/stage-bundle.ps1
+   cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json
+   ```
+
+   The `--config` overlay carries the payload and the NSIS hooks. It is kept
+   out of the main `tauri.conf.json` so that a checkout without the staged
+   binaries still builds — see the M7 plan.
 5. **Take the checkpoint now.** Every run starts from it; the cycle is not
    idempotent because an install is not.
 

@@ -43,21 +43,11 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "externalBin": [
-      "binaries/relay-core",
-      "binaries/relay-share",
-      "binaries/relay-preview"
-    ],
-    "resources": {
-      "binaries/relay_apo.dll": "./relay_apo.dll",
-      "binaries/relay_vdevice.dll": "./relay_vdevice.dll"
-    },
     "shortDescription": "Screen and audio share, per-game audio and colour profiles",
     "longDescription": "Relay shares one PC's screen and audio to another PC as a software capture card, and applies per-game audio EQ, spatial audio and display colour profiles keyed to your headset and monitor.",
     "windows": {
       "nsis": {
-        "installMode": "currentUser",
-        "installerHooks": "installer/hooks.nsh"
+        "installMode": "currentUser"
       }
     }
   }

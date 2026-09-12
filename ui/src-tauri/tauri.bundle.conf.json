@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": [
+      "binaries/relay-core",
+      "binaries/relay-share",
+      "binaries/relay-preview"
+    ],
+    "resources": {
+      "binaries/relay_apo.dll": "./relay_apo.dll",
+      "binaries/relay_vdevice.dll": "./relay_vdevice.dll"
+    },
+    "windows": {
+      "nsis": {
+        "installerHooks": "installer/hooks.nsh"
+      }
+    }
+  }
+}

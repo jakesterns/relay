@@ -24,6 +24,15 @@
   the workspace build takes them with default-features = false through the
   core, so they are built explicitly here).
 
+  The payload is declared in ui/src-tauri/tauri.bundle.conf.json rather than
+  the main tauri.conf.json, and that overlay has to be passed to `tauri build`
+  explicitly. The reason is CI: tauri-build fails the crate's build script
+  when an externalBin is missing, and the staged binaries are build artifacts
+  that are not in the repo -- so a plain `cargo build`, `cargo clippy` or
+  `cargo test` on a fresh checkout would fail before it compiled anything.
+  Keeping packaging config out of the default config means only the packaging
+  step needs the payload.
+
 .PARAMETER SkipBuild
   Stage from whatever is already in target\release.
 #>
@@ -96,4 +105,4 @@ foreach ($src in $resources) {
 
 Write-Host ''
 Write-Host "staged into $staging"
-Write-Host 'now run:  cd ui; pnpm tauri build --bundles nsis'
+Write-Host 'now run:  cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json'
