@@ -96,6 +96,27 @@ fn default_render_device() -> Result<windows::Win32::Media::Audio::IMMDevice, Se
     }
 }
 
+/// The default render endpoint's GUID — the `{...}` MMDevices registry key
+/// name and the suffix of the shared-memory section the APO serves. Device
+/// ids look like `{0.0.0.00000000}.{f8ae226b-…}`; the last braced group is
+/// the endpoint GUID.
+pub fn default_render_endpoint_guid() -> Result<String, SessionsError> {
+    let _com = ComGuard::new()?;
+    let device = default_render_device()?;
+    // SAFETY: device is valid; the returned PWSTR is CoTaskMem-owned and
+    // freed below after copying out.
+    let id = unsafe {
+        let p = device.GetId()?;
+        let s = p.to_string().unwrap_or_default();
+        CoTaskMemFree(Some(p.0 as _));
+        s
+    };
+    match id.rfind('{') {
+        Some(i) => Ok(id[i..].to_string()),
+        None => Ok(id),
+    }
+}
+
 /// Probe the default render endpoint: active session PIDs + exclusive flag.
 ///
 /// Costs one COM activation and one shared-mode `Initialize` attempt on a

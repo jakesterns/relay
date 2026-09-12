@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/audio",
+    "crates/audio/apo",
     "crates/capture",
     "crates/vdevice",
     "crates/display",
@@ -21,6 +22,9 @@ relay-core = { path = "crates/core" }
 # default-features off so the always-on core can take params + sessions
 # without the FFT-heavy DSP; consumers that want the chain add `features = ["dsp"]`.
 relay-audio = { path = "crates/audio", default-features = false }
+# Same idea: default-features off gives the registration/status engine only;
+# the APO DLL itself (feature "com") hosts the DSP.
+relay-apo = { path = "crates/audio/apo", default-features = false }
 relay-capture = { path = "crates/capture" }
 relay-vdevice = { path = "crates/vdevice" }
 relay-display = { path = "crates/display" }

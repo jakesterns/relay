@@ -106,8 +106,8 @@ pub const BLOCK_SIZE: usize = std::mem::size_of::<ParamBlock>();
 /// [`ChainParams`] → POD. Bands beyond [`MAX_BANDS`] are dropped (the DSP
 /// would refuse them anyway).
 pub fn encode(p: &ChainParams) -> PodParams {
-    let mut bands = [PodBand { kind: 0, freq_hz: 0.0, gain_db: 0.0, q: 0.0, enabled: 0 };
-        MAX_BANDS];
+    let mut bands =
+        [PodBand { kind: 0, freq_hz: 0.0, gain_db: 0.0, q: 0.0, enabled: 0 }; MAX_BANDS];
     let n = p.bands.len().min(MAX_BANDS);
     for (dst, src) in bands.iter_mut().zip(p.bands.iter().take(n)) {
         *dst = PodBand {
@@ -207,7 +207,7 @@ impl ParamBlock {
         let pod = encode(p);
         let s = self.seq.load(Ordering::Relaxed);
         self.seq.store(s.wrapping_add(1), Ordering::Release); // odd: in progress
-        // SAFETY: single writer; readers seeing an odd/changed seq discard.
+                                                              // SAFETY: single writer; readers seeing an odd/changed seq discard.
         unsafe { std::ptr::write_volatile(self.params.get(), pod) };
         self.seq.store(s.wrapping_add(2), Ordering::Release);
     }
@@ -250,17 +250,15 @@ mod win {
     //! audiodg) grants the interactive group read/write so the user's core
     //! can steer it; everyone else gets nothing.
 
-    use std::ffi::c_void;
-
     use windows::core::{Owned, PCWSTR};
-    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::Security::Authorization::{
         ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
     };
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::System::Memory::{
-        CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
-        FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
+        CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ,
+        FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, PAGE_READWRITE,
     };
     use windows::Win32::System::Threading::{
         CreateEventW, OpenEventW, SetEvent, EVENT_MODIFY_STATE, SYNCHRONIZATION_SYNCHRONIZE,
@@ -328,8 +326,9 @@ mod win {
                 (Owned::new(h), GetLastError() != ERROR_ALREADY_EXISTS)
             };
             // SAFETY: mapping is a valid section handle sized BLOCK_SIZE.
-            let view =
-                unsafe { MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BLOCK_SIZE) };
+            let view = unsafe {
+                MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BLOCK_SIZE)
+            };
             if view.Value.is_null() {
                 return Err(windows::core::Error::from_thread());
             }
@@ -358,8 +357,9 @@ mod win {
                 )?)
             };
             // SAFETY: as in `create`.
-            let view =
-                unsafe { MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BLOCK_SIZE) };
+            let view = unsafe {
+                MapViewOfFile(*mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, BLOCK_SIZE)
+            };
             if view.Value.is_null() {
                 return Err(windows::core::Error::from_thread());
             }
@@ -408,7 +408,10 @@ mod tests {
 
     fn sample_params() -> ChainParams {
         ChainParams {
-            bands: vec![BandParams::peaking(1000.0, 3.5, 1.4), BandParams::peaking(80.0, -2.0, 0.7)],
+            bands: vec![
+                BandParams::peaking(1000.0, 3.5, 1.4),
+                BandParams::peaking(80.0, -2.0, 0.7),
+            ],
             limiter: Some(LimiterParams::new(150.0, -12.0)),
             hrtf: true,
         }
@@ -426,10 +429,7 @@ mod tests {
     fn block_layout_bypass_is_first_word_and_pod_sized() {
         assert_eq!(std::mem::offset_of!(ParamBlock, bypass), 0);
         // Everything is u32/f32: no hidden padding in the POD image.
-        assert_eq!(
-            std::mem::size_of::<PodParams>(),
-            4 * (1 + 5 * MAX_BANDS + 6 + 1),
-        );
+        assert_eq!(std::mem::size_of::<PodParams>(), 4 * (1 + 5 * MAX_BANDS + 6 + 1),);
     }
 
     #[test]

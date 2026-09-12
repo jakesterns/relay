@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 # params + sessions only: the DSP (FFT) must not live in the always-on core.
 relay-audio.workspace = true
+# fxstore/ids only (no "com" feature): install status + registration engine.
+relay-apo.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

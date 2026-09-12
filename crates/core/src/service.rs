@@ -52,6 +52,7 @@ impl Backends {
                 #[cfg(windows)]
                 {
                     Self {
+                        audio: Arc::new(crate::audio_apo::ApoAudioControl),
                         hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
                         ..Self::default()
                     }

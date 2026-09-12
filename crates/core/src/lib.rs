@@ -11,6 +11,7 @@
 //! other processes and is loaded on demand.
 
 pub mod apply;
+pub mod audio_apo;
 pub mod audio_bridge;
 pub mod autostart;
 pub mod backup;

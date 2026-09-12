@@ -1,0 +1,43 @@
+[package]
+name = "relay-apo"
+description = "Relay endpoint APO: hosts relay-audio::dsp inside the Windows audio engine, plus the FX property-store install/uninstall engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# cdylib: the APO DLL audiodg loads. rlib: the fxstore engine and tests, and
+# the core's install path.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The COM APO itself (pulls the FFT-heavy DSP). The core takes this crate
+# with default-features = false: fxstore/ids/livereg only, no DSP, so the
+# footprint gate stays honest.
+default = ["com"]
+com = ["relay-audio/dsp"]
+
+[dependencies]
+relay-audio = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64 = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-core.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Apo",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }

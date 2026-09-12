@@ -3466,6 +3466,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "relay-apo"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "relay-audio",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
+]
+
+[[package]]
 name = "relay-audio"
 version = "0.1.0"
 dependencies = [
@@ -3510,6 +3523,7 @@ dependencies = [
  "anyhow",
  "directories",
  "parking_lot",
+ "relay-apo",
  "relay-audio",
  "serde",
  "serde_json",
