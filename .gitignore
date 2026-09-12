@@ -25,3 +25,5 @@ Thumbs.db
 /probe-out.json
 /*-out.log
 /*-err.log
+# Installer payload staged by scripts/stage-bundle.ps1 (built artifacts, not source)
+ui/src-tauri/binaries/

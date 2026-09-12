@@ -155,8 +155,24 @@ pub enum Method {
     /// Remove the recorded camera registration; empties `installed.json`.
     /// Same gate.
     UninstallVcam,
+    /// Everything the uninstaller would touch on this machine, in order.
+    /// Read-only — the same plan `relay-core uninstall --dry-run` prints, so
+    /// the Settings card can never promise something the uninstaller does
+    /// not do.
+    UninstallPlan {
+        /// Preview with `%LOCALAPPDATA%\Relay` kept (the default).
+        #[serde(default = "crate::ipc::default_true")]
+        keep_data: bool,
+    },
+    /// Hand over to the Windows uninstaller (one installer, one uninstaller)
+    /// and stop the core. Does not itself remove anything.
+    LaunchUninstaller,
     Subscribe,
     Shutdown,
+}
+
+pub(crate) fn default_true() -> bool {
+    true
 }
 
 /// One library entry for `SaveHardware`.

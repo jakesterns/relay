@@ -449,6 +449,31 @@ export const api = {
     if (!isTauri()) { mockVdevice.camera_registered = false; return; }
     return invoke<void>("uninstall_vcam");
   },
+  /** Everything the uninstaller would touch, in order. Read-only; generated
+   *  by the same code that runs the uninstall (`relay-core uninstall`). */
+  async uninstallPlan(keepData: boolean): Promise<string[]> {
+    if (!isTauri()) return [
+      "[ ] Close the Relay window — relay-ui.exe",
+      "[x] Stop the core (restores your audio and display settings) — \\\\.\\pipe\\relay-core",
+      "[ ] Restore the endpoint audio chain — not installed",
+      "[ ] Unregister the virtual camera — not installed",
+      "[ ] Remove the start-at-login entry — HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\Relay",
+      "[x] Delete the program files — <install dir>",
+      keepData
+        ? "[ ] Delete your profiles and settings — %LOCALAPPDATA%\\Relay"
+        : "[x] Delete your profiles and settings — %LOCALAPPDATA%\\Relay",
+      "",
+      keepData
+        ? "Your profiles and hardware library are kept in %LOCALAPPDATA%\\Relay."
+        : "Everything above is removed. Nothing else on this PC was changed by Relay.",
+    ];
+    return invoke<string[]>("uninstall_plan", { keepData });
+  },
+  /** Hand over to the Windows uninstaller and stop the core. */
+  async launchUninstaller(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("launch_uninstaller");
+  },
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];
     return invoke<DiscoveredReceiver[]>("discover_receivers");

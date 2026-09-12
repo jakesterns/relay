@@ -93,8 +93,11 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] Multi-source switching (display, window, region) without restarting the share — same encoder, track and peer connection; one forced IDR per swap.
 
 ## M7 — Installer and uninstaller
-- [ ] NSIS per-user install of core + UI; autostart opt-in; Settings "Uninstall" button.
-- [ ] Uninstaller restores the APO chain, removes drivers and the Run key, offers to delete data. Tested from a clean VM snapshot.
+**Code-complete 2026-09-12** (branch `m7-installer`; plan + diff summaries in `docs/plans/M7-installer.md`). The install → share → uninstall → diff cycle ran four ways on the dev machine with a zero-difference registry diff every time, and an empty file diff except the data folder when the user keeps it. The harness caught one real leftover (Tauri's `HKCU\Software\relay\Relay` install-location record, now removed on every uninstall). Footprint gate 6.21 MB / 0.0 % with the uninstall engine in the core. Deferred: the clean-VM broad-tier pass (no hypervisor on this PC), the live removal of the two opt-in components (needs elevation; APO restore also wants audiodg), and the signed installer (EV cert still not ordered).
+- [x] NSIS per-user install of core + UI; autostart opt-in; Settings "Uninstall" button. Ships seven files in one folder (three sidecar exes + the two opt-in cdylibs, installed but not registered). Autostart is a first-run-screen toggle plus an `/AUTOSTART` installer switch — Tauri's NSIS hooks cannot add a wizard page, and the first run is the better place to ask.
+- [x] Uninstaller restores the APO chain, removes drivers and the Run key, offers to delete data. The plan is a pure function of a probed `MachineState` and is driven by what the components recorded (`apo-backup\<endpoint>.json`, `installed.json`), not a hard-coded list; `relay-core uninstall --dry-run` and the Settings card render the same plan the uninstaller executes.
+- [ ] Clean-VM snapshot test. Scripts written and green on the dev machine (`scripts/vm-cycle.ps1`, `machine-snapshot.ps1`, `snapshot-diff.ps1`); the checkpoint run itself is deferred — runbook in `docs/dev/uninstall-vm.md`.
+- [ ] Signed installer and binaries (EV cert).
 
 ## v1.1 backlog
 - Relay Send VST3 plugin over shared memory (DAW audio under ASIO).
@@ -115,6 +118,6 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | code-complete 2026-09-12; live pass → `docs/dev/vcam-live.md` (needs elevation); mic driver still EV-cert-blocked |
 | M6 Recording & presets | `docs/plans/M6-recording-presets.md` | done 2026-09-11; measured on loopback (0 ms / +0.06 pt CPU / 55 ms replay save); MKV + 1 h roll soak + full-motion 4K60 → MVP validation pass |
-| M7 Installer | `docs/plans/M7-installer.md` | not started |
+| M7 Installer | `docs/plans/M7-installer.md` | code-complete 2026-09-12; install/uninstall cycle green on the dev machine (empty diff); clean-VM + component live removal + signing deferred |
 
 Update the status column when a session starts or finishes a milestone.

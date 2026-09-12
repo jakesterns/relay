@@ -55,7 +55,7 @@ pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
         obs_virtualcam: detect::obs_virtualcam(),
         mic_targets: detect::mic_targets().unwrap_or_default(),
         consent: file.consent,
-        elevated: is_elevated(),
+        elevated: crate::processes::is_elevated(),
     })
 }
 
@@ -180,35 +180,6 @@ pub fn receive_routing(paths: &Paths) -> (bool, Option<String>) {
 #[cfg(not(windows))]
 pub fn receive_routing(_paths: &Paths) -> (bool, Option<String>) {
     (false, None)
-}
-
-#[cfg(windows)]
-fn is_elevated() -> bool {
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{
-        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    // SAFETY: standard token query on our own process; handle closed by drop
-    // of Owned.
-    unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
-        let token = windows::core::Owned::new(token);
-        let mut elev = TOKEN_ELEVATION::default();
-        let mut len = 0u32;
-        GetTokenInformation(
-            *token,
-            TokenElevation,
-            Some(&mut elev as *mut _ as *mut _),
-            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-            &mut len,
-        )
-        .map(|_| elev.TokenIsElevated != 0)
-        .unwrap_or(false)
-    }
 }
 
 #[cfg(test)]

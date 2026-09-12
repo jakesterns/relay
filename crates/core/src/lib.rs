@@ -30,6 +30,7 @@ pub mod service;
 pub mod share;
 pub mod status;
 pub mod types;
+pub mod uninstall;
 pub mod vdevice;
 pub mod winloop;
 

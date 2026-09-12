@@ -203,9 +203,7 @@ async fn delete_preset(id: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn set_recording_settings(
-    settings: relay_core::presets::RecordingSettings,
-) -> CmdResult<()> {
+async fn set_recording_settings(settings: relay_core::presets::RecordingSettings) -> CmdResult<()> {
     match call(Method::SetRecordingSettings { settings }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
@@ -362,6 +360,22 @@ async fn uninstall_vcam() -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn uninstall_plan(keep_data: bool) -> CmdResult<Vec<String>> {
+    match call(Method::UninstallPlan { keep_data }).await? {
+        Reply::DryRun { lines } => Ok(lines),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn launch_uninstaller() -> CmdResult<()> {
+    match call(Method::LaunchUninstaller).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
         Reply::Receivers { receivers } => Ok(receivers),
@@ -493,6 +507,8 @@ pub fn run() {
             vdevice_dry_run,
             install_vcam,
             uninstall_vcam,
+            uninstall_plan,
+            launch_uninstaller,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

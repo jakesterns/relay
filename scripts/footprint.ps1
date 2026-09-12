@@ -28,7 +28,13 @@ $exe = Join-Path $root "target\release\relay-core.exe"
 
 if (-not $NoBuild) {
   Write-Host "building relay-core (release)..."
-  & cargo build --release -p relay-core
+  # cargo reports progress on stderr, which Windows PowerShell turns into a
+  # terminating error while ErrorActionPreference is 'Stop'. CI runs pwsh,
+  # where this does not bite; the exit code is the signal either way.
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try { & cargo build --release -p relay-core 2>&1 | ForEach-Object { Write-Host "  $_" } }
+  finally { $ErrorActionPreference = $prev }
   if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 }
 if (-not (Test-Path $exe)) { throw "missing $exe" }

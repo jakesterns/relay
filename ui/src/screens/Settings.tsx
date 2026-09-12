@@ -109,6 +109,7 @@ export function Settings() {
           <p className="p" style={{ marginBottom: 10 }}>Put every audio and display setting back to what Windows had before Relay touched it. Safe to press at any time.</p>
           <button className="btn" onClick={() => api.restoreAll().then(refresh)}>Restore original state now</button>
         </Card>
+        <UninstallCard />
       </section>
       <aside className="side">
         <Card>
@@ -118,8 +119,62 @@ export function Settings() {
           <Kv k="Version" v="0.1.0" mono />
         </Card>
         <p className="note">Uninstalling removes every component listed here, the startup entry, and restores the audio chain. Nothing is left behind.</p>
+        <p className="note">Relay is installed for your user account only — it writes nothing to Program Files and installs no drivers unless you opt in above.</p>
       </aside>
     </>
+  );
+}
+
+/** Uninstall. The listing is not written here — it comes from the core's
+ *  uninstall planner, the same code `relay-core uninstall` executes, so what
+ *  the user reads is what actually happens. The button hands over to the one
+ *  Windows uninstaller rather than removing anything itself. */
+function UninstallCard() {
+  const { offline, mock } = useCore();
+  const [keepData, setKeepData] = useState(true);
+  const [lines, setLines] = useState<string[] | null>(null);
+  const [open, setOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api.uninstallPlan(keepData)
+      .then((l) => { if (!cancelled) setLines(l); })
+      .catch(() => { if (!cancelled) setLines(null); });
+    return () => { cancelled = true; };
+  }, [open, keepData, offline]);
+
+  return (
+    <Card title="Uninstall Relay">
+      <p className="p">Removing Relay puts your audio and display settings back first, then takes out every component it registered. Nothing is left behind.</p>
+      {!open ? (
+        <button className="btn q" onClick={() => setOpen(true)}>Show what will be removed…</button>
+      ) : (
+        <div className="consent">
+          <Toggle on={keepData} onChange={setKeepData}
+            label="Keep my profiles and hardware library"
+            sub="Your tuning work stays in %LOCALAPPDATA%\Relay so a reinstall picks it up. Turn this off to delete it too." />
+          {lines === null
+            ? <p className="note">{offline && !mock ? "Core offline — cannot read the plan." : "Reading…"}</p>
+            : lines.map((l, i) => (
+              l === ""
+                ? <div key={`gap-${i}`} style={{ height: 8 }} />
+                : l.startsWith("[")
+                  ? <div className="mono" key={l} style={{ fontSize: 12 }}>{l}</div>
+                  : <p className="p small" key={l}>{l}</p>
+            ))}
+          <div className="ab">
+            <button className="btn" disabled={lines === null}
+              onClick={() => void api.launchUninstaller().catch((e) => setError(String((e as { message?: string })?.message ?? e)))}>
+              Uninstall Relay
+            </button>
+            <button className="btn q" onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+          {error && <div className="offline"><i />{error}</div>}
+        </div>
+      )}
+    </Card>
   );
 }
 

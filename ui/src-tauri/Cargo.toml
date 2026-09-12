@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "relay-ui"
 description = "Relay desktop shell (Tauri). Separate process; closing the window costs nothing."
 version.workspace = true

@@ -153,9 +153,15 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("installed.json");
 
-        let mut f = InstalledFile::default();
-        f.consent =
-            Some(Consent { decided_at: iso_now(), apo: false, camera: true, microphone: false });
+        let mut f = InstalledFile {
+            consent: Some(Consent {
+                decided_at: iso_now(),
+                apo: false,
+                camera: true,
+                microphone: false,
+            }),
+            ..Default::default()
+        };
         f.record(Component {
             id: CAMERA_MEDIA_SOURCE.into(),
             installed_at: iso_now(),

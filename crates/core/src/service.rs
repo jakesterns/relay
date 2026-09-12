@@ -57,7 +57,6 @@ impl Backends {
                         audio: Arc::new(crate::audio_apo::ApoAudioControl),
                         hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
                         display: Arc::new(crate::display_backend::WinDisplay::new()),
-                        ..Self::default()
                     }
                 }
                 #[cfg(not(windows))]
@@ -1078,6 +1077,25 @@ impl IpcHandler {
             Method::InstallVcam | Method::UninstallVcam => {
                 Reply::Error { message: "Windows only".into() }
             }
+            Method::UninstallPlan { keep_data } => {
+                let paths = g.paths.clone();
+                drop(g);
+                Reply::DryRun { lines: crate::uninstall::plan(&paths, keep_data).lines() }
+            }
+            // One installer, one uninstaller: Settings hands over to the
+            // Windows uninstaller rather than doing its own removal, then
+            // stops the core so the files are free.
+            Method::LaunchUninstaller => match crate::uninstall::launch_uninstaller() {
+                Ok(path) => {
+                    drop(g);
+                    let _ = self
+                        .events
+                        .send(Event::Notice { text: format!("Started {}", path.display()) });
+                    let _ = self.shutdown.send(CoreEvent::Shutdown);
+                    Reply::Ok
+                }
+                Err(e) => Reply::Error { message: format!("{e:#}") },
+            },
             Method::Subscribe => Reply::Ok,
             Method::Shutdown => {
                 let _ = self.shutdown.send(CoreEvent::Shutdown);

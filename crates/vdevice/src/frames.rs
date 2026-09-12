@@ -384,10 +384,14 @@ mod tests {
         b
     }
 
+    /// The block has to be big enough for its slots plus the header. Both
+    /// sides are consts, so this is a compile-time check rather than a test
+    /// that can only fail after the binary already exists.
+    const _: () = assert!(BLOCK_SIZE > SLOTS * SLOT_BYTES);
+
     #[test]
     fn header_layout_magic_first() {
         assert_eq!(std::mem::offset_of!(FrameBlock, magic), 0);
-        assert!(BLOCK_SIZE > SLOTS * SLOT_BYTES);
     }
 
     #[test]

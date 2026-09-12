@@ -382,7 +382,7 @@ impl CamStream {
             mt.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
             mt.SetUINT32(&MF_MT_DEFAULT_STRIDE, width)?;
             mt.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
-            mt.SetUINT32(&MF_MT_SAMPLE_SIZE, (width * height * 3 / 2) as u32)?;
+            mt.SetUINT32(&MF_MT_SAMPLE_SIZE, width * height * 3 / 2)?;
 
             let descriptor = MFCreateStreamDescriptor(0, &[Some(mt.clone())])?;
             descriptor.GetMediaTypeHandler()?.SetCurrentMediaType(&mt)?;
@@ -426,7 +426,7 @@ impl IMFMediaEventGenerator_Impl for CamStream_Impl {
         flags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
     ) -> windows::core::Result<IMFMediaEvent> {
         // SAFETY: delegation to the event queue.
-        unsafe { self.shared.queue.GetEvent(flags.0 as u32) }
+        unsafe { self.shared.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(
         &self,
@@ -616,7 +616,7 @@ impl IMFMediaEventGenerator_Impl for CamSource_Impl {
         flags: MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
     ) -> windows::core::Result<IMFMediaEvent> {
         // SAFETY: delegation to the event queue.
-        unsafe { self.queue.GetEvent(flags.0 as u32) }
+        unsafe { self.queue.GetEvent(flags.0) }
     }
     fn BeginGetEvent(
         &self,

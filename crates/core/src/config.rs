@@ -126,6 +126,24 @@ impl Paths {
     pub fn presets_file(&self) -> PathBuf {
         self.data_dir().join("presets.json")
     }
+
+    /// Everything under the root that is *user data* rather than program
+    /// files, deepest-independent so each can be removed on its own.
+    ///
+    /// This list exists because Tauri's per-user NSIS installer puts Relay's
+    /// binaries in `%LOCALAPPDATA%\Relay` — the same folder as the data root.
+    /// "Delete my profiles and settings" therefore removes these named paths
+    /// and leaves the folder itself to the uninstaller, instead of
+    /// recursively deleting a directory that contains the running exe.
+    pub fn data_paths(&self) -> Vec<PathBuf> {
+        vec![
+            self.data_dir(),
+            self.log_dir(),
+            self.previews_dir(),
+            self.apo_backup_dir(),
+            self.installed_file(),
+        ]
+    }
 }
 
 #[cfg(test)]
@@ -137,6 +155,30 @@ mod tests {
         let p = Paths::at(r"C:\tmp\relay");
         assert_eq!(p.profiles_file(), PathBuf::from(r"C:\tmp\relay\data\profiles.json"));
         assert_eq!(p.log_file(), PathBuf::from(r"C:\tmp\relay\logs\core.log"));
+    }
+
+    #[test]
+    fn data_paths_cover_every_file_the_core_writes() {
+        let p = Paths::at(r"C:\tmp\relay");
+        let data = p.data_paths();
+        // Every path the core writes has to be reachable from this list, or
+        // "delete my data" leaves something behind.
+        for written in [
+            p.profiles_file(),
+            p.hardware_file(),
+            p.backup_file(),
+            p.presets_file(),
+            p.log_file(),
+            p.installed_file(),
+        ] {
+            assert!(
+                data.iter().any(|d| written == *d || written.starts_with(d)),
+                "{} is not covered by data_paths()",
+                written.display()
+            );
+        }
+        // And none of them is the root itself: the installer owns that folder.
+        assert!(data.iter().all(|d| d != p.root()), "data_paths must not name the root");
     }
 
     #[test]

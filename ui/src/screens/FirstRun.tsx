@@ -9,6 +9,7 @@ import { api } from "../lib/ipc";
 export function FirstRun({ onDone }: { onDone: () => void }) {
   const [apo, setApo] = useState(false);
   const [camMic, setCamMic] = useState(false);
+  const [autostart, setAutostart] = useState(false);
   const [dryRun, setDryRun] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -22,6 +23,10 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
     setError(null);
     try {
       await api.setVdeviceConsent(apo, camMic, camMic);
+      // Asked here rather than in the installer: the installer's job is to
+      // copy files, and a checkbox buried in a setup wizard is a poor place
+      // to ask for the one registry value Relay ever writes on its own.
+      if (autostart) await api.setAutostart(true);
       onDone();
     } catch (e) {
       setError(String((e as { message?: string })?.message ?? e));
@@ -64,6 +69,11 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
             <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span> and removal deletes
             exactly that list.</p>
         </div>
+      </Card>
+
+      <Card title="Start at login">
+        <Toggle on={autostart} onChange={setAutostart} label="Start Relay when I sign in"
+          sub="Adds one value under HKCU\…\CurrentVersion\Run and nothing else. Without it, profiles and hotkeys only work while Relay is open." />
       </Card>
 
       <div className="ab" style={{ marginTop: 12 }}>
