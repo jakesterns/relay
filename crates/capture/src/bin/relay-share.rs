@@ -347,6 +347,8 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
   bench-encode   measure capture -> NV12 -> HEVC hardware encode latency
   send           share to a paired peer (spawned by relay-core)
   recv           receive a share and render it to a window
+                 (--vcam mirrors into the Relay virtual camera;
+                  --mic-route <endpoint-id> renders audio to that endpoint)
 ";
 
 #[cfg(all(test, windows))]

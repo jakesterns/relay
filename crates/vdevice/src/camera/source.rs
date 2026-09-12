@@ -13,11 +13,11 @@
 //! is gone — the camera serves black, never an error: an app that opened
 //! "Relay Camera" must keep getting frames.
 
-#![allow(unsafe_code)] // COM plumbing; every block carries a SAFETY note
-#![allow(non_snake_case)] // COM method names come from the interfaces
-// The COM ABI hands the *_Impl trait methods raw pointers behind safe
-// traits; the frame server guarantees their validity (same rationale as
-// relay-apo's com.rs).
+// COM method names come from the interfaces, and the COM ABI hands the
+// *_Impl trait methods raw pointers behind safe traits; the frame server
+// guarantees their validity (same rationale as relay-apo's com.rs).
+#![allow(unsafe_code)] // every block carries a SAFETY note
+#![allow(non_snake_case)]
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::sync::atomic::{AtomicU64, Ordering};

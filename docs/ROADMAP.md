@@ -79,9 +79,10 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] Hotkeys Ctrl+Alt+S (toggle share) / Ctrl+Alt+P (preview) wired in the core.
 
 ## M5 — Virtual devices on the receiver
-- [ ] Virtual camera via the Windows 11 frame-server API (`MFCreateVirtualCamera` + a registered media source). OBS VirtualCam detection as fallback.
-- [ ] Virtual mic: signed audio-class driver (second signing dependency). Interim: detect VB-Cable and route to it.
-- [ ] First-run consent screen: two opt-ins, "what we install / how to remove", with a dry-run listing.
+**Code-complete 2026-09-12** (branch `m5-vdevices`; plan + session log in `docs/plans/M5-vdevices.md`). The whole chain short of the frame server is proven by tests (media source serves ring frames byte-for-byte in-process; GPU NV12 texture → staging → ring byte-for-byte); footprint gate 4.21 MB / 0.044 % with the vdevice engine in the core. Deferred: the live frame-server pass + Discord/Zoom/Meet verification (needs one elevated registry write — UAC unavailable in the session; runbook `docs/dev/vcam-live.md`), the signed mic driver (EV cert still not ordered), and the interim-mic live check (VB-Cable not installed).
+- [x] Virtual camera via the Windows 11 frame-server API (`MFCreateVirtualCamera` + a registered media source reading the receiver's shared NV12 ring). OBS VirtualCam detection as fallback (feeding it: deferred by decision — all target receivers are 22H2+).
+- [x] Virtual mic interim: detect VB-Cable / VoiceMeeter and route decoded audio to it (`recv --mic-route`); signed audio-class driver deferred on the EV cert.
+- [x] First-run consent screen: two opt-ins, "what we install / how to remove", exact dry-run key listing from the core; nothing registers before opt-in and everything registered lands in `installed.json` (record-then-apply, empty after opt-out).
 
 ## M6 — Recording, replay buffer, presets
 - [ ] Local high-bitrate MP4/MKV recording alongside the share, replay buffer with hotkey save.
@@ -109,7 +110,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
-| M5 Virtual devices | `docs/plans/M5-vdevices.md` | blocked: EV cert (mic) |
+| M5 Virtual devices | `docs/plans/M5-vdevices.md` | code-complete 2026-09-12; live pass → `docs/dev/vcam-live.md` (needs elevation); mic driver still EV-cert-blocked |
 | M6 Recording & presets | `docs/plans/M6-recording-presets.md` | not started |
 | M7 Installer | `docs/plans/M7-installer.md` | not started |
 

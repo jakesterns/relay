@@ -11,6 +11,9 @@
 //! Windows build or a ring that is not up yet must never kill the receive
 //! window. Failures surface once as an NDJSON event and the sink goes
 //! dormant.
+//!
+//! [`RingWriter`] is the camera-free half (staging copy → ring), split out
+//! so the pixel path is testable without the frame server.
 
 #![allow(unsafe_code)] // D3D11 staging copy + map; SAFETY notes inline
 
@@ -29,59 +32,49 @@ use relay_vdevice::frames::{section_name_from_env, SharedFrames};
 /// How often to retry attaching the frame ring while the camera spins up.
 const ATTACH_RETRY: Duration = Duration::from_millis(500);
 
-pub struct VcamSink {
-    _camera: VirtualCamera,
+/// Staging-copies decoded NV12 textures into the shared frame ring.
+#[derive(Default)]
+pub struct RingWriter {
     ring: Option<SharedFrames>,
-    last_attach: Instant,
+    last_attach: Option<Instant>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
     frames_written: u64,
 }
 
-impl VcamSink {
-    /// Create and start "Relay Camera" for a `width`×`height` stream.
-    /// Requires the media source registered (HKLM) and Windows 11 22H2+;
-    /// the caller reports the error and continues without a camera.
-    pub fn start(width: u32, height: u32, fps: u32) -> Result<Self> {
-        let camera = VirtualCamera::start(width, height, fps)
-            .context("MFCreateVirtualCamera (is the camera registered and Windows 22H2+?)")?;
-        info!(width, height, fps, "virtual camera started");
-        Ok(Self {
-            _camera: camera,
-            ring: None,
-            last_attach: Instant::now() - ATTACH_RETRY,
-            staging: None,
-            frames_written: 0,
-        })
+impl RingWriter {
+    /// Use an already-mapped section (tests use a `Local\` one they created).
+    pub fn with_ring(ring: SharedFrames) -> Self {
+        Self { ring: Some(ring), ..Default::default() }
     }
 
     pub fn frames_written(&self) -> u64 {
         self.frames_written
     }
 
-    /// Push one decoded frame. Errors are internal (logged once per cause by
-    /// the caller's `warn`); a ring that is not up yet is simply skipped.
+    /// Copy one decoded frame into the ring. `Ok(false)` = skipped (ring not
+    /// reachable yet, or the frame was rejected); errors are D3D failures.
     pub fn push(
         &mut self,
         device: &ID3D11Device,
         context: &ID3D11DeviceContext,
         frame: &crate::decode::mf::DecodedFrame,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         // Attach the ring lazily: the media source creates the section when
         // the frame server activates it, which races our first frames.
         if self.ring.is_none() {
-            if self.last_attach.elapsed() < ATTACH_RETRY {
-                return Ok(());
+            if self.last_attach.is_some_and(|t| t.elapsed() < ATTACH_RETRY) {
+                return Ok(false);
             }
-            self.last_attach = Instant::now();
+            self.last_attach = Some(Instant::now());
             match SharedFrames::create(&section_name_from_env()) {
                 Ok(s) => self.ring = Some(s),
-                Err(_) => return Ok(()), // camera not consumed yet
+                Err(_) => return Ok(false), // camera not consumed yet
             }
         }
 
         // SAFETY: live textures on one thread; staging desc mirrors the
         // decoder texture; map/unmap balanced.
-        unsafe {
+        let ok = unsafe {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             frame.texture.GetDesc(&mut desc);
 
@@ -136,12 +129,45 @@ impl VcamSink {
                 pitch,
             );
             context.Unmap(staging, 0);
-            if ok {
-                self.frames_written += 1;
-            } else {
-                warn!(w = frame.width, h = frame.height, "frame rejected by ring");
-            }
+            ok
+        };
+        if ok {
+            self.frames_written += 1;
+        } else {
+            warn!(w = frame.width, h = frame.height, "frame rejected by ring");
         }
-        Ok(())
+        Ok(ok)
+    }
+}
+
+pub struct VcamSink {
+    _camera: VirtualCamera,
+    writer: RingWriter,
+}
+
+impl VcamSink {
+    /// Create and start "Relay Camera" for a `width`×`height` stream.
+    /// Requires the media source registered (HKLM) and Windows 11 22H2+;
+    /// the caller reports the error and continues without a camera.
+    pub fn start(width: u32, height: u32, fps: u32) -> Result<Self> {
+        let camera = VirtualCamera::start(width, height, fps)
+            .context("MFCreateVirtualCamera (is the camera registered and Windows 22H2+?)")?;
+        info!(width, height, fps, "virtual camera started");
+        Ok(Self { _camera: camera, writer: RingWriter::default() })
+    }
+
+    pub fn frames_written(&self) -> u64 {
+        self.writer.frames_written()
+    }
+
+    /// Push one decoded frame. Errors are D3D failures (the caller drops the
+    /// sink); a ring that is not up yet is simply skipped.
+    pub fn push(
+        &mut self,
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        frame: &crate::decode::mf::DecodedFrame,
+    ) -> Result<()> {
+        self.writer.push(device, context, frame).map(|_| ())
     }
 }
