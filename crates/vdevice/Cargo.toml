@@ -1,11 +1,44 @@
 [package]
 name = "relay-vdevice"
-description = "Relay virtual devices: virtual camera (MediaFrameSource / OBS VirtualCam fallback) and the receiver-side virtual mic"
+description = "Relay virtual devices: Windows 11 frame-server virtual camera (COM media source + control), OBS VirtualCam / VB-Cable detection, and the installed.json registration record"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[lib]
+# cdylib: the camera media source DLL the Windows Frame Server loads.
+# rlib: the planner/detection/record engine the core links, and the frame
+# ring + camera control the receiver links.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# The COM media source itself. The core and the receiver take this crate
+# with default-features = false: planner, detection, frame ring and camera
+# control only — no COM server in either binary.
+default = ["com"]
+com = []
+
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-core.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
