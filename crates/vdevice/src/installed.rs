@@ -26,6 +26,11 @@ pub const CAMERA_MEDIA_SOURCE: &str = "camera-media-source";
 pub struct Consent {
     /// ISO-8601 UTC of the decision.
     pub decided_at: String,
+    /// Endpoint APO opt-in (the other first-run component; its install
+    /// path and backups live in relay-apo, this is only the recorded
+    /// decision).
+    #[serde(default)]
+    pub apo: bool,
     /// Virtual camera opt-in.
     pub camera: bool,
     /// Virtual microphone opt-in (the signed driver later; the interim
@@ -150,7 +155,7 @@ mod tests {
 
         let mut f = InstalledFile::default();
         f.consent =
-            Some(Consent { decided_at: iso_now(), camera: true, microphone: false });
+            Some(Consent { decided_at: iso_now(), apo: false, camera: true, microphone: false });
         f.record(Component {
             id: CAMERA_MEDIA_SOURCE.into(),
             installed_at: iso_now(),

@@ -48,10 +48,7 @@ fn wide(s: &str) -> Vec<u16> {
 
 /// REG_SZ bytes: UTF-16LE with the terminating NUL.
 fn sz_bytes(s: &str) -> Vec<u8> {
-    s.encode_utf16()
-        .chain(std::iter::once(0))
-        .flat_map(|u| u.to_le_bytes())
-        .collect()
+    s.encode_utf16().chain(std::iter::once(0)).flat_map(|u| u.to_le_bytes()).collect()
 }
 
 fn assert_writes_allowed() -> Result<(), LiveRegError> {

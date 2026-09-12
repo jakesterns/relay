@@ -15,12 +15,15 @@
 
 #![allow(unsafe_code)] // COM plumbing; every block carries a SAFETY note
 #![allow(non_snake_case)] // COM method names come from the interfaces
+// The COM ABI hands the *_Impl trait methods raw pointers behind safe
+// traits; the frame server guarantees their validity (same rationale as
+// relay-apo's com.rs).
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use windows::core::{implement, IUnknown, Interface, Ref, GUID, HRESULT, PCWSTR};
-use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_NOTIMPL, E_POINTER, S_FALSE, S_OK,
 };
@@ -30,18 +33,18 @@ use windows::Win32::Media::MediaFoundation::{
     IMFGetService_Impl, IMFMediaEvent, IMFMediaEventGenerator_Impl, IMFMediaEventQueue,
     IMFMediaSource, IMFMediaSourceEx, IMFMediaSourceEx_Impl, IMFMediaSource_Impl, IMFMediaStream2,
     IMFMediaStream2_Impl, IMFMediaStream_Impl, IMFPresentationDescriptor, IMFStreamDescriptor,
+    MEMediaSample, MENewStream, MESourceStarted, MESourceStopped, MEStreamStarted, MEStreamStopped,
     MFCreateAttributes, MFCreateEventQueue, MFCreateMediaType, MFCreateMemoryBuffer,
     MFCreatePresentationDescriptor, MFCreateSample, MFCreateStreamDescriptor, MFGetSystemTime,
-    MEMediaSample, MENewStream, MESourceStarted, MESourceStopped, MEStreamStarted,
-    MEStreamStopped, MFMediaType_Video, MFSampleExtension_Token, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MFMEDIASOURCE_IS_LIVE, MF_DEVICESTREAM_STREAM_CATEGORY,
+    MFMediaType_Video, MFSampleExtension_Token, MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MFMEDIASOURCE_IS_LIVE, MF_DEVICESTREAM_STREAM_CATEGORY,
     MF_DEVICESTREAM_STREAM_ID, MF_E_INVALID_STATE_TRANSITION, MF_E_SHUTDOWN,
     MF_E_UNSUPPORTED_SERVICE, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_DEFAULT_STRIDE,
     MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE,
-    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MF_STREAM_STATE, MF_STREAM_STATE_PAUSED,
-    MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED,
+    MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_STREAM_STATE,
+    MF_STREAM_STATE_PAUSED, MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED,
 };
+use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 
 use super::{
@@ -210,7 +213,11 @@ impl IMFAttributes_Impl for Activate_Impl {
     fn SetGUID(&self, key: *const GUID, value: *const GUID) -> windows::core::Result<()> {
         fwd!(self.SetGUID(key, value))
     }
-    fn SetString(&self, key: *const GUID, value: &windows::core::PCWSTR) -> windows::core::Result<()> {
+    fn SetString(
+        &self,
+        key: *const GUID,
+        value: &windows::core::PCWSTR,
+    ) -> windows::core::Result<()> {
         fwd!(self.SetString(key, *value))
     }
     fn SetBlob(&self, key: *const GUID, buf: *const u8, size: u32) -> windows::core::Result<()> {
@@ -357,7 +364,11 @@ struct CamStream {
 }
 
 impl CamStream {
-    fn create(width: u32, height: u32, fps: u32) -> windows::core::Result<(IMFMediaStream2, Arc<StreamShared>)> {
+    fn create(
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> windows::core::Result<(IMFMediaStream2, Arc<StreamShared>)> {
         // SAFETY: standard MF object creation; attribute keys are the
         // documented types.
         unsafe {
@@ -574,9 +585,8 @@ impl CamSource {
             let mut attrs = None;
             MFCreateAttributes(&mut attrs, 2)?;
             let attrs = attrs.expect("MFCreateAttributes out");
-            let pd = MFCreatePresentationDescriptor(Some(&[Some(
-                stream_shared.descriptor.clone(),
-            )]))?;
+            let pd =
+                MFCreatePresentationDescriptor(Some(&[Some(stream_shared.descriptor.clone())]))?;
             pd.SelectStream(0)?;
             (queue, attrs, pd)
         };
@@ -640,9 +650,7 @@ impl IMFMediaSource_Impl for CamSource_Impl {
         Ok(MFMEDIASOURCE_IS_LIVE.0 as u32)
     }
 
-    fn CreatePresentationDescriptor(
-        &self,
-    ) -> windows::core::Result<IMFPresentationDescriptor> {
+    fn CreatePresentationDescriptor(&self) -> windows::core::Result<IMFPresentationDescriptor> {
         let inner = self.inner.lock().unwrap();
         if inner.shutdown {
             return Err(MF_E_SHUTDOWN.into());
@@ -793,14 +801,21 @@ impl IClassFactory_Impl for Factory_Impl {
     }
 }
 
+// The canonical `DllCanUnloadNow` / `DllGetClassObject` names exist only on
+// the cdylib: build.rs aliases them with `/EXPORT:name=internal` through
+// `cargo:rustc-cdylib-link-arg`. The internal symbols carry unique names so
+// the rlib can link into the same binary as relay-apo (which exports the
+// same COM entry points) without an LNK2005 collision.
+
 /// The frame server keeps source DLLs loaded; never volunteer to unload.
+/// (`pub` so fat LTO keeps the symbol for the cdylib /EXPORT alias.)
 #[no_mangle]
-extern "system" fn DllCanUnloadNow() -> HRESULT {
+pub extern "system" fn RelayVdeviceDllCanUnloadNow() -> HRESULT {
     S_FALSE
 }
 
 #[no_mangle]
-extern "system" fn DllGetClassObject(
+pub extern "system" fn RelayVdeviceDllGetClassObject(
     rclsid: *const GUID,
     riid: *const GUID,
     ppv: *mut *mut core::ffi::c_void,

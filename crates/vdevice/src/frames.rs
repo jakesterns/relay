@@ -131,6 +131,7 @@ impl FrameBlock {
     /// from a D3D11 staging texture). `y` must cover `y_stride * height`
     /// bytes and `uv` must cover `uv_stride * height / 2`. Frames larger
     /// than 4K or with odd dimensions are rejected.
+    #[allow(clippy::too_many_arguments)] // two strided planes + geometry
     pub fn write_frame(
         &self,
         width: u32,
@@ -156,11 +157,8 @@ impl FrameBlock {
         }
         let idx = self.write_idx.load(Ordering::Relaxed) as usize % SLOTS;
         // Never overwrite the slot a reader may be copying from.
-        let idx = if idx as u32 == self.latest.load(Ordering::Acquire) {
-            (idx + 1) % SLOTS
-        } else {
-            idx
-        };
+        let idx =
+            if idx as u32 == self.latest.load(Ordering::Acquire) { (idx + 1) % SLOTS } else { idx };
         let slot = &self.slots[idx];
         let s = slot.seq.load(Ordering::Relaxed);
         slot.seq.store(s.wrapping_add(1), Ordering::Release); // odd: in progress
@@ -172,11 +170,7 @@ impl FrameBlock {
             let dst = (*slot.data.get()).as_mut_ptr();
             let w = width as usize;
             for row in 0..height as usize {
-                std::ptr::copy_nonoverlapping(
-                    y.as_ptr().add(row * y_stride),
-                    dst.add(row * w),
-                    w,
-                );
+                std::ptr::copy_nonoverlapping(y.as_ptr().add(row * y_stride), dst.add(row * w), w);
             }
             let uv_base = w * height as usize;
             for row in 0..height as usize / 2 {
@@ -221,11 +215,7 @@ impl FrameBlock {
             // SAFETY: torn reads are possible and are detected by the second
             // sequence load below; a torn frame is discarded.
             let pts = unsafe {
-                std::ptr::copy_nonoverlapping(
-                    (*slot.data.get()).as_ptr(),
-                    out.as_mut_ptr(),
-                    bytes,
-                );
+                std::ptr::copy_nonoverlapping((*slot.data.get()).as_ptr(), out.as_mut_ptr(), bytes);
                 std::ptr::read_volatile(slot.pts_100ns.get())
             };
             if slot.seq.load(Ordering::Acquire) == s0 {

@@ -84,6 +84,20 @@ export interface Preview { original: string; processed: string; sample_rate: num
 
 /** Mirror of relay-core's `audio_apo::ApoStatus`. */
 export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
+/** Mirror of relay-vdevice's `installed::Consent`. */
+export interface VdeviceConsent { decided_at: string; apo: boolean; camera: boolean; microphone: boolean }
+export type MicTargetKind = "vb_cable" | "voice_meeter";
+export interface MicTarget { endpoint_id: string; name: string; kind: MicTargetKind }
+/** Mirror of relay-core's `vdevice::VdeviceStatus`. */
+export interface VdeviceStatus {
+  windows_build: number | null;
+  camera_supported: boolean;
+  camera_registered: boolean;
+  obs_virtualcam: string | null;
+  mic_targets: MicTarget[];
+  consent: VdeviceConsent | null;
+  elevated: boolean;
+}
 export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
 export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
 
@@ -184,6 +198,19 @@ const mockProcesses: ProcessInfo[] = [
 ];
 
 let mockAutostart = false;
+
+/** Browser-only virtual-device state: fresh machine, consent not decided. */
+const mockVdevice: VdeviceStatus = {
+  windows_build: 26200,
+  camera_supported: true,
+  camera_registered: false,
+  obs_virtualcam: null,
+  mic_targets: [
+    { endpoint_id: "{0.0.0.00000000}.{mock-cable}", name: "CABLE Input (VB-Audio Virtual Cable)", kind: "vb_cable" },
+  ],
+  consent: null,
+  elevated: false,
+};
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -306,6 +333,38 @@ export const api = {
   async uninstallApo(): Promise<void> {
     if (!isTauri()) throw new Error("Removing the APO needs the Relay core");
     return invoke<void>("uninstall_apo");
+  },
+  /** Read-only: Windows support, registration, consent, OBS / VB-Cable. */
+  async vdeviceStatus(): Promise<VdeviceStatus> {
+    if (!isTauri()) return structuredClone(mockVdevice);
+    return invoke<VdeviceStatus>("vdevice_status");
+  },
+  /** Record the first-run decision. Installs nothing by itself. */
+  async setVdeviceConsent(apo: boolean, camera: boolean, microphone: boolean): Promise<void> {
+    if (!isTauri()) {
+      mockVdevice.consent = { decided_at: new Date().toISOString(), apo, camera, microphone };
+      return;
+    }
+    return invoke<void>("set_vdevice_consent", { apo, camera, microphone });
+  },
+  /** Exactly what a camera install would create (registry keys + the DLL). */
+  async vdeviceDryRun(): Promise<string[]> {
+    if (!isTauri()) return [
+      "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}",
+      "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}\\InprocServer32",
+      "file: <install dir>\\relay_vdevice.dll (stays in place; only registered)",
+    ];
+    return invoke<string[]>("vdevice_dry_run");
+  },
+  /** Register the camera media source. Gated in the core; errors explain. */
+  async installVcam(): Promise<void> {
+    if (!isTauri()) { mockVdevice.camera_registered = true; return; }
+    return invoke<void>("install_vcam");
+  },
+  /** Remove the recorded registration; empties installed.json. */
+  async uninstallVcam(): Promise<void> {
+    if (!isTauri()) { mockVdevice.camera_registered = false; return; }
+    return invoke<void>("uninstall_vcam");
   },
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];

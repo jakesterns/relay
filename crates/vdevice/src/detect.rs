@@ -11,6 +11,7 @@
 
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
@@ -18,7 +19,6 @@ use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 use windows::Win32::System::Variant::VT_LPWSTR;
-use windows::Win32::Foundation::PROPERTYKEY;
 
 /// The OBS VirtualCam DirectShow filter CLSID (stable across OBS releases).
 pub const OBS_VCAM_CLSID: &str = "{A3FCE0F5-3493-419F-958A-ABA1250EC20B}";
@@ -72,9 +72,7 @@ fn hklm_sz(path: &str, value: &str) -> Option<String> {
 
 /// The running Windows build number (from the registry; no manifest games).
 pub fn windows_build() -> Option<u32> {
-    hklm_sz(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuildNumber")?
-        .parse()
-        .ok()
+    hklm_sz(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentBuildNumber")?.parse().ok()
 }
 
 /// True when the frame-server virtual camera API is available.
@@ -176,12 +174,11 @@ mod tests {
 
     #[test]
     fn mic_kind_matches_known_names() {
+        assert_eq!(mic_kind("CABLE Input (VB-Audio Virtual Cable)"), Some(MicTargetKind::VbCable));
         assert_eq!(
-            mic_kind("CABLE Input (VB-Audio Virtual Cable)"),
-            Some(MicTargetKind::VbCable)
+            mic_kind("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"),
+            Some(MicTargetKind::VoiceMeeter)
         );
-        assert_eq!(mic_kind("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)"),
-            Some(MicTargetKind::VoiceMeeter));
         assert_eq!(mic_kind("Speakers (RØDECaster)"), None);
         assert_eq!(mic_kind("NVIDIA Broadcast"), None);
     }

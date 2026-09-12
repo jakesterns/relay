@@ -90,13 +90,15 @@ mod tests {
         assert!(plan.keys[0].path.ends_with(VCAM_CLSID));
         assert_eq!(plan.keys[0].values, vec![(String::new(), VCAM_CLASS_NAME.to_owned())]);
         assert!(plan.keys[1].path.ends_with("InprocServer32"));
-        assert!(plan
-            .keys[1]
+        assert!(plan.keys[1]
             .values
             .contains(&(String::new(), r"C:\Relay\relay_vdevice.dll".to_owned())));
         assert!(plan.keys[1].values.contains(&("ThreadingModel".into(), "Both".into())));
         // The record lists exactly the created keys.
-        assert_eq!(plan.record.hklm_keys, vec![plan.keys[0].path.clone(), plan.keys[1].path.clone()]);
+        assert_eq!(
+            plan.record.hklm_keys,
+            vec![plan.keys[0].path.clone(), plan.keys[1].path.clone()]
+        );
         assert_eq!(plan.record.id, CAMERA_MEDIA_SOURCE);
     }
 

@@ -855,10 +855,10 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
-            Method::SetVdeviceConsent { camera, microphone } => {
+            Method::SetVdeviceConsent { apo, camera, microphone } => {
                 let paths = g.paths.clone();
                 drop(g);
-                match crate::vdevice::set_consent(&paths, camera, microphone) {
+                match crate::vdevice::set_consent(&paths, apo, camera, microphone) {
                     Ok(_) => Reply::Ok,
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
@@ -873,9 +873,9 @@ impl IpcHandler {
                 drop(g);
                 match crate::vdevice::install_camera_live(&paths) {
                     Ok(()) => {
-                        let _ = self.events.send(Event::Notice {
-                            text: "Relay Camera registered".into(),
-                        });
+                        let _ = self
+                            .events
+                            .send(Event::Notice { text: "Relay Camera registered".into() });
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
@@ -887,9 +887,8 @@ impl IpcHandler {
                 drop(g);
                 match crate::vdevice::uninstall_camera_live(&paths) {
                     Ok(()) => {
-                        let _ = self.events.send(Event::Notice {
-                            text: "Relay Camera removed".into(),
-                        });
+                        let _ =
+                            self.events.send(Event::Notice { text: "Relay Camera removed".into() });
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },

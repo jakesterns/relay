@@ -134,10 +134,7 @@ fn video_thread(
     let mut vcam_sink = if vcam {
         match crate::vcam_sink::VcamSink::start(w, h, 60) {
             Ok(sink) => {
-                println!(
-                    "{}",
-                    serde_json::json!({ "event": "vcam_up", "width": w, "height": h })
-                );
+                println!("{}", serde_json::json!({ "event": "vcam_up", "width": w, "height": h }));
                 Some(sink)
             }
             Err(e) => {

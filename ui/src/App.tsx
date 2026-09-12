@@ -2,6 +2,9 @@ import { useState } from "react";
 import { Rail, type Screen } from "./components/Rail";
 import { TitleBar } from "./components/TitleBar";
 import { CoreProvider, useCore } from "./lib/core";
+import { api } from "./lib/ipc";
+import { useEffect } from "react";
+import { FirstRun } from "./screens/FirstRun";
 import { Games, type Section } from "./screens/Games";
 import { Profiles } from "./screens/Profiles";
 import { Receive } from "./screens/Receive";
@@ -20,6 +23,16 @@ function Shell() {
   const { state, offline, mock } = useCore();
   const [screen, setScreen] = useState<Screen>("profiles");
   const [section, setSection] = useState<Section>("audio");
+  // null = unknown yet; true = the first-run consent decision is still due.
+  const [firstRun, setFirstRun] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.vdeviceStatus()
+      .then((s) => { if (!cancelled) setFirstRun(s.consent === null); })
+      .catch(() => { if (!cancelled) setFirstRun(false); }); // offline: don't block the app
+    return () => { cancelled = true; };
+  }, [offline]);
 
   const sharing = state.sharing.kind === "sharing";
   const profile = state.active_profile;
@@ -43,6 +56,17 @@ function Shell() {
     setScreen(s);
   };
   const railKey: Screen = screen === "games" ? (section === "audio" ? "audio" : section === "display" ? "display" : "games") : screen;
+
+  if (firstRun === true) {
+    return (
+      <div className="app">
+        <TitleBar subtitle="First run" idle />
+        <div className="body">
+          <FirstRun onDone={() => setFirstRun(false)} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">

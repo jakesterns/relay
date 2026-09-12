@@ -249,6 +249,46 @@ async fn uninstall_apo() -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn vdevice_status() -> CmdResult<relay_core::vdevice::VdeviceStatus> {
+    match call(Method::VdeviceStatus).await? {
+        Reply::Vdevice { status } => Ok(*status),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_vdevice_consent(apo: bool, camera: bool, microphone: bool) -> CmdResult<()> {
+    match call(Method::SetVdeviceConsent { apo, camera, microphone }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn vdevice_dry_run() -> CmdResult<Vec<String>> {
+    match call(Method::VdeviceDryRun).await? {
+        Reply::DryRun { lines } => Ok(lines),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn install_vcam() -> CmdResult<()> {
+    match call(Method::InstallVcam).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn uninstall_vcam() -> CmdResult<()> {
+    match call(Method::UninstallVcam).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
         Reply::Receivers { receivers } => Ok(receivers),
@@ -352,6 +392,11 @@ pub fn run() {
             apo_status,
             install_apo,
             uninstall_apo,
+            vdevice_status,
+            set_vdevice_consent,
+            vdevice_dry_run,
+            install_vcam,
+            uninstall_vcam,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

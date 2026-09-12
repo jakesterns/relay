@@ -153,7 +153,7 @@ fn main() -> Result<()> {
                 Some("consent-camera") => {
                     // CLI convenience for the runbook; the UI screen is the
                     // real flow. Grants the camera opt-in only.
-                    let c = relay_core::vdevice::set_consent(&args.paths, true, false)?;
+                    let c = relay_core::vdevice::set_consent(&args.paths, false, true, false)?;
                     println!("recorded: camera {} / microphone {}", c.camera, c.microphone);
                 }
                 Some("install") => {

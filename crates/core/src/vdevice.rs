@@ -74,9 +74,9 @@ pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
 }
 
 /// Record the first-run decision. Never installs anything by itself.
-pub fn set_consent(paths: &Paths, camera: bool, microphone: bool) -> Result<Consent> {
+pub fn set_consent(paths: &Paths, apo: bool, camera: bool, microphone: bool) -> Result<Consent> {
     let mut file = load(paths)?;
-    let consent = Consent { decided_at: installed::iso_now(), camera, microphone };
+    let consent = Consent { decided_at: installed::iso_now(), apo, camera, microphone };
     file.consent = Some(consent.clone());
     save(paths, &file)?;
     Ok(consent)
@@ -85,12 +85,11 @@ pub fn set_consent(paths: &Paths, camera: bool, microphone: bool) -> Result<Cons
 /// The dry-run listing the consent screen shows: exactly what an install
 /// would create, before anything is created.
 pub fn camera_dry_run() -> Vec<String> {
-    let dll = camera_dll_path().map(|p| p.display().to_string()).unwrap_or_else(|_| {
-        format!("<install dir>\\{CAMERA_DLL} (not built yet)")
-    });
+    let dll = camera_dll_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| format!("<install dir>\\{CAMERA_DLL} (not built yet)"));
     let plan = relay_vdevice::reg::plan_camera_install(&dll);
-    let mut lines: Vec<String> =
-        plan.keys.iter().map(|k| format!(r"HKLM\{}", k.path)).collect();
+    let mut lines: Vec<String> = plan.keys.iter().map(|k| format!(r"HKLM\{}", k.path)).collect();
     lines.push(format!("file: {dll} (stays in place; only registered)"));
     lines
 }
@@ -150,8 +149,9 @@ pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
         bail!("no camera registration recorded; nothing to uninstall");
     };
     let keys = relay_vdevice::reg::plan_camera_uninstall(&record);
-    relay_vdevice::livereg::remove(&keys)
-        .context("removing the camera media source keys (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)")?;
+    relay_vdevice::livereg::remove(&keys).context(
+        "removing the camera media source keys (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)",
+    )?;
     file.remove(CAMERA_MEDIA_SOURCE);
     save(paths, &file)?;
     tracing::info!("camera media source unregistered");
@@ -228,7 +228,7 @@ mod tests {
         assert!(s.consent.is_none(), "fresh install: consent not decided");
         assert!(!s.camera_registered);
 
-        set_consent(&paths, true, false).expect("consent");
+        set_consent(&paths, false, true, false).expect("consent");
         let s = status(&paths).expect("status 2");
         let c = s.consent.expect("recorded");
         assert!(c.camera && !c.microphone);
@@ -245,7 +245,7 @@ mod tests {
 
         // Consent but no DLL next to the test binary → refused before the
         // registry too, and nothing is recorded.
-        set_consent(&paths, true, false).unwrap();
+        set_consent(&paths, false, true, false).unwrap();
         let _ = install_camera_live(&paths).unwrap_err();
         let file = installed::load(&paths.installed_file()).unwrap();
         assert!(file.components.is_empty(), "no record without an applied install");

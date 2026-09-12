@@ -85,8 +85,7 @@ impl VcamSink {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             frame.texture.GetDesc(&mut desc);
 
-            if self.staging.as_ref().map(|(_, w, h)| (*w, *h)) != Some((desc.Width, desc.Height))
-            {
+            if self.staging.as_ref().map(|(_, w, h)| (*w, *h)) != Some((desc.Width, desc.Height)) {
                 let staging_desc = D3D11_TEXTURE2D_DESC {
                     Width: desc.Width,
                     Height: desc.Height,
@@ -101,8 +100,7 @@ impl VcamSink {
                 };
                 let mut tex = None;
                 device.CreateTexture2D(&staging_desc, None, Some(&mut tex))?;
-                self.staging =
-                    Some((tex.context("staging texture")?, desc.Width, desc.Height));
+                self.staging = Some((tex.context("staging texture")?, desc.Width, desc.Height));
             }
             let (staging, _, tex_h) = self.staging.as_ref().expect("just set");
 

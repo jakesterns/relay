@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Card, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, type ApoStatus } from "../lib/ipc";
+import { api, type ApoStatus, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
   const { state, refresh, offline, mock } = useCore();
@@ -44,7 +44,7 @@ export function Settings() {
         <Card title="What Relay installs">
           <p className="p">Relay works at the OS and hardware layer only. It never injects into games, reads their memory, or changes your default devices. Two optional components need your explicit consent:</p>
           <ApoConsentRow />
-          <div className="tog"><div><b>Virtual camera &amp; microphone</b><small>Lets the receiving PC appear as a webcam in calls. Not installed.</small></div><button className="btn q" disabled>Install…</button></div>
+          <VdeviceConsentRow />
         </Card>
         <Card title="Hotkeys">
           <Kv k="Toggle share" v="Ctrl + Alt + S" mono />
@@ -122,6 +122,89 @@ function ApoConsentRow() {
             is ever touched.</p>
           <div className="ab">
             <button className="btn acc" disabled={busy} onClick={() => void run(() => api.installApo())}>
+              {busy ? "Installing…" : "Install now"}
+            </button>
+            <button className="btn q" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {error && <div className="offline"><i />{error}</div>}
+    </>
+  );
+}
+
+/** The virtual camera & microphone opt-in: registration status, the exact
+ *  dry-run listing before install, and a remove path that empties
+ *  installed.json. The install itself needs an elevated core (the button
+ *  explains when it isn't). */
+function VdeviceConsentRow() {
+  const { offline, mock } = useCore();
+  const [status, setStatus] = useState<VdeviceStatus | null>(null);
+  const [dryRun, setDryRun] = useState<string[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshStatus = () => {
+    api.vdeviceStatus().then(setStatus).catch(() => setStatus(null));
+  };
+  useEffect(refreshStatus, [offline]);
+  useEffect(() => {
+    if (confirming && dryRun.length === 0) {
+      api.vdeviceDryRun().then(setDryRun).catch(() => {});
+    }
+  }, [confirming, dryRun.length]);
+
+  const run = async (action: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try { await action(); setConfirming(false); }
+    catch (e) { setError(String((e as { message?: string })?.message ?? e)); }
+    finally { setBusy(false); refreshStatus(); }
+  };
+
+  const registered = status?.camera_registered === true;
+  const micNote = status && status.mic_targets.length > 0
+    ? `Mic route: ${status.mic_targets[0].name}.`
+    : "Mic: waiting on the signed driver; install VB-Cable for the interim route.";
+  const sub = status === null
+    ? (offline && !mock ? "Core offline — status unknown." : "Show incoming shares as a webcam in calls.")
+    : !status.camera_supported
+      ? `Needs Windows 11 22H2+ (this PC: build ${status.windows_build ?? "?"}).${status.obs_virtualcam ? " OBS VirtualCam detected as a fallback." : ""}`
+      : registered
+        ? `"Relay Camera" registered — it appears in calls while receiving. ${micNote}`
+        : `Not installed. ${micNote}`;
+
+  return (
+    <>
+      <div className="tog">
+        <div><b>Virtual camera &amp; microphone</b><small>{sub}</small></div>
+        {registered ? (
+          <button className="btn q" disabled={busy || status === null}
+            onClick={() => void run(async () => {
+              await api.uninstallVcam();
+              await api.setVdeviceConsent(status?.consent?.apo ?? false, false, false);
+            })}>Remove</button>
+        ) : (
+          <button className="btn q" disabled={busy || status === null || status?.camera_supported === false}
+            onClick={() => setConfirming(!confirming)}>Install…</button>
+        )}
+      </div>
+      {confirming && !registered && (
+        <div className="consent">
+          <p className="p"><b>What this installs</b> — one COM class so the Windows camera service
+            can load Relay's media source (the DLL stays where it is):</p>
+          {dryRun.map((l) => <div className="mono" key={l} style={{ fontSize: 12 }}>{l}</div>)}
+          <p className="p" style={{ marginTop: 8 }}><b>How to remove:</b> this same card or the
+            uninstaller deletes exactly those keys; every registration is recorded in
+            <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span>.
+            {status?.elevated === false && " Installing needs the core running as administrator."}</p>
+          <div className="ab">
+            <button className="btn acc" disabled={busy}
+              onClick={() => void run(async () => {
+                await api.setVdeviceConsent(status?.consent?.apo ?? false, true, true);
+                await api.installVcam();
+              })}>
               {busy ? "Installing…" : "Install now"}
             </button>
             <button className="btn q" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>

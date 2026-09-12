@@ -111,6 +111,7 @@ pub enum Method {
     /// Record the first-run consent decision (camera / microphone opt-ins).
     /// Never installs anything by itself.
     SetVdeviceConsent {
+        apo: bool,
         camera: bool,
         microphone: bool,
     },
