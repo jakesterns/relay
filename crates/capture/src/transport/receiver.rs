@@ -25,6 +25,10 @@ pub struct RecvOpts {
     pub headless: bool,
     /// Print the pairing code (the UI reads it from the NDJSON stream).
     pub code: Option<String>,
+    /// Mirror decoded video into the Relay virtual camera (opt-in).
+    pub vcam: bool,
+    /// Render decoded audio to this endpoint id (interim virtual-mic route).
+    pub mic_route: Option<String>,
 }
 
 /// One depacketized HEVC access unit.
@@ -240,7 +244,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    crate::render::run(au_rx, opus_rx, stats, events.closed, pc).await
+    let render_opts =
+        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
+    crate::render::run(au_rx, opus_rx, stats, events.closed, pc, render_opts).await
 }
 
 /// Depacketize one video track into access units (marker bit = AU boundary).

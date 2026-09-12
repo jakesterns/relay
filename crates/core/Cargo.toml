@@ -20,6 +20,9 @@ path = "src/main.rs"
 relay-audio.workspace = true
 # fxstore/ids only (no "com" feature): install status + registration engine.
 relay-apo.workspace = true
+# planner/detection/installed.json only (no "com" feature): the camera media
+# source DLL never links into the always-on core.
+relay-vdevice.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

@@ -28,6 +28,7 @@ pub mod service;
 pub mod share;
 pub mod status;
 pub mod types;
+pub mod vdevice;
 pub mod winloop;
 
 pub use config::Paths;

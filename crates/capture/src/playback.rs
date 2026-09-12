@@ -1,9 +1,12 @@
 //! Receiver audio playback: Opus decode → WASAPI shared-mode render on the
-//! default endpoint. Shared mode only; nothing about the endpoint is changed.
+//! default endpoint, or on an explicitly named endpoint (the interim
+//! virtual-mic route feeds a VB-Cable / VoiceMeeter input this way).
+//! Shared mode only; nothing about any endpoint is changed.
 
 use std::sync::mpsc::Receiver;
 
 use anyhow::{Context, Result};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -14,11 +17,15 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-pub fn run(opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>, stop: Receiver<()>) -> Result<()> {
+pub fn run(
+    opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    stop: Receiver<()>,
+    device_id: Option<String>,
+) -> Result<()> {
     // SAFETY: COM for this thread; WASAPI render loop; balanced on return.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
-        let result = render_loop(opus_rx, stop);
+        let result = render_loop(opus_rx, stop, device_id);
         CoUninitialize();
         result
     }
@@ -27,9 +34,18 @@ pub fn run(opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>, stop: Receiver<()>) ->
 unsafe fn render_loop(
     mut opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     stop: Receiver<()>,
+    device_id: Option<String>,
 ) -> Result<()> {
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+    let device = match &device_id {
+        Some(id) => {
+            let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+            enumerator
+                .GetDevice(PCWSTR(wide.as_ptr()))
+                .with_context(|| format!("open audio endpoint {id}"))?
+        }
+        None => enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?,
+    };
     let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
     let mix = client.GetMixFormat()?;
     let rate = (*mix).nSamplesPerSec;

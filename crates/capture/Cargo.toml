@@ -33,6 +33,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 webrtc = "0.20"
 
 [target.'cfg(windows)'.dependencies]
+relay-vdevice.workspace = true
 opus = "0.4"
 windows-core = "0.62"
 windows = { workspace = true, features = [

@@ -25,6 +25,17 @@ use crate::decode::mf::MfHevcDecoder;
 use crate::transport::receiver::{AccessUnit, RecvStats};
 use crate::{probe, signal_now_ns};
 
+/// Receiver output options beyond the window itself.
+#[derive(Debug, Default, Clone)]
+pub struct RenderOpts {
+    /// Start "Relay Camera" and mirror decoded frames into its ring.
+    pub vcam: bool,
+    /// Render decoded audio to this endpoint id instead of the default
+    /// device (the interim virtual-mic route: a VB-Cable / VoiceMeeter
+    /// input endpoint).
+    pub mic_route: Option<String>,
+}
+
 /// Entry point used by the transport when not headless.
 pub async fn run(
     aus: mpsc::Receiver<AccessUnit>,
@@ -32,12 +43,14 @@ pub async fn run(
     stats: Arc<RecvStats>,
     mut closed: mpsc::Receiver<()>,
     pc: impl webrtc::peer_connection::PeerConnection,
+    opts: RenderOpts,
 ) -> Result<()> {
     // Audio playback thread (best-effort; a decode failure must not kill video).
     let (audio_stop_tx, audio_stop_rx) = std::sync::mpsc::channel::<()>();
+    let mic_route = opts.mic_route.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
-            if let Err(e) = crate::playback::run(opus, audio_stop_rx) {
+            if let Err(e) = crate::playback::run(opus, audio_stop_rx, mic_route) {
                 warn!(error = %e, "audio playback stopped");
             }
         })?;
@@ -46,8 +59,9 @@ pub async fn run(
     let present_latency = Arc::new(AtomicI64::new(0));
     let pl = present_latency.clone();
     let stats2 = stats.clone();
+    let vcam = opts.vcam;
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl) {
+        if let Err(e) = video_thread(aus, stats2, pl, vcam) {
             warn!(error = %e, "render thread stopped");
             println!(
                 "{}",
@@ -94,6 +108,7 @@ fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
     present_latency: Arc<AtomicI64>,
+    vcam: bool,
 ) -> Result<()> {
     // SAFETY: COM MTA for MF + free-threaded D3D; balanced on return.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
@@ -113,6 +128,31 @@ fn video_thread(
     );
 
     let mut vp = VideoPresent::new(&win, w, h)?;
+
+    // Virtual camera (opt-in): best-effort — a missing registration or an
+    // unsupported build reports once and the window carries on alone.
+    let mut vcam_sink = if vcam {
+        match crate::vcam_sink::VcamSink::start(w, h, 60) {
+            Ok(sink) => {
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "vcam_up", "width": w, "height": h })
+                );
+                Some(sink)
+            }
+            Err(e) => {
+                warn!(error = %e, "virtual camera unavailable");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "vcam_error", "message": e.to_string() })
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut pending: Option<AccessUnit> = Some(first);
     let mut msg = MSG::default();
 
@@ -143,6 +183,12 @@ fn video_thread(
         stats.video_aus.fetch_add(1, Ordering::Relaxed);
         for frame in decoder.decode(&au.data, au.pts_or_zero())? {
             vp.present(&win, &frame)?;
+            if let Some(sink) = vcam_sink.as_mut() {
+                if let Err(e) = sink.push(&win.device, &win.context, &frame) {
+                    warn!(error = %e, "virtual camera sink stopped");
+                    vcam_sink = None;
+                }
+            }
             if let Some(cap_ns) = au.capture_local_ns {
                 present_latency.store((signal_now_ns() - cap_ns) / 1_000, Ordering::Relaxed);
             }

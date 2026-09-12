@@ -52,6 +52,14 @@ pub struct ReceiveRequest {
     /// Fixed pairing code; None = the engine generates one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// Mirror decoded video into the Relay virtual camera. The service sets
+    /// this from the consent + registration state, not the client.
+    #[serde(default)]
+    pub vcam: bool,
+    /// Render decoded audio to this endpoint id (interim virtual-mic route).
+    /// Also service-set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_route: Option<String>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -211,6 +219,13 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--code".into());
         args.push(code.into());
     }
+    if req.vcam {
+        args.push("--vcam".into());
+    }
+    if let Some(ep) = req.mic_route.as_deref().filter(|e| !e.is_empty()) {
+        args.push("--mic-route".into());
+        args.push(ep.into());
+    }
     args
 }
 
@@ -335,6 +350,13 @@ mod tests {
 
         // Empty strings behave like absent fields.
         let req: ReceiveRequest = serde_json::from_str(r#"{"name":"","code":""}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
+
+        // Virtual-device routing (service-set).
+        let req: ReceiveRequest =
+            serde_json::from_str(r#"{"vcam":true,"mic_route":"{0.0.0.00000000}.{ep}"}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv", "--vcam", "--mic-route", "{0.0.0.00000000}.{ep}"]);
+        let req: ReceiveRequest = serde_json::from_str(r#"{"mic_route":""}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
     }
 

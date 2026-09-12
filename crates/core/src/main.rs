@@ -107,6 +107,69 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        // Direct as well: registration wants an elevated prompt, and the
+        // consent screen may not exist yet on a fresh machine. Same gates.
+        #[cfg(windows)]
+        "vdevice" => {
+            logging::init_console(args.verbose);
+            match args.arg.as_deref() {
+                None | Some("status") => {
+                    let s = relay_core::vdevice::status(&args.paths)?;
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&s)?);
+                    } else {
+                        println!(
+                            "windows build: {} (frame-server camera {})",
+                            s.windows_build.map_or("unknown".into(), |b| b.to_string()),
+                            if s.camera_supported { "supported" } else { "needs 22H2+" },
+                        );
+                        println!("camera registered: {}", s.camera_registered);
+                        println!(
+                            "consent: {}",
+                            s.consent.as_ref().map_or("not decided".into(), |c| format!(
+                                "camera {} / microphone {} ({})",
+                                c.camera, c.microphone, c.decided_at
+                            )),
+                        );
+                        println!(
+                            "obs virtualcam: {}",
+                            s.obs_virtualcam.as_deref().unwrap_or("not detected"),
+                        );
+                        if s.mic_targets.is_empty() {
+                            println!("mic route targets: none (install VB-Cable for the interim virtual mic)");
+                        } else {
+                            for t in &s.mic_targets {
+                                println!("mic route target: {} [{:?}]", t.name, t.kind);
+                            }
+                        }
+                        println!("elevated: {}", s.elevated);
+                    }
+                }
+                Some("dry-run") => {
+                    for line in relay_core::vdevice::camera_dry_run() {
+                        println!("{line}");
+                    }
+                }
+                Some("consent-camera") => {
+                    // CLI convenience for the runbook; the UI screen is the
+                    // real flow. Grants the camera opt-in only.
+                    let c = relay_core::vdevice::set_consent(&args.paths, true, false)?;
+                    println!("recorded: camera {} / microphone {}", c.camera, c.microphone);
+                }
+                Some("install") => {
+                    relay_core::vdevice::install_camera_live(&args.paths)?;
+                    println!("Relay Camera media source registered");
+                }
+                Some("uninstall") => {
+                    relay_core::vdevice::uninstall_camera_live(&args.paths)?;
+                    println!("Relay Camera media source removed; installed.json cleared");
+                }
+                Some(other) => anyhow::bail!(
+                    "vdevice takes `status`, `dry-run`, `consent-camera`, `install` or `uninstall`, not `{other}`"
+                ),
+            }
+            Ok(())
+        }
         other => anyhow::bail!("unknown command `{other}`\n{USAGE}"),
     }
 }
@@ -156,6 +219,9 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   apo [status|install|uninstall]  endpoint-APO registration (install/uninstall
              are VM / installer only: they refuse without
              RELAY_APO_ALLOW_LIVE_WRITE=1 and an elevated prompt)
+  vdevice [status|dry-run|consent-camera|install|uninstall]  virtual-camera
+             registration (install/uninstall refuse without
+             RELAY_VDEVICE_ALLOW_LIVE_WRITE=1 and an elevated prompt)
 ";
 
 #[cfg(windows)]

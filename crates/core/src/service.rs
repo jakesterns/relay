@@ -91,6 +91,8 @@ struct Inner {
     previews_dir: std::path::PathBuf,
     /// Where pre-install FX property-store backups live (`<endpoint>.json`).
     apo_backup_dir: std::path::PathBuf,
+    /// The full path set (virtual-device consent + registration record).
+    paths: Paths,
     /// What the applier reported for the active profile's audio chain; the
     /// exclusive-mode watcher restores this when exclusivity clears.
     applied_audio: AudioChainState,
@@ -141,6 +143,7 @@ impl Service {
             receive: None,
             previews_dir: paths.previews_dir(),
             apo_backup_dir: paths.apo_backup_dir(),
+            paths: paths.clone(),
             applied_audio: AudioChainState::Bypass,
             audio_watch: false,
         }));
@@ -512,6 +515,10 @@ fn spawn_receive(
     if g.receive.is_some() {
         return Reply::Error { message: "already receiving".into() };
     }
+    // Virtual-device routing is decided here from consent + registration,
+    // never by the client: no opt-in, no camera, no mic route.
+    let mut req = req;
+    (req.vcam, req.mic_route) = crate::vdevice::receive_routing(&g.paths);
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,
@@ -838,6 +845,58 @@ impl IpcHandler {
             }
             #[cfg(not(windows))]
             Method::InstallApo | Method::UninstallApo => {
+                Reply::Error { message: "Windows only".into() }
+            }
+            Method::VdeviceStatus => {
+                let paths = g.paths.clone();
+                drop(g);
+                match crate::vdevice::status(&paths) {
+                    Ok(status) => Reply::Vdevice { status: Box::new(status) },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::SetVdeviceConsent { camera, microphone } => {
+                let paths = g.paths.clone();
+                drop(g);
+                match crate::vdevice::set_consent(&paths, camera, microphone) {
+                    Ok(_) => Reply::Ok,
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::VdeviceDryRun => {
+                drop(g);
+                Reply::DryRun { lines: crate::vdevice::camera_dry_run() }
+            }
+            #[cfg(windows)]
+            Method::InstallVcam => {
+                let paths = g.paths.clone();
+                drop(g);
+                match crate::vdevice::install_camera_live(&paths) {
+                    Ok(()) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: "Relay Camera registered".into(),
+                        });
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            #[cfg(windows)]
+            Method::UninstallVcam => {
+                let paths = g.paths.clone();
+                drop(g);
+                match crate::vdevice::uninstall_camera_live(&paths) {
+                    Ok(()) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: "Relay Camera removed".into(),
+                        });
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            #[cfg(not(windows))]
+            Method::InstallVcam | Method::UninstallVcam => {
                 Reply::Error { message: "Windows only".into() }
             }
             Method::Subscribe => Reply::Ok,

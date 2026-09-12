@@ -145,14 +145,21 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
 /// Parse `relay-share recv` flags into [`RecvOpts`].
 #[cfg(windows)]
 fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver::RecvOpts> {
-    let mut opts =
-        relay_capture::transport::receiver::RecvOpts { name: None, headless: false, code: None };
+    let mut opts = relay_capture::transport::receiver::RecvOpts {
+        name: None,
+        headless: false,
+        code: None,
+        vcam: false,
+        mic_route: None,
+    };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--name" => opts.name = it.next().cloned(),
             "--headless" => opts.headless = true,
             "--code" => opts.code = it.next().cloned(),
+            "--vcam" => opts.vcam = true,
+            "--mic-route" => opts.mic_route = it.next().cloned(),
             other => bail!("unknown recv flag `{other}`"),
         }
     }

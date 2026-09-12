@@ -105,6 +105,25 @@ pub enum Method {
     /// Restore the endpoint's FX property store from the install backup and
     /// unregister. Same gate.
     UninstallApo,
+    /// Virtual-device state: Windows support, registration, consent, OBS /
+    /// VB-Cable detection. Read-only.
+    VdeviceStatus,
+    /// Record the first-run consent decision (camera / microphone opt-ins).
+    /// Never installs anything by itself.
+    SetVdeviceConsent {
+        camera: bool,
+        microphone: bool,
+    },
+    /// The dry-run listing for the consent screen: exactly what a camera
+    /// install would create. Read-only.
+    VdeviceDryRun,
+    /// Register the camera media source (record-then-apply into
+    /// `installed.json`). Refused without consent, and gated like the APO
+    /// (`RELAY_VDEVICE_ALLOW_LIVE_WRITE` + elevation).
+    InstallVcam,
+    /// Remove the recorded camera registration; empties `installed.json`.
+    /// Same gate.
+    UninstallVcam,
     Subscribe,
     Shutdown,
 }
@@ -166,6 +185,12 @@ pub enum Reply {
     },
     Apo {
         status: crate::audio_apo::ApoStatus,
+    },
+    Vdevice {
+        status: Box<crate::vdevice::VdeviceStatus>,
+    },
+    DryRun {
+        lines: Vec<String>,
     },
     Ok,
     Error {

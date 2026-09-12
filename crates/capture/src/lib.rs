@@ -32,6 +32,8 @@ pub mod source;
 pub mod time;
 #[cfg(windows)]
 pub mod transport;
+#[cfg(windows)]
+pub mod vcam_sink;
 
 /// Wall-clock unix nanoseconds (receiver present-latency math).
 #[cfg(windows)]

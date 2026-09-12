@@ -26,7 +26,9 @@ relay-audio = { path = "crates/audio", default-features = false }
 # the APO DLL itself (feature "com") hosts the DSP.
 relay-apo = { path = "crates/audio/apo", default-features = false }
 relay-capture = { path = "crates/capture" }
-relay-vdevice = { path = "crates/vdevice" }
+# Same idea again: default-features off is the planner/ring/control half; the
+# camera media source DLL itself is feature "com".
+relay-vdevice = { path = "crates/vdevice", default-features = false }
 relay-display = { path = "crates/display" }
 
 anyhow = "1.0"

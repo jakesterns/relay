@@ -7,6 +7,7 @@
 //! <root>/data/profiles.json          user profiles
 //! <root>/data/original-state.json    pre-apply snapshot (crash-restore path)
 //! <root>/logs/core.log[.1..3]        rotating service log
+//! <root>/installed.json              virtual-device consent + registrations
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -106,6 +107,13 @@ impl Paths {
     /// *before* any APO install touches the registry (M3b plan).
     pub fn apo_backup_dir(&self) -> PathBuf {
         self.root.join("apo-backup")
+    }
+
+    /// The virtual-device record: the user's two consent decisions plus
+    /// every registered component, so opt-out removes exactly what opt-in
+    /// added (M5 plan).
+    pub fn installed_file(&self) -> PathBuf {
+        self.root.join("installed.json")
     }
 
     /// Snapshot of the machine's original state. Presence of this file with
