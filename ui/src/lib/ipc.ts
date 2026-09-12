@@ -54,7 +54,7 @@ export type HardwareItem =
   | { kind: "monitor"; value: HardwareMonitor };
 
 export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
-export interface ProcessInfo { pid: number; exe: string; title: string }
+export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
 export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
 export type DisplayState = "default" | "applied";
@@ -70,8 +70,24 @@ export interface CoreState {
 
 export interface ShareRequest {
   peer?: string | null; code: string; bitrate_mbps: number; fps: number;
-  audio: boolean; audio_pid?: number; cursor: boolean;
+  size?: [number, number];
+  audio: boolean; audio_pid?: number; mic?: boolean; cursor: boolean;
+  preset?: string; record?: boolean; replay_secs?: number; record_dir?: string;
 }
+/** Mirror of `crates/core/src/share.rs` `SourceTarget` (serde-tagged on `kind`). */
+export type SourceTarget =
+  | { kind: "display"; index: number }
+  | { kind: "window"; hwnd: number }
+  | { kind: "region"; display: number; x: number; y: number; w: number; h: number };
+/** Mirror of `crates/core/src/presets.rs`. */
+export type PresetAudio = "system" | "game" | "mic" | "off";
+export interface SharePresetDef {
+  id: string; name: string; bitrate_mbps: number; fps: number;
+  size?: [number, number]; audio: PresetAudio; cursor: boolean;
+  record: boolean; replay_secs: number;
+}
+export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb: number }
+export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
 export interface ReceiveRequest { name?: string | null; code?: string }
 export interface DiscoveredReceiver { name: string; addr: string; port: number }
 /** One `stats` NDJSON line from the share/receive engine (loose shape). */
@@ -81,6 +97,15 @@ export interface ShareStats {
   dropped?: number; encode_ms?: number; capture_to_send_ms?: number;
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
   cpu_percent?: number; rss_mb?: number;
+  /** Present while the engine is recording-capable. */
+  recording?: boolean; rec_mb?: number; rec_dropped?: number;
+  replay_fill?: number; replays_saved?: number; rec_stopped_disk?: boolean;
+}
+export interface RecordingStatus { on: boolean; path: string | null }
+export interface ReplaySaved { path: string; ms: number }
+/** The `source_changed` event's `data` (engine `source` line, verbatim). */
+export interface SourceChangedData {
+  target?: SourceTarget; width?: number; height?: number;
 }
 /** A/B listening-test render (`Method::RenderPreview`). Paths are absolute. */
 export interface Preview { original: string; processed: string; sample_rate: number; hrtf_applied: boolean }
@@ -195,10 +220,10 @@ const mockStore: Map<string, Profile> = new Map(
 export const mockProfiles: ProfileSummary[] = [...mockStore.values()].map(summarize);
 
 const mockProcesses: ProcessInfo[] = [
-  { pid: 1001, exe: "cod.exe", title: "Call of Duty" },
-  { pid: 1002, exe: "valorant.exe", title: "VALORANT" },
-  { pid: 1003, exe: "fl64.exe", title: "FL Studio 21" },
-  { pid: 1004, exe: "discord.exe", title: "Discord" },
+  { pid: 1001, exe: "cod.exe", title: "Call of Duty", hwnd: 0x11001 },
+  { pid: 1002, exe: "valorant.exe", title: "VALORANT", hwnd: 0x11002 },
+  { pid: 1003, exe: "fl64.exe", title: "FL Studio 21", hwnd: 0x11003 },
+  { pid: 1004, exe: "discord.exe", title: "Discord", hwnd: 0x11004 },
 ];
 
 let mockAutostart = false;
@@ -215,6 +240,14 @@ const mockVdevice: VdeviceStatus = {
   consent: null,
   elevated: false,
 };
+
+/** The three built-ins, mirroring `presets.rs::builtins()`. */
+const mockPresets: SharePresetDef[] = [
+  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: "game", cursor: false, record: false, replay_secs: 60 },
+  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: "system", cursor: true, record: false, replay_secs: 0 },
+  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: "system", cursor: true, record: false, replay_secs: 0 },
+];
+const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -268,6 +301,52 @@ export const api = {
   async stopShare(): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("stop_share");
+  },
+  async startSharePreset(preset: string, code: string, peer?: string | null): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("start_share_preset", { preset, code, peer: peer ?? null });
+  },
+  async record(on: boolean): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("record", { on });
+  },
+  async saveReplay(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("save_replay");
+  },
+  async switchSource(target: SourceTarget): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("switch_source", { target });
+  },
+  async listPresets(): Promise<PresetsReply> {
+    if (!isTauri()) return structuredClone({ presets: mockPresets, recording: mockRecording });
+    return invoke<PresetsReply>("list_presets");
+  },
+  async savePreset(preset: SharePresetDef): Promise<void> {
+    if (!isTauri()) {
+      const i = mockPresets.findIndex((p) => p.id === preset.id);
+      if (i >= 0) mockPresets[i] = structuredClone(preset);
+      else mockPresets.push(structuredClone(preset));
+      return;
+    }
+    return invoke<void>("save_preset", { preset });
+  },
+  async deletePreset(id: string): Promise<void> {
+    if (!isTauri()) {
+      const i = mockPresets.findIndex((p) => p.id === id);
+      if (i >= 0) mockPresets.splice(i, 1);
+      return;
+    }
+    return invoke<void>("delete_preset", { id });
+  },
+  async setRecordingSettings(settings: RecordingSettings): Promise<void> {
+    if (!isTauri()) {
+      mockRecording.dir = settings.dir;
+      mockRecording.cap_gb = settings.cap_gb;
+      mockRecording.free_floor_gb = settings.free_floor_gb;
+      return;
+    }
+    return invoke<void>("set_recording_settings", { settings });
   },
   async startReceive(request: ReceiveRequest): Promise<void> {
     if (!isTauri()) return;
@@ -384,6 +463,9 @@ export async function onCoreEvents(handlers: {
   shareStats?: (s: ShareStats) => void;
   shareStatus?: (s: ShareStatus) => void;
   receiveStatus?: (s: ReceiveStatus) => void;
+  recordingStatus?: (s: RecordingStatus) => void;
+  replaySaved?: (s: ReplaySaved) => void;
+  sourceChanged?: (s: SourceChangedData) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
@@ -394,6 +476,9 @@ export async function onCoreEvents(handlers: {
     listen<ShareStats>("core://share-stats", (e) => handlers.shareStats?.(e.payload)),
     listen<ShareStatus>("core://share-status", (e) => handlers.shareStatus?.(e.payload)),
     listen<ReceiveStatus>("core://receive-status", (e) => handlers.receiveStatus?.(e.payload)),
+    listen<RecordingStatus>("core://recording-status", (e) => handlers.recordingStatus?.(e.payload)),
+    listen<ReplaySaved>("core://replay-saved", (e) => handlers.replaySaved?.(e.payload)),
+    listen<SourceChangedData>("core://source-changed", (e) => handlers.sourceChanged?.(e.payload)),
   ]);
   return () => unlisteners.forEach((u) => u());
 }

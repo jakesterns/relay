@@ -19,7 +19,8 @@ use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
 use crate::hardware::{AudioInterface, HardwareView, Headset, Monitor, ProbeReport};
-use crate::share::{ReceiveRequest, ShareRequest};
+use crate::presets::{RecordingSettings, SharePresetDef};
+use crate::share::{ReceiveRequest, ShareRequest, SourceTarget};
 use crate::types::{CoreState, HeadsetId, ProcessInfo, Profile, ProfileSummary};
 
 /// A connection that has neither subscribed nor sent a request for this long is closed.
@@ -61,6 +62,35 @@ pub enum Method {
     },
     /// Stop the running share engine.
     StopShare,
+    /// Start a share from a preset id; the core resolves it (game audio pid
+    /// from the focused window, recording folder from settings).
+    StartSharePreset {
+        preset: String,
+        code: String,
+        #[serde(default)]
+        peer: Option<String>,
+    },
+    /// Toggle continuous recording on the running share.
+    Record {
+        on: bool,
+    },
+    /// Save the replay buffer of the running share to disk.
+    SaveReplay,
+    /// Swap the running share's capture source (no renegotiation).
+    SwitchSource {
+        target: SourceTarget,
+    },
+    /// Presets and recording settings.
+    ListPresets,
+    SavePreset {
+        preset: Box<SharePresetDef>,
+    },
+    DeletePreset {
+        id: String,
+    },
+    SetRecordingSettings {
+        settings: RecordingSettings,
+    },
     /// Start receiving: advertise over mDNS and render an incoming share.
     StartReceive {
         request: Box<ReceiveRequest>,
@@ -193,6 +223,10 @@ pub enum Reply {
     DryRun {
         lines: Vec<String>,
     },
+    Presets {
+        presets: Vec<SharePresetDef>,
+        recording: RecordingSettings,
+    },
     Ok,
     Error {
         message: String,
@@ -217,6 +251,20 @@ pub enum Event {
         sharing: bool,
         peer: Option<String>,
         message: Option<String>,
+    },
+    /// Continuous recording started/stopped on the share engine.
+    RecordingStatus {
+        on: bool,
+        path: Option<String>,
+    },
+    /// A replay clip was saved.
+    ReplaySaved {
+        path: String,
+        ms: u64,
+    },
+    /// The share's capture source changed (engine `source` line, verbatim).
+    SourceChanged {
+        data: serde_json::Value,
     },
     /// The receive engine's state: advertising with a code, paired, or stopped.
     ReceiveStatus {

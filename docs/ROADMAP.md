@@ -86,9 +86,11 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] First-run consent screen: two opt-ins, "what we install / how to remove", exact dry-run key listing from the core; nothing registers before opt-in and everything registered lands in `installed.json` (record-then-apply, empty after opt-out).
 
 ## M6 — Recording, replay buffer, presets
-- [ ] Local high-bitrate MP4/MKV recording alongside the share, replay buffer with hotkey save.
-- [ ] Share presets Game / DAW / Desktop map to encoder settings, audio sources, cursor.
-- [ ] Multi-source switching (display, window, region) without restarting the share.
+**Done 2026-09-11** (branch `m6-recording`; plan + loopback measurements in `docs/plans/M6-recording-presets.md`). Recording tees the share's own bitstream through a non-blocking channel into a pure-Rust fragmented-MP4 muxer (golden-fixture tested) — measured 0 ms added latency and +0.06 pt median CPU on loopback; 60 s replay saved in 55 ms (≈ 0.7 s extrapolated at a full 60 Mb/s, « 2 s gate); region↔display switch mid-share held 60 fps with no renegotiation; footprint gate still green (5.1 MB idle). MKV, a 1-hour roll soak and full-motion 4K60 numbers are deferred with runbooks (plan's Deferred).
+
+- [x] Local high-bitrate fMP4 recording alongside the share (same bitstream, hourly keyframe-aligned rolls, 50 GB cap / 10 GB free-floor budget, `%USERPROFILE%\Videos\Relay`), replay buffer with Ctrl+Alt+R hotkey save. (MKV deferred — see plan.)
+- [x] Share presets Game / DAW / Desktop as editable data in `presets.json` → encoder settings (bitrate/fps/size), audio source (system / game-process / mic / off), cursor, record-on-start, replay window; `StartSharePreset` resolves them, DAW = 1440p60 with untouched default-endpoint audio.
+- [x] Multi-source switching (display, window, region) without restarting the share — same encoder, track and peer connection; one forced IDR per swap.
 
 ## M7 — Installer and uninstaller
 - [ ] NSIS per-user install of core + UI; autostart opt-in; Settings "Uninstall" button.
@@ -112,7 +114,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | code-complete 2026-09-12; live pass → `docs/dev/vcam-live.md` (needs elevation); mic driver still EV-cert-blocked |
-| M6 Recording & presets | `docs/plans/M6-recording-presets.md` | not started |
+| M6 Recording & presets | `docs/plans/M6-recording-presets.md` | done 2026-09-11; measured on loopback (0 ms / +0.06 pt CPU / 55 ms replay save); MKV + 1 h roll soak + full-motion 4K60 → MVP validation pass |
 | M7 Installer | `docs/plans/M7-installer.md` | not started |
 
 Update the status column when a session starts or finishes a milestone.

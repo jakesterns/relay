@@ -140,6 +140,79 @@ async fn stop_share() -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn start_share_preset(preset: String, code: String, peer: Option<String>) -> CmdResult<()> {
+    match call(Method::StartSharePreset { preset, code, peer }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn record(on: bool) -> CmdResult<()> {
+    match call(Method::Record { on }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn save_replay() -> CmdResult<()> {
+    match call(Method::SaveReplay).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn switch_source(target: relay_core::share::SourceTarget) -> CmdResult<()> {
+    match call(Method::SwitchSource { target }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// Mirrors `Reply::Presets`; the frontend gets one object.
+#[derive(Debug, serde::Serialize)]
+struct PresetsReply {
+    presets: Vec<relay_core::presets::SharePresetDef>,
+    recording: relay_core::presets::RecordingSettings,
+}
+
+#[tauri::command]
+async fn list_presets() -> CmdResult<PresetsReply> {
+    match call(Method::ListPresets).await? {
+        Reply::Presets { presets, recording } => Ok(PresetsReply { presets, recording }),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn save_preset(preset: relay_core::presets::SharePresetDef) -> CmdResult<()> {
+    match call(Method::SavePreset { preset: Box::new(preset) }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn delete_preset(id: String) -> CmdResult<()> {
+    match call(Method::DeletePreset { id }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_recording_settings(
+    settings: relay_core::presets::RecordingSettings,
+) -> CmdResult<()> {
+    match call(Method::SetRecordingSettings { settings }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn start_receive(request: relay_core::share::ReceiveRequest) -> CmdResult<()> {
     match call(Method::StartReceive { request: Box::new(request) }).await? {
         Reply::Ok => Ok(()),
@@ -327,6 +400,21 @@ fn spawn_event_bridge(app: AppHandle) {
                                         }),
                                     );
                                 }
+                                Event::RecordingStatus { on, path } => {
+                                    let _ = app.emit(
+                                        "core://recording-status",
+                                        serde_json::json!({ "on": on, "path": path }),
+                                    );
+                                }
+                                Event::ReplaySaved { path, ms } => {
+                                    let _ = app.emit(
+                                        "core://replay-saved",
+                                        serde_json::json!({ "path": path, "ms": ms }),
+                                    );
+                                }
+                                Event::SourceChanged { data } => {
+                                    let _ = app.emit("core://source-changed", data);
+                                }
                                 Event::ReceiveStatus { receiving, code, sender, message } => {
                                     let _ = app.emit(
                                         "core://receive-status",
@@ -380,6 +468,14 @@ pub fn run() {
             set_autostart,
             start_share,
             stop_share,
+            start_share_preset,
+            record,
+            save_replay,
+            switch_source,
+            list_presets,
+            save_preset,
+            delete_preset,
+            set_recording_settings,
             start_receive,
             stop_receive,
             discover_receivers,

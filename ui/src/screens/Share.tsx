@@ -1,30 +1,36 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Chips, Kv, Live, Toggle } from "../components/Controls";
+import { Card, Chips, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, onCoreEvents, type DiscoveredReceiver, type ShareStats } from "../lib/ipc";
-
-type Preset = "game" | "daw" | "desktop";
+import {
+  api, onCoreEvents,
+  type DiscoveredReceiver, type ProcessInfo, type SharePresetDef, type ShareStats,
+  type SourceTarget,
+} from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
 interface Strip {
   mbps: number; latencyMs: number; dropped: number; sent: number;
   gpuPct: number; cpuPct: number; audioDb: number; history: number[];
+  recording: boolean; recMb: number; recDropped: number;
+  replayFill: number; recStoppedDisk: boolean;
 }
 const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
+  recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
+};
+
+const presetAudioLabel: Record<SharePresetDef["audio"], string> = {
+  system: "System mix", game: "Game only", mic: "Microphone", off: "None",
 };
 
 export function Share() {
   const { state, mock } = useCore();
   const sharing = state.sharing.kind === "sharing";
   const peer = state.sharing.kind === "sharing" ? state.sharing.peer : null;
-  const [preset, setPreset] = useState<Preset>("game");
-  const [sysAudio, setSysAudio] = useState(true);
-  const [mic, setMic] = useState(false);
-  const [cursor, setCursor] = useState(true);
-  const [bitrate, setBitrate] = useState(60);
+  const [presets, setPresets] = useState<SharePresetDef[]>([]);
+  const [preset, setPreset] = useState("game");
   const [code, setCode] = useState("");
   const [receivers, setReceivers] = useState<DiscoveredReceiver[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -32,15 +38,34 @@ export function Share() {
   const [error, setError] = useState<string | null>(null);
   const [strip, setStrip] = useState<Strip>(idleStrip);
   const histRef = useRef<number[]>(Array(18).fill(0));
+  // Recording + replay state pushed by the engine.
+  const [rec, setRec] = useState<{ on: boolean; path: string | null }>({ on: false, path: null });
+  const [replayToast, setReplayToast] = useState<string | null>(null);
+  // Active capture source; confirmed by `source_changed` events.
+  const [source, setSource] = useState<SourceTarget>({ kind: "display", index: 0 });
+  const [showRegion, setShowRegion] = useState(false);
+  const [region, setRegion] = useState({ x: 0, y: 0, w: 1920, h: 1080 });
+  const [showWindows, setShowWindows] = useState(false);
+  const [windows, setWindows] = useState<ProcessInfo[]>([]);
 
-  // Live stats from the engine while sharing.
+  const selectedDef = presets.find((p) => p.id === preset) ?? presets[0];
+  const bitrateCeil = Math.max(selectedDef?.bitrate_mbps ?? 60, 1);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.listPresets()
+      .then((r) => { if (!cancelled) setPresets(r.presets); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Live stats + recording/replay/source events from the engine while sharing.
   useEffect(() => {
     let unsub = () => {};
     void onCoreEvents({
       shareStats: (s: ShareStats) => {
         if (s.bitrate_mbps === undefined) return;
-        const ceil = Math.max(bitrate, 1);
-        const h = [...histRef.current.slice(1), Math.min(1, (s.bitrate_mbps ?? 0) / ceil)];
+        const h = [...histRef.current.slice(1), Math.min(1, (s.bitrate_mbps ?? 0) / bitrateCeil)];
         histRef.current = h;
         setStrip({
           mbps: s.bitrate_mbps ?? 0,
@@ -51,16 +76,36 @@ export function Share() {
           cpuPct: Math.round((s.cpu_percent ?? 0) * 10) / 10,
           audioDb: s.audio_peak ? 20 * Math.log10(Math.max(1e-4, s.audio_peak)) : -Infinity,
           history: h,
+          recording: s.recording ?? false,
+          recMb: s.rec_mb ?? 0,
+          recDropped: s.rec_dropped ?? 0,
+          replayFill: s.replay_fill ?? 0,
+          recStoppedDisk: s.rec_stopped_disk ?? false,
         });
       },
       shareStatus: (st) => { if (st.message) setError(st.message); },
+      recordingStatus: (r) => setRec({ on: r.on, path: r.path }),
+      replaySaved: (r) => setReplayToast(`Replay saved · ${(r.ms / 1000).toFixed(1)} s · ${r.path}`),
+      sourceChanged: (s) => { if (s.target) setSource(s.target); },
     }).then((u) => { unsub = u; });
     return () => unsub();
-  }, [bitrate]);
+  }, [bitrateCeil]);
 
   useEffect(() => {
-    if (!sharing) { setStrip(idleStrip); histRef.current = Array(18).fill(0); }
+    if (!sharing) {
+      setStrip(idleStrip);
+      histRef.current = Array(18).fill(0);
+      setRec({ on: false, path: null });
+      setSource({ kind: "display", index: 0 });
+      setShowRegion(false);
+    }
   }, [sharing]);
+
+  useEffect(() => {
+    if (!replayToast) return;
+    const t = setTimeout(() => setReplayToast(null), 6000);
+    return () => clearTimeout(t);
+  }, [replayToast]);
 
   const discover = async () => {
     setBusy(true); setError(null);
@@ -74,12 +119,8 @@ export function Share() {
 
   const start = async () => {
     setBusy(true); setError(null);
-    try {
-      await api.startShare({
-        peer: selected, code: code.trim(), bitrate_mbps: bitrate, fps: 60,
-        audio: sysAudio, cursor,
-      });
-    } catch (e) { setError(String(e)); }
+    try { await api.startSharePreset(preset, code.trim(), selected); }
+    catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
 
@@ -89,7 +130,26 @@ export function Share() {
     finally { setBusy(false); }
   };
 
-  const canStart = code.trim().length === 6 && !busy;
+  const switchTo = async (target: SourceTarget) => {
+    setError(null);
+    setSource(target); // optimistic; source_changed confirms
+    try { await api.switchSource(target); } catch (e) { setError(String(e)); }
+  };
+
+  const toggleRecord = async () => {
+    setError(null);
+    try { await api.record(!rec.on); } catch (e) { setError(String(e)); }
+  };
+
+  const saveReplay = async () => {
+    setError(null);
+    try { await api.saveReplay(); } catch (e) { setError(String(e)); }
+  };
+
+  // "Display 1", "Display 2"… from the connected monitors; two if unknown.
+  const displayCount = Math.max(state.hardware.monitors.length, sharing ? 2 : 1) || 2;
+  const canStart = code.trim().length === 6 && !busy && !!selectedDef;
+  const replayOn = (selectedDef?.replay_secs ?? 0) > 0;
 
   return (
     <>
@@ -100,7 +160,64 @@ export function Share() {
         </div>
         <OfflineBanner />
         <Chips label="Preset" value={preset} onChange={setPreset}
-          options={[{ key: "game", label: "Game" }, { key: "daw", label: "DAW" }, { key: "desktop", label: "Desktop" }]} />
+          options={presets.map((p) => ({ key: p.id, label: p.name }))} />
+        {sharing && (
+          <div className="chips">
+            <span>Source</span>
+            {Array.from({ length: displayCount }, (_, i) => (
+              <button key={i}
+                className={"chip" + (source.kind === "display" && source.index === i ? " on" : "")}
+                onClick={() => void switchTo({ kind: "display", index: i })}>
+                Display {i + 1}
+              </button>
+            ))}
+            <button className={"chip" + (source.kind === "window" ? " on" : showWindows ? " on" : "")}
+              onClick={() => {
+                setShowWindows((v) => !v);
+                setShowRegion(false);
+                void api.listProcesses().then(setWindows).catch(() => {});
+              }}>
+              Window…
+            </button>
+            <button className={"chip" + (source.kind === "region" ? " on" : showRegion ? " on" : "")}
+              onClick={() => { setShowRegion((v) => !v); setShowWindows(false); }}>
+              Region…
+            </button>
+          </div>
+        )}
+        {sharing && showWindows && (
+          <div className="region">
+            <label style={{ flex: 1 }}>
+              <span>window</span>
+              <select
+                value={source.kind === "window" ? String(source.hwnd) : ""}
+                onChange={(e) => {
+                  const w = windows.find((p) => String(p.hwnd) === e.target.value);
+                  if (w) void switchTo({ kind: "window", hwnd: w.hwnd });
+                }}>
+                <option value="" disabled>{windows.length ? "Pick a window" : "Loading…"}</option>
+                {windows.map((p) => (
+                  <option key={p.hwnd} value={String(p.hwnd)}>{p.exe} — {p.title}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+        )}
+        {sharing && showRegion && (
+          <div className="region">
+            {(["x", "y", "w", "h"] as const).map((k) => (
+              <label key={k}>
+                <span>{k}</span>
+                <input inputMode="numeric" value={region[k]}
+                  onChange={(e) => setRegion({ ...region, [k]: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+              </label>
+            ))}
+            <button className="btn q" disabled={region.w === 0 || region.h === 0}
+              onClick={() => void switchTo({ kind: "region", display: 0, ...region })}>
+              Apply region
+            </button>
+          </div>
+        )}
         <div className="preview">
           <div className={"scene" + (sharing ? "" : " idle")} />
           {sharing && <div className="horizon" />}
@@ -109,7 +226,21 @@ export function Share() {
             ? <div className="cap">Preview — press P to hide</div>
             : <div className="idlemsg">Capture starts when you share. Nothing is running now.</div>}
         </div>
-        <InstrumentStrip s={strip} live={sharing} />
+        <InstrumentStrip s={strip} live={sharing} recOn={rec.on} />
+        {sharing && (
+          <div className="recrow">
+            <button className={"btn" + (rec.on ? " danger" : "")} onClick={() => void toggleRecord()}>
+              {rec.on ? "Stop recording" : "Record"}
+            </button>
+            <button className="btn q" onClick={() => void saveReplay()} disabled={!replayOn}
+              title={replayOn ? "" : "This preset has no replay buffer"}>
+              Save replay (Ctrl+Alt+R)
+            </button>
+            {rec.on && <div className="ind"><i />REC</div>}
+            {rec.on && rec.path && <div className="path" title={rec.path}>{rec.path}</div>}
+            {replayToast && <div className="toast">{replayToast}</div>}
+          </div>
+        )}
       </section>
       <aside className="side">
         <Card title="Send to">
@@ -127,14 +258,14 @@ export function Share() {
         <Card title="Pairing code">
           <input className="in" inputMode="numeric" maxLength={6} placeholder="6 digits from the receiver"
             value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
-          <Kv k="Bitrate" v={`${bitrate} Mb/s`} />
-          <input type="range" min={20} max={80} step={5} value={bitrate}
-            onChange={(e) => setBitrate(Number(e.target.value))} />
         </Card>
-        <Card>
-          <Toggle label="System audio" on={sysAudio} onChange={setSysAudio} />
-          <Toggle label="Microphone" on={mic} onChange={setMic} />
-          <Toggle label="Cursor" on={cursor} onChange={setCursor} />
+        <Card title={selectedDef ? `${selectedDef.name} preset` : "Preset"}>
+          <Kv k="Bitrate" v={selectedDef ? `${selectedDef.bitrate_mbps} Mb/s` : "—"} mono />
+          <Kv k="Frame rate" v={selectedDef ? `${selectedDef.fps} fps` : "—"} mono />
+          <Kv k="Size" v={selectedDef?.size ? `${selectedDef.size[0]}×${selectedDef.size[1]}` : "Native"} mono />
+          <Kv k="Audio" v={selectedDef ? presetAudioLabel[selectedDef.audio] : "—"} />
+          <Kv k="Cursor" v={selectedDef ? (selectedDef.cursor ? "Shown" : "Hidden") : "—"} />
+          <Kv k="Replay buffer" v={selectedDef ? (selectedDef.replay_secs ? `${selectedDef.replay_secs} s` : "Off") : "—"} mono />
         </Card>
         <Card>
           <Kv k="Connection" v={sharing ? "Direct, encrypted (DTLS-SRTP)" : "—"} />
@@ -153,9 +284,11 @@ export function Share() {
   );
 }
 
-function InstrumentStrip({ s, live }: { s: Strip; live: boolean }) {
+function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {
   const audioSegs = 12;
   const lit = live && isFinite(s.audioDb) ? Math.round(((s.audioDb + 40) / 40) * audioSegs) : 0;
+  const recording = live && (s.recording || recOn);
+  const recWarn = live && (s.recDropped > 0 || s.recStoppedDisk);
   return (
     <div className="meter">
       <div>
@@ -186,6 +319,18 @@ function InstrumentStrip({ s, live }: { s: Strip; live: boolean }) {
         <label>Audio</label>
         <div className="v">{live && isFinite(s.audioDb) ? s.audioDb.toFixed(1) : "—"}<u>dB</u></div>
         <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < lit ? "" : "off"} />)}</div>
+      </div>
+      <div className={recWarn ? "warn" : ""}>
+        <label><i className={"recdot" + (recording ? " on" : "")} />Rec</label>
+        <div className="v">{recording ? s.recMb.toFixed(0) : "—"}<u>MB</u></div>
+        <div className="fill" role="meter" aria-label="Replay buffer" aria-valuenow={Math.round(s.replayFill * 100)}>
+          <i style={{ width: `${live ? Math.min(1, Math.max(0, s.replayFill)) * 100 : 0}%` }} />
+        </div>
+        <div className="hint">
+          {s.recStoppedDisk ? "Stopped — disk floor"
+            : recWarn ? `${s.recDropped} rec frames dropped`
+            : `Replay · ${live ? Math.round(Math.min(1, Math.max(0, s.replayFill)) * 100) : 0}%`}
+        </div>
       </div>
     </div>
   );

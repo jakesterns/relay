@@ -24,8 +24,13 @@ use webrtc::peer_connection::PeerConnection;
 
 use super::{audio_codec, build_pc, discovery, sei, signal, video_codec};
 use crate::audio::{AudioSource, OpusStream};
+use crate::command::{self, EngineCmd, SourceTarget};
 use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
+use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
+use crate::source::switch::{self, Switcher};
 use crate::time;
+use std::path::PathBuf;
+use std::sync::{Mutex as StdMutex, OnceLock};
 
 #[derive(Debug)]
 pub struct SendOpts {
@@ -38,6 +43,15 @@ pub struct SendOpts {
     pub audio: Option<AudioSource>,
     pub mic: bool,
     pub cursor: bool,
+    /// Encode size cap `(w, h)`; `None` = native capture size. The capture is
+    /// GPU-scaled, so changing source never renegotiates the connection.
+    pub size: Option<(u32, u32)>,
+    /// Recording folder; `None` disables recording and the replay ring.
+    pub record_dir: Option<PathBuf>,
+    /// Start continuous recording as soon as the share is up.
+    pub record: bool,
+    /// Replay ring window; 0 = ring off.
+    pub replay_secs: u32,
 }
 
 /// Live counters the stats task samples every 500 ms.
@@ -261,6 +275,20 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
+    // Source-switch mailbox: stdin queues, the pipeline applies at a frame
+    // boundary. The share always starts on the primary display.
+    let switcher = Arc::new(StdMutex::new(Switcher::new(SourceTarget::Display { index: 0 })));
+
+    // Recorder slot: created inside the video pipeline once the capture size
+    // is known; every other reader treats "not there yet" as "off".
+    let recorder: Arc<OnceLock<Recorder>> = Arc::new(OnceLock::new());
+    let record_setup = opts.record_dir.clone().map(|dir| RecordSetup {
+        dir,
+        record_on_start: opts.record,
+        replay_secs: opts.replay_secs,
+        audio: opts.audio.is_some(),
+    });
+
     // Video pipeline thread (blocking): capture → convert → encode → channel.
     let (vtx, mut vrx) = mpsc::channel::<VideoAu>(4);
     let video_join = {
@@ -270,9 +298,25 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let bitrate = opts.bitrate_bps;
         let fps = opts.fps;
         let cursor = opts.cursor;
+        let out_size = opts.size;
         let target = target_bps.clone();
+        let rec = recorder.clone();
+        let sw = switcher.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
-            if let Err(e) = video_pipeline(bitrate, fps, cursor, vtx, stats, stop, kf, target) {
+            if let Err(e) = video_pipeline(
+                bitrate,
+                fps,
+                cursor,
+                out_size,
+                vtx,
+                stats,
+                stop,
+                kf,
+                target,
+                rec,
+                record_setup,
+                sw,
+            ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
                     "{}",
@@ -287,8 +331,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let audio_join = if let Some(source) = opts.audio.clone() {
         let stats = stats.clone();
         let stop = stop.clone();
+        let rec = recorder.clone();
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
-            if let Err(e) = audio_pipeline(source, atx, stats, stop) {
+            if let Err(e) = audio_pipeline(source, atx, stats, stop, rec) {
                 warn!(error = %e, "audio pipeline stopped");
             }
         })?)
@@ -380,7 +425,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 let bytes = stats.video_bytes.load(Ordering::Relaxed);
                 let frames = stats.video_frames.load(Ordering::Relaxed);
                 let fp = meter.sample();
-                println!("{}", serde_json::json!({
+                let mut line = serde_json::json!({
                     "event": "stats",
                     "bitrate_mbps": (bytes - last_bytes) as f64 * 8.0 / 0.5 / 1e6,
                     "fps": (frames - last_frames) as f64 / 0.5,
@@ -393,20 +438,64 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "audio_peak": stats.audio_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
                     "rss_mb": fp.rss_bytes as f64 / 1e6,
-                }));
+                });
+                if let Some(rs) = recorder.get().map(|r| r.stats()) {
+                    line["recording"] = rs.recording.load(Ordering::Relaxed).into();
+                    line["rec_mb"] = (rs.bytes_written.load(Ordering::Relaxed) as f64 / 1e6).into();
+                    line["rec_dropped"] = rs.dropped.load(Ordering::Relaxed).into();
+                    line["replay_fill"] = (rs.ring_fill_milli.load(Ordering::Relaxed) as f64 / 1e3).into();
+                    line["replays_saved"] = rs.replays_saved.load(Ordering::Relaxed).into();
+                    line["rec_stopped_disk"] = rs.stopped_for_disk.load(Ordering::Relaxed).into();
+                }
+                println!("{line}");
                 last_bytes = bytes;
                 last_frames = frames;
             }
             line = stdin_lines.next_line(), if stdin_open => {
                 match line {
-                    Ok(Some(l)) if l.trim() == "stop" => break Ok(()),
-                    Ok(Some(_)) => {}
-                    _ if spawned_by_core => break Ok(()), // core went away
+                    Ok(Some(l)) => match command::parse_line(&l) {
+                        Some(EngineCmd::Stop) => {
+                            info!("stop command received");
+                            break Ok(());
+                        }
+                        Some(EngineCmd::Record { on }) => {
+                            if let Some(r) = recorder.get() {
+                                r.set_recording(on);
+                                if on {
+                                    // The file starts at the next keyframe;
+                                    // don't make the user wait out the GOP.
+                                    keyframe_wanted.store(true, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Some(EngineCmd::ReplaySave) => {
+                            if let Some(r) = recorder.get() {
+                                r.save_replay();
+                            }
+                        }
+                        Some(EngineCmd::Switch { target }) => {
+                            if switcher.lock().unwrap().request(target) {
+                                debug!(?target, "switch queued");
+                            } else {
+                                debug!(?target, "switch dropped (already live)");
+                            }
+                        }
+                        None => {
+                            debug!(line = %l, "unrecognised stdin line ignored");
+                        }
+                    },
+                    _ if spawned_by_core => {
+                        info!("stdin closed; core went away");
+                        break Ok(());
+                    }
                     _ => stdin_open = false,
                 }
             }
             _ = events.closed.recv() => break Err(anyhow::anyhow!("peer connection lost")),
-            _ = tokio::signal::ctrl_c() => break Ok(()),
+            _ = tokio::signal::ctrl_c() => {
+                info!("ctrl-c");
+                break Ok(());
+            }
         }
     };
 
@@ -423,17 +512,30 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     result
 }
 
+/// What `video_pipeline` needs to bring up the recorder once the capture
+/// size is known.
+struct RecordSetup {
+    dir: PathBuf,
+    record_on_start: bool,
+    replay_secs: u32,
+    audio: bool,
+}
+
 /// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC MFT → SEI → channel.
 #[allow(clippy::too_many_arguments)]
 fn video_pipeline(
     bitrate_bps: u32,
     fps: u32,
     cursor: bool,
+    out_size: Option<(u32, u32)>,
     tx: mpsc::Sender<VideoAu>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
     keyframe_wanted: Arc<AtomicBool>,
     target_bps: Arc<AtomicU32>,
+    recorder: Arc<OnceLock<Recorder>>,
+    record_setup: Option<RecordSetup>,
+    switcher: Arc<StdMutex<Switcher>>,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -444,12 +546,42 @@ fn video_pipeline(
     let hmon = crate::d3d::primary_monitor();
     let gpu = crate::d3d::device_for_monitor(hmon)?;
     let mut src = crate::source::create(&gpu, hmon, cursor)?;
-    let size = src.size();
-    let mut conv = crate::encode::convert::Converter::new(&gpu, size, size)?;
+    let in_size = src.size();
+    // The encoder's output size is fixed for the life of the share; sources
+    // of any size are GPU-scaled into it, so switching never renegotiates.
+    let size = out_size.unwrap_or(in_size);
+    let mut conv = crate::encode::convert::Converter::new(&gpu, in_size, size)?;
     let enc = MfHevcEncoder::new(
         &gpu,
         &EncoderConfig { width: size.0, height: size.1, fps, bitrate_bps },
     )?;
+    if let Some(rs) = record_setup {
+        // Ring RAM ≈ bitrate × (window + one GOP + margin), hard-capped.
+        let ring_max =
+            ((bitrate_bps as u64 / 8) * (rs.replay_secs as u64 + 15)).min(1_500_000_000) as usize;
+        match Recorder::start(RecordConfig {
+            dir: rs.dir,
+            width: size.0,
+            height: size.1,
+            audio: rs.audio,
+            replay_secs: rs.replay_secs,
+            ring_max_bytes: ring_max,
+            budget: DiskBudget::default(),
+            roll_secs: 3600,
+            record_on_start: rs.record_on_start,
+        }) {
+            Ok(r) => {
+                let _ = recorder.set(r);
+            }
+            Err(e) => {
+                warn!(error = %e, "recorder unavailable; sharing without recording");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "error", "where": "record", "message": e.to_string() })
+                );
+            }
+        }
+    }
     info!(encoder = %enc.name, w = size.0, h = size.1, fps, bitrate_bps, "video pipeline up");
     println!(
         "{}",
@@ -466,6 +598,8 @@ fn video_pipeline(
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
+    let mut conv_in = in_size;
+    let mut crop: Option<(u32, u32, u32, u32)> = None;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
             EncoderEvent::NeedInput => {
@@ -475,10 +609,64 @@ fn video_pipeline(
                     applied_bps = want;
                     tracing::debug!(bps = want, "bitrate adjusted");
                 }
+                // Swap the capture source if a switch is queued. Encoder,
+                // track and peer connection stay as they are — the new
+                // source scales into the same encode size, then one IDR.
+                let pending = switcher.lock().unwrap().take_pending();
+                if let Some(t) = pending {
+                    match create_target_source(&gpu, t, cursor) {
+                        Ok((new_src, new_crop)) => {
+                            src = new_src;
+                            conv_in = src.size();
+                            conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            conv.set_source_rect(new_crop);
+                            crop = new_crop;
+                            let _ = enc.request_keyframe();
+                            switcher.lock().unwrap().applied(t);
+                            info!(target = ?t, w = conv_in.0, h = conv_in.1, "source switched");
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "source",
+                                    "target": t,
+                                    "width": conv_in.0,
+                                    "height": conv_in.1,
+                                })
+                            );
+                        }
+                        Err(e) => {
+                            warn!(target = ?t, error = %e, "switch failed; keeping current source");
+                            println!(
+                                "{}",
+                                serde_json::json!({ "event": "error", "where": "switch", "message": e.to_string() })
+                            );
+                        }
+                    }
+                }
                 let Some(frame) = src.next(Duration::from_millis(250))? else {
                     tracing::debug!("no capture frame in 250ms");
                     continue;
                 };
+                // A captured window can resize (or a display can change
+                // mode): rebuild the source so the frame pool matches. The
+                // encode size never changes, so nothing renegotiates.
+                if (frame.width, frame.height) != conv_in && crop.is_none() && frame.width > 0 {
+                    let t = switcher.lock().unwrap().current();
+                    tracing::debug!(target = ?t, w = frame.width, h = frame.height, "source resized");
+                    drop(frame); // stale-sized; the rebuilt source delivers the next one
+                    match create_target_source(&gpu, t, cursor) {
+                        Ok((new_src, new_crop)) => {
+                            src = new_src;
+                            conv_in = src.size();
+                            conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            conv.set_source_rect(new_crop);
+                            crop = new_crop;
+                            let _ = enc.request_keyframe();
+                        }
+                        Err(e) => warn!(error = %e, "rebuilding resized source failed"),
+                    }
+                    continue;
+                }
                 if keyframe_wanted.swap(false, Ordering::Relaxed) {
                     let _ = enc.request_keyframe();
                 }
@@ -491,6 +679,10 @@ fn video_pipeline(
                 let now_qpc = time::qpc_now_100ns();
                 if let Some(t_in) = inflight.remove(&out.pts_100ns) {
                     stats.encode_us_last.store(((now_qpc - t_in) / 10) as u64, Ordering::Relaxed);
+                }
+                // Tee the pre-SEI bitstream to the recorder; never blocks.
+                if let Some(r) = recorder.get() {
+                    r.push_video(&out.data, out.pts_100ns, out.keyframe);
                 }
                 // Capture time on the wall clock, for the receiver's estimate.
                 let capture_unix_ns =
@@ -510,17 +702,57 @@ fn video_pipeline(
     Ok(())
 }
 
+/// A live capture source plus the crop rect a `Region` target needs.
+type SourceAndCrop = (Box<dyn crate::source::FrameSource>, Option<(u32, u32, u32, u32)>);
+
+/// Build the capture source (and optional crop rect) for a switch target on
+/// the share's existing GPU device.
+fn create_target_source(
+    gpu: &crate::d3d::Gpu,
+    target: SourceTarget,
+    cursor: bool,
+) -> Result<SourceAndCrop> {
+    use crate::source;
+    match target {
+        SourceTarget::Display { index } => {
+            let mons = crate::d3d::monitors();
+            let hmon = *mons
+                .get(index)
+                .with_context(|| format!("no display {index} (this PC has {})", mons.len()))?;
+            Ok((source::create(gpu, hmon, cursor)?, None))
+        }
+        SourceTarget::Window { hwnd } => {
+            let hwnd = windows::Win32::Foundation::HWND(hwnd as usize as *mut _);
+            Ok((Box::new(source::wgc::WgcCapture::window(gpu, hwnd, cursor)?), None))
+        }
+        SourceTarget::Region { display, x, y, w, h } => {
+            let mons = crate::d3d::monitors();
+            let hmon = *mons
+                .get(display)
+                .with_context(|| format!("no display {display} (this PC has {})", mons.len()))?;
+            let src = source::create(gpu, hmon, cursor)?;
+            let crop = switch::clamp_region(src.size(), x, y, w, h)
+                .context("region lies outside the monitor")?;
+            Ok((src, Some(crop)))
+        }
+    }
+}
+
 fn audio_pipeline(
     source: AudioSource,
     tx: mpsc::Sender<(Vec<u8>, Duration)>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
+    recorder: Arc<OnceLock<Recorder>>,
 ) -> Result<()> {
     let mut stream = OpusStream::new(source, 160_000)?;
     while !stop.load(Ordering::Relaxed) {
         let Some(p) = stream.next(Duration::from_millis(200))? else { continue };
         stats.audio_packets.fetch_add(1, Ordering::Relaxed);
         stats.audio_peak_milli.store((stream.peak * 1e3) as u32, Ordering::Relaxed);
+        if let Some(r) = recorder.get() {
+            r.push_audio(&p.data, p.qpc_100ns, (p.duration.as_nanos() / 100) as i64);
+        }
         if tx.blocking_send((p.data, p.duration)).is_err() {
             break;
         }

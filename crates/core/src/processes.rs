@@ -43,7 +43,7 @@ pub fn list_windowed() -> Vec<ProcessInfo> {
             if exe.is_empty() {
                 return BOOL(1);
             }
-            acc.seen.insert(pid, ProcessInfo { pid, exe, title });
+            acc.seen.insert(pid, ProcessInfo { pid, exe, title, hwnd: hwnd.0 as usize as u64 });
         }
         BOOL(1)
     }

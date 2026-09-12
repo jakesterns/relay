@@ -95,3 +95,27 @@ pub fn primary_monitor() -> HMONITOR {
     // SAFETY: always returns a monitor with DEFAULTTOPRIMARY.
     unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) }
 }
+
+/// All monitors in enumeration order, primary first — the index the
+/// `SourceTarget::Display`/`Region` commands refer to.
+pub fn monitors() -> Vec<HMONITOR> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC};
+
+    unsafe extern "system" fn cb(m: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
+        // SAFETY: `out` is the Vec passed below, valid for the whole call.
+        unsafe { &mut *(out.0 as *mut Vec<HMONITOR>) }.push(m);
+        true.into()
+    }
+    let mut list: Vec<HMONITOR> = Vec::new();
+    // SAFETY: callback only runs during this call; `list` outlives it.
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(cb), LPARAM(&mut list as *mut _ as isize));
+    }
+    let primary = primary_monitor();
+    if let Some(pos) = list.iter().position(|m| *m == primary) {
+        list.swap(0, pos);
+    }
+    list
+}

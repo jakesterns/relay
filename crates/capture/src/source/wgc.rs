@@ -45,7 +45,19 @@ impl WgcCapture {
         // SAFETY: hmonitor is a live monitor handle.
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmonitor) }
             .context("GraphicsCaptureItem::CreateForMonitor")?;
+        Self::from_item(gpu, item, cursor)
+    }
 
+    /// Start capturing one top-level window (source switching).
+    pub fn window(gpu: &Gpu, hwnd: windows::Win32::Foundation::HWND, cursor: bool) -> Result<Self> {
+        let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+        // SAFETY: an invalid/closed HWND fails here with a clear error.
+        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }
+            .context("GraphicsCaptureItem::CreateForWindow (window closed?)")?;
+        Self::from_item(gpu, item, cursor)
+    }
+
+    fn from_item(gpu: &Gpu, item: GraphicsCaptureItem, cursor: bool) -> Result<Self> {
         let dxgi: IDXGIDevice = gpu.device.cast()?;
         // SAFETY: dxgi is a valid DXGI device.
         let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }?;

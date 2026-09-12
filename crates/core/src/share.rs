@@ -24,13 +24,52 @@ pub struct ShareRequest {
     pub bitrate_mbps: u32,
     #[serde(default = "default_fps")]
     pub fps: u32,
+    /// Encode size cap `(w, h)`; `None` = native capture size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<(u32, u32)>,
     #[serde(default = "default_true")]
     pub audio: bool,
     /// Capture just this process's audio (game-only) instead of the desktop mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_pid: Option<u32>,
+    /// Send the default microphone instead of the desktop mix.
+    #[serde(default)]
+    pub mic: bool,
     #[serde(default = "default_true")]
     pub cursor: bool,
+    /// The preset this request was resolved from (informational).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    /// Start continuous recording with the share.
+    #[serde(default)]
+    pub record: bool,
+    /// Replay ring window in seconds; 0 = off.
+    #[serde(default)]
+    pub replay_secs: u32,
+    /// Recording folder; `None` disables recording and the replay ring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_dir: Option<String>,
+}
+
+/// Mirror of `relay_capture::command::SourceTarget` (the core does not link
+/// the capture crate); the wire shape is locked by tests on both sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SourceTarget {
+    Display { index: usize },
+    Window { hwnd: u64 },
+    Region { display: usize, x: u32, y: u32, w: u32, h: u32 },
+}
+
+/// Mirror of `relay_capture::command::EngineCmd`, serialised onto the
+/// engine's stdin one line at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum EngineCmd {
+    Stop,
+    Record { on: bool },
+    ReplaySave,
+    Switch { target: SourceTarget },
 }
 
 fn default_bitrate() -> u32 {
@@ -78,6 +117,12 @@ pub enum ShareEvent {
     Exited { ok: bool, code: Option<i32> },
     /// A structured error line from the engine.
     Error { message: String },
+    /// Continuous recording started or stopped (with the file path when on).
+    Recording { on: bool, path: Option<String> },
+    /// A replay clip landed on disk.
+    ReplaySaved { path: String, ms: u64 },
+    /// The capture source switched (verbatim target JSON for the UI).
+    SourceChanged { data: serde_json::Value },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -175,6 +220,17 @@ impl ShareEngine {
             _ => None,
         }
     }
+
+    /// Send one command line to the engine's stdin (record toggle, replay
+    /// save, source switch).
+    pub fn command(&mut self, cmd: &EngineCmd) -> Result<()> {
+        let stdin = self.stdin.as_mut().context("engine stdin already closed")?;
+        let mut line = serde_json::to_vec(cmd)?;
+        line.push(b'\n');
+        stdin.write_all(&line)?;
+        stdin.flush()?;
+        Ok(())
+    }
 }
 
 impl Drop for ShareEngine {
@@ -196,14 +252,31 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     args.push(req.bitrate_mbps.to_string());
     args.push("--fps".into());
     args.push(req.fps.to_string());
+    if let Some((w, h)) = req.size {
+        args.push("--size".into());
+        args.push(format!("{w}x{h}"));
+    }
     if !req.audio {
         args.push("--no-audio".into());
     } else if let Some(pid) = req.audio_pid {
         args.push("--audio-pid".into());
         args.push(pid.to_string());
+    } else if req.mic {
+        args.push("--audio-mic".into());
     }
     if !req.cursor {
         args.push("--no-cursor".into());
+    }
+    if let Some(dir) = req.record_dir.as_deref().filter(|d| !d.is_empty()) {
+        args.push("--record-dir".into());
+        args.push(dir.into());
+        if req.record {
+            args.push("--record".into());
+        }
+        if req.replay_secs > 0 {
+            args.push("--replay-secs".into());
+            args.push(req.replay_secs.to_string());
+        }
     }
     args
 }
@@ -245,6 +318,15 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         }),
         Some("error") => Some(ShareEvent::Error {
             message: v.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string(),
+        }),
+        Some("recording") => Some(ShareEvent::Recording {
+            on: v.get("on").and_then(|o| o.as_bool()).unwrap_or(false),
+            path: v.get("path").and_then(|p| p.as_str()).map(str::to_string),
+        }),
+        Some("source") => Some(ShareEvent::SourceChanged { data: v }),
+        Some("replay_saved") => Some(ShareEvent::ReplaySaved {
+            path: v.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+            ms: v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0),
         }),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
@@ -331,6 +413,86 @@ mod tests {
         let args = send_args(&req);
         assert!(args.contains(&"--no-audio".to_string()));
         assert!(!args.iter().any(|a| a == "--audio-pid"));
+    }
+
+    #[test]
+    fn send_args_size_mic_and_recording() {
+        let req: ShareRequest = serde_json::from_str(
+            r#"{"code":"1","size":[2560,1440],"mic":true,"record":true,"replay_secs":60,"record_dir":"C:\\V\\Relay"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            send_args(&req),
+            [
+                "send",
+                "--code",
+                "1",
+                "--bitrate",
+                "60",
+                "--fps",
+                "60",
+                "--size",
+                "2560x1440",
+                "--audio-mic",
+                "--record-dir",
+                "C:\\V\\Relay",
+                "--record",
+                "--replay-secs",
+                "60",
+            ]
+        );
+
+        // No record_dir → no recording flags at all, even if record was set.
+        let req: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","record":true,"replay_secs":60}"#).unwrap();
+        let args = send_args(&req);
+        assert!(!args.iter().any(|a| a.starts_with("--record") || a == "--replay-secs"));
+
+        // Game-only audio beats the mic toggle (single-track contract).
+        let req: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","mic":true,"audio_pid":42}"#).unwrap();
+        let args = send_args(&req);
+        assert!(args.contains(&"--audio-pid".to_string()));
+        assert!(!args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// Locks the stdin command strings to `relay_capture::command`'s shapes.
+    #[test]
+    fn engine_cmd_wire_matches_the_capture_side() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Record { on: true }).unwrap(),
+            r#"{"cmd":"record","on":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::ReplaySave).unwrap(),
+            r#"{"cmd":"replay_save"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Switch {
+                target: SourceTarget::Region { display: 0, x: 1, y: 2, w: 3, h: 4 }
+            })
+            .unwrap(),
+            r#"{"cmd":"switch","target":{"kind":"region","display":0,"x":1,"y":2,"w":3,"h":4}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Switch {
+                target: SourceTarget::Window { hwnd: 20958 }
+            })
+            .unwrap(),
+            r#"{"cmd":"switch","target":{"kind":"window","hwnd":20958}}"#
+        );
+        assert_eq!(serde_json::to_string(&EngineCmd::Stop).unwrap(), r#"{"cmd":"stop"}"#);
+    }
+
+    #[test]
+    fn decode_line_maps_recording_events() {
+        let ev =
+            decode_line(r#"{"event":"recording","on":true,"path":"C:\\V\\Relay\\a.mp4"}"#).unwrap();
+        assert!(
+            matches!(ev, ShareEvent::Recording { on: true, path: Some(p) } if p.ends_with("a.mp4"))
+        );
+        let ev = decode_line(r#"{"event":"replay_saved","path":"r.mp4","ms":420}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::ReplaySaved { path, ms: 420 } if path == "r.mp4"));
     }
 
     #[test]

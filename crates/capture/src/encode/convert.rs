@@ -85,6 +85,34 @@ impl Converter {
         })
     }
 
+    /// Crop the input to `rect` (left, top, width, height) before scaling —
+    /// region capture. `None` restores full-frame conversion. Sticky until
+    /// changed.
+    pub fn set_source_rect(&mut self, rect: Option<(u32, u32, u32, u32)>) {
+        use windows::Win32::Foundation::RECT;
+        let (enable, r) = match rect {
+            Some((x, y, w, h)) => (
+                true,
+                RECT {
+                    left: x as i32,
+                    top: y as i32,
+                    right: (x + w) as i32,
+                    bottom: (y + h) as i32,
+                },
+            ),
+            None => (false, RECT::default()),
+        };
+        // SAFETY: stream 0 exists for the life of the processor.
+        unsafe {
+            self.video_context.VideoProcessorSetStreamSourceRect(
+                &self.processor,
+                0,
+                enable,
+                if enable { Some(&r) } else { None },
+            );
+        }
+    }
+
     /// Convert (and scale) `src` into the next NV12 ring texture and return it.
     /// The returned texture stays valid until `RING - 1` further calls.
     pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {

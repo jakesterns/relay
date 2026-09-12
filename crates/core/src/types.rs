@@ -243,6 +243,9 @@ pub struct ProcessInfo {
     pub pid: u32,
     pub exe: String,
     pub title: String,
+    /// The enumerated top-level window, for source switching.
+    #[serde(default)]
+    pub hwnd: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
