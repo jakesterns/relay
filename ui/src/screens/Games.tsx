@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, isTauri, type Preview } from "../lib/ipc";
+import { api, isTauri, type ApoStatus, type Preview } from "../lib/ipc";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -73,6 +73,32 @@ function AudioSection({ profileId }: { profileId: string | null }) {
       </div>
       <AbListeningCard profileId={profileId} />
     </>
+  );
+}
+
+/** Latency / chain-state / route readout. Latency is the chain's real
+ *  figure at 48 kHz: EQ adds none, the limiter 1 ms of look-ahead, HRTF one
+ *  128-frame partition (2.7 ms). The route reflects whether the endpoint APO
+ *  is actually registered — without it the profile is preview-only. */
+function ChainReadout({ chain, hrtf, tamer }: { chain: string; hrtf: boolean; tamer: boolean }) {
+  const { offline } = useCore();
+  const [apo, setApo] = useState<ApoStatus | null>(null);
+  useEffect(() => {
+    api.apoStatus().then(setApo).catch(() => setApo(null));
+  }, [offline]);
+
+  const ms = (tamer ? 1.0 : 0) + (hrtf ? 2.7 : 0);
+  const route = apo === null
+    ? "Endpoint · status unknown"
+    : apo.installed
+      ? `Endpoint APO${apo.running ? "" : " · idle"}`
+      : "Preview only · APO not installed";
+  return (
+    <Card>
+      <Kv k="Processing" v={chain === "active" ? `${ms.toFixed(1)} ms` : "0 ms"} mono />
+      <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Bypassed by game (exclusive)"} />
+      <Kv k="Route" v={route} />
+    </Card>
   );
 }
 
@@ -218,11 +244,7 @@ function AudioSide() {
         <Toggle label="Explosion tamer" sub="Soft limiter under 120 Hz" on={tamer} onChange={setTamer} />
         <Toggle label="Apply to share feed" sub="Call hears what you hear" on={toShare} onChange={setToShare} />
       </Card>
-      <Card>
-        <Kv k="Processing" v={chain === "active" ? "0.4 ms" : "0 ms"} mono />
-        <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Bypassed by game (exclusive)"} />
-        <Kv k="Route" v="Endpoint · no virtual device" />
-      </Card>
+      <ChainReadout chain={chain} hrtf={hrtf} tamer={tamer} />
       <button className="btn acc" disabled>Save to profile</button>
       <p className="note">Runs inside Windows audio on this headset only. Other apps and your desktop are unaffected.</p>
     </aside>

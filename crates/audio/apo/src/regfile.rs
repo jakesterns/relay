@@ -312,7 +312,7 @@ fn parse_value_line(line: &str, lineno: usize) -> Result<(String, RegValue), Reg
 
 /// Parse a leading quoted string (with `\\` and `\"` escapes); returns the
 /// unescaped string and the remainder after the closing quote.
-fn parse_quoted<'a>(s: &'a str, lineno: usize) -> Result<(String, &'a str), RegFileError> {
+fn parse_quoted(s: &str, lineno: usize) -> Result<(String, &str), RegFileError> {
     let inner = s.strip_prefix('"').ok_or(RegFileError::BadString(lineno))?;
     let mut out = String::new();
     let mut chars = inner.char_indices();

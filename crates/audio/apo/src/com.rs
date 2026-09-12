@@ -367,6 +367,9 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
 }
 
 impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
+    // The COM ABI hands these methods raw pointers behind a safe trait; the
+    // engine guarantees their validity (see the SAFETY notes inside).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn LockForProcess(
         &self,
         num_in: u32,
@@ -463,6 +466,9 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
 }
 
 impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
+    // As above: raw pointers behind a safe COM trait, validity guaranteed
+    // by the engine.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn APOProcess(
         &self,
         num_in: u32,

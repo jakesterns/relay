@@ -81,6 +81,9 @@ export interface ShareStats {
 }
 /** A/B listening-test render (`Method::RenderPreview`). Paths are absolute. */
 export interface Preview { original: string; processed: string; sample_rate: number; hrtf_applied: boolean }
+
+/** Mirror of relay-core's `audio_apo::ApoStatus`. */
+export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
 export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
 export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
 
@@ -288,6 +291,21 @@ export const api = {
   async renderPreview(id: string, wav?: string): Promise<Preview> {
     if (!isTauri()) throw new Error("A/B rendering needs the Relay core");
     return invoke<Preview>("render_preview", { id, wav: wav ?? null });
+  },
+  /** Read-only probe: is the Relay APO on the default render endpoint? */
+  async apoStatus(): Promise<ApoStatus> {
+    if (!isTauri()) return { installed: false, endpoint: null, running: false };
+    return invoke<ApoStatus>("apo_status");
+  },
+  /** Register the APO (backup-then-apply). Gated in the core; errors explain. */
+  async installApo(): Promise<void> {
+    if (!isTauri()) throw new Error("Installing the APO needs the Relay core");
+    return invoke<void>("install_apo");
+  },
+  /** Restore the endpoint's FX chain from the install backup and unregister. */
+  async uninstallApo(): Promise<void> {
+    if (!isTauri()) throw new Error("Removing the APO needs the Relay core");
+    return invoke<void>("uninstall_apo");
   },
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];

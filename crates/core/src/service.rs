@@ -89,6 +89,8 @@ struct Inner {
     receive: Option<crate::share::ShareEngine>,
     /// Where A/B listening-test renders go.
     previews_dir: std::path::PathBuf,
+    /// Where pre-install FX property-store backups live (`<endpoint>.json`).
+    apo_backup_dir: std::path::PathBuf,
     /// What the applier reported for the active profile's audio chain; the
     /// exclusive-mode watcher restores this when exclusivity clears.
     applied_audio: AudioChainState,
@@ -138,6 +140,7 @@ impl Service {
             last_share: None,
             receive: None,
             previews_dir: paths.previews_dir(),
+            apo_backup_dir: paths.apo_backup_dir(),
             applied_audio: AudioChainState::Bypass,
             audio_watch: false,
         }));
@@ -800,6 +803,42 @@ impl IpcHandler {
                     },
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
+            }
+            Method::ApoStatus => {
+                drop(g);
+                Reply::Apo { status: crate::audio_apo::apo_status() }
+            }
+            #[cfg(windows)]
+            Method::InstallApo => {
+                let dir = g.apo_backup_dir.clone();
+                drop(g);
+                match crate::audio_apo::install_live(&dir) {
+                    Ok(endpoint) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: format!("Relay APO registered on {endpoint}"),
+                        });
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            #[cfg(windows)]
+            Method::UninstallApo => {
+                let dir = g.apo_backup_dir.clone();
+                drop(g);
+                match crate::audio_apo::uninstall_live(&dir) {
+                    Ok(endpoint) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: format!("Endpoint {endpoint} restored to its original state"),
+                        });
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            #[cfg(not(windows))]
+            Method::InstallApo | Method::UninstallApo => {
+                Reply::Error { message: "Windows only".into() }
             }
             Method::Subscribe => Reply::Ok,
             Method::Shutdown => {

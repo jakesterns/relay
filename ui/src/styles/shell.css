@@ -213,6 +213,8 @@ a { color: inherit; text-decoration: none; }
 
 /* WASAPI-exclusive warning (Games · Audio) */
 .warnbanner { display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 14px; border: 1px solid rgba(201,169,106,.35); border-radius: 6px; color: var(--ink); font-size: 12px; }
+.consent { padding: 10px 12px; margin-top: 8px; border: 1px solid var(--line); border-radius: 6px; }
+.consent .p { font-size: 12px; }
 .warnbanner i { width: 7px; height: 7px; border-radius: 50%; background: var(--brass); flex: none; }
 
 .empty { color: var(--dim); padding: 18px 0; text-align: center; }

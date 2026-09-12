@@ -78,6 +78,35 @@ fn main() -> Result<()> {
             logging::init_console(args.verbose);
             client_command(&args.cmd, args.arg.as_deref(), args.json)
         }
+        // Direct (no running service needed): the VM runbook drives these
+        // from an elevated prompt. The livereg write gate applies.
+        #[cfg(windows)]
+        "apo" => {
+            logging::init_console(args.verbose);
+            match args.arg.as_deref() {
+                None | Some("status") => {
+                    let s = relay_core::audio_apo::apo_status();
+                    println!(
+                        "endpoint: {}\ninstalled: {}\nparams section: {}",
+                        s.endpoint.as_deref().unwrap_or("none"),
+                        s.installed,
+                        if s.running { "reachable" } else { "not reachable" },
+                    );
+                }
+                Some("install") => {
+                    let ep = relay_core::audio_apo::install_live(&args.paths.apo_backup_dir())?;
+                    println!("registered on {ep}; restart audiosrv to pick it up");
+                }
+                Some("uninstall") => {
+                    let ep = relay_core::audio_apo::uninstall_live(&args.paths.apo_backup_dir())?;
+                    println!("restored {ep} to its pre-install state");
+                }
+                Some(other) => {
+                    anyhow::bail!("apo takes `status`, `install` or `uninstall`, not `{other}`")
+                }
+            }
+            Ok(())
+        }
         other => anyhow::bail!("unknown command `{other}`\n{USAGE}"),
     }
 }
@@ -124,6 +153,9 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   autostart  show, enable or disable start-at-login (HKCU Run key only)
   share-start <code>  spawn the share engine (RELAY_PEER, RELAY_BITRATE_MBPS optional)
   share-stop          stop the running share engine
+  apo [status|install|uninstall]  endpoint-APO registration (install/uninstall
+             are VM / installer only: they refuse without
+             RELAY_APO_ALLOW_LIVE_WRITE=1 and an elevated prompt)
 ";
 
 #[cfg(windows)]

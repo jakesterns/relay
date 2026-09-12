@@ -225,6 +225,30 @@ async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>
 }
 
 #[tauri::command]
+async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
+    match call(Method::ApoStatus).await? {
+        Reply::Apo { status } => Ok(status),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn install_apo() -> CmdResult<()> {
+    match call(Method::InstallApo).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn uninstall_apo() -> CmdResult<()> {
+    match call(Method::UninstallApo).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn discover_receivers() -> CmdResult<serde_json::Value> {
     match call(Method::DiscoverReceivers).await? {
         Reply::Receivers { receivers } => Ok(receivers),
@@ -325,6 +349,9 @@ pub fn run() {
             probe_hardware,
             import_curve,
             render_preview,
+            apo_status,
+            install_apo,
+            uninstall_apo,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

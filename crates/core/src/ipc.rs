@@ -96,6 +96,15 @@ pub enum Method {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wav: Option<String>,
     },
+    /// Is the endpoint APO registered on the default render endpoint?
+    /// Read-only registry probe.
+    ApoStatus,
+    /// Register the APO (backup-then-apply). Refused unless the live-write
+    /// gate is set — VM / installer only.
+    InstallApo,
+    /// Restore the endpoint's FX property store from the install backup and
+    /// unregister. Same gate.
+    UninstallApo,
     Subscribe,
     Shutdown,
 }
@@ -154,6 +163,9 @@ pub enum Reply {
         processed: String,
         sample_rate: u32,
         hrtf_applied: bool,
+    },
+    Apo {
+        status: crate::audio_apo::ApoStatus,
     },
     Ok,
     Error {

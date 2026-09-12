@@ -92,6 +92,66 @@ pub fn apo_status() -> ApoStatus {
     ApoStatus { installed: false, endpoint: None, running: false }
 }
 
+/// Register the APO on the default render endpoint. Backup-then-apply, same
+/// contract as the `Applier`: the complete prior FX property store lands in
+/// `<backup_dir>\<endpoint>.json` *before* the registry changes.
+///
+/// Gated twice: `relay-apo`'s livereg refuses without
+/// `RELAY_APO_ALLOW_LIVE_WRITE=1` (VM / installer only — this dev machine
+/// never sets it), and this fn refuses to overwrite an existing backup (an
+/// install over an install would lose the true original).
+#[cfg(windows)]
+pub fn install_live(backup_dir: &std::path::Path) -> Result<String> {
+    use anyhow::{bail, Context};
+
+    let endpoint = relay_audio::sessions::default_render_endpoint_guid()
+        .context("no default render endpoint")?;
+    let backup_file = backup_dir.join(format!("{endpoint}.json"));
+    if backup_file.exists() {
+        bail!("a backup for {endpoint} already exists — the APO looks installed; uninstall first");
+    }
+    let dll = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
+        .filter(|p| p.exists())
+        .context("relay_apo.dll not found next to the running binary")?;
+
+    let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
+        .with_context(|| format!("reading FX store of {endpoint}"))?;
+    let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll.to_string_lossy());
+
+    std::fs::create_dir_all(backup_dir)?;
+    let tmp = backup_file.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_vec_pretty(&plan.backup)?)?;
+    std::fs::rename(&tmp, &backup_file).context("persisting the backup")?;
+
+    relay_apo::livereg::LiveRegistry::apply_install(&plan)
+        .context("registering the APO (VM / installer only; RELAY_APO_ALLOW_LIVE_WRITE gate)")?;
+    info!(%endpoint, "APO registered; endpoint streams pick it up on their next start");
+    Ok(endpoint)
+}
+
+/// Restore the endpoint's FX property store from the backup taken at
+/// install, byte-for-byte, and remove our COM registration. The backup file
+/// is kept with a `.restored` suffix for the post-uninstall export diff.
+#[cfg(windows)]
+pub fn uninstall_live(backup_dir: &std::path::Path) -> Result<String> {
+    use anyhow::Context;
+
+    let endpoint = relay_audio::sessions::default_render_endpoint_guid()
+        .context("no default render endpoint")?;
+    let backup_file = backup_dir.join(format!("{endpoint}.json"));
+    let backup: relay_apo::fxstore::Backup = serde_json::from_slice(
+        &std::fs::read(&backup_file)
+            .with_context(|| format!("no backup for {endpoint}; nothing to uninstall"))?,
+    )?;
+    relay_apo::livereg::LiveRegistry::restore(&backup)
+        .context("restoring the FX property store (RELAY_APO_ALLOW_LIVE_WRITE gate)")?;
+    let _ = std::fs::rename(&backup_file, backup_file.with_extension("json.restored"));
+    info!(%endpoint, "FX property store restored to the pre-install state");
+    Ok(endpoint)
+}
+
 #[cfg(windows)]
 fn open_default_endpoint() -> Option<SharedParams> {
     let guid = match relay_audio::sessions::default_render_endpoint_guid() {
@@ -122,7 +182,7 @@ impl AudioControl for ApoAudioControl {
         // The APO's resting state is bypass by construction (the block is
         // initialised that way), so the original state is always "bypass".
         // Reading the live word anyway keeps the snapshot honest.
-        let bypass = open_default_endpoint().map_or(true, |s| s.block().bypass());
+        let bypass = open_default_endpoint().is_none_or(|s| s.block().bypass());
         Ok(AudioState { bypass })
     }
 

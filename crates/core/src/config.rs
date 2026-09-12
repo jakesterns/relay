@@ -102,6 +102,12 @@ impl Paths {
         self.root.join("previews")
     }
 
+    /// Prior FX property stores, one `<endpoint>.json` per endpoint, written
+    /// *before* any APO install touches the registry (M3b plan).
+    pub fn apo_backup_dir(&self) -> PathBuf {
+        self.root.join("apo-backup")
+    }
+
     /// Snapshot of the machine's original state. Presence of this file with
     /// `applied = true` on start means we did not get to restore last time.
     pub fn backup_file(&self) -> PathBuf {

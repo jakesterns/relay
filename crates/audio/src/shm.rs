@@ -165,7 +165,7 @@ pub fn decode(p: &PodParams) -> ChainParams {
             enabled: b.enabled != 0 && b.kind <= 4,
         })
         .collect();
-    let limiter = (p.limiter.present != 0).then(|| LimiterParams {
+    let limiter = (p.limiter.present != 0).then_some(LimiterParams {
         below_hz: p.limiter.below_hz,
         threshold_db: p.limiter.threshold_db,
         lookahead_ms: p.limiter.lookahead_ms,

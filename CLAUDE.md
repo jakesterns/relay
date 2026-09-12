@@ -51,6 +51,11 @@ crates/audio/         relay-audio — DSP (biquad EQ, band-split limiter, partit
                       `dsp` feature (default on) holds the FFT; the core links default-features=false
                       (params + sessions only) and spawns `relay-preview` on demand — keep it that way
                       or the footprint gate fails. Bundled HRIRs: SADIE II D1 (assets/hrtf, Apache 2.0).
+crates/audio/apo/     relay-apo — the endpoint APO cdylib (COM, feature "com" pulls the DSP) plus the
+                      FX property-store install/uninstall engine (regfile/fxstore/livereg — pure model,
+                      fixture-tested; live writes double-gated on RELAY_APO_ALLOW_LIVE_WRITE + elevation,
+                      VM only). The core links it default-features=false (no FFT). Test-sign runbook:
+                      docs/dev/apo-testsign.md.
 crates/capture/       relay-capture — placeholder for DXGI/WGC → encoder → WebRTC
 crates/vdevice/       relay-vdevice — placeholder for virtual camera / mic
 crates/display/       relay-display — placeholder for NvAPI/ADLX + DDC/CI
@@ -74,6 +79,7 @@ relay-handoff/        original handoff bundle; do not edit
 - `processes.rs` — windowed processes for the exe picker (`Method::ListProcesses`).
 - `status.rs` — human summary for `relay-core status` (`--json` for the raw state).
 - `audio_bridge.rs` — `AudioSettings` → `relay_audio::ChainParams`; spawns `relay-preview` for the A/B render.
+- `audio_apo.rs` — the production `AudioControl`: params to the APO over `relay_audio::shm` (apply = write + un-bypass, restore = bypass); read-only `apo_status()` probe; gated `install_live`/`uninstall_live` (backup-then-apply to `apo-backup\<endpoint>.json`); `relay-core apo` CLI.
 - `service.rs` — wires the above; single-threaded tokio runtime. 1 s tick runs the WASAPI-exclusive watcher (only while a profile with audio processing is active) → `AudioChainState::ExclusiveBypassed`.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.
 

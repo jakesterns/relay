@@ -60,10 +60,11 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] Offline listening test: apply the profile to a WAV (or a synthesized demo clip) and play A/B from the UI so tuning works before the APO ships.
 
 ## M3b — Endpoint APO (needs EV cert)
-- [ ] Start EV certificate + Hardware Dev Center attestation as soon as M0 lands. External dependency; track in this file.
-- [ ] APO `cdylib` hosting `relay-audio::dsp`, parameters via shared memory, registered on one endpoint only.
-- [ ] Install/uninstall that edits only that endpoint's FX property store and restores the exact prior chain (brief risk #2). Verified by a before/after registry diff test.
-- [ ] `AudioControl` adapter; Settings opt-in card goes live.
+**Code-complete 2026-09-11** (branch `m3b-apo`; plan + session log in `docs/plans/M3b-apo.md`). All development done unsigned and fixture-driven: this machine's registry was never modified (read-only baseline exports only; live writes double-gated). Deferred, blocked on the EV cert and on having a hypervisor: production signing, and the live audiodg-hosted VM pass (runbook: `docs/dev/apo-testsign.md`). 176 workspace tests green; footprint gate 5.3 MB / 0 % with the registration engine in the core.
+- [ ] Start EV certificate + Hardware Dev Center attestation as soon as M0 lands. External dependency; track in the M3b plan (**still not ordered as of 2026-09-11 — this now blocks M3b's VM pass and M5's virtual mic**).
+- [x] APO `cdylib` hosting `relay-audio::dsp`, parameters via shared memory (seqlock, bypass-first-word, event-driven rebuilds off the RT path), registered on one endpoint only (EFX via the composite key). In-process COM test proves output bit-identical to the direct DSP chain.
+- [x] Install/uninstall that edits only that endpoint's FX property store and restores the exact prior chain (brief risk #2). Verified by a byte-for-byte before/after export diff against the real RODECaster baseline fixture; the same diff re-runs live in the VM pass (deferred).
+- [x] `AudioControl` adapter (now the production audio backend; live-tested over the real endpoint's section name); Settings opt-in card live with real status + consent copy; Games Route/Processing readouts real; `relay-core apo` CLI.
 
 ## M4 — Share MVP (headline)
 **Done 2026-09-10** (branch `m4-share`; plan + measurements in `docs/plans/M4-share.md`). Full capture→encode→transport→decode→present pipeline built and green on loopback: capture→present ~4–6 ms, zero AU loss; MF HEVC encode 4K60 p99 10.8 ms (« 20 ms gate, so direct NVENC not needed); core RSS unchanged while sharing. Decision 2026-09-10: dual-PC testing is not currently possible, so the pipeline logic is unit-tested thoroughly instead (101 workspace tests; see the plan's "Unit coverage") and **live two-PC integration testing moves to the future MVP validation pass** (runbook in the plan's Deferred).
@@ -107,7 +108,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | not started |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
-| M3b Endpoint APO | `docs/plans/M3b-apo.md` | blocked: EV cert |
+| M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | blocked: EV cert (mic) |
 | M6 Recording & presets | `docs/plans/M6-recording-presets.md` | not started |
 | M7 Installer | `docs/plans/M7-installer.md` | not started |
