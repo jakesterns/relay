@@ -231,6 +231,7 @@ mod tests {
             refresh_hz: Some(144.0),
             primary: true,
             hmonitor: 0x10001,
+            gdi_name: r"\\.\DISPLAY1".into(),
             ddc: None,
         };
         let report_with_default = |default_key: &str| ProbeReport {

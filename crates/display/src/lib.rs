@@ -1,15 +1,28 @@
-//! Relay display.
+//! Relay display: the primitive display-control operations.
 //!
-//! Planned layout:
-//! - `gpu/` NvAPI (vibrance, gamma, contrast, hue, LUT) and ADLX equivalents.
-//! - `ddc/` DDC/CI over `dxva2` (brightness, contrast, black equaliser, etc.),
-//!   per monitor, with capability probing from the VCP string.
-//! - `adapter` the `DisplayControl` impl for `relay_core::apply`: capture the
-//!   current values, apply, restore. Only the monitor the game is on.
+//! Layout:
+//! - [`vcp`] — VCP opcode constants, per-model quirks (write delays, vendor
+//!   codes) and the pure profile-field → opcode mapping. No OS calls.
+//! - [`gamma`] — gamma-ramp maths (pure) and the GDI `SetDeviceGammaRamp`
+//!   read/write path per monitor DC. Vendor-neutral; the only GPU path on
+//!   non-NVIDIA hardware until ADLX lands.
+//! - [`ddc`] — DDC/CI monitor controls over `dxva2`: physical-monitor handles
+//!   from an `HMONITOR`, get/set VCP with retries and write delays, because
+//!   DDC/CI is slow and flaky.
+//! - [`nvapi`] — digital vibrance and hue via `nvapi64.dll`, loaded
+//!   dynamically so there is no link-time dependency and non-NVIDIA machines
+//!   simply report "unavailable".
 //!
-//! Multi-monitor and restore-on-crash are listed as early risks in the brief;
-//! the core's snapshot file is the recovery mechanism.
+//! This crate deliberately does not depend on `relay-core`: it exposes raw
+//! operations and raw state; the `DisplayControl` adapter in the core is what
+//! enforces capture-before-apply and owns the snapshot shape.
 
-#![forbid(unsafe_code)]
+pub mod gamma;
+pub mod vcp;
+
+#[cfg(windows)]
+pub mod ddc;
+#[cfg(windows)]
+pub mod nvapi;
 
 pub const CRATE: &str = "relay-display";

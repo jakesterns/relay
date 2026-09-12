@@ -11,6 +11,13 @@ import {
 const shareLabel: Record<ProfileSummary["share"], string> = { game: "Game", daw: "DAW", desktop: "Desktop", off: "Off" };
 const kindLabel: Record<HeadsetKind, string> = { headphone: "Headphones", iem: "IEM", speakers: "Speakers" };
 
+/** Which controls Relay can drive on this panel, from its advertised VCP codes. */
+function ddcControls(codes: number[]): string {
+  const known: [number, string][] = [[0x10, "brightness"], [0x12, "contrast"], [0x87, "sharpness"]];
+  const names = known.filter(([c]) => codes.includes(c)).map(([, n]) => n);
+  return names.length ? `controls: ${names.join(", ")}` : `DDC/CI ${codes.length} codes`;
+}
+
 export function Profiles() {
   const { state, profiles, hardware, refresh } = useCore();
   const active = state.active_profile;
@@ -130,7 +137,7 @@ export function Profiles() {
                 <div className="ic" />
                 <div>
                   <b>{m.name}</b>
-                  <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · DDC/CI ${m.ddcci.length} controls` : ""}</span>
+                  <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : ""}</span>
                 </div>
                 {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
               </div>

@@ -217,6 +217,9 @@ pub struct CoreState {
     pub sharing: ShareState,
     pub audio_chain: AudioChainState,
     pub display_state: DisplayState,
+    /// Which display paths the current apply used (all-false when default).
+    #[serde(default)]
+    pub display_via: DisplayVia,
     pub footprint: Footprint,
     /// Connected endpoints/monitors and the resolved headset (M1).
     #[serde(default)]
@@ -228,6 +231,10 @@ pub struct Foreground {
     pub pid: u32,
     pub exe: String,
     pub title: String,
+    /// `HMONITOR` of the monitor hosting the window (0 = unknown). Volatile;
+    /// used to target display applies at the game's monitor only.
+    #[serde(default)]
+    pub hmonitor: i64,
 }
 
 /// A running process that owns a visible window (for the exe picker).
@@ -266,6 +273,19 @@ pub enum DisplayState {
     #[default]
     Default,
     Applied,
+}
+
+/// Which paths actually carried the current display apply, for the UI's
+/// "Applied via" line, plus profile fields this hardware could not honour.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DisplayVia {
+    pub nvapi: bool,
+    pub gamma: bool,
+    pub ddcci: bool,
+    /// Field names from `MonitorSettings`/`GpuColor` that were skipped,
+    /// e.g. `black_equalizer` on a model with no verified vendor code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsupported: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]

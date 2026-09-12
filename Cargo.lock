@@ -3526,6 +3526,7 @@ dependencies = [
  "parking_lot",
  "relay-apo",
  "relay-audio",
+ "relay-display",
  "relay-vdevice",
  "serde",
  "serde_json",
@@ -3542,7 +3543,11 @@ dependencies = [
 name = "relay-display"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "serde",
+ "serde_json",
+ "tracing",
+ "windows 0.62.2",
 ]
 
 [[package]]

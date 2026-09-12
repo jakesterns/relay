@@ -21,6 +21,9 @@ pub enum CoreEvent {
     /// re-select. Sent by the winloop window (`WM_DISPLAYCHANGE` /
     /// `WM_DEVICECHANGE`) and by the WASAPI notification client.
     HardwareChanged,
+    /// The interactive session locked (`true`) or unlocked (`false`).
+    /// Display profiles restore on lock and re-apply on unlock.
+    SessionLock(bool),
     /// Console Ctrl-C / close / logoff / shutdown.
     Shutdown,
 }
@@ -76,6 +79,15 @@ pub fn process_image_path(pid: u32) -> Option<String> {
     unsafe { imp::process_image(pid) }
 }
 
+/// The current foreground window, described the same way the hook events are.
+/// Used by the service's slow tick to notice a game moved monitors through a
+/// path no hook covers (e.g. Win+Shift+Arrow).
+#[cfg(windows)]
+pub fn current_foreground() -> Option<Foreground> {
+    // SAFETY: read-only queries on the current foreground window.
+    unsafe { imp::describe(windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()) }
+}
+
 /// `C:\Games\CoD\cod.exe` → `cod.exe`
 pub fn exe_name(path: &str) -> String {
     PathBuf::from(path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
@@ -89,9 +101,13 @@ mod imp {
     use windows::core::BOOL;
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
+    use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
     use windows::Win32::System::Console::{
         SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_C_EVENT, CTRL_LOGOFF_EVENT,
         CTRL_SHUTDOWN_EVENT,
+    };
+    use windows::Win32::System::RemoteDesktop::{
+        WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
     };
     use windows::Win32::System::Threading::{
         GetCurrentThreadId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
@@ -105,10 +121,16 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
         GetMessageW, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, RegisterClassW,
-        TranslateMessage, EVENT_SYSTEM_FOREGROUND, MSG, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
-        WINEVENT_SKIPOWNPROCESS, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_HOTKEY, WM_QUIT, WNDCLASSW,
-        WS_OVERLAPPED,
+        TranslateMessage, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, MSG, WINDOW_EX_STYLE,
+        WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
+        WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
     };
+
+    /// `WM_WTSSESSION_CHANGE` and its lock/unlock reasons (wtsapi32.h; the
+    /// message is not surfaced by the crate's messaging module).
+    const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+    const WTS_SESSION_LOCK: usize = 0x7;
+    const WTS_SESSION_UNLOCK: usize = 0x8;
 
     /// The hook callback is a bare `extern "system"` fn and cannot capture, so the
     /// sender lives in a process-wide slot. One loop per process is the design.
@@ -138,6 +160,18 @@ mod imp {
                     warn!("SetWinEventHook failed; focus tracking disabled");
                 }
 
+                // Drag-end events, to notice the game window landing on a
+                // different monitor. Rare events; costs nothing at rest.
+                let move_hook = SetWinEventHook(
+                    EVENT_SYSTEM_MOVESIZEEND,
+                    EVENT_SYSTEM_MOVESIZEEND,
+                    None,
+                    Some(win_event_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                );
+
                 let mut registered = Vec::new();
                 for hk in &hotkeys {
                     match RegisterHotKey(None, hk.action.id(), modifiers(hk), hk.vk) {
@@ -150,6 +184,12 @@ mod imp {
                 // WM_DISPLAYCHANGE / WM_DEVICECHANGE broadcasts (thread
                 // message loops and message-only windows do not get them).
                 let hw_window = create_hardware_window();
+                if let Some(w) = hw_window {
+                    // Lock/unlock notifications for restore-on-lock.
+                    if WTSRegisterSessionNotification(w, NOTIFY_FOR_THIS_SESSION).is_err() {
+                        warn!("session notifications unavailable; no restore-on-lock");
+                    }
+                }
 
                 // Seed with whatever is in front right now.
                 if let Some(fg) = describe(GetForegroundWindow()) {
@@ -169,6 +209,7 @@ mod imp {
                 }
 
                 if let Some(w) = hw_window {
+                    let _ = WTSUnRegisterSessionNotification(w);
                     let _ = DestroyWindow(w);
                 }
                 for id in registered {
@@ -176,6 +217,9 @@ mod imp {
                 }
                 if !hook.is_invalid() {
                     let _ = UnhookWinEvent(hook);
+                }
+                if !move_hook.is_invalid() {
+                    let _ = UnhookWinEvent(move_hook);
                 }
                 let _ = SetConsoleCtrlHandler(Some(ctrl_handler), false);
             }
@@ -264,6 +308,11 @@ mod imp {
         match msg {
             // Coalescing happens in the service; here every signal counts.
             WM_DISPLAYCHANGE => emit(CoreEvent::HardwareChanged),
+            WM_WTSSESSION_CHANGE => match wparam.0 {
+                WTS_SESSION_LOCK => emit(CoreEvent::SessionLock(true)),
+                WTS_SESSION_UNLOCK => emit(CoreEvent::SessionLock(false)),
+                _ => {}
+            },
             WM_DEVICECHANGE => {
                 // 0x0007 = DBT_DEVNODES_CHANGED (the catch-all broadcast),
                 // 0x8000/0x8004 = DBT_DEVICEARRIVAL / REMOVECOMPLETE.
@@ -286,11 +335,19 @@ mod imp {
         _thread: u32,
         _time: u32,
     ) {
-        if event != EVENT_SYSTEM_FOREGROUND {
+        let relevant = match event {
+            EVENT_SYSTEM_FOREGROUND => true,
+            // A drag ended: only interesting for the window that has focus
+            // (its monitor may have changed).
+            // SAFETY: plain query.
+            EVENT_SYSTEM_MOVESIZEEND => (unsafe { GetForegroundWindow() }) == hwnd,
+            _ => false,
+        };
+        if !relevant {
             return;
         }
-        if let Some(fg) = describe(hwnd) {
-            debug!(exe = %fg.exe, pid = fg.pid, "foreground changed");
+        if let Some(fg) = unsafe { describe(hwnd) } {
+            debug!(exe = %fg.exe, pid = fg.pid, hmonitor = fg.hmonitor, "foreground changed");
             emit(CoreEvent::ForegroundChanged(fg));
         }
     }
@@ -308,9 +365,9 @@ mod imp {
         }
     }
 
-    /// Read pid, image path and title for a window. Only limited-information
-    /// process access is requested; never memory or handles.
-    unsafe fn describe(hwnd: HWND) -> Option<Foreground> {
+    /// Read pid, image path, title and hosting monitor for a window. Only
+    /// limited-information process access is requested; never memory or handles.
+    pub(super) unsafe fn describe(hwnd: HWND) -> Option<Foreground> {
         if hwnd.is_invalid() {
             return None;
         }
@@ -326,7 +383,9 @@ mod imp {
         let n = GetWindowTextW(hwnd, &mut title_buf) as usize;
         let title = String::from_utf16_lossy(&title_buf[..n]);
 
-        Some(Foreground { pid, exe, title })
+        let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as i64;
+
+        Some(Foreground { pid, exe, title, hmonitor })
     }
 
     pub(super) unsafe fn process_image(pid: u32) -> Option<String> {

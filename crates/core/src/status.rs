@@ -60,7 +60,12 @@ mod tests {
     #[test]
     fn renders_every_line() {
         let mut st = CoreState {
-            foreground: Some(Foreground { pid: 42, exe: "cod.exe".into(), title: "CoD".into() }),
+            foreground: Some(Foreground {
+                pid: 42,
+                exe: "cod.exe".into(),
+                title: "CoD".into(),
+                hmonitor: 0,
+            }),
             ..Default::default()
         };
         st.footprint.rss_bytes = 9 * 1024 * 1024;

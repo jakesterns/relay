@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, isTauri, type ApoStatus, type Preview } from "../lib/ipc";
+import { api, isTauri, type ApoStatus, type Preview, type Profile } from "../lib/ipc";
 
 export type Section = "audio" | "display" | "sharing";
 
 /**
  * Per-game editor. Hosts the Audio / Display / Sharing sections from mocks
- * s2 + s3. The Audio and Display rail items land here with the section preset.
- * Values are local state until profile editing is wired to `save_profile`.
+ * s2 + s3. The Display section reads and writes the subject profile's
+ * `DisplaySettings` (M2); Audio stays local until M3 wires it.
  */
 export function Games({ section, onSection }: { section: Section; onSection: (s: Section) => void }) {
   const { state, profiles } = useCore();
@@ -17,6 +17,37 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
   const subject = active ?? profiles[0] ?? null;
   const title = subject?.name ?? "No game";
   const sectionLabel = section === "audio" ? "Audio" : section === "display" ? "Display" : "Sharing";
+
+  // Draft of the subject profile for the Display editor.
+  const [draft, setDraft] = useState<Profile | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const subjectId = subject?.id ?? null;
+  useEffect(() => {
+    let live = true;
+    if (subjectId) {
+      api.getProfile(subjectId)
+        .then((p) => { if (live) { setDraft(p); setDirty(false); } })
+        .catch(() => { if (live) setDraft(null); });
+    } else {
+      setDraft(null);
+    }
+    return () => { live = false; };
+  }, [subjectId]);
+
+  const update = (fn: (p: Profile) => void) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const next = structuredClone(d);
+      fn(next);
+      return next;
+    });
+    setDirty(true);
+  };
+  const save = async () => {
+    if (!draft) return;
+    await api.saveProfile(draft);
+    setDirty(false);
+  };
 
   return (
     <>
@@ -29,11 +60,11 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
         <Chips label="Section" value={section} onChange={onSection}
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
         {section === "audio" && <AudioSection profileId={subject?.id ?? null} />}
-        {section === "display" && <DisplaySection />}
+        {section === "display" && <DisplaySection draft={draft} update={update} />}
         {section === "sharing" && <SharingSection />}
       </section>
       {section === "audio" && <AudioSide />}
-      {section === "display" && <DisplaySide />}
+      {section === "display" && <DisplaySide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "sharing" && <SharingSide />}
     </>
   );
@@ -253,10 +284,29 @@ function AudioSide() {
 
 /* ---------- Display ---------- */
 
-function DisplaySection() {
-  const [gpu, setGpu] = useState({ vibrance: 68, gamma: 0.86, contrast: 5, shadow: 12, hue: 0 });
-  const [mon, setMon] = useState({ brightness: 80, contrast: 70, blackEq: 14, response: 2 });
+const RESPONSE_LEVELS = ["off", "normal", "fast", "faster"];
+
+/** Advertised-VCP check. Unknown capabilities (never probed) allow the
+ *  standard codes, matching the core's `plan_writes` behaviour. */
+function vcpAvailable(codes: number[] | undefined, code: number): boolean {
+  return !codes || codes.includes(code);
+}
+
+function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn: (p: Profile) => void) => void }) {
+  const { hardware } = useCore();
   const signed = (v: number) => `${v > 0 ? "+" : ""}${v}`;
+  const gpu = draft?.display.gpu ?? { vibrance: 50, gamma: 1, contrast: 0, shadow_lift: 0, hue_deg: 0 };
+  const mon = draft?.display.monitor ?? {};
+  const off = !draft;
+
+  // The profile's monitor (or the main connected one) decides which DDC/CI
+  // controls exist. Vendor codes (black eq, response) stay disabled until a
+  // verified opcode for the model lands in the quirks table.
+  const mainId = hardware.connected.monitors.find((m) => m.primary)?.id ?? null;
+  const libMonitor = hardware.monitors.find((m) => m.id === (draft?.monitor ?? mainId));
+  const codes = libMonitor?.ddcci;
+  const hue = ((gpu.hue_deg + 180) % 360) - 180;
+  const responseIx = Math.max(0, RESPONSE_LEVELS.indexOf(mon.response ?? "off"));
   return (
     <>
       <div className="cmp">
@@ -265,19 +315,31 @@ function DisplaySection() {
         <div className="div" />
       </div>
       <div className="two">
-        <Card title="GPU color" action="Reset" onAction={() => setGpu({ vibrance: 50, gamma: 1, contrast: 0, shadow: 0, hue: 0 })}>
-          <Slider label="Vibrance" value={gpu.vibrance} min={0} max={100} format={signed} onChange={(v) => setGpu({ ...gpu, vibrance: v })} />
-          <Slider label="Gamma" value={gpu.gamma} min={0.5} max={1.5} step={0.01} format={(v) => v.toFixed(2)} onChange={(v) => setGpu({ ...gpu, gamma: v })} />
-          <Slider label="Contrast" value={gpu.contrast} min={-50} max={50} format={signed} onChange={(v) => setGpu({ ...gpu, contrast: v })} />
-          <Slider label="Shadow lift" value={gpu.shadow} min={0} max={50} format={signed} onChange={(v) => setGpu({ ...gpu, shadow: v })} />
-          <Slider label="Hue" value={gpu.hue} min={-180} max={180} format={(v) => `${v}°`} onChange={(v) => setGpu({ ...gpu, hue: v })} />
+        <Card title="GPU color" action="Reset"
+          onAction={() => update((p) => { p.display.gpu = { vibrance: 50, gamma: 1, contrast: 0, shadow_lift: 0, hue_deg: 0 }; })}>
+          <Slider label="Vibrance" value={gpu.vibrance} min={0} max={100} format={signed} disabled={off}
+            onChange={(v) => update((p) => { p.display.gpu.vibrance = v; })} />
+          <Slider label="Gamma" value={gpu.gamma} min={0.5} max={1.5} step={0.01} format={(v) => v.toFixed(2)} disabled={off}
+            onChange={(v) => update((p) => { p.display.gpu.gamma = v; })} />
+          <Slider label="Contrast" value={gpu.contrast} min={-50} max={50} format={signed} disabled={off}
+            onChange={(v) => update((p) => { p.display.gpu.contrast = v; })} />
+          <Slider label="Shadow lift" value={gpu.shadow_lift} min={0} max={50} format={signed} disabled={off}
+            onChange={(v) => update((p) => { p.display.gpu.shadow_lift = v; })} />
+          <Slider label="Hue" value={hue} min={-180} max={180} format={(v) => `${v}°`} disabled={off}
+            onChange={(v) => update((p) => { p.display.gpu.hue_deg = ((v % 360) + 360) % 360; })} />
         </Card>
-        <Card title="Monitor" action="Reset" onAction={() => setMon({ brightness: 50, contrast: 50, blackEq: 10, response: 1 })}>
-          <Slider label="Brightness" value={mon.brightness} min={0} max={100} onChange={(v) => setMon({ ...mon, brightness: v })} />
-          <Slider label="Contrast" value={mon.contrast} min={0} max={100} onChange={(v) => setMon({ ...mon, contrast: v })} />
-          <Slider label="Black equalizer" value={mon.blackEq} min={0} max={20} onChange={(v) => setMon({ ...mon, blackEq: v })} />
-          <Slider label="Response" value={mon.response} min={0} max={3} format={(v) => ["Off", "Normal", "Fast", "Faster"][v] ?? ""} onChange={(v) => setMon({ ...mon, response: v })} />
-          <Slider label="Sharpness" value={50} min={0} max={100} disabled />
+        <Card title="Monitor" action="Reset" onAction={() => update((p) => { p.display.monitor = {}; })}>
+          <Slider label="Brightness" value={mon.brightness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x10)}
+            onChange={(v) => update((p) => { p.display.monitor.brightness = v; })} />
+          <Slider label="Contrast" value={mon.contrast ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x12)}
+            onChange={(v) => update((p) => { p.display.monitor.contrast = v; })} />
+          <Slider label="Black equalizer" value={mon.black_equalizer ?? 10} min={0} max={20} disabled
+            onChange={(v) => update((p) => { p.display.monitor.black_equalizer = v; })} />
+          <Slider label="Response" value={responseIx} min={0} max={3}
+            format={(v) => ["Off", "Normal", "Fast", "Faster"][v] ?? ""} disabled
+            onChange={(v) => update((p) => { p.display.monitor.response = v === 0 ? undefined : RESPONSE_LEVELS[v]; })} />
+          <Slider label="Sharpness" value={mon.sharpness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x87)}
+            onChange={(v) => update((p) => { p.display.monitor.sharpness = v; })} />
         </Card>
       </div>
     </>
@@ -295,23 +357,37 @@ function Scene() {
   );
 }
 
-function DisplaySide() {
+/** "NvAPI + gamma ramp + DDC/CI", from the live apply. */
+function appliedViaText(state: ReturnType<typeof useCore>["state"]): string {
+  if (state.display_state !== "applied") return "—";
+  const parts = [
+    state.display_via.nvapi && "NvAPI",
+    state.display_via.gamma && "gamma ramp",
+    state.display_via.ddcci && "DDC/CI",
+  ].filter(Boolean) as string[];
+  return parts.length ? parts.join(" + ") : "nothing to change";
+}
+
+function DisplaySide({ draft, update, save, dirty }: {
+  draft: Profile | null;
+  update: (fn: (p: Profile) => void) => void;
+  save: () => Promise<void>;
+  dirty: boolean;
+}) {
   const { state, hardware } = useCore();
-  const [follow, setFollow] = useState(true);
-  const [second, setSecond] = useState(true);
-  const [trueColors, setTrueColors] = useState(true);
   const [picking, setPicking] = useState(false);
-  const [pick, setPick] = useState<string | null>(null);
   const mainId = hardware.connected.monitors.find((m) => m.primary)?.id ?? null;
-  const monitor = hardware.monitors.find((m) => m.id === (pick ?? mainId));
+  const monitor = hardware.monitors.find((m) => m.id === (draft?.monitor ?? mainId));
   const plugged = monitor && hardware.connected.monitors.find((c) => c.id === monitor.id);
+  const d = draft?.display;
+  const unsupported = state.display_via.unsupported ?? [];
   return (
     <aside className="side">
       <Card title="Monitor" action={picking ? "Done" : "Change"} onAction={() => setPicking(!picking)}>
         {picking ? (
           <label className="field">
-            <select value={monitor?.id ?? ""} onChange={(e) => { setPick(e.target.value || null); setPicking(false); }}>
-              <option value="">Main monitor</option>
+            <select value={draft?.monitor ?? ""} onChange={(e) => { const v = e.target.value; update((p) => { if (v) p.monitor = v; else delete p.monitor; }); setPicking(false); }}>
+              <option value="">Any monitor</option>
               {hardware.monitors.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
             </select>
           </label>
@@ -322,16 +398,22 @@ function DisplaySide() {
         )}
       </Card>
       <Card>
-        <Toggle label="Follow game focus" sub="Apply on launch, restore on exit" on={follow} onChange={setFollow} />
-        <Toggle label="Second monitor" sub="Leave untouched" on={second} onChange={setSecond} />
-        <Toggle label="Send true colors to share" sub="Call sees the unfiltered feed" on={trueColors} onChange={setTrueColors} />
+        <Toggle label="Follow game focus" sub="Apply on launch, restore on exit" on={d?.follow_focus ?? true}
+          onChange={(v) => update((p) => { p.display.follow_focus = v; })} />
+        <Toggle label="Second monitor" sub="Leave untouched" on={d?.leave_other_monitors ?? true}
+          onChange={(v) => update((p) => { p.display.leave_other_monitors = v; })} />
+        <Toggle label="Send true colors to share" sub="Call sees the unfiltered feed" on={d?.share_true_colors ?? true}
+          onChange={(v) => update((p) => { p.display.share_true_colors = v; })} />
       </Card>
       <Card>
-        <Kv k="Applied via" v="NvAPI + DDC/CI" />
+        <Kv k="Applied via" v={appliedViaText(state)} />
+        {unsupported.length > 0 && <Kv k="Not on this hardware" v={unsupported.join(", ")} />}
         <Kv k="In-game hooks" v="None" />
         <Kv k="Backup" v={state.display_state === "applied" ? "Saved before change" : "Nothing to back up"} />
       </Card>
-      <button className="btn acc" disabled>Save to profile</button>
+      <button className="btn acc" disabled={!draft || !dirty} onClick={() => void save()}>
+        {dirty ? "Save to profile" : "Saved"}
+      </button>
       <p className="note">Original monitor and GPU settings are stored on disk and restored on exit, crash, or reboot.</p>
     </aside>
   );
