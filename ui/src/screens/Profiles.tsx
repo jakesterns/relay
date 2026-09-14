@@ -28,6 +28,8 @@ export function Profiles() {
   const [isNew, setIsNew] = useState(false);
   const [adding, setAdding] = useState<"headset" | "monitor" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hwError, setHwError] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const apply = async (id: string) => {
     try { await api.applyProfile(id); await refresh(); } catch { /* surfaced via offline banner */ }
@@ -47,6 +49,28 @@ export function Profiles() {
   const remove = async (id: string) => {
     try { await api.deleteProfile(id); await refresh(); close(); }
     catch (e) { setError(errText(e)); }
+  };
+
+  /** Remove a headset or monitor from the library.
+   *
+   *  Profiles that named it keep the id and fall back to matching "Any", so
+   *  this loses the entry's name and measured curve but never a profile. The
+   *  confirm is here because a curve can represent a long import. */
+  const removeHw = async (id: string, name: string) => {
+    if (!window.confirm(`Remove ${name} from the hardware library?\n\nProfiles that use it stay, but stop matching on it.`)) return;
+    setHwError(null);
+    try { await api.deleteHardware(id); await refresh(); }
+    catch (e) { setHwError(errText(e)); }
+  };
+
+  /** Full re-probe, including the slow per-monitor DDC/CI capability query
+   *  that fills in which controls each panel actually exposes. */
+  const rescan = async () => {
+    setScanning(true);
+    setHwError(null);
+    try { await api.probeHardware(); await refresh(); }
+    catch (e) { setHwError(errText(e)); }
+    finally { setScanning(false); }
   };
 
   /** Library names for the table; fall back to the raw id. */
@@ -124,6 +148,8 @@ export function Profiles() {
                 <span>{kindLabel[h.kind]}{h.curve ? ` · curve (${h.source || "measured"})` : " · no curve"}</span>
               </div>
               {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
+              <button className="rm" title={`Remove ${h.name} from the library`}
+                onClick={() => void removeHw(h.id, h.name)}>Remove</button>
             </div>
           ))}
         </Card>
@@ -137,12 +163,23 @@ export function Profiles() {
                 <div className="ic" />
                 <div>
                   <b>{m.name}</b>
-                  <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : ""}</span>
+                  <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
                 </div>
                 {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
+                <button className="rm" title={`Remove ${m.name} from the library`}
+                  onClick={() => void removeHw(m.id, m.name)}>Remove</button>
               </div>
             );
           })}
+          {/* The only thing that asks each monitor which DDC/CI controls it
+              actually has. It is a slow query (a capability string per panel),
+              so it is a button rather than something the core does on every
+              probe. Until it runs, the Display sliders allow everything and
+              report what the monitor refused. */}
+          <button className="btn q" disabled={scanning} onClick={() => void rescan()}>
+            {scanning ? "Scanning…" : "Scan monitor controls"}
+          </button>
+          {hwError && <div className="offline"><i />{hwError}</div>}
         </Card>
         <Card>
           <Kv k="Auto-switch" v="By plugged hardware" />

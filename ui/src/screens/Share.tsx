@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Card, Chips, Kv, Live } from "../components/Controls";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Card, Chips, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
@@ -50,6 +50,13 @@ export function Share() {
 
   const selectedDef = presets.find((p) => p.id === preset) ?? presets[0];
   const bitrateCeil = Math.max(selectedDef?.bitrate_mbps ?? 60, 1);
+
+  const reloadPresets = useCallback(async (select?: string) => {
+    const r = await api.listPresets();
+    setPresets(r.presets);
+    if (select) setPreset(select);
+    else if (!r.presets.some((p) => p.id === preset)) setPreset(r.presets[0]?.id ?? "game");
+  }, [preset]);
 
   useEffect(() => {
     let cancelled = false;
@@ -259,14 +266,7 @@ export function Share() {
           <input className="in" inputMode="numeric" maxLength={6} placeholder="6 digits from the receiver"
             value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
         </Card>
-        <Card title={selectedDef ? `${selectedDef.name} preset` : "Preset"}>
-          <Kv k="Bitrate" v={selectedDef ? `${selectedDef.bitrate_mbps} Mb/s` : "—"} mono />
-          <Kv k="Frame rate" v={selectedDef ? `${selectedDef.fps} fps` : "—"} mono />
-          <Kv k="Size" v={selectedDef?.size ? `${selectedDef.size[0]}×${selectedDef.size[1]}` : "Native"} mono />
-          <Kv k="Audio" v={selectedDef ? presetAudioLabel[selectedDef.audio] : "—"} />
-          <Kv k="Cursor" v={selectedDef ? (selectedDef.cursor ? "Shown" : "Hidden") : "—"} />
-          <Kv k="Replay buffer" v={selectedDef ? (selectedDef.replay_secs ? `${selectedDef.replay_secs} s` : "Off") : "—"} mono />
-        </Card>
+        <PresetCard def={selectedDef} locked={sharing} onSaved={reloadPresets} />
         <Card>
           <Kv k="Connection" v={sharing ? "Direct, encrypted (DTLS-SRTP)" : "—"} />
           <Kv k="Path" v={sharing ? "LAN · host candidates only" : "—"} mono />
@@ -282,6 +282,142 @@ export function Share() {
       </aside>
     </>
   );
+}
+
+/** The three ids `presets.rs::builtins()` ships, pinned on the Rust side by
+ *  `builtins_match_the_plan`. They can be edited like any other preset, but
+ *  not deleted: `PresetStore::load` only re-seeds them when presets.json is
+ *  missing entirely, so removing one here would be permanent. */
+const BUILTIN_PRESETS = ["game", "daw", "desktop"];
+
+/** The selected preset: its settings, and an editor for them.
+ *
+ *  Read-only until you press Edit, because this card sits next to the Start
+ *  button and the common case is checking what is about to be sent, not
+ *  changing it. Locked outright while a share is running — the engine read
+ *  these values when it started and editing them here would not reach it. */
+function PresetCard({ def, locked, onSaved }: {
+  def: SharePresetDef | undefined;
+  locked: boolean;
+  onSaved: (select?: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState<SharePresetDef | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isNew = !!draft && !!def && draft.id !== def.id;
+  const builtin = !!draft && BUILTIN_PRESETS.includes(draft.id);
+
+  const edit = (patch: Partial<SharePresetDef>) =>
+    setDraft((d) => (d ? { ...d, ...patch } : d));
+
+  const run = async (action: () => Promise<string | undefined>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const select = await action();
+      await onSaved(select);
+      setDraft(null);
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!def) return <Card title="Preset"><div className="empty">No presets</div></Card>;
+
+  if (!draft) {
+    return (
+      <Card title={`${def.name} preset`} action={locked ? undefined : "Edit"}
+        onAction={locked ? undefined : () => { setDraft({ ...def }); setError(null); }}>
+        <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
+        <Kv k="Frame rate" v={`${def.fps} fps`} mono />
+        <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
+        <Kv k="Audio" v={presetAudioLabel[def.audio]} />
+        <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
+        <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+        {locked && <p className="note">Stop sharing to change the preset.</p>}
+      </Card>
+    );
+  }
+
+  return (
+    <Card title={isNew ? "New preset" : `Edit ${def.name}`} action="Cancel" onAction={() => setDraft(null)}>
+      <div className="form">
+        <div className="field">
+          <span>Name</span>
+          <input value={draft.name} onChange={(e) => edit({ name: e.target.value })} />
+        </div>
+        <div className="two" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div className="field">
+            <span>Bitrate (Mb/s)</span>
+            <input className="mono" inputMode="numeric" value={draft.bitrate_mbps}
+              onChange={(e) => edit({ bitrate_mbps: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+          </div>
+          <div className="field">
+            <span>Frame rate</span>
+            <input className="mono" inputMode="numeric" value={draft.fps}
+              onChange={(e) => edit({ fps: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+          </div>
+        </div>
+        <div className="field">
+          <span>Encode size</span>
+          <input className="mono" placeholder="Native — or 2560x1440"
+            value={draft.size ? `${draft.size[0]}x${draft.size[1]}` : ""}
+            onChange={(e) => {
+              // Blank means "capture at the monitor's native size"; the
+              // engine only scales when a cap is given.
+              const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/.exec(e.target.value);
+              edit({ size: m ? [Number(m[1]), Number(m[2])] : undefined });
+            }} />
+        </div>
+        <Chips label="Audio" value={draft.audio}
+          onChange={(v) => edit({ audio: v as SharePresetDef["audio"] })}
+          options={[
+            { key: "system", label: "System mix" }, { key: "game", label: "Game only" },
+            { key: "mic", label: "Microphone" }, { key: "off", label: "None" },
+          ]} />
+        <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
+          label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
+        <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
+          label="Start recording with the share"
+          sub="Writes the same bitstream to disk; costs no extra encode." />
+        <div className="field">
+          <span>Replay buffer (seconds, 0 = off)</span>
+          <input className="mono" inputMode="numeric" value={draft.replay_secs}
+            onChange={(e) => edit({ replay_secs: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
+        </div>
+        <div className="ab">
+          <button className="btn acc" disabled={busy || !draft.name.trim()}
+            onClick={() => void run(async () => {
+              await api.savePreset({ ...draft, name: draft.name.trim() });
+              return draft.id;
+            })}>{busy ? "Saving…" : "Save preset"}</button>
+          <button className="btn q" disabled={busy}
+            onClick={() => {
+              // Duplicate-as-new: the fastest way to a custom preset is to
+              // start from one that already works.
+              const id = `custom-${Date.now().toString(36)}`;
+              setDraft({ ...draft, id, name: `${draft.name} copy` });
+            }}>Duplicate</button>
+        </div>
+        {!builtin && !isNew && (
+          <button className="btn q" disabled={busy}
+            onClick={() => void run(async () => {
+              await api.deletePreset(draft.id);
+              return undefined;
+            })}>Delete this preset</button>
+        )}
+        {builtin && <p className="note">Built-in presets can be edited but not deleted. Duplicate it to make a version you can remove.</p>}
+        {error && <div className="offline"><i />{error}</div>}
+      </div>
+    </Card>
+  );
+}
+
+function errText(e: unknown): string {
+  if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
+  return String(e);
 }
 
 function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {

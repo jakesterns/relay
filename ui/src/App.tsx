@@ -61,7 +61,7 @@ function Shell() {
     return (
       <div className="app">
         <TitleBar subtitle="First run" idle />
-        <div className="body">
+        <div className="body solo">
           <FirstRun onDone={() => setFirstRun(false)} />
         </div>
       </div>

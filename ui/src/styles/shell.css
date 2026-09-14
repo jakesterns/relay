@@ -39,6 +39,10 @@ a { color: inherit; text-decoration: none; }
 /* Body */
 .body { display: grid; grid-template-columns: 196px 1fr; min-height: 0; }
 .body.three { grid-template-columns: 196px 1fr 300px; }
+/* First run has no rail and no side panel, so its single section must get the
+   whole width. Without this it lands in the 196px rail column and the consent
+   text renders in a ribbon down the left edge. */
+.body.solo { grid-template-columns: 1fr; }
 
 .rail { border-right: 1px solid var(--line); padding: 22px 12px; display: flex; flex-direction: column; gap: 2px; }
 .rail a { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 6px; color: var(--mute); font-weight: 450; transition: background .25s var(--ease), color .25s var(--ease); }
@@ -82,7 +86,10 @@ a { color: inherit; text-decoration: none; }
 .chip { padding: 6px 12px; border-radius: 5px; border: 1px solid var(--line2); color: var(--mute); font-weight: 450; display: inline-block; transition: background .25s var(--ease), color .25s var(--ease), border-color .25s var(--ease); }
 .chip:hover { color: var(--ink); }
 .chip.on { background: var(--raised); color: var(--ink); border-color: rgba(201,169,106,.4); }
-.chips { display: flex; gap: 6px; align-items: center; }
+/* Wraps because the same control is used in the 300px side panel, where four
+   audio options do not fit on one line and would otherwise push a horizontal
+   scrollbar onto the whole window. */
+.chips { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .chips > span { color: var(--dim); margin-right: 6px; }
 
 .sw { width: 30px; height: 16px; border-radius: 9px; background: #2A2622; position: relative; flex: none; transition: background .35s var(--ease); }
@@ -201,6 +208,18 @@ a { color: inherit; text-decoration: none; }
 .hwl .ic { width: 22px; height: 16px; border: 1.25px solid var(--mute); border-radius: 3px; flex: none; }
 .hwl .ic.r { border-radius: 50%; width: 18px; height: 18px; }
 .hwl .pill { margin-left: auto; }
+/* Remove: present but quiet. It sits at the end of a library row and only
+   resolves on hover, so the list reads as hardware rather than as a row of
+   destructive buttons. `margin-left:auto` on the first of pill/button keeps
+   it right-aligned whether or not the item is plugged in. */
+.hwl .rm {
+  margin-left: auto; flex: none; background: none; border: 0; cursor: pointer;
+  color: transparent; font: inherit; font-size: 11.5px; padding: 2px 4px;
+  transition: color .18s ease;
+}
+.hwl .pill + .rm { margin-left: 8px; }
+.hwl:hover .rm { color: var(--dim); }
+.hwl .rm:hover, .hwl .rm:focus-visible { color: var(--warn, #d98b6a); outline: none; }
 
 /* EQ graph */
 .eq { position: relative; border-radius: 8px; border: 1px solid var(--line2); background: var(--surface); height: 270px; overflow: hidden; flex: none; }
