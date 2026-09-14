@@ -1,0 +1,16 @@
+#!/bin/sh
+# Belt and braces for the post-commit hook: if the installed copy is already
+# at HEAD this exits immediately, so the usual commit-then-push does no extra
+# work. It only builds when something skipped the commit hook (an amend, a
+# rebase, a commit made with RELAY_NO_INSTALL).
+#
+# Blocking, unlike post-commit: a push is a deliberate pause, and it is worth
+# knowing before you publish that the thing still packages.
+[ -n "$RELAY_NO_INSTALL" ] && exit 0
+
+root=$(git rev-parse --show-toplevel)
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "$root/scripts/install-local.ps1" -NoRelaunch
+# Never block the push on a packaging failure -- the log has the detail and a
+# broken local install is not a reason to withhold code from the remote.
+exit 0

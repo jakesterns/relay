@@ -1,0 +1,14 @@
+#!/bin/sh
+# Rebuild and reinstall the local Relay app so the Start Menu copy always
+# matches the working tree. Runs detached: a release build plus NSIS bundle
+# takes a minute or two and blocking every commit for that is not worth it.
+#
+# Progress and failures go to .git/relay-install.log.
+# Skip a single commit with:  RELAY_NO_INSTALL=1 git commit ...
+[ -n "$RELAY_NO_INSTALL" ] && exit 0
+
+root=$(git rev-parse --show-toplevel)
+echo "relay: rebuilding local install in the background -> .git/relay-install.log"
+powershell -NoProfile -ExecutionPolicy Bypass \
+  -File "$root/scripts/install-local.ps1" >/dev/null 2>&1 &
+exit 0
