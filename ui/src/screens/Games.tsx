@@ -435,6 +435,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
             onChange={(v) => update((p) => { p.display.monitor.response = v === 0 ? undefined : RESPONSE_LEVELS[v]; })} />
           <Slider label="Sharpness" value={mon.sharpness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x87)}
             onChange={(v) => update((p) => { p.display.monitor.sharpness = v; })} />
+          <p className="note">Black equalizer and Response live on vendor-private DDC/CI codes that differ per model and are not published. Relay will not guess at one — writing the wrong code changes a setting you did not ask for. They stay off until a verified opcode for your panel is added.</p>
         </Card>
       </div>
     </>

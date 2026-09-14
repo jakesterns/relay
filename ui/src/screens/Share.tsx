@@ -386,6 +386,7 @@ function PresetCard({ def, locked, onSaved }: {
             { key: "system", label: "System mix" }, { key: "game", label: "Game only" },
             { key: "mic", label: "Microphone" }, { key: "off", label: "None" },
           ]} />
+        <p className="note">One audio track per share: picking Microphone sends your mic <em>instead of</em> the desktop mix, not alongside it. Mic-plus-desktop needs a second track and is not built yet.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
