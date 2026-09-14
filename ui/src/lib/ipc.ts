@@ -60,6 +60,9 @@ export interface ColorInfo {
 export interface HardwareMonitor {
   id: MonitorId; name: string; panel: string; ddcci?: number[]; color?: ColorInfo;
 }
+/** One model in the bundled headphone catalogue. Mirrors
+ *  `hardware::catalog::CatalogEntry`. */
+export interface CatalogEntry { name: string; source: string; rig: string; path: string }
 export interface AudioInterface { id: string; name: string }
 export interface EndpointInfo { key: string; name: string; default: boolean }
 export interface MonitorProbe {
@@ -273,6 +276,15 @@ const mockPresets: SharePresetDef[] = [
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 
+/** A handful of real catalogue rows so the browser build can exercise search. */
+const mockCatalog: CatalogEntry[] = [
+  { name: "Sennheiser HD 560S", source: "oratory1990", rig: "", path: "oratory1990/over-ear/Sennheiser%20HD%20560S" },
+  { name: "Sennheiser HD 600", source: "oratory1990", rig: "", path: "oratory1990/over-ear/Sennheiser%20HD%20600" },
+  { name: "Sennheiser HD 560S", source: "crinacle", rig: "GRAS 43AG-7", path: "crinacle/GRAS%2043AG-7%20over-ear/Sennheiser%20HD%20560S" },
+  { name: "Moondrop Blessing 3", source: "crinacle", rig: "711", path: "crinacle/711%20in-ear/Moondrop%20Blessing%203" },
+  { name: "Beyerdynamic DT 770 Pro 80 Ohm", source: "oratory1990", rig: "", path: "oratory1990/over-ear/Beyerdynamic%20DT%20770%20Pro%2080%20Ohm" },
+];
+
 export const api = {
   async status(): Promise<CoreState> {
     if (!isTauri()) return mockState;
@@ -467,6 +479,30 @@ export const api = {
   async installVcam(): Promise<void> {
     if (!isTauri()) { mockVdevice.camera_registered = true; return; }
     return invoke<void>("install_vcam");
+  },
+  /** Search the bundled headphone catalogue. Offline — the index ships with
+   *  Relay; only picking a model fetches anything. */
+  async searchCatalog(query: string): Promise<CatalogEntry[]> {
+    if (!isTauri()) {
+      const q = query.trim().toLowerCase();
+      return q
+        ? mockCatalog.filter((e) => e.name.toLowerCase().includes(q))
+        : [];
+    }
+    return invoke<CatalogEntry[]>("search_catalog", { query });
+  },
+  /** Add a catalogue model: downloads its measurement once, then caches. */
+  async addHeadsetFromCatalog(entry: CatalogEntry, endpoint: string | null): Promise<void> {
+    if (!isTauri()) {
+      mockHardware.headsets.push({
+        id: `${entry.name}-${entry.source}`.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+        name: entry.name, kind: entry.path.includes("in-ear") ? "iem" : "headphone",
+        curve: [[20, 6], [1000, 0], [20000, -3]], source: entry.source,
+        endpoints: endpoint ? [endpoint] : [],
+      });
+      return;
+    }
+    return invoke<void>("add_headset_from_catalog", { entry, endpoint });
   },
   /** Remove the recorded registration; empties installed.json. */
   async uninstallVcam(): Promise<void> {

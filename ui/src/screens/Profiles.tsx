@@ -4,7 +4,7 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
   api, fmtMb, newProfile,
-  type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
+  type CatalogEntry, type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
   type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
 } from "../lib/ipc";
 
@@ -225,6 +225,80 @@ function colorSummary(c: ColorInfo): string {
   return parts.join(" · ") || "no colour data";
 }
 
+/** Search 8,849 measured models and add one with its curve.
+ *
+ *  The index ships with Relay, so typing is offline and instant. Picking a
+ *  model is the one moment Relay reaches the network: it downloads that
+ *  model's measurement, caches it under the data folder, and credits whoever
+ *  measured it — the licence requires the credit, and the download-on-demand
+ *  is why Relay can use this data at all without redistributing it. */
+function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () => Promise<void> }) {
+  const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<CatalogEntry[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) { setHits([]); return; }
+    // Debounced: the index is scanned per keystroke otherwise.
+    let live = true;
+    setSearching(true);
+    const t = setTimeout(() => {
+      api.searchCatalog(q)
+        .then((r) => { if (live) setHits(r); })
+        .catch((e) => { if (live) setError(errText(e)); })
+        .finally(() => { if (live) setSearching(false); });
+    }, 180);
+    return () => { live = false; clearTimeout(t); };
+  }, [query]);
+
+  const add = async (e: CatalogEntry) => {
+    setBusy(`${e.name}|${e.source}`);
+    setError(null);
+    try { await api.addHeadsetFromCatalog(e, endpoint || null); await onAdded(); }
+    catch (err) { setError(errText(err)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <>
+      <label className="field">
+        <span>Find your headphones</span>
+        <input value={query} autoFocus placeholder="HD 560S, Blessing 3, DT 770…"
+          onChange={(e) => setQuery(e.target.value)} />
+      </label>
+      {query.trim().length >= 2 && (
+        <div className="catalog">
+          {searching && hits.length === 0 && <div className="empty">Searching…</div>}
+          {!searching && hits.length === 0 && <div className="empty">No match in the catalogue</div>}
+          {hits.map((e) => {
+            const key = `${e.name}|${e.source}`;
+            return (
+              <div className="hwl" key={`${key}|${e.rig}`}>
+                <div className="ic r" />
+                <div>
+                  <b>{e.name}</b>
+                  <span>Measured by {e.source}{e.rig ? ` on ${e.rig}` : ""}</span>
+                </div>
+                <button className="btn q" disabled={busy !== null}
+                  onClick={() => void add(e)}>{busy === key ? "Adding…" : "Add"}</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="p small">
+        Measurements come from the <b>AutoEQ</b> project and its contributors (oratory1990,
+        crinacle and others). Relay ships only the list of names; the curve itself is downloaded
+        when you pick a model, cached on this PC, and never redistributed.
+      </p>
+      {error && <div className="offline"><i />{error}</div>}
+    </>
+  );
+}
+
 /** Turn "Moondrop Blessing 3" into a stable-ish library id. */
 function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -262,6 +336,10 @@ function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
   return (
     <Card title="Add headset" action="Cancel" onAction={onClose}>
       <div className="form">
+        <CatalogSearch endpoint={endpoint} onAdded={onSaved} />
+        <div className="hdr" style={{ margin: "6px 0 0" }}>
+          <span className="note">Or describe it yourself</span>
+        </div>
         <label className="field">
           <span>Name</span>
           <input value={name} placeholder="HD 560S" autoFocus onChange={(e) => setName(e.target.value)} />
@@ -288,7 +366,7 @@ function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
           <textarea rows={4} className="mono" value={curveText} placeholder={"frequency,raw,…\n20.00,-4.11,…"}
             onChange={(e) => setCurveText(e.target.value)} />
         </label>
-        <p className="p small">Paste the contents of an AutoEQ result file. Relay reads only what you paste — it never downloads anything.</p>
+        <p className="p small">Paste the contents of an AutoEQ result file, or leave this empty and use the search above.</p>
         {error && <div className="offline"><i />{error}</div>}
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>

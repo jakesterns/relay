@@ -112,11 +112,23 @@ pub enum Method {
     /// Full re-probe including the slow DDC/CI capability query; refreshes the
     /// cached connected state and stores VCP lists on known library monitors.
     ProbeHardware,
-    /// Parse AutoEQ results text (local file contents or paste — the core
-    /// never fetches) and attach it to a headset as its measured curve.
+    /// Parse AutoEQ results text (local file contents or paste) and attach it
+    /// to a headset as its measured curve.
     ImportCurve {
         headset: HeadsetId,
         csv: String,
+    },
+    /// Search the bundled headphone catalogue by name. Read-only, offline.
+    SearchCatalog {
+        query: String,
+    },
+    /// Add a catalogue model to the library: fetch its measurement (once,
+    /// then cached), attach it as the curve, and bind it to an endpoint.
+    /// The only request that reaches the network.
+    AddHeadsetFromCatalog {
+        entry: Box<crate::hardware::catalog::CatalogEntry>,
+        #[serde(default)]
+        endpoint: Option<String>,
     },
     /// Render the A/B listening pair for a profile's audio chain into the
     /// previews directory. `wav` is an optional source clip; without it a
@@ -223,6 +235,9 @@ pub enum Reply {
     },
     Curve {
         points: Vec<(f32, f32)>,
+    },
+    Catalog {
+        entries: Vec<crate::hardware::catalog::CatalogEntry>,
     },
     Preview {
         original: String,

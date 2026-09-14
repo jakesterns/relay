@@ -105,6 +105,15 @@ foreach ($src in $resources) {
     Write-Host "  resource $src"
 }
 
+# The headphone catalogue index is checked-in source, not a build artefact, so
+# it comes from the crate rather than from target/release. Regenerate it with
+# scripts/build-catalog.ps1 when the upstream index moves on.
+$catalog = Join-Path $repo 'crates\core\catalog\autoeq-index.tsv'
+if (-not (Test-Path $catalog)) { throw "missing $catalog - run scripts/build-catalog.ps1" }
+Copy-Item $catalog (Join-Path $staging 'autoeq-index.tsv') -Force
+Write-Host ("  resource autoeq-index.tsv ({0:N0} models, {1:N0} KB)" -f `
+    (Get-Content $catalog).Count, ((Get-Item $catalog).Length / 1KB))
+
 Write-Host ''
 Write-Host "staged into $staging"
 Write-Host 'now run:  cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json'

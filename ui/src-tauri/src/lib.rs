@@ -360,6 +360,27 @@ async fn uninstall_vcam() -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn search_catalog(
+    query: String,
+) -> CmdResult<Vec<relay_core::hardware::catalog::CatalogEntry>> {
+    match call(Method::SearchCatalog { query }).await? {
+        Reply::Catalog { entries } => Ok(entries),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn add_headset_from_catalog(
+    entry: relay_core::hardware::catalog::CatalogEntry,
+    endpoint: Option<String>,
+) -> CmdResult<()> {
+    match call(Method::AddHeadsetFromCatalog { entry: Box::new(entry), endpoint }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn uninstall_plan(keep_data: bool) -> CmdResult<Vec<String>> {
     match call(Method::UninstallPlan { keep_data }).await? {
         Reply::DryRun { lines } => Ok(lines),
@@ -509,6 +530,8 @@ pub fn run() {
             uninstall_vcam,
             uninstall_plan,
             launch_uninstaller,
+            search_catalog,
+            add_headset_from_catalog,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Relay");

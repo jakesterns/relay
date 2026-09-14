@@ -127,6 +127,12 @@ impl Paths {
         self.data_dir().join("presets.json")
     }
 
+    /// Downloaded headphone measurements, one CSV per model. Cached so a
+    /// model is fetched once ever; deleting this only costs a re-download.
+    pub fn curves_dir(&self) -> PathBuf {
+        self.data_dir().join("curves")
+    }
+
     /// Everything under the root that is *user data* rather than program
     /// files, deepest-independent so each can be removed on its own.
     ///

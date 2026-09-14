@@ -465,6 +465,20 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
 }
 
 /// Pick and apply (or restore) for one foreground window, using the cached
+/// AutoEQ files live under `<source>/<rig> in-ear/...`, `over-ear`, `earbud`,
+/// so the catalogue path says what kind of thing this is without asking.
+fn kind_from_path(path: &str) -> crate::hardware::HeadsetKind {
+    use crate::hardware::HeadsetKind;
+    let p = path.to_ascii_lowercase();
+    if p.contains("in-ear") || p.contains("in%20ear") {
+        HeadsetKind::Iem
+    } else {
+        // Earbuds are closer to headphones than to IEMs for tuning purposes,
+        // and the library has no separate kind for them.
+        HeadsetKind::Headphone
+    }
+}
+
 /// The correction curve to apply with `profile`: the one imported for the
 /// headset the profile names, or failing that the headset currently plugged
 /// in. A profile bound to no headset still gets the connected one's curve,
@@ -992,6 +1006,55 @@ impl IpcHandler {
                 h.curve = Some(points.clone());
                 match g.library.save() {
                     Ok(()) => Reply::Curve { points },
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::SearchCatalog { query } => {
+                drop(g);
+                let index = match crate::hardware::catalog::index_path() {
+                    Ok(p) => p,
+                    Err(e) => return Reply::Error { message: format!("{e:#}") },
+                };
+                match crate::hardware::catalog::search(&index, &query, 40) {
+                    Ok(entries) => Reply::Catalog { entries },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::AddHeadsetFromCatalog { entry, endpoint } => {
+                let cache = g.paths.curves_dir();
+                drop(g);
+                // Fetch outside the lock: this is the one request that can
+                // block on the network, and holding the state lock through it
+                // would stall every focus change until it returned.
+                let (points, fetched) = match crate::hardware::catalog::curve(&entry, &cache) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Reply::Error {
+                            message: format!("could not get that measurement: {e:#}"),
+                        }
+                    }
+                };
+                info!(
+                    model = %entry.name, source = %entry.source, points = points.len(), fetched,
+                    "headset added from the catalogue"
+                );
+
+                let headset = crate::hardware::Headset {
+                    id: crate::types::HeadsetId(entry.slug()),
+                    name: entry.name.clone(),
+                    kind: kind_from_path(&entry.path),
+                    curve: Some(points),
+                    source: entry.source.clone(),
+                    endpoints: endpoint.into_iter().collect(),
+                };
+                let mut g = self.inner.lock();
+                g.library.upsert_headset(headset);
+                match g.library.save() {
+                    Ok(()) => {
+                        drop(g);
+                        library_changed(&self.inner, &self.events);
+                        Reply::Ok
+                    }
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }

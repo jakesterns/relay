@@ -9,7 +9,8 @@
     ],
     "resources": {
       "binaries/relay_apo.dll": "./relay_apo.dll",
-      "binaries/relay_vdevice.dll": "./relay_vdevice.dll"
+      "binaries/relay_vdevice.dll": "./relay_vdevice.dll",
+      "binaries/autoeq-index.tsv": "./autoeq-index.tsv"
     },
     "windows": {
       "nsis": {

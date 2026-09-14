@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::types::{HeadsetId, MonitorId};
 
 pub mod autoeq;
+pub mod catalog;
 pub mod ddc;
 pub mod edid;
 pub mod edid_color;
