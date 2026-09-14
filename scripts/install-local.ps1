@@ -35,6 +35,17 @@ function Say($m) {
     Add-Content -LiteralPath $log -Value $line -Encoding utf8
 }
 
+# A failed build leaves the previous version installed, which is easy to
+# misread as "my change is live and broken". Say which commit is actually in
+# the Start Menu, and name the usual cause: this builds the working tree, so
+# editing files while a background install runs compiles a half-finished tree.
+function Fail($why) {
+    $have = if (Test-Path $marker) { (Get-Content $marker -Raw).Trim().Substring(0, 8) } else { 'nothing' }
+    Say "FAILED: $why (see $log)"
+    Say "still installed: $have -- rerun scripts\install-local.ps1 once the tree builds"
+    exit 1
+}
+
 # One build at a time: a commit followed straight away by a push would
 # otherwise have two builds writing the same staging directory.
 $lockStream = $null
@@ -68,12 +79,12 @@ try {
         Pop-Location
     }
     $ErrorActionPreference = $prev
-    if ($staged -ne 0) { Say "FAILED: staging exited $staged (see $log)"; exit 1 }
-    if ($built -ne 0) { Say "FAILED: bundle exited $built (see $log)"; exit 1 }
+    if ($staged -ne 0) { Fail "staging exited $staged" }
+    if ($built -ne 0) { Fail "bundle exited $built" }
 
     $setup = Get-ChildItem (Join-Path $repo 'target\release\bundle\nsis') -Filter '*-setup.exe' |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if (-not $setup) { Say 'FAILED: no installer produced'; exit 1 }
+    if (-not $setup) { Fail 'no installer produced' }
 
     # The running UI holds relay-ui.exe open, which would block the upgrade.
     # The installer's own hook stops the core (and restores display/audio on
@@ -83,7 +94,7 @@ try {
 
     $p = Start-Process $setup.FullName -ArgumentList '/S' -PassThru
     $p.WaitForExit()
-    if ($p.ExitCode -ne 0) { Say "FAILED: installer exited $($p.ExitCode)"; exit 1 }
+    if ($p.ExitCode -ne 0) { Fail "installer exited $($p.ExitCode)" }
 
     Set-Content -LiteralPath $marker -Value $sha -Encoding ascii
     Say "installed $($sha.Substring(0,8)) -> $env:LOCALAPPDATA\Relay"
