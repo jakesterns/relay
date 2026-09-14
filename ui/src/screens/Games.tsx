@@ -2,14 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, isTauri, type ApoStatus, type Preview, type Profile } from "../lib/ipc";
+import { api, isTauri, type ApoStatus, type Limiter, type Preview, type Profile } from "../lib/ipc";
 
 export type Section = "audio" | "display" | "sharing";
 
 /**
  * Per-game editor. Hosts the Audio / Display / Sharing sections from mocks
- * s2 + s3. The Display section reads and writes the subject profile's
- * `DisplaySettings` (M2); Audio stays local until M3 wires it.
+ * s2 + s3.
+ *
+ * Audio and Display share one draft of the subject profile: both sections
+ * edit it through `update` and both side panels save it with the same button,
+ * so switching between the two tabs never loses unsaved changes.
  */
 export function Games({ section, onSection }: { section: Section; onSection: (s: Section) => void }) {
   const { state, profiles } = useCore();
@@ -18,7 +21,7 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
   const title = subject?.name ?? "No game";
   const sectionLabel = section === "audio" ? "Audio" : section === "display" ? "Display" : "Sharing";
 
-  // Draft of the subject profile for the Display editor.
+  // Draft of the subject profile, shared by the Audio and Display editors.
   const [draft, setDraft] = useState<Profile | null>(null);
   const [dirty, setDirty] = useState(false);
   const subjectId = subject?.id ?? null;
@@ -59,11 +62,11 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
         <OfflineBanner />
         <Chips label="Section" value={section} onChange={onSection}
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
-        {section === "audio" && <AudioSection profileId={subject?.id ?? null} />}
+        {section === "audio" && <AudioSection draft={draft} update={update} />}
         {section === "display" && <DisplaySection draft={draft} update={update} />}
         {section === "sharing" && <SharingSection />}
       </section>
-      {section === "audio" && <AudioSide />}
+      {section === "audio" && <AudioSide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "display" && <DisplaySide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "sharing" && <SharingSide />}
     </>
@@ -72,26 +75,55 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
 
 /* ---------- Audio ---------- */
 
-const defaultBands = [
-  { label: "Sub · 60 Hz", gain: -5.0 },
-  { label: "Low · 250 Hz", gain: -1.0 },
-  { label: "Mid · 1 kHz", gain: 0.5 },
-  { label: "Presence · 3 kHz", gain: 4.5 },
-  { label: "Air · 10 kHz", gain: -1.5 },
+/** The five bands the UI exposes, and the `EqBand` each one maps to.
+ *
+ *  A profile can hold any bands the DSP accepts, but a fixed set of five is
+ *  what someone tuning by ear can actually hold in their head. Q is wide
+ *  enough that the five overlap into a continuous curve rather than five
+ *  separate bumps. */
+const UI_BANDS = [
+  { label: "Sub · 60 Hz", freq: 60, q: 0.9 },
+  { label: "Low · 250 Hz", freq: 250, q: 0.9 },
+  { label: "Mid · 1 kHz", freq: 1000, q: 0.9 },
+  { label: "Presence · 3 kHz", freq: 3000, q: 0.9 },
+  { label: "Air · 10 kHz", freq: 10000, q: 0.9 },
 ];
 
-function AudioSection({ profileId }: { profileId: string | null }) {
-  const [bands, setBands] = useState(defaultBands);
+/** Gains for the five sliders, read out of whatever the profile stores. */
+function gainsOf(draft: Profile | null): number[] {
+  return UI_BANDS.map(
+    (u) => draft?.audio.bands.find((b) => Math.abs(b.freq_hz - u.freq) < 1)?.gain_db ?? 0,
+  );
+}
+
+/** Write the five sliders back as `EqBand`s, dropping the flat ones so an
+ *  untouched profile stores no bands at all — which is what makes the core
+ *  treat it as "no audio processing" and skip the exclusive-mode watcher. */
+function setGain(p: Profile, index: number, gain: number) {
+  const u = UI_BANDS[index];
+  const rest = p.audio.bands.filter((b) => Math.abs(b.freq_hz - u.freq) >= 1);
+  p.audio.bands = gain === 0 ? rest : [...rest, { freq_hz: u.freq, gain_db: gain, q: u.q }];
+  p.audio.bands.sort((a, b) => a.freq_hz - b.freq_hz);
+}
+
+function AudioSection({ draft, update }: {
+  draft: Profile | null;
+  update: (fn: (p: Profile) => void) => void;
+}) {
+  const gains = gainsOf(draft);
+  const off = !draft;
   const dbFmt = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} dB`;
   return (
     <>
       <ExclusiveBanner />
-      <EqGraph bands={bands.map((b) => b.gain)} />
+      <EqGraph bands={gains} />
       <div className="two">
-        <Card title="Bands" action="Reset" onAction={() => setBands(defaultBands)}>
-          {bands.map((b, i) => (
-            <Slider key={b.label} label={b.label} value={b.gain} min={-12} max={12} step={0.5} format={dbFmt}
-              onChange={(v) => setBands(bands.map((x, j) => (j === i ? { ...x, gain: v } : x)))} />
+        <Card title="Bands" action="Reset"
+          onAction={() => update((p) => { p.audio.bands = []; })}>
+          {UI_BANDS.map((u, i) => (
+            <Slider key={u.label} label={u.label} value={gains[i]} min={-12} max={12} step={0.5}
+              format={dbFmt} disabled={off}
+              onChange={(v) => update((p) => setGain(p, i, v))} />
           ))}
         </Card>
         <Card title="Tune with your assistant">
@@ -102,8 +134,8 @@ function AudioSection({ profileId }: { profileId: string | null }) {
           </div>
         </Card>
       </div>
-      <HeadsetCorrectionCard profileId={profileId} />
-      <AbListeningCard profileId={profileId} />
+      <HeadsetCorrectionCard draft={draft} update={update} />
+      <AbListeningCard profileId={draft?.id ?? null} />
     </>
   );
 }
@@ -114,40 +146,20 @@ function AudioSection({ profileId }: { profileId: string | null }) {
  *  imported on the Profiles screen and then silently shapes everything you
  *  hear, so the one place you tune audio should say whether it is on and
  *  which headset it came from. */
-function HeadsetCorrectionCard({ profileId }: { profileId: string | null }) {
+function HeadsetCorrectionCard({ draft, update }: {
+  draft: Profile | null;
+  update: (fn: (p: Profile) => void) => void;
+}) {
   const { hardware, offline, mock } = useCore();
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    if (!profileId) { setProfile(null); return; }
-    api.getProfile(profileId)
-      .then((p) => { if (live) setProfile(p); })
-      .catch(() => { if (live) setProfile(null); });
-    return () => { live = false; };
-  }, [profileId, offline]);
 
   // The profile's headset, or whatever is plugged in — the same fallback the
   // core uses when it resolves the curve.
-  const headsetId = profile?.headset ?? hardware.connected.headset;
+  const headsetId = draft?.headset ?? hardware.connected.headset;
   const headset = hardware.headsets.find((h) => h.id === headsetId);
   const points = headset?.curve?.length ?? 0;
-  const on = profile?.audio.headset_correction ?? false;
+  const on = draft?.audio.headset_correction ?? false;
 
-  const toggle = async (v: boolean) => {
-    if (!profile) return;
-    setBusy(true);
-    setError(null);
-    const next: Profile = structuredClone(profile);
-    next.audio.headset_correction = v;
-    try { await api.saveProfile(next); setProfile(next); }
-    catch (e) { setError(String((e as { message?: string })?.message ?? e)); }
-    finally { setBusy(false); }
-  };
-
-  const sub = !profile
+  const sub = !draft
     ? (offline && !mock ? "Core offline." : "No profile selected.")
     : !headset
       ? "No headset chosen for this profile, and none recognised as plugged in."
@@ -157,13 +169,13 @@ function HeadsetCorrectionCard({ profileId }: { profileId: string | null }) {
 
   return (
     <Card title="Headset correction">
-      <Toggle on={on} onChange={profile && points > 0 && !busy ? (v) => void toggle(v) : undefined}
+      <Toggle on={on}
+        onChange={draft && points > 0 ? (v) => update((p) => { p.audio.headset_correction = v; }) : undefined}
         label="Correct this headset's measured response" sub={sub} />
       {points > 0 && on && (
         <p className="p small">Correction runs first, so the bands above are your taste on top of a
           neutral headset rather than a fight with it.</p>
       )}
-      {error && <div className="offline"><i />{error}</div>}
     </Card>
   );
 }
@@ -304,23 +316,38 @@ function EqGraph({ bands }: { bands: number[] }) {
   );
 }
 
-function AudioSide() {
+/** Default limiter when the "explosion tamer" toggle is switched on. Matches
+ *  the copy beside it, and the band-split the DSP was tuned against. */
+const TAMER: Limiter = { below_hz: 120, threshold_db: -10 };
+
+function AudioSide({ draft, update, save, dirty }: {
+  draft: Profile | null;
+  update: (fn: (p: Profile) => void) => void;
+  save: () => Promise<void>;
+  dirty: boolean;
+}) {
   const { state, hardware } = useCore();
-  const [hrtf, setHrtf] = useState(true);
-  const [tamer, setTamer] = useState(true);
-  const [toShare, setToShare] = useState(false);
   const [picking, setPicking] = useState(false);
-  // Local pick until the section is wired to save_profile; defaults to the
-  // headset the core resolved from the default endpoint.
-  const [pick, setPick] = useState<string | null>(null);
   const chain = state.audio_chain;
-  const headset = hardware.headsets.find((h) => h.id === (pick ?? hardware.connected.headset));
+  const off = !draft;
+  const hrtf = draft?.audio.hrtf ?? false;
+  const tamer = !!draft?.audio.limiter;
+  const toShare = draft?.audio.apply_to_share ?? false;
+  // The profile's headset, falling back to whatever the core resolved from
+  // the default endpoint so the card is never blank.
+  const headset = hardware.headsets.find((h) => h.id === (draft?.headset ?? hardware.connected.headset));
   return (
     <aside className="side">
-      <Card title="Headset" action={picking ? "Done" : "Change"} onAction={() => setPicking(!picking)}>
+      <Card title="Headset" action={off ? undefined : picking ? "Done" : "Change"}
+        onAction={off ? undefined : () => setPicking(!picking)}>
         {picking ? (
           <label className="field">
-            <select value={headset?.id ?? ""} onChange={(e) => { setPick(e.target.value || null); setPicking(false); }}>
+            <select value={draft?.headset ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                update((p) => { if (v) p.headset = v; else delete p.headset; });
+                setPicking(false);
+              }}>
               <option value="">From plugged hardware</option>
               {hardware.headsets.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
             </select>
@@ -332,12 +359,19 @@ function AudioSide() {
         )}
       </Card>
       <Card>
-        <Toggle label="Spatial audio" sub="HRTF · Relay Arena" on={hrtf} onChange={setHrtf} />
-        <Toggle label="Explosion tamer" sub="Soft limiter under 120 Hz" on={tamer} onChange={setTamer} />
-        <Toggle label="Apply to share feed" sub="Call hears what you hear" on={toShare} onChange={setToShare} />
+        <Toggle label="Spatial audio" sub="HRTF · Relay Arena" on={hrtf}
+          onChange={off ? undefined : (v) => update((p) => { p.audio.hrtf = v; })} />
+        <Toggle label="Explosion tamer" sub="Soft limiter under 120 Hz" on={tamer}
+          onChange={off ? undefined : (v) => update((p) => {
+            if (v) p.audio.limiter = { ...TAMER }; else delete p.audio.limiter;
+          })} />
+        <Toggle label="Apply to share feed" sub="Call hears what you hear" on={toShare}
+          onChange={off ? undefined : (v) => update((p) => { p.audio.apply_to_share = v; })} />
       </Card>
       <ChainReadout chain={chain} hrtf={hrtf} tamer={tamer} />
-      <button className="btn acc" disabled>Save to profile</button>
+      <button className="btn acc" disabled={off || !dirty} onClick={() => void save()}>
+        {dirty ? "Save to profile" : "Saved"}
+      </button>
       <p className="note">Runs inside Windows audio on this headset only. Other apps and your desktop are unaffected.</p>
     </aside>
   );
