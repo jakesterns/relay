@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
+import { CodecBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import {
   api, onCoreEvents,
@@ -171,6 +172,7 @@ export function Share() {
           <Live on={sharing} text={sharing ? "Sharing" : "Not sharing"} />
         </div>
         <OfflineBanner />
+        <CodecBanner need="share" />
         <Chips label="Preset" value={preset} onChange={setPreset}
           options={presets.map((p) => ({ key: p.id, label: p.name }))} />
         {sharing && (

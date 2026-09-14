@@ -1123,6 +1123,18 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
+            Method::ShareCapabilities => {
+                drop(g);
+                match crate::share::capabilities() {
+                    Ok(c) => Reply::Capabilities {
+                        can_share: !c.encoders.is_empty(),
+                        can_receive: !c.decoders.is_empty(),
+                        encoders: c.encoders,
+                        decoders: c.decoders,
+                    },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
             Method::ApoStatus => {
                 drop(g);
                 Reply::Apo { status: crate::audio_apo::apo_status() }

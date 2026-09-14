@@ -142,6 +142,12 @@ export interface SourceChangedData {
 /** A/B listening-test render (`Method::RenderPreview`). Paths are absolute. */
 export interface Preview { original: string; processed: string; sample_rate: number; hrtf_applied: boolean }
 
+/** HEVC support on this PC (`Reply::Capabilities`). Sending needs a hardware
+ *  encoder; receiving needs any decoder, usually the Microsoft HEVC Video
+ *  Extension, which is a free Store download and not something Relay bundles. */
+export interface ShareCapabilities {
+  can_share: boolean; can_receive: boolean; encoders: string[]; decoders: string[];
+}
 /** Mirror of relay-core's `audio_apo::ApoStatus`. */
 export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
 /** Mirror of relay-vdevice's `installed::Consent`. */
@@ -456,6 +462,17 @@ export const api = {
   async renderPreview(id: string, wav?: string): Promise<Preview> {
     if (!isTauri()) throw new Error("A/B rendering needs the Relay core");
     return invoke<Preview>("render_preview", { id, wav: wav ?? null });
+  },
+  /** What this PC can do with HEVC. Spawns a probe child in the core, so call
+   *  it once when a screen opens, not on every state refresh. */
+  async shareCapabilities(): Promise<ShareCapabilities> {
+    if (!isTauri()) {
+      return {
+        can_share: true, can_receive: true,
+        encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
+      };
+    }
+    return invoke<ShareCapabilities>("share_capabilities");
   },
   /** Read-only probe: is the Relay APO on the default render endpoint? */
   async apoStatus(): Promise<ApoStatus> {

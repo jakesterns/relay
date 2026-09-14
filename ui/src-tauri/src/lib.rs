@@ -295,6 +295,23 @@ async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>
     }
 }
 
+/// What this PC can do with HEVC. Spawns a probe child, so call it when a
+/// screen opens rather than on every refresh.
+#[tauri::command]
+async fn share_capabilities() -> CmdResult<serde_json::Value> {
+    match call(Method::ShareCapabilities).await? {
+        Reply::Capabilities { can_share, can_receive, encoders, decoders } => {
+            Ok(serde_json::json!({
+                "can_share": can_share,
+                "can_receive": can_receive,
+                "encoders": encoders,
+                "decoders": decoders,
+            }))
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
     match call(Method::ApoStatus).await? {
@@ -528,6 +545,7 @@ pub fn run() {
             probe_hardware,
             import_curve,
             render_preview,
+            share_capabilities,
             apo_status,
             install_apo,
             uninstall_apo,

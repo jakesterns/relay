@@ -151,6 +151,53 @@ pub fn share_binary() -> Result<PathBuf> {
     Ok(cand)
 }
 
+/// What this PC can do with HEVC, from `relay-share probe`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Hardware HEVC encoder MFTs. Empty = this PC cannot send.
+    pub encoders: Vec<String>,
+    /// Any HEVC decoder MFT, hardware or the Microsoft HEVC Video Extension.
+    /// Empty = this PC cannot receive until the extension is installed.
+    pub decoders: Vec<String>,
+}
+
+/// Ask the share engine what the machine supports. A short-lived child, so
+/// this belongs on a screen-open, not a tick.
+pub fn capabilities() -> Result<Capabilities> {
+    let bin = share_binary()?;
+    anyhow::ensure!(bin.exists(), "share engine not found at {}", bin.display());
+    let out = Command::new(&bin).arg("probe").stderr(Stdio::null()).output().context("probing")?;
+    anyhow::ensure!(out.status.success(), "relay-share probe exited with {}", out.status);
+    Ok(parse_probe(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Pull the friendly names out of a probe report. Written against the JSON
+/// rather than the struct because the core does not link the capture crate.
+fn parse_probe(json: &str) -> Capabilities {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Capabilities::default(),
+    };
+    let names = |key: &str| -> Vec<String> {
+        v.get(key)
+            .and_then(|a| a.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e.get("friendly_name").and_then(|n| n.as_str()))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Prefer the "any decoder" list: the Video Extension is a software MFT,
+    // and it is what makes receiving work at all.
+    let mut decoders = names("hevc_any_decoders");
+    if decoders.is_empty() {
+        decoders = names("hevc_hardware_decoders");
+    }
+    Capabilities { encoders: names("hevc_hardware_encoders"), decoders }
+}
+
 /// A running share child. Dropping it stops and reaps the process.
 pub struct ShareEngine {
     child: Child,
@@ -481,6 +528,37 @@ mod tests {
         let args = send_args(&req);
         assert!(args.contains(&"--audio-pid".to_string()));
         assert!(!args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// Shape copied from a real `relay-share probe` run on this dev machine.
+    #[test]
+    fn probe_report_maps_to_capabilities() {
+        let json = r#"{
+          "hevc_hardware_encoders": [
+            {"friendly_name":"NVIDIA HEVC Encoder MFT","hardware_url":"vidpn"}
+          ],
+          "hevc_hardware_decoders": [],
+          "hevc_any_decoders": [
+            {"friendly_name":"Microsoft HEVC Video Extension","hardware_url":null}
+          ],
+          "wgc_supported": true
+        }"#;
+        let c = parse_probe(json);
+        assert_eq!(c.encoders, ["NVIDIA HEVC Encoder MFT"]);
+        assert_eq!(c.decoders, ["Microsoft HEVC Video Extension"], "software MFT still counts");
+
+        // No extension installed: receiving is off, sharing is unaffected.
+        let json = json.replace(
+            r#"{"friendly_name":"Microsoft HEVC Video Extension","hardware_url":null}"#,
+            "",
+        );
+        let c = parse_probe(&json);
+        assert!(c.decoders.is_empty());
+        assert_eq!(c.encoders.len(), 1);
+
+        // A probe that failed to produce JSON reads as "nothing", never a panic.
+        assert_eq!(parse_probe("boom"), Capabilities::default());
+        assert_eq!(parse_probe(""), Capabilities::default());
     }
 
     /// Locks the stdin command strings to `relay_capture::command`'s shapes.

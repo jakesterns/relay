@@ -2,7 +2,44 @@ import { useEffect, useState } from "react";
 import { Card, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, onCoreEvents, type VdeviceStatus } from "../lib/ipc";
+import { api, onCoreEvents, type ShareCapabilities, type VdeviceStatus } from "../lib/ipc";
+
+/** Warn before the user tries, not after it fails.
+ *
+ *  Hardware HEVC *decode* on Windows goes through the Microsoft HEVC Video
+ *  Extension; GPU vendors register encode MFTs only. Without it `recv` dies on
+ *  the first frame, which looks like a network problem and is not one. */
+export function CodecBanner({ need }: { need: "share" | "receive" }) {
+  const { offline } = useCore();
+  const [caps, setCaps] = useState<ShareCapabilities | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api.shareCapabilities()
+      .then((c) => { if (live) setCaps(c); })
+      .catch(() => { if (live) setCaps(null); });
+    return () => { live = false; };
+  }, [offline]);
+
+  if (!caps) return null;
+  if (need === "receive" && !caps.can_receive) {
+    return (
+      <div className="offline"><i />
+        No HEVC decoder on this PC. Install the free "HEVC Video Extensions from Device Manufacturer"
+        from the Microsoft Store, then reopen Relay. Receiving will fail on the first frame without it.
+      </div>
+    );
+  }
+  if (need === "share" && !caps.can_share) {
+    return (
+      <div className="offline"><i />
+        No hardware HEVC encoder on this GPU. Relay has no software encode path, so this PC can receive
+        but cannot send.
+      </div>
+    );
+  }
+  return null;
+}
 
 /** Whether a call on this PC will actually see the incoming share.
  *
@@ -104,6 +141,7 @@ export function Receive() {
           <Live on={receiving} text={receiving ? "Ready" : "Not receiving"} />
         </div>
         <OfflineBanner />
+        <CodecBanner need="receive" />
         <div className="preview">
           <div className={"scene" + (sender ? "" : " idle")} />
           {sender

@@ -138,6 +138,11 @@ pub enum Method {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wav: Option<String>,
     },
+    /// What this PC can actually do with HEVC: hardware encoders (needed to
+    /// share) and any decoder (needed to receive). Runs `relay-share probe`,
+    /// so it costs a short-lived child process -- call it when a screen opens,
+    /// not on a timer.
+    ShareCapabilities,
     /// Is the endpoint APO registered on the default render endpoint?
     /// Read-only registry probe.
     ApoStatus,
@@ -244,6 +249,14 @@ pub enum Reply {
         processed: String,
         sample_rate: u32,
         hrtf_applied: bool,
+    },
+    /// Encoder/decoder names as the share engine reported them. Empty lists
+    /// are the answer, not a failure: they mean this PC cannot do that half.
+    Capabilities {
+        can_share: bool,
+        can_receive: bool,
+        encoders: Vec<String>,
+        decoders: Vec<String>,
     },
     Apo {
         status: crate::audio_apo::ApoStatus,
