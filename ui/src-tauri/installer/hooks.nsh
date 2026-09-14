@@ -43,10 +43,13 @@
   ${EndIf}
 
   ; Start the always-on core so the UI has live data the moment it opens.
-  ; RunAsUser because the core must run as the user whose profiles it
-  ; manages, whatever token the installer happens to be holding.
+  ; Through relay-svc.exe, the GUI-subsystem launcher, so the user does not
+  ; see a console window flash at the end of the install -- it spawns
+  ; relay-core with CREATE_NO_WINDOW and exits. RunAsUser because the core
+  ; must run as the user whose profiles it manages, whatever token the
+  ; installer happens to be holding.
   DetailPrint "Starting the Relay core..."
-  nsis_tauri_utils::RunAsUser "$INSTDIR\relay-core.exe" "run"
+  nsis_tauri_utils::RunAsUser "$INSTDIR\relay-svc.exe" "run"
   Pop $0
 !macroend
 

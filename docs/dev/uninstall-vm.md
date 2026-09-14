@@ -86,10 +86,13 @@ Phases, in order: `before`, `install`, `optin`, `share`, `uninstall`, `after`.
 
 - **before** — refuses to run if Relay is already installed, because a
   baseline taken over an existing install proves nothing.
-- **install** — all seven payload files landed in one folder
-  (`relay-ui.exe`, `relay-core.exe`, `relay-share.exe`, `relay-preview.exe`,
-  `relay_apo.dll`, `relay_vdevice.dll`, `uninstall.exe`); there is a Start
-  Menu shortcut and an Add/Remove Programs entry; autostart is **off**; and
+- **install** — all eight payload files landed in one folder
+  (`relay-ui.exe`, `relay-core.exe`, `relay-svc.exe`, `relay-share.exe`,
+  `relay-preview.exe`, `relay_apo.dll`, `relay_vdevice.dll`,
+  `uninstall.exe`); there is a Start Menu shortcut and an Add/Remove Programs
+  entry; autostart is **off**, and once enabled its Run value is an absolute
+  path to `relay-svc.exe` inside the install directory (pointing it at the
+  console binary would flash a window at every login); and
   `relay-core uninstall --dry-run` shows nothing registered. That last check
   is the important one: a fresh install must not have touched the machine.
 - **optin** — the APO registers and writes its pre-install FX-store backup

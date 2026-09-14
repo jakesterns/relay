@@ -3,6 +3,7 @@
   "bundle": {
     "externalBin": [
       "binaries/relay-core",
+      "binaries/relay-svc",
       "binaries/relay-share",
       "binaries/relay-preview"
     ],

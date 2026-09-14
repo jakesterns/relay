@@ -52,10 +52,11 @@ here) and the two HKLM components. Runbook: `docs/dev/uninstall-vm.md`.
 
 ## Checklist
 - [x] NSIS per-user installer (Tauri bundler, `installMode: currentUser`) shipping `relay-core.exe`, `relay-ui.exe`, `relay-share.exe`; Start Menu entry; optional autostart checkbox mapped to `relay-core autostart on`.
-      Ships seven files, not three: the three exes above plus
+      Ships eight files, not three: the three exes above plus
+      `relay-svc.exe` (the windowless launcher, see below),
       `relay-preview.exe` (the on-demand A/B renderer), `relay_apo.dll` and
       `relay_vdevice.dll` (the two opt-in components, installed but not
-      registered), and NSIS's `uninstall.exe`. The three helper exes ride as
+      registered), and NSIS's `uninstall.exe`. The four helper exes ride as
       Tauri `externalBin` sidecars; the two cdylibs go through `resources`
       mapped to the install root, because the sidecar naming convention only
       covers executables. `scripts/stage-bundle.ps1` builds and stages all of
@@ -136,6 +137,21 @@ Verified by moving the staging directory aside and confirming
 `cargo build -p relay-ui` still succeeds, then confirming the overlay build
 still emits all five payload files and the hook include.
 
+**The console flash is fixed by a launcher, not by moving the CLI.** Windows
+decides whether to capture a process' output from the PE subsystem field, so a
+console-subsystem `relay-core.exe` gets a console allocated before `main`
+runs — which is the flash — while a GUI-subsystem one would make
+`relay-core status` print nothing into a PowerShell pipe. The sketch in the
+first draft of this plan was the usual split (GUI service + console CLI shim);
+the inverse turned out to be better. `relay-svc.exe` is a 224 KB
+GUI-subsystem binary that spawns `relay-core.exe` with `CREATE_NO_WINDOW` and
+exits, and the Run key and the installer go through it. Nothing stays
+resident, and `relay-core`'s command line, output, and every script and test
+that reads it are untouched. `autostart::command_line()` delegates the choice
+to `launcher::autostart_target`, which falls back to the core itself in a
+`cargo run` tree where the launcher was not built — a flash on a dev machine
+beats silently failing to configure autostart.
+
 **The uninstall plan is a pure function of a probed `MachineState`.** Only
 `probe()` reads the machine; the plan, its ordering and its rendering are pure,
 which is what lets the promise be tested without a VM at all.
@@ -214,15 +230,41 @@ cycle gave the zero-registry-difference results above. This is exactly what
 the harness is for and it is worth keeping in mind that it was found by the
 diff, not by reading the template.
 
+### The windowless launcher
+Measured directly from the PE headers and the process list:
+
+```
+relay-core.exe subsystem=3 (CONSOLE)  -> CLI output is still captured by PowerShell
+relay-svc.exe  subsystem=2 (GUI)      -> Windows allocates it no console at all
+
+relay-svc.exe run --data-dir <tmp>
+  returns immediately; 0 relay-svc processes remain
+  1 relay-core process, MainWindowHandle=0 (no visible window)
+  relay-core status answers over the pipe; shutdown is clean
+```
+
+`relay-svc.exe` is 224 KB and exits before the core finishes starting, so it
+costs nothing at runtime. The cycle now asserts the Run value:
+
+```
+run value: "C:\Users\stern\AppData\Local\Relay\relay-svc.exe" run
+```
+
+— absolute, inside the install directory, and naming the launcher rather than
+the console binary. The uninstall removes it, as the zero-registry-difference
+results below show.
+
 ### Gates
 - `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -D warnings` clean
   (this also fixed four lints in `relay-vdevice` and one in `relay-core` that a
   newer toolchain started flagging after M5/M2 landed).
-- Full workspace test suite green, including 9 new `uninstall` tests and one
-  new `config` test.
+- Full workspace test suite green: **272 passed, 0 failed** across 33 suites,
+  including 9 new `uninstall` tests, 3 `launcher` tests and 2 new
+  `config`/`autostart` tests.
 - Footprint gate with the uninstall engine in the always-on core:
-  `relay-core.exe` 1.31 MB, idle RSS 6.21 MB peak, private working set
-  0.86 MB, CPU 0.0 % over 35.6 s. **PASS** (budget 10 MB / 0.5 %).
+  `relay-core.exe` 1.31 MB, idle RSS 6.16 MB peak, private working set
+  0.84 MB, CPU 0.044 % over 35.8 s. **PASS** (budget 10 MB / 0.5 %). The
+  launcher adds nothing resident — it has exited by the time the core is up.
 
 ## Definition of Done
 - [x] Every checklist item checked or moved to Deferred with a reason.
@@ -252,13 +294,5 @@ diff, not by reading the template.
    machine, so the `share` phase proves the engine spins up and tears down
    rather than that a share ran end to end. Two-PC validation is already
    M4's deferred item; the cycle will pick it up for free once that runs.
-5. **The autostart console flash** (deferred to M7 by M0) is still not fully
-   gone. Building `relay-core` for the GUI subsystem was tried and reverted:
-   PowerShell does not capture stdout from a GUI-subsystem process, so
-   `relay-core status` printed nothing into a pipe and every script and test
-   that reads it silently saw empty output — a much worse failure than a
-   flash, and a quiet one. `hide_own_console()` still hides the window within
-   milliseconds of start. The real fix is the split every dual-mode Windows
-   tool ends up with: a GUI-subsystem `relay-core.exe` for the service and a
-   small console-subsystem `relay-cli.exe` that forwards to it. Worth doing
-   before v1 ships, not worth doing in the same session as the uninstaller.
+_(The autostart console flash that M0 deferred here is **done** — see the
+launcher decision above and the measurements below.)_

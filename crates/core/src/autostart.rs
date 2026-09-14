@@ -7,10 +7,17 @@ use anyhow::{Context, Result};
 pub const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 pub const VALUE_NAME: &str = "Relay";
 
-/// The command line the Run key launches: this executable in `run` mode.
+/// The command line the Run key launches.
+///
+/// Points at `relay-svc.exe` — the GUI-subsystem launcher — rather than
+/// `relay-core.exe` directly, so signing in does not flash a console window.
+/// The launcher forwards `run` to the core, so the value keeps the shape it
+/// has always had. Falls back to this executable when the launcher is not
+/// beside it (a `cargo run` development tree); see
+/// [`crate::launcher::autostart_target`].
 pub fn command_line() -> Result<String> {
     let exe = std::env::current_exe().context("locating relay-core.exe")?;
-    Ok(format!("\"{}\" run", exe.display()))
+    Ok(format!("\"{}\" run", crate::launcher::autostart_target(&exe).display()))
 }
 
 #[cfg(windows)]
@@ -110,5 +117,20 @@ mod tests {
         let c = command_line().unwrap();
         assert!(c.starts_with('"'));
         assert!(c.ends_with("\" run"));
+    }
+
+    /// The value must name an absolute path — a bare name in a Run value
+    /// resolves against the search path at login — and it must be whatever
+    /// [`crate::launcher::autostart_target`] chose, so the launcher
+    /// preference lives in one place rather than being restated here.
+    #[test]
+    fn command_line_delegates_the_target_choice_and_is_absolute() {
+        let c = command_line().unwrap();
+        let quoted = c.trim_end_matches("\" run").trim_start_matches('"');
+        let path = std::path::Path::new(quoted);
+        assert!(path.is_absolute(), "{c}");
+
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(path, crate::launcher::autostart_target(&exe), "{c}");
     }
 }

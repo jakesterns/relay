@@ -15,6 +15,13 @@ path = "src/lib.rs"
 name = "relay-core"
 path = "src/main.rs"
 
+# GUI-subsystem launcher: starts relay-core with no console window, then
+# exits. The Run key and the installer go through this so logging in does not
+# flash a black box. See crates/core/src/launcher.rs.
+[[bin]]
+name = "relay-svc"
+path = "src/bin/relay-svc.rs"
+
 [dependencies]
 # params + sessions only: the DSP (FFT) must not live in the always-on core.
 relay-audio.workspace = true

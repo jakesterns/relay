@@ -162,8 +162,8 @@ function Phase-Install {
     # Everything the core spawns has to be beside it, or the on-demand
     # children (share engine, preview renderer) and the two opt-in DLLs are
     # unreachable at runtime.
-    $needed = @('relay-ui.exe', 'relay-core.exe', 'relay-share.exe', 'relay-preview.exe',
-                'relay_apo.dll', 'relay_vdevice.dll', 'uninstall.exe')
+    $needed = @('relay-ui.exe', 'relay-core.exe', 'relay-svc.exe', 'relay-share.exe',
+                'relay-preview.exe', 'relay_apo.dll', 'relay_vdevice.dll', 'uninstall.exe')
     $missing = @()
     foreach ($f in $needed) { if (-not (Test-Path (Join-Path $dir $f))) { $missing += $f } }
     if ($missing.Count -gt 0) { Fail "missing from the install: $($missing -join ', ')" }
@@ -192,7 +192,20 @@ function Phase-Install {
 
     Relay-Core @('autostart', 'on') | Out-Null
     if ("$(Relay-Core @('autostart'))".Trim() -ne 'on') { Fail 'autostart on did not stick' }
-    Say 'autostart opt-in exercised (the installer checkbox drives this same command)'
+
+    # The Run value must launch the windowless launcher, not the core
+    # directly: relay-core.exe is a console binary, so pointing the Run key at
+    # it flashes a black window at every login. It must also be an absolute
+    # path inside the install directory.
+    $runValue = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run').Relay
+    Say "run value: $runValue"
+    if ($runValue -notmatch [regex]::Escape('relay-svc.exe')) {
+        Fail "autostart points at something other than relay-svc.exe: $runValue"
+    }
+    if ($runValue -notmatch [regex]::Escape($dir)) {
+        Fail "autostart points outside the install directory: $runValue"
+    }
+    Say 'autostart opt-in exercised and points at the windowless launcher'
 
     Say 'starting the core'
     Start-Process -FilePath (Join-Path $dir 'relay-core.exe') -ArgumentList 'run' | Out-Null

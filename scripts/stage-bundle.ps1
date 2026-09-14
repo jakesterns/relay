@@ -8,13 +8,14 @@
 
     relay-ui.exe        the Tauri shell (the bundle's main binary)
     relay-core.exe      the always-on service
+    relay-svc.exe       windowless launcher for the core (Run key, installer)
     relay-share.exe     the share engine, spawned per share
     relay-preview.exe   the offline A/B renderer, spawned on demand
     relay_apo.dll       the endpoint APO (only registered if opted in)
     relay_vdevice.dll   the camera media source (only registered if opted in)
     uninstall.exe       written by NSIS
 
-  The three helper exes ride along as Tauri "externalBin" sidecars, which is
+  The four helper exes ride along as Tauri "externalBin" sidecars, which is
   why they need the target triple in the staged filename -- the bundler strips
   it again on install. The two DLLs go through "resources", which drops them
   straight into the install directory; they are cdylibs, not sidecars, and
@@ -81,6 +82,7 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 # name in target\release  ->  staged name
 $sidecars = @{
     'relay-core.exe'    = "relay-core-$triple.exe"
+    'relay-svc.exe'     = "relay-svc-$triple.exe"
     'relay-share.exe'   = "relay-share-$triple.exe"
     'relay-preview.exe' = "relay-preview-$triple.exe"
 }

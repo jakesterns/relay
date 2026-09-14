@@ -22,6 +22,7 @@ pub mod hardware;
 pub mod hotkeys;
 pub mod instance;
 pub mod ipc;
+pub mod launcher;
 pub mod logging;
 pub mod presets;
 pub mod processes;
