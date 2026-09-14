@@ -330,6 +330,13 @@ export const api = {
     if (!isTauri()) { mockAutostart = enabled; return enabled; }
     return invoke<boolean>("set_autostart", { enabled });
   },
+  /** Start a share from explicit settings rather than a preset.
+   *
+   *  No screen calls this by design: the Share screen goes through
+   *  `startSharePreset`, which lets the core resolve the game's audio pid and
+   *  the recording folder. This is the escape hatch the CLI uses
+   *  (`relay-core share-start`) and the seam a future scripted share would
+   *  use, so it stays wired end to end. */
   async startShare(request: ShareRequest): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("start_share", { request });

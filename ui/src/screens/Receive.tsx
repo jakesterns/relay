@@ -2,7 +2,60 @@ import { useEffect, useState } from "react";
 import { Card, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, onCoreEvents } from "../lib/ipc";
+import { api, onCoreEvents, type VdeviceStatus } from "../lib/ipc";
+
+/** Whether a call on this PC will actually see the incoming share.
+ *
+ *  This is the question the Receive screen exists to answer and previously
+ *  did not: the virtual camera only appears in Discord/Zoom/Meet if it was
+ *  consented to *and* registered, and both are decided elsewhere. Saying so
+ *  here saves a support round-trip with someone staring at a camera picker. */
+function VirtualDeviceCard() {
+  const { offline, mock } = useCore();
+  const [vd, setVd] = useState<VdeviceStatus | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api.vdeviceStatus()
+      .then((s) => { if (live) setVd(s); })
+      .catch(() => { if (live) setVd(null); });
+    return () => { live = false; };
+  }, [offline]);
+
+  if (!vd) {
+    return (
+      <Card title="In calls">
+        <p className="note">{offline && !mock ? "Core offline — status unknown." : "Reading…"}</p>
+      </Card>
+    );
+  }
+
+  const camera = !vd.camera_supported
+    ? `Needs Windows 11 22H2+ (this PC: build ${vd.windows_build ?? "?"})`
+    : vd.camera_registered
+      ? '"Relay Camera" — pick it in Discord, Zoom or Meet'
+      : vd.consent?.camera
+        ? "Consented, not installed yet — finish in Settings"
+        : "Not enabled — turn it on in Settings";
+
+  const mic = vd.mic_targets.length > 0
+    ? vd.mic_targets[0].name
+    : "No route yet — the signed driver ships later; VB-Cable works meanwhile";
+
+  return (
+    <Card title="In calls">
+      <Kv k="Camera" v={camera} />
+      <Kv k="Microphone" v={mic} />
+      {!vd.camera_registered && vd.camera_supported && (
+        <p className="note">Without the virtual camera the share still plays in its own window — it just
+          cannot be picked as a webcam.</p>
+      )}
+      {vd.obs_virtualcam && !vd.camera_registered && (
+        <p className="note">OBS VirtualCam is installed on this PC, but Relay does not feed it.</p>
+      )}
+    </Card>
+  );
+}
 
 /**
  * Receive mode. Advertises this PC over mDNS and renders an incoming share in
@@ -74,6 +127,7 @@ export function Receive() {
           <Kv k="Decode" v={receiving ? "Hardware (DXVA HEVC)" : "—"} mono />
           <Kv k="Window" v={sender ? "Native D3D11 swapchain" : "—"} mono />
         </Card>
+        <VirtualDeviceCard />
         {error && <p className="note" style={{ color: "#d98b6a" }}>{error}</p>}
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>

@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, isTauri, type ApoStatus, type Limiter, type Preview, type Profile } from "../lib/ipc";
+import {
+  api, isTauri,
+  type ApoStatus, type Limiter, type Preview, type Profile, type SharePreset, type SharePresetDef,
+} from "../lib/ipc";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -64,11 +67,11 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
         {section === "audio" && <AudioSection draft={draft} update={update} />}
         {section === "display" && <DisplaySection draft={draft} update={update} />}
-        {section === "sharing" && <SharingSection />}
+        {section === "sharing" && <SharingSection draft={draft} update={update} />}
       </section>
       {section === "audio" && <AudioSide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "display" && <DisplaySide draft={draft} update={update} save={save} dirty={dirty} />}
-      {section === "sharing" && <SharingSide />}
+      {section === "sharing" && <SharingSide draft={draft} save={save} dirty={dirty} />}
     </>
   );
 }
@@ -516,26 +519,70 @@ function DisplaySide({ draft, update, save, dirty }: {
 
 /* ---------- Sharing (per-game preset) ---------- */
 
-function SharingSection() {
-  const [preset, setPreset] = useState<"game" | "daw" | "desktop" | "off">("game");
+function SharingSection({ draft, update }: {
+  draft: Profile | null;
+  update: (fn: (p: Profile) => void) => void;
+}) {
+  const preset = draft?.share ?? "off";
   return (
     <Card title="Share preset for this game">
       <p className="p" style={{ marginBottom: 12 }}>Which encoder, audio sources and cursor setting Relay uses when you share while this game has focus.</p>
-      <Chips label="Preset" value={preset} onChange={setPreset}
+      <Chips<SharePreset> label="Preset" value={preset}
+        onChange={draft ? (v) => update((p) => { p.share = v; }) : undefined}
         options={[{ key: "game", label: "Game" }, { key: "daw", label: "DAW" }, { key: "desktop", label: "Desktop" }, { key: "off", label: "Off" }]} />
+      {!draft && <p className="note">No profile selected.</p>}
     </Card>
   );
 }
 
-function SharingSide() {
+/** The real settings behind the chosen preset, read from `presets.json`
+ *  rather than restated here — the Share screen lets you edit those numbers,
+ *  and two places quoting different values would be worse than none. */
+function SharingSide({ draft, save, dirty }: {
+  draft: Profile | null;
+  save: () => Promise<void>;
+  dirty: boolean;
+}) {
+  const { offline } = useCore();
+  const [presets, setPresets] = useState<SharePresetDef[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    api.listPresets()
+      .then((r) => { if (live) setPresets(r.presets); })
+      .catch(() => { if (live) setPresets([]); });
+    return () => { live = false; };
+  }, [offline]);
+
+  const chosen = draft?.share ?? "off";
+  const def = presets.find((p) => p.id === chosen);
+  const audio: Record<SharePresetDef["audio"], string> = {
+    system: "System mix", game: "Game only", mic: "Microphone", off: "None",
+  };
+
   return (
     <aside className="side">
-      <Card>
-        <Kv k="Encoder" v="HEVC · NVENC" />
-        <Kv k="Target" v="4K60 · 40–80 Mb/s" mono />
-        <Kv k="Audio" v="System + profile" />
+      <Card title={def ? `${def.name} preset` : "Preset"}>
+        {chosen === "off" ? (
+          <p className="p">Sharing is off for this game. Relay still shares when you start it manually; this only decides what happens automatically.</p>
+        ) : def ? (
+          <>
+            <Kv k="Encoder" v="HEVC · hardware" />
+            <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
+            <Kv k="Frame rate" v={`${def.fps} fps`} mono />
+            <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
+            <Kv k="Audio" v={audio[def.audio]} />
+            <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
+            <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+          </>
+        ) : (
+          <p className="note">Reading presets…</p>
+        )}
       </Card>
-      <p className="note">Everything stays on your local network. Nothing on this PC was changed.</p>
+      <button className="btn acc" disabled={!draft || !dirty} onClick={() => void save()}>
+        {dirty ? "Save to profile" : "Saved"}
+      </button>
+      <p className="note">Edit these numbers on the Share screen. Everything stays on your local network. Nothing on this PC was changed.</p>
     </aside>
   );
 }
