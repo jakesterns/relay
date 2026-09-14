@@ -25,12 +25,24 @@ param([switch]$Force, [switch]$NoRelaunch)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-$marker = Join-Path $repo '.git\relay-installed-sha'
-$log = Join-Path $repo '.git\relay-install.log'
-$lock = Join-Path $repo '.git\relay-install.lock'
+
+# State lives in the *common* git dir, not "$repo\.git". In a linked worktree
+# .git is a file, so the old path did not exist -- and more importantly, every
+# worktree installs over the same %LOCALAPPDATA%\Relay, so they must share one
+# lock and one marker or two sessions race to install different builds.
+Push-Location $repo
+$gitDir = (& git rev-parse --path-format=absolute --git-common-dir).Trim()
+Pop-Location
+$marker = Join-Path $gitDir 'relay-installed-sha'
+$log = Join-Path $gitDir 'relay-install.log'
+$lock = Join-Path $gitDir 'relay-install.lock'
+
+# One shared log across every worktree, so the tree has to be named or you
+# cannot tell which session installed what.
+$tree = Split-Path -Leaf $repo
 
 function Say($m) {
-    $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $m
+    $line = "[{0}] ({1}) {2}" -f (Get-Date -Format 'HH:mm:ss'), $tree, $m
     Write-Host $line
     Add-Content -LiteralPath $log -Value $line -Encoding utf8
 }

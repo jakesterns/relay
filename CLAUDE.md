@@ -42,6 +42,8 @@ Dark, restrained, hardware-inspired. Warm black `#0E0D0C`, surfaces `#151312`/`#
 ## Roadmap and milestone sessions
 `docs/ROADMAP.md` is the agreed order and decision log. Each milestone has a plan file in `docs/plans/` with a kickoff prompt; one chat session per milestone. Agreed order: M0 → M4 share → M1 hardware → M2 display (with M3 audio DSP in parallel) → M3b APO → M5 → M6 → M7. Latency and efficiency come first for share.
 
+**`main` is the trunk** (2026-09-14: M0–M7 all merged into it). Cut feature branches from `main`, never from the old `m*` milestone branches, which are kept only as history. Parallel sessions each get a git worktree — `docs/dev/parallel-sessions.md` has the layout, the merge-back steps, and the one sharp edge: the post-commit installer runs in every tree and installs over the same `%LOCALAPPDATA%\Relay`, so the installed app follows whichever tree committed last (`RELAY_NO_INSTALL=1` opts a tree out).
+
 ## Repo layout (scaffolded 2026-09-09)
 ```
 Cargo.toml            workspace (resolver 2, size-optimised release profile)
