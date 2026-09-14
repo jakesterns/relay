@@ -1,5 +1,11 @@
 # Milestone plans
 
+**M0–M7 are done and merged into `main`.** Everything that remains — the work
+deferred out of those milestones plus the v1.1 backlog — is broken into
+sessions in `SESSIONS.md`, each with its branch, worktree, Definition of Ready,
+Definition of Done and kickoff prompt. Start there; the files below are the
+history that explains why each remaining item was deferred.
+
 One file per milestone, one chat session per milestone. Each plan is
 self-contained: a session that reads only `CLAUDE.md` and its plan file has
 enough context to start.

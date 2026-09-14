@@ -1,5 +1,12 @@
 # Kickoff prompts — one per milestone chat session
 
+> **All eight milestones (M0–M7) are complete and merged into `main` as of
+> 2026-09-14.** The prompts below are kept for the record. For work that is
+> still outstanding, use **`docs/plans/SESSIONS.md`** — it carries every
+> remaining task as a session with its own branch, worktree, DoR, DoD and
+> kickoff prompt.
+
+
 Copy the block for the milestone into a new Claude Code chat in the Stream
 Share project. Each prompt tells the session where the plan is, how to treat
 Definition of Ready (DoR) and Definition of Done (DoD), and how to report.

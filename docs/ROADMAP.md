@@ -101,6 +101,17 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [ ] Clean-VM snapshot test. Scripts written and green on the dev machine (`scripts/vm-cycle.ps1`, `machine-snapshot.ps1`, `snapshot-diff.ps1`); the checkpoint run itself is deferred — runbook in `docs/dev/uninstall-vm.md`.
 - [ ] Signed installer and binaries (EV cert).
 
+## What is left
+
+All eight milestones are merged into `main` as of 2026-09-14. Every remaining
+item — the deferred work from M1–M7 above and the v1.1 backlog below — is
+broken into sessions in **`docs/plans/SESSIONS.md`**, each with its branch,
+worktree, Definition of Ready, Definition of Done and kickoff prompt.
+
+The long pole is the **EV certificate**: four deliverables wait on it (signed
+installer, signed APO DLL, signed virtual mic driver, attestation) and it has
+weeks of identity-verification lead time. It is still not ordered.
+
 ## v1.1 backlog
 - Relay Send VST3 plugin over shared memory (DAW audio under ASIO).
 - Call-audio return route and mix-minus.

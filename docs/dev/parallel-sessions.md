@@ -12,16 +12,23 @@ time), and over the post-commit installer.
 
 ## The trees
 
-| Folder | Branch | Scope |
+| Folder | Branch | Session |
 | --- | --- | --- |
 | `Stream Share` | `main` | trunk; integration, releases, the installed app |
-| `relay-adlx` | `feat/adlx-display` | AMD display backend behind the existing `DisplayIo` seam |
-| `relay-dual-audio` | `feat/dual-audio` | second Opus track so mic and desktop audio ship together |
-| `relay-mkv` | `feat/mkv-container` | MKV alongside the fragmented-MP4 recorder |
-| `relay-monitor-vcp` | `feat/monitor-vcp` | verified vendor VCP opcodes (black equalizer, response) |
+| `relay-adlx` | `feat/adlx-display` | S1 — AMD display backend behind the `DisplayIo` seam |
+| `relay-dual-audio` | `feat/dual-audio` | S2 — second Opus track, mic *and* desktop audio |
+| `relay-monitor-vcp` | `feat/monitor-vcp` | S3 — verified vendor VCP opcodes |
+| `relay-mkv` | `feat/mkv-container` | S4 — MKV alongside the fragmented-MP4 recorder |
+| `relay-hkcu-vcam` | `feat/hkcu-vcam` | S5 — per-user camera registration (kills the elevation need) |
+| `relay-elevation` | `feat/elevated-install` | S6 — elevated install helper |
+| `relay-codec` | `feat/codec-robustness` | S7 — MFT allocator path, codec hard edges |
+| `relay-uitest` | `feat/ui-test-harness` | S8 — WebView test harness |
 
-These four were chosen because they touch nearly disjoint files, so they
-merge without fighting each other.
+`docs/plans/SESSIONS.md` is the full catalogue: what each session does, its
+Definition of Ready and Done, and the prompt to start it. These eight were
+given their own trees because they touch nearly disjoint files and so merge
+back without fighting. Sessions S9–S17 are validation and bookkeeping and run
+in the main tree on a `chore/` branch.
 
 ## Adding one
 
