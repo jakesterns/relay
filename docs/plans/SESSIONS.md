@@ -39,11 +39,15 @@ Either paste the kickoff prompt into a new Claude Code chat opened in that
 session's worktree, or let the launcher do it:
 
 ```
-pwsh scripts\start-session.ps1                    # list every session
-pwsh scripts\start-session.ps1 -Session S5 -DryRun # show the resolved prompt
-pwsh scripts\start-session.ps1 -Session S1 S2 S3   # start three
-pwsh scripts\start-session.ps1 -All                # start S1-S8
+pwsh scripts\start-session.ps1                      # list every session
+pwsh scripts\start-session.ps1 -Session S5 -DryRun  # show the resolved prompt
+pwsh scripts\start-session.ps1 -Session S1,S2,S3    # start three (commas, not spaces)
+pwsh scripts\start-session.ps1 -All                 # start S1-S8
 ```
+
+Session ids are **comma-separated**. Space separation binds the second id to
+the next parameter and fails with a confusing complaint about
+`PermissionMode`.
 
 The launcher reads the kickoff prompts out of *this file*, so there is one copy
 of each — edit the catalogue, not the script. It starts each session with

@@ -48,6 +48,11 @@
 #>
 [CmdletBinding()]
 param(
+    # Comma-separated: -Session S1,S2,S3. Space separation does not work
+    # through `powershell -File` -- the second value binds positionally to the
+    # next parameter instead, which surfaces as a confusing ValidateSet error
+    # about PermissionMode. Elements are split on commas below so both
+    # "S1,S2" and @('S1','S2') behave the same.
     [string[]]$Session,
     [switch]$All,
     [switch]$DryRun,
@@ -130,6 +135,8 @@ if ($All) {
     Write-Host 'Start one with:  scripts\start-session.ps1 -Session S5'
     exit 0
 }
+
+$Session = @($Session | ForEach-Object { $_ -split ',' } | Where-Object { $_ -ne '' })
 
 $started = @()
 $first = $true
