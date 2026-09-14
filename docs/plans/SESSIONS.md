@@ -33,6 +33,43 @@ inherited):
 three at once, because they converge on `ipc.rs` / `ipc.ts` and the UI screens.
 S5 should land before S12 — it may delete S12 entirely.
 
+## Starting a session
+
+Either paste the kickoff prompt into a new Claude Code chat opened in that
+session's worktree, or let the launcher do it:
+
+```
+pwsh scripts\start-session.ps1                    # list every session
+pwsh scripts\start-session.ps1 -Session S5 -DryRun # show the resolved prompt
+pwsh scripts\start-session.ps1 -Session S1 S2 S3   # start three
+pwsh scripts\start-session.ps1 -All                # start S1-S8
+```
+
+The launcher reads the kickoff prompts out of *this file*, so there is one copy
+of each — edit the catalogue, not the script. It starts each session with
+`claude --bg`, which returns immediately and prints a short id:
+
+- `claude agents` — list running sessions
+- `claude attach <id>` — open one in your terminal, to answer a question or
+  take over
+- `claude stop <id>` — end one
+
+Feature trees are launched with `RELAY_NO_INSTALL=1`, so eight sessions cannot
+fight over the single installed app; the main tree is left alone. Launches are
+staggered 20 s apart, because eight simultaneous Rust release builds is not a
+good use of the machine.
+
+**`-All` deliberately covers only S1–S8.** The rest need you at the keyboard
+(S10 is nothing *but* asking you questions) or an external unblock, so starting
+them unattended burns tokens waiting. Name them explicitly if you want them.
+
+Two things worth knowing before starting several at once. The default
+`-PermissionMode acceptEdits` lets a session edit files in its own worktree
+without prompting but still asks before running commands, so a background
+session will sit waiting until you attach — that is the intended shape, not a
+hang. And every running session costs tokens continuously, so three attentive
+sessions beat eight neglected ones.
+
 | # | Session | Branch | Worktree | Blocked on |
 |---|---|---|---|---|
 | S1 | ADLX display backend | `feat/adlx-display` | `relay-adlx` | — |
