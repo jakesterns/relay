@@ -63,6 +63,8 @@ export interface HardwareMonitor {
 /** One model in the bundled headphone catalogue. Mirrors
  *  `hardware::catalog::CatalogEntry`. */
 export interface CatalogEntry { name: string; source: string; rig: string; path: string }
+/** A base64 JPEG thumbnail of the live capture (Event::SharePreview). */
+export interface SharePreview { width: number; height: number; jpeg: string }
 export interface AudioInterface { id: string; name: string }
 export interface EndpointInfo { key: string; name: string; default: boolean }
 export interface MonitorProbe {
@@ -558,6 +560,7 @@ export async function onCoreEvents(handlers: {
   recordingStatus?: (s: RecordingStatus) => void;
   replaySaved?: (s: ReplaySaved) => void;
   sourceChanged?: (s: SourceChangedData) => void;
+  sharePreview?: (s: SharePreview) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
@@ -571,6 +574,7 @@ export async function onCoreEvents(handlers: {
     listen<RecordingStatus>("core://recording-status", (e) => handlers.recordingStatus?.(e.payload)),
     listen<ReplaySaved>("core://replay-saved", (e) => handlers.replaySaved?.(e.payload)),
     listen<SourceChangedData>("core://source-changed", (e) => handlers.sourceChanged?.(e.payload)),
+    listen<SharePreview>("core://share-preview", (e) => handlers.sharePreview?.(e.payload)),
   ]);
   return () => unlisteners.forEach((u) => u());
 }

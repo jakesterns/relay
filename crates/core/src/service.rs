@@ -589,6 +589,9 @@ fn spawn_share(
                 ShareEvent::Stats { data } => {
                     let _ = events2.send(Event::ShareStats { data });
                 }
+                ShareEvent::Preview { width, height, jpeg } => {
+                    let _ = events2.send(Event::SharePreview { width, height, jpeg });
+                }
                 ShareEvent::Connected { peer } => {
                     inner2.lock().state.sharing =
                         crate::types::ShareState::Sharing { peer: peer.clone() };
@@ -672,6 +675,9 @@ fn spawn_receive(
         .name("relay-receive-pump".into())
         .spawn(move || {
             crate::share::pump(rx, |ev| match ev {
+                // The receiver renders into its own window, so a preview from
+                // that side would be a picture of something already on screen.
+                ShareEvent::Preview { .. } => {}
                 ShareEvent::Waiting { code, .. } => {
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,

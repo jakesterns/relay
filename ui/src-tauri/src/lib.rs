@@ -450,6 +450,14 @@ fn spawn_event_bridge(app: AppHandle) {
                                 Event::SourceChanged { data } => {
                                     let _ = app.emit("core://source-changed", data);
                                 }
+                                Event::SharePreview { width, height, jpeg } => {
+                                    let _ = app.emit(
+                                        "core://share-preview",
+                                        serde_json::json!({
+                                            "width": width, "height": height, "jpeg": jpeg,
+                                        }),
+                                    );
+                                }
                                 Event::ReceiveStatus { receiving, code, sender, message } => {
                                     let _ = app.emit(
                                         "core://receive-status",

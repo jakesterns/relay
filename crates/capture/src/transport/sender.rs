@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -52,6 +52,89 @@ pub struct SendOpts {
     pub record: bool,
     /// Replay ring window; 0 = ring off.
     pub replay_secs: u32,
+    /// Emit a JPEG thumbnail of the capture this many times a second, as
+    /// preview events on stdout, so the app window can show what is being
+    /// shared. 0 = off, which costs nothing at all.
+    pub preview_fps: u32,
+}
+
+/// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
+///
+/// Off unless `preview_fps > 0`, and even then it only touches the GPU once
+/// per interval — the share path is on a latency budget and a preview is
+/// worth nothing if it costs frames. A failure here is logged once and then
+/// the tap disables itself: a thumbnail is never a reason to interrupt a
+/// share that is otherwise working.
+struct PreviewTap {
+    interval: Option<Duration>,
+    last: Option<Instant>,
+    inner: Option<crate::preview::Preview>,
+    failed: bool,
+}
+
+impl PreviewTap {
+    fn new(fps: u32) -> Self {
+        let interval = (fps > 0).then(|| Duration::from_micros(1_000_000 / fps.min(30) as u64));
+        Self { interval, last: None, inner: None, failed: false }
+    }
+
+    /// Drop the scaler so the next frame rebuilds it at the new source size.
+    fn invalidate(&mut self) {
+        self.inner = None;
+    }
+
+    fn due(&self) -> bool {
+        match (self.interval, self.last) {
+            (None, _) => false,
+            (Some(_), None) => true,
+            (Some(i), Some(last)) => last.elapsed() >= i,
+        }
+    }
+}
+
+/// One preview frame, if one is due. Errors disable the tap rather than
+/// propagating: see [`PreviewTap`].
+fn emit_preview(
+    tap: &mut PreviewTap,
+    gpu: &crate::d3d::Gpu,
+    texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    in_size: (u32, u32),
+) {
+    if tap.failed || !tap.due() {
+        return;
+    }
+    tap.last = Some(Instant::now());
+
+    if tap.inner.is_none() {
+        match crate::preview::Preview::new(gpu, in_size) {
+            Ok(p) => tap.inner = Some(p),
+            Err(e) => {
+                warn!(error = %e, "preview disabled");
+                tap.failed = true;
+                return;
+            }
+        }
+    }
+    let Some(p) = tap.inner.as_mut() else { return };
+    match p.jpeg(gpu, texture) {
+        Ok(jpeg) => {
+            use base64::Engine as _;
+            let (w, h) = p.size();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "event": "preview",
+                    "width": w,
+                    "height": h,
+                    "jpeg": base64::engine::general_purpose::STANDARD.encode(&jpeg),
+                })
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "preview frame failed; disabling");
+            tap.failed = true;
+        }
+    }
 }
 
 /// Live counters the stats task samples every 500 ms.
@@ -299,6 +382,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let fps = opts.fps;
         let cursor = opts.cursor;
         let out_size = opts.size;
+        let preview_fps = opts.preview_fps;
         let target = target_bps.clone();
         let rec = recorder.clone();
         let sw = switcher.clone();
@@ -308,6 +392,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 fps,
                 cursor,
                 out_size,
+                preview_fps,
                 vtx,
                 stats,
                 stop,
@@ -528,6 +613,7 @@ fn video_pipeline(
     fps: u32,
     cursor: bool,
     out_size: Option<(u32, u32)>,
+    preview_fps: u32,
     tx: mpsc::Sender<VideoAu>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
@@ -599,6 +685,9 @@ fn video_pipeline(
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
     let mut conv_in = in_size;
+    // Built on the first frame rather than here: a source swap can change the
+    // input size, and rebuilding from the frame keeps one code path.
+    let mut preview = PreviewTap::new(preview_fps);
     let mut crop: Option<(u32, u32, u32, u32)> = None;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
@@ -621,6 +710,7 @@ fn video_pipeline(
                             conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
+                            preview.invalidate();
                             let _ = enc.request_keyframe();
                             switcher.lock().unwrap().applied(t);
                             info!(target = ?t, w = conv_in.0, h = conv_in.1, "source switched");
@@ -661,6 +751,7 @@ fn video_pipeline(
                             conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
+                            preview.invalidate();
                             let _ = enc.request_keyframe();
                         }
                         Err(e) => warn!(error = %e, "rebuilding resized source failed"),
@@ -670,6 +761,7 @@ fn video_pipeline(
                 if keyframe_wanted.swap(false, Ordering::Relaxed) {
                     let _ = enc.request_keyframe();
                 }
+                emit_preview(&mut preview, &gpu, &frame.texture, conv_in);
                 let nv12 = conv.convert(&frame.texture)?;
                 enc.submit(&nv12, frame.qpc_100ns)?;
                 inflight.insert(frame.qpc_100ns, time::qpc_now_100ns());

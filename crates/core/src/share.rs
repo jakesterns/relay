@@ -46,6 +46,10 @@ pub struct ShareRequest {
     /// Replay ring window in seconds; 0 = off.
     #[serde(default)]
     pub replay_secs: u32,
+    /// Thumbnails per second for the app window's preview. 0 = off, which is
+    /// the default: the engine does no readback at all unless asked.
+    #[serde(default)]
+    pub preview_fps: u32,
     /// Recording folder; `None` disables recording and the replay ring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_dir: Option<String>,
@@ -123,6 +127,8 @@ pub enum ShareEvent {
     ReplaySaved { path: String, ms: u64 },
     /// The capture source switched (verbatim target JSON for the UI).
     SourceChanged { data: serde_json::Value },
+    /// A JPEG thumbnail of what is being captured, base64 in the engine line.
+    Preview { width: u32, height: u32, jpeg: String },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -278,6 +284,10 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
             args.push(req.replay_secs.to_string());
         }
     }
+    if req.preview_fps > 0 {
+        args.push("--preview-fps".into());
+        args.push(req.preview_fps.to_string());
+    }
     args
 }
 
@@ -324,6 +334,11 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
             path: v.get("path").and_then(|p| p.as_str()).map(str::to_string),
         }),
         Some("source") => Some(ShareEvent::SourceChanged { data: v }),
+        Some("preview") => Some(ShareEvent::Preview {
+            width: v.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32,
+            height: v.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32,
+            jpeg: v.get("jpeg").and_then(|j| j.as_str())?.to_string(),
+        }),
         Some("replay_saved") => Some(ShareEvent::ReplaySaved {
             path: v.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
             ms: v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0),

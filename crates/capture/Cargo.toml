@@ -18,6 +18,7 @@ relay-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
+base64 = "0.22"
 serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -48,6 +49,7 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Imaging",
     "Win32_Media_DirectShow",
     "Win32_Media_KernelStreaming",
     "Win32_NetworkManagement_IpHelper",

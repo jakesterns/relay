@@ -288,3 +288,8 @@ a { color: inherit; text-decoration: none; }
 .catalog { max-height: 240px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; padding: 0 10px; }
 .catalog .hwl { padding: 8px 0; }
 .catalog .btn { flex: none; margin-left: auto; }
+
+/* The live capture thumbnail. Contain, not cover: a preview that crops is
+   worse than one with letterbox bars, because the point is to show exactly
+   what the other side receives. */
+.preview .shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }

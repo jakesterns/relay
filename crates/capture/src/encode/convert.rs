@@ -31,6 +31,10 @@ pub struct Converter {
 }
 
 impl Converter {
+    /// BGRA in, NV12 out — what the encoder wants, and what the preview
+    /// thumbnail reads back. A BGRA output was tried for the preview and
+    /// reverted: the processor accepts the output view, reports success and
+    /// writes solid black.
     pub fn new(gpu: &Gpu, in_size: (u32, u32), out_size: (u32, u32)) -> Result<Self> {
         let video_device: ID3D11VideoDevice = gpu.device.cast().context("ID3D11VideoDevice")?;
         let video_context: ID3D11VideoContext = gpu.context.cast()?;
@@ -69,7 +73,7 @@ impl Converter {
             let mut tex = None;
             // SAFETY: valid descriptor, out pointer is ours.
             unsafe { gpu.device.CreateTexture2D(&tex_desc, None, Some(&mut tex)) }
-                .context("creating NV12 target")?;
+                .context("creating the video-processor output texture")?;
             ring.push(tex.unwrap());
         }
 

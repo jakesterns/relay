@@ -120,6 +120,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         record_dir: None,
         record: false,
         replay_secs: 0,
+        preview_fps: 0,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -141,6 +142,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
                 opts.audio = Some(relay_capture::audio::AudioSource::Microphone);
             }
             "--no-cursor" => opts.cursor = false,
+            "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
                 let s = it.next().context("--size WxH")?;
                 let (w, h) = s.split_once('x').context("--size must be WxH")?;

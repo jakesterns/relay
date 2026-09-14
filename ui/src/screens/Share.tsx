@@ -5,7 +5,7 @@ import { useCore } from "../lib/core";
 import {
   api, onCoreEvents,
   type DiscoveredReceiver, type ProcessInfo, type SharePresetDef, type ShareStats,
-  type SourceTarget,
+  type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
@@ -46,6 +46,8 @@ export function Share() {
   const [showRegion, setShowRegion] = useState(false);
   const [region, setRegion] = useState({ x: 0, y: 0, w: 1920, h: 1080 });
   const [showWindows, setShowWindows] = useState(false);
+  // Latest capture thumbnail from the engine; cleared when the share stops.
+  const [preview, setPreview] = useState<SharePreview | null>(null);
   const [windows, setWindows] = useState<ProcessInfo[]>([]);
 
   const selectedDef = presets.find((p) => p.id === preset) ?? presets[0];
@@ -70,6 +72,7 @@ export function Share() {
   useEffect(() => {
     let unsub = () => {};
     void onCoreEvents({
+      sharePreview: (p: SharePreview) => setPreview(p),
       shareStats: (s: ShareStats) => {
         if (s.bitrate_mbps === undefined) return;
         const h = [...histRef.current.slice(1), Math.min(1, (s.bitrate_mbps ?? 0) / bitrateCeil)];
@@ -133,6 +136,7 @@ export function Share() {
 
   const stop = async () => {
     setBusy(true);
+    setPreview(null);
     try { await api.stopShare(); } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
   };
@@ -226,11 +230,15 @@ export function Share() {
           </div>
         )}
         <div className="preview">
-          <div className={"scene" + (sharing ? "" : " idle")} />
-          {sharing && <div className="horizon" />}
+          {/* A real thumbnail of the capture once one arrives; the drawn
+              placeholder until then, so the box is never empty. */}
+          {sharing && preview
+            ? <img className="shot" src={`data:image/jpeg;base64,${preview.jpeg}`} alt="What is being shared" />
+            : <div className={"scene" + (sharing ? "" : " idle")} />}
+          {sharing && !preview && <div className="horizon" />}
           <div className="tag"><span>Up to 3840×2160</span><span>60 fps</span><span>HEVC</span></div>
           {sharing
-            ? <div className="cap">Preview — press P to hide</div>
+            ? <div className="cap">{preview ? `Live · ${preview.width}×${preview.height} thumbnail` : "Waiting for the first frame…"}</div>
             : <div className="idlemsg">Capture starts when you share. Nothing is running now.</div>}
         </div>
         <InstrumentStrip s={strip} live={sharing} recOn={rec.on} />

@@ -304,6 +304,13 @@ pub enum Event {
         sender: Option<String>,
         message: Option<String>,
     },
+    /// A base64 JPEG thumbnail of the live capture, for the Share screen's
+    /// preview. Only sent while a share was started with previews on.
+    SharePreview {
+        width: u32,
+        height: u32,
+        jpeg: String,
+    },
 }
 
 /// One line on the wire is exactly one of these.
