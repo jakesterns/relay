@@ -65,17 +65,19 @@ pub struct SendOpts {
 /// worth nothing if it costs frames. A failure here is logged once and then
 /// the tap disables itself: a thumbnail is never a reason to interrupt a
 /// share that is otherwise working.
+/// The rate is read from a shared cell on every frame rather than captured at
+/// construction, so Ctrl+Alt+P (a `preview` command on stdin) can turn the tap
+/// on and off mid-share without disturbing the encoder.
 struct PreviewTap {
-    interval: Option<Duration>,
+    fps: Arc<AtomicU32>,
     last: Option<Instant>,
     inner: Option<crate::preview::Preview>,
     failed: bool,
 }
 
 impl PreviewTap {
-    fn new(fps: u32) -> Self {
-        let interval = (fps > 0).then(|| Duration::from_micros(1_000_000 / fps.min(30) as u64));
-        Self { interval, last: None, inner: None, failed: false }
+    fn new(fps: Arc<AtomicU32>) -> Self {
+        Self { fps, last: None, inner: None, failed: false }
     }
 
     /// Drop the scaler so the next frame rebuilds it at the new source size.
@@ -83,8 +85,13 @@ impl PreviewTap {
         self.inner = None;
     }
 
+    fn interval(&self) -> Option<Duration> {
+        let fps = self.fps.load(Ordering::Relaxed);
+        (fps > 0).then(|| Duration::from_micros(1_000_000 / fps.min(30) as u64))
+    }
+
     fn due(&self) -> bool {
-        match (self.interval, self.last) {
+        match (self.interval(), self.last) {
             (None, _) => false,
             (Some(_), None) => true,
             (Some(i), Some(last)) => last.elapsed() >= i,
@@ -100,7 +107,15 @@ fn emit_preview(
     texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
     in_size: (u32, u32),
 ) {
-    if tap.failed || !tap.due() {
+    if tap.failed {
+        return;
+    }
+    if tap.interval().is_none() {
+        // Switched off mid-share: give the scaler and its staging texture back.
+        tap.inner = None;
+        return;
+    }
+    if !tap.due() {
         return;
     }
     tap.last = Some(Instant::now());
@@ -372,6 +387,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         audio: opts.audio.is_some(),
     });
 
+    // Preview rate, shared so the `preview` stdin command can retune it live.
+    let preview_fps = Arc::new(AtomicU32::new(opts.preview_fps));
+
     // Video pipeline thread (blocking): capture → convert → encode → channel.
     let (vtx, mut vrx) = mpsc::channel::<VideoAu>(4);
     let video_join = {
@@ -382,7 +400,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let fps = opts.fps;
         let cursor = opts.cursor;
         let out_size = opts.size;
-        let preview_fps = opts.preview_fps;
+        let preview_fps = preview_fps.clone();
         let target = target_bps.clone();
         let rec = recorder.clone();
         let sw = switcher.clone();
@@ -558,6 +576,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                                 r.save_replay();
                             }
                         }
+                        Some(EngineCmd::Preview { fps }) => {
+                            preview_fps.store(fps.min(30), Ordering::Relaxed);
+                            debug!(fps, "preview rate set");
+                        }
                         Some(EngineCmd::Switch { target }) => {
                             if switcher.lock().unwrap().request(target) {
                                 debug!(?target, "switch queued");
@@ -613,7 +635,7 @@ fn video_pipeline(
     fps: u32,
     cursor: bool,
     out_size: Option<(u32, u32)>,
-    preview_fps: u32,
+    preview_fps: Arc<AtomicU32>,
     tx: mpsc::Sender<VideoAu>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
@@ -687,7 +709,7 @@ fn video_pipeline(
     let mut conv_in = in_size;
     // Built on the first frame rather than here: a source swap can change the
     // input size, and rebuilding from the frame keeps one code path.
-    let mut preview = PreviewTap::new(preview_fps);
+    let mut preview = PreviewTap::new(preview_fps.clone());
     let mut crop: Option<(u32, u32, u32, u32)> = None;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {

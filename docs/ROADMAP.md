@@ -79,6 +79,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] Share engine runs as a child process of the core, spawned per share and fully torn down after; core RSS unchanged.
 - [x] Wi-Fi detection → wired / 6 GHz recommendation; AIMD bitrate step-down on receiver-reported loss.
 - [x] Hotkeys Ctrl+Alt+S (toggle share) / Ctrl+Alt+P (preview) wired in the core.
+- [x] In-app share preview: the video pipeline taps a 480×270 JPEG thumbnail (GPU scale on the existing NV12 video processor, ~200 KB readback, WIC 24bppBGR encode) at a preset-chosen rate — 2 fps from the UI, off from the CLI. Measured 17–32 KB per frame, ≈41 KB/s. Added 2026-09-14; Ctrl+Alt+P now shows a picture instead of a notice.
 
 ## M5 — Virtual devices on the receiver
 **Code-complete 2026-09-12** (branch `m5-vdevices`; plan + session log in `docs/plans/M5-vdevices.md`). The whole chain short of the frame server is proven by tests (media source serves ring frames byte-for-byte in-process; GPU NV12 texture → staging → ring byte-for-byte); footprint gate 4.21 MB / 0.044 % with the vdevice engine in the core. Deferred: the live frame-server pass + Discord/Zoom/Meet verification (needs one elevated registry write — UAC unavailable in the session; runbook `docs/dev/vcam-live.md`), the signed mic driver (EV cert still not ordered), and the interim-mic live check (VB-Cable not installed).

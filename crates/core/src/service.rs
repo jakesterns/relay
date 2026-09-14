@@ -87,6 +87,9 @@ struct Inner {
     share: Option<crate::share::ShareEngine>,
     /// Last share request, so the Ctrl+Alt+S hotkey can re-start it.
     last_share: Option<crate::share::ShareRequest>,
+    /// Thumbnails per second the running engine was last told to emit, so
+    /// Ctrl+Alt+P knows which way to flip. Reset when a share starts.
+    preview_fps: u32,
     /// The running receive engine (a child process), if any.
     receive: Option<crate::share::ShareEngine>,
     /// Where A/B listening-test renders go.
@@ -130,6 +133,11 @@ impl Service {
         let connected = library.connected(&report);
         let state = CoreState {
             hardware: HardwareView::from_report(report.clone(), &library),
+            build: crate::types::BuildInfo {
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                data_dir: paths.root().display().to_string(),
+                log_file: paths.log_file().display().to_string(),
+            },
             ..Default::default()
         };
 
@@ -145,6 +153,7 @@ impl Service {
             pinned: false,
             share: None,
             last_share: None,
+            preview_fps: 0,
             receive: None,
             previews_dir: paths.previews_dir(),
             apo_backup_dir: paths.apo_backup_dir(),
@@ -414,8 +423,34 @@ impl Service {
                 }
             }
             HotkeyAction::TogglePreview => {
-                // Preview is a UI concern; relay the intent for the UI to toggle.
-                let _ = self.events.send(Event::Notice { text: "preview toggled".into() });
+                // Thumbnails cost a GPU scale and a readback per frame, so the
+                // toggle reaches all the way into the engine rather than just
+                // hiding the picture in the UI.
+                let sharing = self.inner.lock().share.is_some();
+                if !sharing {
+                    let _ = self.events.send(Event::Notice {
+                        text: "Ctrl+Alt+P: nothing to preview -- start a share first".into(),
+                    });
+                    return;
+                }
+                let fps = {
+                    let mut g = self.inner.lock();
+                    g.preview_fps =
+                        if g.preview_fps > 0 { 0 } else { crate::share::DEFAULT_PREVIEW_FPS };
+                    g.preview_fps
+                };
+                match engine_command(&self.inner, &crate::share::EngineCmd::Preview { fps }) {
+                    Reply::Error { message } => {
+                        let _ = self
+                            .events
+                            .send(Event::Notice { text: format!("Ctrl+Alt+P: {message}") });
+                    }
+                    _ => {
+                        let _ = self.events.send(Event::Notice {
+                            text: if fps > 0 { "Preview on".into() } else { "Preview off".into() },
+                        });
+                    }
+                }
             }
             HotkeyAction::SaveReplay => {
                 let reply = engine_command(&self.inner, &crate::share::EngineCmd::ReplaySave);
@@ -576,6 +611,7 @@ fn spawn_share(
         Err(e) => return Reply::Error { message: e.to_string() },
     };
     g.share = Some(engine);
+    g.preview_fps = req.preview_fps;
     g.last_share = Some(req);
     g.state.sharing = crate::types::ShareState::Sharing { peer: String::new() };
     drop(g);

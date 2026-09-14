@@ -104,6 +104,7 @@ export function Settings() {
           <Kv k="Toggle share" v="Ctrl + Alt + S" mono />
           <Kv k="Toggle game profile" v="Ctrl + Alt + G" mono />
           <Kv k="Toggle preview" v="Ctrl + Alt + P" mono />
+          <Kv k="Save replay clip" v="Ctrl + Alt + R" mono />
         </Card>
         <Card title="Restore">
           <p className="p" style={{ marginBottom: 10 }}>Put every audio and display setting back to what Windows had before Relay touched it. Safe to press at any time.</p>
@@ -114,9 +115,9 @@ export function Settings() {
       <aside className="side">
         <Card>
           <Kv k="Core service" v={offline && !mock ? "Offline" : "Running"} />
-          <Kv k="Data folder" v="%LOCALAPPDATA%\\Relay" mono />
-          <Kv k="Log file" v="…\\Relay\\logs\\core.log" mono />
-          <Kv k="Version" v="0.1.0" mono />
+          <Kv k="Data folder" v={state.build?.data_dir ?? "—"} mono />
+          <Kv k="Log file" v={state.build?.log_file ?? "—"} mono />
+          <Kv k="Version" v={state.build?.version ?? "—"} mono />
         </Card>
         <p className="note">Uninstalling removes every component listed here, the startup entry, and restores the audio chain. Nothing is left behind.</p>
         <p className="note">Relay is installed for your user account only — it writes nothing to Program Files and installs no drivers unless you opt in above.</p>

@@ -93,13 +93,18 @@ export interface CoreState {
   sharing: ShareState; audio_chain: AudioChainState; display_state: DisplayState;
   display_via: DisplayVia; footprint: Footprint;
   hardware: HardwareView;
+  build?: BuildInfo;
 }
+/** Version and the paths this core actually uses (`--data-dir` moves them). */
+export interface BuildInfo { version: string; data_dir: string; log_file: string }
 
 export interface ShareRequest {
   peer?: string | null; code: string; bitrate_mbps: number; fps: number;
   size?: [number, number];
   audio: boolean; audio_pid?: number; mic?: boolean; cursor: boolean;
   preset?: string; record?: boolean; replay_secs?: number; record_dir?: string;
+  /** Thumbnails per second for the in-app preview; 0 = off. */
+  preview_fps?: number;
 }
 /** Mirror of `crates/core/src/share.rs` `SourceTarget` (serde-tagged on `kind`). */
 export type SourceTarget =
@@ -225,6 +230,11 @@ export const mockState: CoreState = {
   display_via: { nvapi: false, gamma: false, ddcci: false },
   footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
   hardware: mockHardware.connected,
+  build: {
+    version: "0.1.0",
+    data_dir: "C:\\Users\\you\\AppData\\Local\\Relay",
+    log_file: "C:\\Users\\you\\AppData\\Local\\Relay\\logs\\core.log",
+  },
 };
 
 function mockProfile(id: string, name: string, note: string, exe: string, headset: string | null, monitor: string | null, share: SharePreset, status: ProfileStatus): Profile {

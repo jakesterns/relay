@@ -15,11 +15,17 @@
 
 .PARAMETER Secs
   How long to share before stopping.
+
+.PARAMETER Toggle
+  Start with the preview off and turn it on mid-share with the `preview`
+  stdin command, the way Ctrl+Alt+P does. Proves the toggle, not just the
+  start-up flag.
 #>
 [CmdletBinding()]
 param(
     [int]$Fps = 2,
     [int]$Secs = 12,
+    [switch]$Toggle,
     [string]$OutDir = "$env:TEMP\relay-preview-check"
 )
 
@@ -44,16 +50,27 @@ Start-Sleep -Seconds 1
 
 $sendPsi = New-Object System.Diagnostics.ProcessStartInfo
 $sendPsi.FileName = $exe
-$sendPsi.Arguments = "send --code 424242 --peer 127.0.0.1:$port --preview-fps $Fps"
+$startFps = if ($Toggle) { 0 } else { $Fps }
+$sendPsi.Arguments = "send --code 424242 --peer 127.0.0.1:$port --preview-fps $startFps"
 $sendPsi.RedirectStandardOutput = $true
 $sendPsi.RedirectStandardInput = $true
 $sendPsi.UseShellExecute = $false
 $send = [System.Diagnostics.Process]::Start($sendPsi)
 
-Write-Host "sharing for $Secs s with --preview-fps $Fps ..."
+Write-Host "sharing for $Secs s with --preview-fps $startFps ..."
 $lines = New-Object System.Collections.Generic.List[string]
+$before = 0
 $deadline = (Get-Date).AddSeconds($Secs)
+$flip = if ($Toggle) { (Get-Date).AddSeconds([int]($Secs / 3)) } else { $null }
 while ((Get-Date) -lt $deadline) {
+    if ($flip -and (Get-Date) -ge $flip) {
+        # Count what arrived while the preview was meant to be off, then turn
+        # it on the way the Ctrl+Alt+P hotkey does.
+        $before = ($lines | Where-Object { $_ -match '"event":"preview"' }).Count
+        $send.StandardInput.WriteLine("{""cmd"":""preview"",""fps"":$Fps}")
+        Write-Host "  -> preview turned on mid-share (fps $Fps)"
+        $flip = $null
+    }
     $l = $send.StandardOutput.ReadLine()
     if ($null -eq $l) { break }
     $lines.Add($l)
@@ -66,6 +83,10 @@ if (-not $recv.HasExited) { $recv.Kill() }
 $previews = $lines | Where-Object { $_ -match '"event":"preview"' }
 Write-Host ""
 Write-Host ("preview events : {0} in {1} s" -f $previews.Count, $Secs)
+if ($Toggle) {
+    Write-Host ("before toggle  : {0} (must be 0)" -f $before)
+    if ($before -ne 0) { throw "preview emitted frames while it was switched off" }
+}
 if ($previews.Count -eq 0) {
     Write-Host "no preview frames - check that the source produced any frames at all:"
     $lines | Where-Object { $_ -match '"event":"stats"' } | Select-Object -Last 1

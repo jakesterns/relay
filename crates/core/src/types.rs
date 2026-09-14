@@ -230,6 +230,19 @@ pub struct CoreState {
     /// Connected endpoints/monitors and the resolved headset (M1).
     #[serde(default)]
     pub hardware: crate::hardware::HardwareView,
+    /// Version and on-disk locations. Here so the Settings screen can show the
+    /// paths this core actually uses instead of the defaults it assumes --
+    /// `--data-dir` and `RELAY_INSTANCE` both move them.
+    #[serde(default)]
+    pub build: BuildInfo,
+}
+
+/// What this build is and where it keeps its files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BuildInfo {
+    pub version: String,
+    pub data_dir: String,
+    pub log_file: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

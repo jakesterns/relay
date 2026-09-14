@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::profiles::write_atomic;
-use crate::share::ShareRequest;
+use crate::share::{ShareRequest, DEFAULT_PREVIEW_FPS};
 
 const FILE_VERSION: u32 = 1;
 
@@ -244,7 +244,7 @@ pub fn to_share_request(
         record_dir: Some(recording.resolved_dir()),
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
-        preview_fps: 2,
+        preview_fps: DEFAULT_PREVIEW_FPS,
     }
 }
 

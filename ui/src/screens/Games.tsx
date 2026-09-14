@@ -130,11 +130,8 @@ function AudioSection({ draft, update }: {
           ))}
         </Card>
         <Card title="Tune with your assistant">
-          <p className="p">Compares footsteps against explosions and ambience in live game audio, then adjusts the profile for this headset. Uses your own API key.</p>
-          <div className="ab">
-            <button className="btn acc" disabled>Run listening test</button>
-            <button className="btn q" disabled>Not run yet</button>
-          </div>
+          <p className="p">Planned for a later release, not built yet: compare footsteps against explosions and ambience in live game audio, then adjust the profile for this headset using your own API key.</p>
+          <p className="note">Until then, the A/B listening test below renders the same clip with and without your chain so you can judge a change by ear.</p>
         </Card>
       </div>
       <HeadsetCorrectionCard draft={draft} update={update} />

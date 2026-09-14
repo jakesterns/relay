@@ -157,8 +157,9 @@ export function Share() {
     try { await api.saveReplay(); } catch (e) { setError(String(e)); }
   };
 
-  // "Display 1", "Display 2"… from the connected monitors; two if unknown.
-  const displayCount = Math.max(state.hardware.monitors.length, sharing ? 2 : 1) || 2;
+  // "Display 1", "Display 2"… from the connected monitors. Never guess more
+  // than one: offering a display that isn't there just fails the switch.
+  const displayCount = Math.max(state.hardware.monitors.length, 1);
   const canStart = code.trim().length === 6 && !busy && !!selectedDef;
   const replayOn = (selectedDef?.replay_secs ?? 0) > 0;
 

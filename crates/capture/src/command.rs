@@ -32,6 +32,10 @@ pub enum EngineCmd {
     Switch {
         target: SourceTarget,
     },
+    /// Retune the in-app preview: thumbnails per second, 0 = off.
+    Preview {
+        fps: u32,
+    },
 }
 
 /// Parse one stdin line. `stop` (the M4 wire format) still works; everything
@@ -90,6 +94,10 @@ mod tests {
             .unwrap(),
             r#"{"cmd":"switch","target":{"kind":"region","display":1,"x":10,"y":20,"w":1280,"h":720}}"#
         );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Preview { fps: 2 }).unwrap(),
+            r#"{"cmd":"preview","fps":2}"#
+        );
     }
 
     #[test]
@@ -99,6 +107,7 @@ mod tests {
             EngineCmd::Record { on: false },
             EngineCmd::ReplaySave,
             EngineCmd::Switch { target: SourceTarget::Display { index: 1 } },
+            EngineCmd::Preview { fps: 0 },
         ] {
             let s = serde_json::to_string(&cmd).unwrap();
             assert_eq!(parse_line(&s), Some(cmd), "{s}");

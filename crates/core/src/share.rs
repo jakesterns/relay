@@ -65,15 +65,27 @@ pub enum SourceTarget {
     Region { display: usize, x: u32, y: u32, w: u32, h: u32 },
 }
 
+/// Thumbnails per second the app window asks for. Two is enough to see what
+/// you are sharing and cheap enough to be invisible in the latency budget.
+pub const DEFAULT_PREVIEW_FPS: u32 = 2;
+
 /// Mirror of `relay_capture::command::EngineCmd`, serialised onto the
 /// engine's stdin one line at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCmd {
     Stop,
-    Record { on: bool },
+    Record {
+        on: bool,
+    },
     ReplaySave,
-    Switch { target: SourceTarget },
+    Switch {
+        target: SourceTarget,
+    },
+    /// Retune the in-app preview: thumbnails per second, 0 = off.
+    Preview {
+        fps: u32,
+    },
 }
 
 fn default_bitrate() -> u32 {
@@ -488,6 +500,14 @@ mod tests {
             })
             .unwrap(),
             r#"{"cmd":"switch","target":{"kind":"region","display":0,"x":1,"y":2,"w":3,"h":4}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Preview { fps: DEFAULT_PREVIEW_FPS }).unwrap(),
+            r#"{"cmd":"preview","fps":2}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Preview { fps: 0 }).unwrap(),
+            r#"{"cmd":"preview","fps":0}"#
         );
         assert_eq!(
             serde_json::to_string(&EngineCmd::Switch {

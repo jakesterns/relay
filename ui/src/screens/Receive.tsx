@@ -124,8 +124,7 @@ export function Receive() {
         </Card>
         <Card>
           <Kv k="Status" v={sender ? `Paired with ${sender}` : receiving ? "Advertising on the LAN" : "Idle"} />
-          <Kv k="Decode" v={receiving ? "Hardware (DXVA HEVC)" : "—"} mono />
-          <Kv k="Window" v={sender ? "Native D3D11 swapchain" : "—"} mono />
+          <Kv k="Codec" v={receiving ? "HEVC" : "—"} mono />
         </Card>
         <VirtualDeviceCard />
         {error && <p className="note" style={{ color: "#d98b6a" }}>{error}</p>}
