@@ -45,12 +45,13 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [x] UI: "Add" flows on the Profiles screen, live "Plugged / Main / Second" pills, headset/monitor pickers on the profile form and Games screen.
 
 ## M2 — Display profiles (first real apply/restore)
-**Code complete 2026-09-10/11** (branch `m2-display`, worktree `stream-share-m2`; plan in `docs/plans/M2-display.md`). All logic unit-tested (two-monitor fake covers "second monitor untouched", unplug-mid-apply, stale-handle restore); footprint gate green at 5.95 MB / 0 %. **Live pass pending:** the physical monitor was powered off the whole session, so the real-hardware runbook (live read → real crash-restore test → alt-tab timing → lock/unlock) is queued in the plan's Deferred and gates closing this milestone.
+**Done 2026-09-13** (branch `m2-display`, merged into `m7-installer`; plan + live pass log in `docs/plans/M2-display.md`). All logic unit-tested (two-monitor fake covers "second monitor untouched", unplug-mid-apply, stale-handle restore); footprint gate green at 5.95 MB / 0 %. **Live pass done** on the LG ULTRAGEAR+ once the monitor was awake: DDC/CI reads on 0x10/0x12/0x87, NvAPI ids correct on this driver, crash-restore returns the exact original values after `taskkill /F`, and apply-on-focus / restore-on-focus-loss measured at 137–148 ms (mean 144, budget 200) over six runs. Still deferred: the second physical monitor, the LG C2, vendor OSD opcodes, ADLX, and the Win+L lock/unlock check.
 - [x] `relay-display::ddc`: DDC/CI over `dxva2` with retries + per-model write delays; capability parsing from M1; per-monitor handle from the probe's `HMONITOR`.
 - [x] `relay-display`: NvAPI vibrance + hue (dynamic `nvapi64.dll`, raw levels snapshotted); `SetDeviceGammaRamp` per monitor DC for gamma/contrast/shadow lift as the vendor-neutral path (raw original ramp preserved). ADLX after NVIDIA is live-verified.
 - [x] `DisplayControl` adapter (`display_backend.rs`) with true capture-before-apply; snapshot carries every VCP code touched, the raw ramp and raw NvAPI state, keyed by stable monitor id for crash/reboot restore.
 - [x] Multi-monitor: only the game's monitor changes; game moves monitors → restore old, apply new (focus hmonitor + move hook + tick safety net).
-- [ ] Manual test log on the LG ULTRAGEAR+ and LG C2 (VCP codes that actually work per model go in the hardware library) — needs the monitor awake / second panel; runbooks in the plan.
+- [x] Manual test log on the LG ULTRAGEAR+ (brightness 0x10, contrast 0x12, sharpness 0x87 all answer; NvAPI vibrance 0–63) — logged in the plan's Live pass section. The LG C2 and the second-panel checks still need the second monitor.
+- [x] Live apply/restore proof: crash-restore and focus-change restore both verified against real hardware, with an automated test for each (`crash_restore_display`, `focus_apply_restore_live`; both `--ignored`, run by hand with the monitor awake).
 - [x] UI: Display section reads/writes the real profile; "Applied via" reflects NvAPI / gamma ramp / DDC-CI actually used; unsupported controls disabled.
 
 ## M3 — Audio DSP and detection (no signing needed)
@@ -113,7 +114,7 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 | M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
 | M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
-| M2 Display profiles | `docs/plans/M2-display.md` | code + tests done 2026-09-11; live hardware pass pending (monitor was off) — runbook in plan |
+| M2 Display profiles | `docs/plans/M2-display.md` | done 2026-09-13; live pass complete on the LG ULTRAGEAR+ (crash-restore + focus restore at 144 ms mean); 2nd monitor / C2 / vendor opcodes / ADLX / Win+L deferred |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
 | M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | code-complete 2026-09-12; live pass → `docs/dev/vcam-live.md` (needs elevation); mic driver still EV-cert-blocked |

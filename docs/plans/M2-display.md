@@ -32,7 +32,8 @@ M0 (crash-restore harness), M1 (monitor ids and HMONITOR mapping, DDC/CI capabil
 - [x] Game moves monitors → restore old, apply new: `Applier` keys the fast path on (profile, target-id) and retargets otherwise (`moving_monitors_restores_old_then_applies_new`). Detection: `Foreground.hmonitor` on every focus event, an `EVENT_SYSTEM_MOVESIZEEND` hook for drags, and the 5 s service tick as the safety net for hook-less moves (Win+Shift+Arrow).
 - [x] Session events: `WTSRegisterSessionNotification` on the hidden winloop window → `CoreEvent::SessionLock` → restore on lock, re-select on unlock. Logoff/shutdown ride the existing console-ctrl path; `WM_DISPLAYCHANGE` re-probes and re-selects (a vanished monitor deselects → restore).
 - [x] Snapshot format: `DisplayStateSnapshot.targets[]` = `{ monitor id, gdi_name, hmonitor, vcp[(code,value)], raw gamma ramp, raw NvAPI {dvc,min,max,hue} }`, serde-round-trip tested. Written (fsync) before any change, as before.
-- [ ] Crash-restore harness on the real backend on a real monitor — **written** (`crates/core/tests/crash_restore_display.rs`, ignored: apply real brightness/gamma/vibrance deltas over IPC, `taskkill /F`, assert live values restored on restart by reading the hardware) but **not yet run**: the monitor was powered off all session (→ Deferred/live pass). The recording-backend harness (`crash_restore.rs`) passes with the new target-aware backend.
+- [x] Crash-restore harness on the real backend on a real monitor — written *and now run* (2026-09-13, monitor awake). `crates/core/tests/crash_restore_display.rs` passed against the LG ULTRAGEAR+: apply → `taskkill /F` → restart → live values back. See the live pass log below. The recording-backend harness (`crash_restore.rs`) passes with the target-aware backend.
+- [x] Apply-on-focus / restore-on-focus-loss on real hardware — `crates/core/tests/focus_apply_restore_live.rs` (new, ignored). Launches Notepad, lets the focus hook apply the profile with no IPC nudge, closes it, and asserts the hardware is back. Measures restore latency from the core's own log rather than from DDC reads, which would swamp it.
 
 ### UI
 - [x] Display section on the Games screen reads/writes the subject profile's real `DisplaySettings` (draft loaded via `get_profile`, saved via `save_profile`); sliders for unadvertised VCP codes are disabled from the library's `ddcci` list; black equaliser / response are disabled until a verified vendor opcode exists. "Applied via" renders `CoreState.display_via` (NvAPI / gamma ramp / DDC/CI actually used, plus fields the hardware could not honour). `pnpm build` (tsc + vite) green.
@@ -44,19 +45,89 @@ M0 (crash-restore harness), M1 (monitor ids and HMONITOR mapping, DDC/CI capabil
 
 ## Definition of Done
 - Every checklist item checked or moved to Deferred with a reason. ✔ (Deferred below)
-- Alt-tab out of the game restores within 200 ms; alt-tab back re-applies. — *pending live pass*
-- Kill the core while applied, restart: monitor and GPU back to original. — *test written; pending live pass*
+- Alt-tab out of the game restores within 200 ms; alt-tab back re-applies. — **met 2026-09-13**: 137.4–148.1 ms, mean 144 ms over six consecutive runs of `focus_apply_restore_live`. See the note on where that time goes, below.
+- Kill the core while applied, restart: monitor and GPU back to original. — **met 2026-09-13** on the LG ULTRAGEAR+.
 - Second monitor never changes. — proven at the unit level on every path (two-monitor fake); live proof needs a second physical monitor (runbook below).
+
+## Live pass — 2026-09-13 (LG ULTRAGEAR+, single monitor, NVIDIA)
+
+The monitor that was powered off for the whole 2026-09-11 session was awake,
+so runbook steps 1 and 2 ran, and step 3 became an automated test.
+
+**1. Read-only state** (`relay-display --test live_read`). Everything the
+backend depends on answers on this panel and driver:
+
+```
+== \\.\DISPLAY1 (HMONITOR 0x10001)
+  brightness 0x10: 100 / 100
+  contrast   0x12: 70 / 100
+  sharpness  0x87: 70 / 100
+  gamma ramp: identity=true r[0]=0 r[128]=32896 r[255]=65535
+== NvAPI \\.\DISPLAY1: dvc=Ok(Dvc { current: 0, min: 0, max: 63 }) hue=Ok((0, 0))
+```
+
+So: DDC/CI works for 0x10 / 0x12 / 0x87; the NvAPI function ids and struct
+versions are right on this driver (no −9, so the `…Ex` fallback is not
+needed); and the ramp was untouched, i.e. no f.lux/Night Light curve was in
+play during the test.
+
+**2. Crash-restore** (`relay-core --test crash_restore_display`). Every path
+the profile touches moved, and the exact original values came back after a
+hard kill:
+
+```
+before:   LiveState { brightness: 100, ramp_mid: 32896, dvc: Some(0) }
+applied:  LiveState { brightness: 95,  ramp_mid: 35023, dvc: Some(13) }   <- DDC + ramp + NvAPI
+killed:   LiveState { brightness: 95,  ramp_mid: 35023, dvc: Some(13) }   <- taskkill /F, nobody restored
+restored: LiveState { brightness: 100, ramp_mid: 32896, dvc: Some(0) }    <- recovery on restart
+```
+
+Brief risk #4 ("restore-on-crash for display settings") is closed for the
+single-monitor case. An independent `live_read` afterwards matched the
+before-state on all five values, including the two the profile never touched.
+
+**3. Apply-on-focus and restore-on-focus-loss**
+(`relay-core --test focus_apply_restore_live`, new). Notepad stands in for the
+game; the profile applies from the focus hook alone, with no IPC nudge, and
+the machine goes back when Notepad closes. Six consecutive runs:
+
+```
+137.4  148.1  141.4  148.0  144.6  144.2  ms      (mean 144, budget 200)
+```
+
+**Where that time goes, and why it matters:** the measurement is from the
+core's `foreground changed` line to its `original state restored` line, and
+the bulk of it is the DDC/CI write — brightness travels over I2C to the panel
+and costs ~100 ms on its own. The gamma ramp and NvAPI paths are far quicker.
+So a profile that sets only GPU colour restores almost instantly, and 144 ms
+is close to the floor for one that also drives a monitor control. It is
+inside the 200 ms budget but not by much, and the headroom is the panel's,
+not ours — worth remembering before adding a second DDC write to the restore
+path.
+
+**Test robustness, learned the hard way.** The first version of the focus test
+killed Notepad by pid. On Windows 11 `notepad.exe` is an app-execution alias:
+the process that gets launched exits immediately and the real Notepad runs
+under a different pid, so the kill hit nothing, the test timed out, and it
+panicked *with the profile still applied* — leaving the monitor dimmed. The
+repair was the product's own recovery path (start a core on the same data
+root; it restores from the pending snapshot before opening its pipe), which
+is an unplanned second confirmation that crash-restore works. The test now
+kills by image name and carries a `RestoreGuard` that runs that same recovery
+on unwind.
 
 ## Out of scope
 LUT / ICC profiles, HDR.
 
 ## Deferred
-- **Live verification pass** — the LG was physically powered off (no EDID device, DDC dead, gamma/NvAPI calls failing on the phantom display) for the entire session (2026-09-11); software wake (input jiggle + `SC_MONITORPOWER`) did not help. *Runbook, in order, with the monitor awake:*
-  1. `cargo test -p relay-display --test live_read -- --ignored --nocapture` — read-only; paste the output into the DoR note above. Confirms DDC/CI, ramp read and the NvAPI function ids/struct versions (community-documented, not yet exercised on this driver — if `GetDVCInfo` returns −9, switch to the `…Ex` variants).
-  2. `cargo test -p relay-core --test crash_restore_display -- --ignored --nocapture` — the full apply → kill → restart → restored cycle with real hardware reads between phases.
-  3. Alt-tab timing: Ready profile on a real exe, watch `logs/core.log` timestamps for restore-on-blur ≤ 200 ms; alt-tab back re-applies.
-  4. Session lock (Win+L) restores; unlock re-applies.
+- ~~**Live verification pass**~~ — **done 2026-09-13**, steps 1–3 above. Re-run any time with:
+  ```
+  cargo test -p relay-display --test live_read               -- --ignored --nocapture
+  cargo test -p relay-core --test crash_restore_display      -- --ignored --nocapture
+  cargo test -p relay-core --test focus_apply_restore_live   -- --ignored --nocapture
+  ```
+  All three need the monitor awake; the last two change real settings briefly and restore them.
+- **Session lock / unlock (Win+L)** — the one live step still outstanding. Not automated because locking the machine mid-session is disruptive and the unlock needs a human. *Runbook:* with a profile applied, press Win+L, and on returning check `logs/core.log` for `session lock change locked=true` followed by `original state restored`, then a re-apply on unlock. The code path (`WTSRegisterSessionNotification` → `CoreEvent::SessionLock`) is unit-tested; what is unverified is that Windows delivers the notification to the hidden winloop window on this machine.
 - **Second-monitor live proof + LG C2 manual test log** — one physical monitor on this PC (same deferral as M1). *Runbook:* attach the C2, give it a profile row, confirm (a) only the game's monitor changes brightness/ramp, (b) dragging the game across restores the first panel within a tick, (c) per-model VCP codes that work go into the hardware library / quirks table.
 - **Vendor opcodes (black equaliser, response time)** — need eyes on the OSD to verify which candidate code (LG 0xF4–0xFF) drives which OSD setting; set-and-readback alone cannot prove the on-screen meaning. Until then the fields are skipped and surfaced as unsupported in the UI.
 - **ADLX (AMD)** — after NVIDIA is live-verified; plugs into `DisplayIo`.
