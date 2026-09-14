@@ -39,14 +39,32 @@ export interface Headset {
   id: HeadsetId; name: string; kind: HeadsetKind;
   curve?: [number, number][]; source: string; endpoints: string[];
 }
+/** What a panel reports about its own colour, read from its EDID. Mirrors
+ *  `hardware::edid_color::ColorInfo`. */
+export interface Chromaticity { red: [number, number]; green: [number, number]; blue: [number, number]; white: [number, number] }
+export interface Coverage { srgb: number; dci_p3: number; bt2020: number }
+export interface Colorimetry {
+  bt2020_rgb: boolean; bt2020_ycc: boolean; bt2020_cycc: boolean;
+  adobe_rgb: boolean; adobe_ycc: boolean; s_ycc601: boolean;
+  xv_ycc709: boolean; xv_ycc601: boolean;
+}
+export interface Hdr {
+  hdr10: boolean; hlg: boolean; hdr_gamma: boolean;
+  dolby_vision: boolean; hdr10_plus: boolean;
+  max_nits?: number; max_frame_avg_nits?: number; min_nits?: number;
+}
+export interface ColorInfo {
+  chromaticity?: Chromaticity; gamma?: number; bit_depth?: number;
+  digital: boolean; colorimetry: Colorimetry; hdr: Hdr; coverage?: Coverage;
+}
 export interface HardwareMonitor {
-  id: MonitorId; name: string; panel: string; ddcci?: number[];
+  id: MonitorId; name: string; panel: string; ddcci?: number[]; color?: ColorInfo;
 }
 export interface AudioInterface { id: string; name: string }
 export interface EndpointInfo { key: string; name: string; default: boolean }
 export interface MonitorProbe {
   id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
-  primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[];
+  primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[]; color?: ColorInfo;
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
 export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }

@@ -947,9 +947,17 @@ impl IpcHandler {
             }
             Method::ProbeHardware => {
                 let report = g.hardware.probe(true);
-                // Remember the advertised VCP codes on known library monitors.
+                // Remember what the panels reported: the advertised VCP codes
+                // and the EDID colour characteristics, so the library screen
+                // can show both without re-probing.
                 let mut dirty = false;
                 for probed in &report.monitors {
+                    if let Some(known) = g.library.monitors.iter_mut().find(|m| m.id == probed.id) {
+                        if probed.color.is_some() && known.color != probed.color {
+                            known.color = probed.color.clone();
+                            dirty = true;
+                        }
+                    }
                     if let Some(ddc) = &probed.ddc {
                         if let Some(known) =
                             g.library.monitors.iter_mut().find(|m| m.id == probed.id)

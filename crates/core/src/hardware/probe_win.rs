@@ -34,7 +34,9 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY};
 use windows::Win32::System::Variant::{VT_CLSID, VT_LPWSTR};
 
-use super::{ddc, edid, endpoint_key, EndpointInfo, HardwareProbe, MonitorProbe, ProbeReport};
+use super::{
+    ddc, edid, edid_color, endpoint_key, EndpointInfo, HardwareProbe, MonitorProbe, ProbeReport,
+};
 use crate::types::MonitorId;
 
 pub struct WindowsHardwareProbe;
@@ -174,6 +176,8 @@ pub(crate) fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
 
         let raw_edid = edid_from_registry(&device_path);
         let parsed = raw_edid.as_deref().and_then(edid::parse);
+        // Same blob, so the colour read costs nothing beyond the parse.
+        let color = raw_edid.as_deref().and_then(edid_color::parse);
         let (id, name, native) = match (&parsed, &raw_edid) {
             (Some(e), Some(raw)) => (
                 edid::monitor_id(e, raw),
@@ -219,6 +223,7 @@ pub(crate) fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
             hmonitor,
             gdi_name,
             ddc,
+            color,
         });
     }
     out.sort_by_key(|m| !m.primary);

@@ -233,6 +233,7 @@ mod tests {
             hmonitor: 0x10001,
             gdi_name: r"\\.\DISPLAY1".into(),
             ddc: None,
+            color: None,
         };
         let report_with_default = |default_key: &str| ProbeReport {
             endpoints: vec![

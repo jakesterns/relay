@@ -370,6 +370,7 @@ mod tests {
             hmonitor,
             gdi_name: gdi.into(),
             ddc,
+            color: None,
         }
     }
 

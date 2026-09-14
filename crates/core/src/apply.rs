@@ -368,6 +368,7 @@ mod tests {
             hmonitor: 1,
             gdi_name: r"\\.\DISPLAY1".into(),
             ddc: None,
+            color: None,
         }
     }
 

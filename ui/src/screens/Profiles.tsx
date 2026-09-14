@@ -4,7 +4,7 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
   api, fmtMb, newProfile,
-  type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
+  type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
   type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
 } from "../lib/ipc";
 
@@ -164,6 +164,7 @@ export function Profiles() {
                 <div>
                   <b>{m.name}</b>
                   <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
+                  {m.color && <span className="mono" style={{ fontSize: 11 }}>{colorSummary(m.color)}</span>}
                 </div>
                 {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
                 <button className="rm" title={`Remove ${m.name} from the library`}
@@ -195,6 +196,33 @@ export function Profiles() {
 function errText(e: unknown): string {
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
   return String(e);
+}
+
+/** One line of what the panel says about itself: gamut, HDR, bit depth.
+ *
+ *  Coverage is containment of the reference gamut, not an area ratio, so
+ *  "97% P3" means the panel really reaches 97% of those colours. Panel
+ *  technology is deliberately absent — EDID does not report it, so the
+ *  free-text `panel` field beside this is the user's to fill in. */
+function colorSummary(c: ColorInfo): string {
+  const parts: string[] = [];
+  if (c.coverage) {
+    const p3 = Math.round(c.coverage.dci_p3 * 100);
+    const bt = Math.round(c.coverage.bt2020 * 100);
+    parts.push(p3 >= 90 ? `P3 ${p3}%` : `sRGB ${Math.round(c.coverage.srgb * 100)}%`);
+    if (bt >= 60) parts.push(`BT.2020 ${bt}%`);
+  }
+  const hdr = [
+    c.hdr.dolby_vision && "Dolby Vision",
+    c.hdr.hdr10_plus && "HDR10+",
+    c.hdr.hdr10 && "HDR10",
+    c.hdr.hlg && "HLG",
+  ].filter(Boolean) as string[];
+  if (hdr.length) {
+    parts.push(c.hdr.max_nits ? `${hdr[0]} · ${Math.round(c.hdr.max_nits)} nits` : hdr[0]);
+  }
+  if (c.bit_depth) parts.push(`${c.bit_depth}-bit`);
+  return parts.join(" · ") || "no colour data";
 }
 
 /** Turn "Moondrop Blessing 3" into a stable-ish library id. */

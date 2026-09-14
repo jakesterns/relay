@@ -24,6 +24,7 @@ use crate::types::{HeadsetId, MonitorId};
 pub mod autoeq;
 pub mod ddc;
 pub mod edid;
+pub mod edid_color;
 #[cfg(windows)]
 pub mod probe_win;
 #[cfg(windows)]
@@ -79,6 +80,11 @@ pub struct MonitorProbe {
     /// Parsed DDC/CI VCP code list, filled by the full probe only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddc: Option<Vec<u8>>,
+    /// What the panel reports about its own colour: primaries, white point,
+    /// gamma, bit depth, advertised colorimetry and HDR formats. Read from
+    /// the same EDID blob the id comes from, so it costs nothing extra.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<edid_color::ColorInfo>,
 }
 
 /// Everything one probe pass saw. `ConnectedHardware` is derived from this
@@ -199,6 +205,10 @@ pub struct Monitor {
     /// VCP codes the monitor advertised over DDC/CI, once probed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddcci: Option<Vec<u8>>,
+    /// Colour characteristics from the panel's EDID, cached at probe time so
+    /// the library screen can show them without a re-probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<edid_color::ColorInfo>,
 }
 
 /// An audio interface (Scarlett, RØDECaster…) the user wants tracked; used by
@@ -393,6 +403,7 @@ mod tests {
             name: "LG ULTRAGEAR+".into(),
             panel: "Nano IPS".into(),
             ddcci: Some(vec![0x10, 0x12, 0x60]),
+            color: None,
         });
         store.save().unwrap();
 
