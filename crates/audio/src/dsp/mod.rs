@@ -27,6 +27,16 @@ pub enum PrepareError {
     InvalidParam(&'static str),
 }
 
+// Filter design moved to the un-gated `crate::coeffs` so the core can fit
+// headset curves without the FFT; the cascade still reports one error type.
+impl From<crate::coeffs::DesignError> for PrepareError {
+    fn from(e: crate::coeffs::DesignError) -> Self {
+        match e {
+            crate::coeffs::DesignError::InvalidParam(m) => PrepareError::InvalidParam(m),
+        }
+    }
+}
+
 /// The full stereo chain. I/O is interleaved stereo `f32` (L R L R …).
 pub struct Chain {
     params: ChainParams,

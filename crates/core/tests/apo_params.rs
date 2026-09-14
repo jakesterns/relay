@@ -44,8 +44,9 @@ fn apply_writes_params_and_restore_bypasses() {
         hrtf: false,
         limiter: None,
         apply_to_share: false,
+        headset_correction: false,
     };
-    let state = control.apply(&settings).expect("apply");
+    let state = control.apply(&settings, None).expect("apply");
     assert_eq!(state, relay_core::types::AudioChainState::Active);
     assert!(!apo_side.block().bypass(), "apply clears the bypass word");
     let (_, params) = apo_side.block().read_params().expect("params readable");
@@ -54,7 +55,7 @@ fn apply_writes_params_and_restore_bypasses() {
     assert_eq!(params.bands[0].gain_db, 4.0);
 
     // Empty settings never activate anything.
-    let state = control.apply(&AudioSettings::default()).expect("apply empty");
+    let state = control.apply(&AudioSettings::default(), None).expect("apply empty");
     assert_eq!(state, relay_core::types::AudioChainState::Bypass);
 
     // restore() = bypass, whatever was captured.

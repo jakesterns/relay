@@ -13,7 +13,11 @@ export type MonitorId = string;
 export interface GameMatch { exe: string; title_contains?: string }
 export interface EqBand { freq_hz: number; gain_db: number; q: number }
 export interface Limiter { below_hz: number; threshold_db: number }
-export interface AudioSettings { bands: EqBand[]; hrtf: boolean; limiter?: Limiter; apply_to_share: boolean }
+export interface AudioSettings {
+  bands: EqBand[]; hrtf: boolean; limiter?: Limiter; apply_to_share: boolean;
+  /** Apply the headset's imported correction curve ahead of `bands`. */
+  headset_correction: boolean;
+}
 export interface GpuColor { vibrance: number; gamma: number; contrast: number; shadow_lift: number; hue_deg: number }
 export interface MonitorSettings { brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number }
 export interface DisplaySettings { gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean }
@@ -144,7 +148,9 @@ export function newProfile(name = "", exe = ""): Profile {
     name,
     note: "",
     game: { exe },
-    audio: { bands: [], hrtf: false, apply_to_share: false },
+    // Correction on by default, matching the core: a curve only exists
+    // because someone imported it for this headset.
+    audio: { bands: [], hrtf: false, apply_to_share: false, headset_correction: true },
     display: {
       gpu: { vibrance: 50, gamma: 1.0, contrast: 0, shadow_lift: 0, hue_deg: 0 },
       monitor: {},

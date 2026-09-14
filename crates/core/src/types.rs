@@ -68,6 +68,12 @@ pub struct AudioSettings {
     /// Route the processed signal into the share feed too ("call hears what you hear").
     #[serde(default)]
     pub apply_to_share: bool,
+    /// Apply the connected headset's imported correction curve ahead of the
+    /// bands above. Defaults to on: a curve only exists because someone
+    /// imported it for this headset, and leaving it unused is the surprising
+    /// behaviour.
+    #[serde(default = "default_true")]
+    pub headset_correction: bool,
 }
 
 /// GPU-side colour controls (NvAPI / ADLX). Units follow the vendor APIs.

@@ -102,8 +102,69 @@ function AudioSection({ profileId }: { profileId: string | null }) {
           </div>
         </Card>
       </div>
+      <HeadsetCorrectionCard profileId={profileId} />
       <AbListeningCard profileId={profileId} />
     </>
+  );
+}
+
+/** The measured headset curve, and whether this profile uses it.
+ *
+ *  Worth its own card because the curve is invisible otherwise: it is
+ *  imported on the Profiles screen and then silently shapes everything you
+ *  hear, so the one place you tune audio should say whether it is on and
+ *  which headset it came from. */
+function HeadsetCorrectionCard({ profileId }: { profileId: string | null }) {
+  const { hardware, offline, mock } = useCore();
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    if (!profileId) { setProfile(null); return; }
+    api.getProfile(profileId)
+      .then((p) => { if (live) setProfile(p); })
+      .catch(() => { if (live) setProfile(null); });
+    return () => { live = false; };
+  }, [profileId, offline]);
+
+  // The profile's headset, or whatever is plugged in — the same fallback the
+  // core uses when it resolves the curve.
+  const headsetId = profile?.headset ?? hardware.connected.headset;
+  const headset = hardware.headsets.find((h) => h.id === headsetId);
+  const points = headset?.curve?.length ?? 0;
+  const on = profile?.audio.headset_correction ?? false;
+
+  const toggle = async (v: boolean) => {
+    if (!profile) return;
+    setBusy(true);
+    setError(null);
+    const next: Profile = structuredClone(profile);
+    next.audio.headset_correction = v;
+    try { await api.saveProfile(next); setProfile(next); }
+    catch (e) { setError(String((e as { message?: string })?.message ?? e)); }
+    finally { setBusy(false); }
+  };
+
+  const sub = !profile
+    ? (offline && !mock ? "Core offline." : "No profile selected.")
+    : !headset
+      ? "No headset chosen for this profile, and none recognised as plugged in."
+      : points === 0
+        ? `${headset.name} has no measured curve yet — import one on the Profiles screen.`
+        : `${headset.name} · ${points} measured points, fitted to at most 8 filters ahead of your own bands.`;
+
+  return (
+    <Card title="Headset correction">
+      <Toggle on={on} onChange={profile && points > 0 && !busy ? (v) => void toggle(v) : undefined}
+        label="Correct this headset's measured response" sub={sub} />
+      {points > 0 && on && (
+        <p className="p small">Correction runs first, so the bands above are your taste on top of a
+          neutral headset rather than a fight with it.</p>
+      )}
+      {error && <div className="offline"><i />{error}</div>}
+    </Card>
   );
 }
 

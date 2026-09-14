@@ -18,8 +18,10 @@
 
 #![deny(unsafe_code)]
 
+pub mod coeffs;
 #[cfg(feature = "dsp")]
 pub mod dsp;
+pub mod fit;
 #[cfg(feature = "dsp")]
 pub mod offline;
 pub mod params;
@@ -27,6 +29,7 @@ pub mod params;
 pub mod sessions;
 pub mod shm;
 
+pub use coeffs::{Coeffs, DesignError};
 pub use params::{BandParams, ChainParams, FilterKind, LimiterParams};
 
 #[cfg(feature = "dsp")]

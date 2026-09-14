@@ -26,7 +26,15 @@ use crate::types::{
 
 pub trait AudioControl: Send + Sync {
     fn capture(&self) -> Result<AudioState>;
-    fn apply(&self, settings: &AudioSettings) -> Result<AudioChainState>;
+    /// correction is the connected headset's measured correction curve,
+    /// when the profile asks for it. It is passed alongside the settings
+    /// rather than folded into them because it needs shelf filters, and a
+    /// profile's own bands are peaking-only by design.
+    fn apply(
+        &self,
+        settings: &AudioSettings,
+        correction: Option<&[(f32, f32)]>,
+    ) -> Result<AudioChainState>;
     fn restore(&self, original: &AudioState) -> Result<()>;
 }
 
@@ -57,7 +65,7 @@ impl AudioControl for Noop {
     fn capture(&self) -> Result<AudioState> {
         Ok(AudioState { bypass: true })
     }
-    fn apply(&self, _: &AudioSettings) -> Result<AudioChainState> {
+    fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
         Ok(AudioChainState::Bypass)
     }
     fn restore(&self, _: &AudioState) -> Result<()> {
@@ -107,7 +115,7 @@ impl AudioControl for FileRecorder {
         self.record("audio.capture");
         Ok(AudioState { bypass: true })
     }
-    fn apply(&self, _: &AudioSettings) -> Result<AudioChainState> {
+    fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
         self.record("audio.apply");
         Ok(AudioChainState::Active)
     }
@@ -198,7 +206,12 @@ impl Applier {
         }
     }
 
-    pub fn apply(&mut self, profile: &Profile, target: Option<&MonitorProbe>) -> Result<Applied> {
+    pub fn apply(
+        &mut self,
+        profile: &Profile,
+        target: Option<&MonitorProbe>,
+        correction: Option<&[(f32, f32)]>,
+    ) -> Result<Applied> {
         if let Some(cur) = &self.current {
             let same_target = match (&self.current_target, target) {
                 (Some(a), Some(b)) => a.id == b.id,
@@ -226,7 +239,7 @@ impl Applier {
         self.current_target = target.cloned();
 
         let result = (|| -> Result<Applied> {
-            let audio = self.audio.apply(&profile.audio).context("applying audio")?;
+            let audio = self.audio.apply(&profile.audio, correction).context("applying audio")?;
             let (display, via) = if profile.display.follow_focus {
                 let via =
                     self.display.apply(target, &profile.display).context("applying display")?;
@@ -310,7 +323,7 @@ mod tests {
             self.push("audio.capture");
             Ok(AudioState { bypass: true })
         }
-        fn apply(&self, _: &AudioSettings) -> Result<AudioChainState> {
+        fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
             self.push("audio.apply");
             Ok(AudioChainState::Active)
         }
@@ -376,7 +389,7 @@ mod tests {
     fn captures_and_persists_before_applying() {
         let (rec, mut a, dir) = setup(false);
         let m = monitor("mon:A");
-        let applied = a.apply(&profile(), Some(&m)).unwrap();
+        let applied = a.apply(&profile(), Some(&m), None).unwrap();
         assert!(applied.via.gamma);
         let log = rec.log();
         let cap = log.iter().position(|s| s == "display.capture mon:A").unwrap();
@@ -391,7 +404,7 @@ mod tests {
     #[test]
     fn failed_apply_restores_immediately() {
         let (rec, mut a, dir) = setup(true);
-        assert!(a.apply(&profile(), Some(&monitor("mon:A"))).is_err());
+        assert!(a.apply(&profile(), Some(&monitor("mon:A")), None).is_err());
         let log = rec.log();
         assert!(log.contains(&"display.restore".to_string()));
         assert!(log.contains(&"audio.restore".to_string()));
@@ -412,9 +425,9 @@ mod tests {
         let (rec, mut a, dir) = setup(false);
         let m = monitor("mon:A");
         let p = profile();
-        a.apply(&p, Some(&m)).unwrap();
+        a.apply(&p, Some(&m), None).unwrap();
         let before = rec.log().len();
-        let applied = a.apply(&p, Some(&m)).unwrap();
+        let applied = a.apply(&p, Some(&m), None).unwrap();
         assert_eq!(rec.log().len(), before, "no backend calls on the fast path");
         assert!(applied.via.gamma, "via is replayed, not reset");
         let _ = std::fs::remove_dir_all(dir);
@@ -424,9 +437,9 @@ mod tests {
     fn moving_monitors_restores_old_then_applies_new() {
         let (rec, mut a, dir) = setup(false);
         let p = profile();
-        a.apply(&p, Some(&monitor("mon:A"))).unwrap();
+        a.apply(&p, Some(&monitor("mon:A")), None).unwrap();
         rec.log.lock().clear();
-        a.apply(&p, Some(&monitor("mon:B"))).unwrap();
+        a.apply(&p, Some(&monitor("mon:B")), None).unwrap();
         let log = rec.log();
         let restore = log.iter().position(|s| s == "display.restore").unwrap();
         let cap_b = log.iter().position(|s| s == "display.capture mon:B").unwrap();
@@ -439,7 +452,7 @@ mod tests {
     #[test]
     fn recovers_pending_snapshot_on_start() {
         let (rec, mut a, dir) = setup(false);
-        a.apply(&profile(), Some(&monitor("mon:A"))).unwrap();
+        a.apply(&profile(), Some(&monitor("mon:A")), None).unwrap();
         // Simulate a crash: drop the applier without restoring.
         drop(a);
         rec.log.lock().clear();

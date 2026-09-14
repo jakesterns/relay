@@ -186,8 +186,12 @@ impl AudioControl for ApoAudioControl {
         Ok(AudioState { bypass })
     }
 
-    fn apply(&self, settings: &AudioSettings) -> Result<AudioChainState> {
-        let params = crate::audio_bridge::chain_params(settings);
+    fn apply(
+        &self,
+        settings: &AudioSettings,
+        correction: Option<&[(f32, f32)]>,
+    ) -> Result<AudioChainState> {
+        let params = crate::audio_bridge::chain_params_with(settings, correction);
         if params.bands.is_empty() && params.limiter.is_none() && !params.hrtf {
             return Ok(AudioChainState::Bypass);
         }
@@ -221,7 +225,7 @@ impl AudioControl for ApoAudioControl {
     fn capture(&self) -> Result<AudioState> {
         Ok(AudioState { bypass: true })
     }
-    fn apply(&self, _: &AudioSettings) -> Result<AudioChainState> {
+    fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
         Ok(AudioChainState::Bypass)
     }
     fn restore(&self, _: &AudioState) -> Result<()> {

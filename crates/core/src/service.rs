@@ -21,7 +21,7 @@ use crate::hotkeys::{self, HotkeyAction};
 use crate::ipc::{Event, Method, Reply};
 use crate::presets::PresetStore;
 use crate::profiles::ProfileStore;
-use crate::types::{AudioChainState, CoreState, DisplayState, DisplayVia, Foreground};
+use crate::types::{AudioChainState, CoreState, DisplayState, DisplayVia, Foreground, Profile};
 use crate::winloop::{CoreEvent, WinLoop};
 
 pub struct Backends {
@@ -465,6 +465,18 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
 }
 
 /// Pick and apply (or restore) for one foreground window, using the cached
+/// The correction curve to apply with `profile`: the one imported for the
+/// headset the profile names, or failing that the headset currently plugged
+/// in. A profile bound to no headset still gets the connected one's curve,
+/// which is what someone swapping between two headsets expects.
+fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
+    if !profile.audio.headset_correction {
+        return None;
+    }
+    let id = profile.headset.as_ref().or(g.connected.headset.as_ref())?;
+    g.library.headsets.iter().find(|h| &h.id == id)?.curve.clone()
+}
+
 /// connected-hardware view. Mutates state only; the caller broadcasts.
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     let hw = g.connected.clone();
@@ -473,7 +485,8 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
         Some(profile) => {
             g.pinned = false;
             let target = resolve_target(g, fg.hmonitor);
-            match g.applier.apply(&profile, target.as_ref()) {
+            let correction = correction_for(g, &profile);
+            match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
                 Ok(applied) => {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
@@ -764,7 +777,8 @@ impl IpcHandler {
                 // (the current foreground window's), or the primary.
                 let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
                 let target = resolve_target(&g, hmon);
-                match g.applier.apply(&profile, target.as_ref()) {
+                let correction = correction_for(&g, &profile);
+                match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
                     Ok(applied) => {
                         g.pinned = true;
                         g.state.active_profile = Some(profile.summary());
@@ -978,9 +992,15 @@ impl IpcHandler {
                     return Reply::Error { message: "no such profile".into() };
                 };
                 let dir = g.previews_dir.clone();
+                let correction = correction_for(&g, &profile);
                 drop(g);
                 let wav = wav.map(std::path::PathBuf::from);
-                match crate::audio_bridge::render_preview(&profile.audio, wav.as_deref(), &dir) {
+                match crate::audio_bridge::render_preview(
+                    &profile.audio,
+                    wav.as_deref(),
+                    &dir,
+                    correction.as_deref(),
+                ) {
                     Ok(p) => Reply::Preview {
                         original: p.original.display().to_string(),
                         processed: p.processed.display().to_string(),

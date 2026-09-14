@@ -2,9 +2,19 @@
 //! measurements live in that repo). Input is a local file's contents or
 //! pasted text — the core never fetches anything over the network.
 //!
+//! What is imported is the **correction to apply**, not the headset's
+//! measured response. Those are different curves and confusing them inverts
+//! the sound: `raw` is what the headset does, and flattening it would aim at
+//! a flat response rather than at the Harman-style target the measurement was
+//! scored against. AutoEQ already publishes the answer in `equalization`.
+//!
+//! Column preference, best first:
+//! - `equalization` — AutoEQ's recommended correction. Exactly what we want.
+//! - `error` — deviation from the target, so the correction is its negation.
+//! - `raw` / `db` / `gain` — a bare curve the user supplied, taken as-is.
+//!
 //! Accepted shapes:
-//! - the full results CSV (`frequency,raw,smoothed,error,…`): the `frequency`
-//!   and `raw` columns are used, everything else ignored;
+//! - the full results CSV (`frequency,raw,smoothed,error,…,equalization,…`);
 //! - a bare two-column `hz,db` list with or without a header.
 
 use anyhow::{bail, Result};
@@ -17,19 +27,27 @@ pub fn parse_curve(text: &str) -> Result<Vec<(f32, f32)>> {
     let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
     let Some(first) = lines.next() else { bail!("empty curve") };
 
-    // Header? Find the `frequency` and `raw` columns; default to 0 and 1.
-    let (fi, ri, first_is_data) = {
+    // Header? Find the frequency column and the best available correction
+    // column. `negate` is set for `error`, whose sign is the deviation from
+    // target rather than the fix for it.
+    let (fi, ri, negate, first_is_data) = {
         let cols: Vec<&str> = first.split(',').map(str::trim).collect();
         if cols.iter().any(|c| c.parse::<f32>().is_err()) {
             let find = |name: &str| cols.iter().position(|c| c.eq_ignore_ascii_case(name));
             let fi = find("frequency").or_else(|| find("freq")).or_else(|| find("hz"));
-            let ri = find("raw").or_else(|| find("db")).or_else(|| find("gain"));
+            let (ri, negate) = match find("equalization") {
+                Some(i) => (Some(i), false),
+                None => match find("error") {
+                    Some(i) => (Some(i), true),
+                    None => (find("raw").or_else(|| find("db")).or_else(|| find("gain")), false),
+                },
+            };
             match (fi, ri) {
-                (Some(f), Some(r)) => (f, r, false),
-                _ => bail!("header has no frequency/raw columns: {first:?}"),
+                (Some(f), Some(r)) => (f, r, negate, false),
+                _ => bail!("header has no frequency and correction columns: {first:?}"),
             }
         } else {
-            (0, 1, true)
+            (0, 1, false, true)
         }
     };
 
@@ -43,7 +61,7 @@ pub fn parse_curve(text: &str) -> Result<Vec<(f32, f32)>> {
             raw.parse::<f32>().map_err(|_| anyhow::anyhow!("line {}: bad number {raw:?}", n + 1))
         };
         let hz = cell(fi)?;
-        let db = cell(ri)?;
+        let db = if negate { -cell(ri)? } else { cell(ri)? };
         if !(1.0..=100_000.0).contains(&hz) {
             bail!("line {}: frequency {hz} Hz out of range", n + 1);
         }
@@ -74,13 +92,33 @@ mod tests {
     const HD560S: &str = include_str!("../../tests/fixtures/autoeq-hd560s.csv");
 
     #[test]
-    fn imports_the_real_autoeq_results_csv() {
+    fn imports_the_correction_column_from_the_real_autoeq_results_csv() {
         let curve = parse_curve(HD560S).unwrap();
         assert_eq!(curve.len(), 695);
-        // First data row: 20.00,-4.11,…  — raw column, not any other.
-        assert_eq!(curve[0], (20.0, -4.11));
+        // First data row is
+        //   frequency,raw,  smoothed,error,error_smoothed,equalization,…
+        //   20.00,   -4.11, -4.12,   -6.86,-6.87,          6.00,…
+        // so the imported value must be the +6.00 correction, not the -4.11
+        // the headset measured. Getting this backwards would EQ towards a
+        // flat response instead of the measurement's target.
+        assert_eq!(curve[0], (20.0, 6.00));
         assert!(curve.last().unwrap().0 > 19_000.0);
         assert!(curve.windows(2).all(|w| w[0].0 < w[1].0));
+    }
+
+    #[test]
+    fn error_column_is_negated_because_it_is_the_deviation_not_the_fix() {
+        // No `equalization` column, so `error` is used and its sign flipped.
+        let csv = "frequency,raw,error\n20,-4.11,-6.86\n1000,0,0.5\n20000,-2,1.0";
+        let curve = parse_curve(csv).unwrap();
+        assert_eq!(curve[0], (20.0, 6.86));
+        assert_eq!(curve[1], (1000.0, -0.5));
+    }
+
+    #[test]
+    fn equalization_wins_over_error_and_raw() {
+        let csv = "frequency,raw,error,equalization\n20,1,2,3\n1000,1,2,4";
+        assert_eq!(parse_curve(csv).unwrap()[0], (20.0, 3.0));
     }
 
     #[test]
