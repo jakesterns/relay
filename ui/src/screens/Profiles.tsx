@@ -204,7 +204,7 @@ function errText(e: unknown): string {
  *  "97% P3" means the panel really reaches 97% of those colours. Panel
  *  technology is deliberately absent — EDID does not report it, so the
  *  free-text `panel` field beside this is the user's to fill in. */
-function colorSummary(c: ColorInfo): string {
+export function colorSummary(c: ColorInfo): string {
   const parts: string[] = [];
   if (c.coverage) {
     const p3 = Math.round(c.coverage.dci_p3 * 100);

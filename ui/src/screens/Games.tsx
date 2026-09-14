@@ -4,8 +4,10 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
   api, isTauri,
-  type ApoStatus, type Limiter, type Preview, type Profile, type SharePreset, type SharePresetDef,
+  type ApoStatus, type ColorInfo, type Limiter, type Preview, type Profile, type SharePreset,
+  type SharePresetDef,
 } from "../lib/ipc";
+import { colorSummary } from "./Profiles";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -387,6 +389,27 @@ function vcpAvailable(codes: number[] | undefined, code: number): boolean {
   return !codes || codes.includes(code);
 }
 
+/** What the panel says it can do, next to the sliders that push it there.
+ *
+ *  Vibrance is a saturation multiplier applied before the panel's own gamut
+ *  mapping, so the same setting that looks right on an sRGB monitor clips
+ *  skin tones on a wide-gamut one. The panel's EDID knows which it is; saying
+ *  so beats leaving the user to discover it on a dark map. */
+function PanelColorNote({ color, vibrance }: { color?: ColorInfo; vibrance: number }) {
+  if (!color) {
+    return <p className="note">No EDID colour data from this monitor, so these are open-loop adjustments.</p>;
+  }
+  const wide = (color.coverage?.dci_p3 ?? 0) >= 0.9;
+  return (
+    <>
+      <p className="note">Panel reports: {colorSummary(color)}</p>
+      {wide && vibrance > 60 && (
+        <p className="note">This is a wide-gamut panel — sRGB content is already pushed past its intended saturation before vibrance is applied. Above about 60, reds and skin tones will clip.</p>
+      )}
+    </>
+  );
+}
+
 function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn: (p: Profile) => void) => void }) {
   const { hardware } = useCore();
   const signed = (v: number) => `${v > 0 ? "+" : ""}${v}`;
@@ -400,6 +423,10 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
   const mainId = hardware.connected.monitors.find((m) => m.primary)?.id ?? null;
   const libMonitor = hardware.monitors.find((m) => m.id === (draft?.monitor ?? mainId));
   const codes = libMonitor?.ddcci;
+  // Prefer what the panel is reporting right now over whatever the library
+  // recorded when it was first added.
+  const panelColor = hardware.connected.monitors.find((m) => m.id === (draft?.monitor ?? mainId))?.color
+    ?? libMonitor?.color;
   const hue = ((gpu.hue_deg + 180) % 360) - 180;
   const responseIx = Math.max(0, RESPONSE_LEVELS.indexOf(mon.response ?? "off"));
   return (
@@ -422,6 +449,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
             onChange={(v) => update((p) => { p.display.gpu.shadow_lift = v; })} />
           <Slider label="Hue" value={hue} min={-180} max={180} format={(v) => `${v}°`} disabled={off}
             onChange={(v) => update((p) => { p.display.gpu.hue_deg = ((v % 360) + 360) % 360; })} />
+          <PanelColorNote color={panelColor} vibrance={gpu.vibrance} />
         </Card>
         <Card title="Monitor" action="Reset" onAction={() => update((p) => { p.display.monitor = {}; })}>
           <Slider label="Brightness" value={mon.brightness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x10)}
