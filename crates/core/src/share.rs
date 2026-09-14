@@ -178,16 +178,20 @@ fn parse_probe(json: &str) -> Capabilities {
         Ok(v) => v,
         Err(_) => return Capabilities::default(),
     };
+    // Deduplicated, order preserved: the probe enumerates sync and async MFTs
+    // separately, so one adapter answering both is listed twice. That reads as
+    // two GPUs to anyone shown the list.
     let names = |key: &str| -> Vec<String> {
-        v.get(key)
-            .and_then(|a| a.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|e| e.get("friendly_name").and_then(|n| n.as_str()))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
+        let mut out: Vec<String> = Vec::new();
+        let Some(arr) = v.get(key).and_then(|a| a.as_array()) else {
+            return out;
+        };
+        for name in arr.iter().filter_map(|e| e.get("friendly_name").and_then(|n| n.as_str())) {
+            if !out.iter().any(|existing| existing == name) {
+                out.push(name.to_string());
+            }
+        }
+        out
     };
     // Prefer the "any decoder" list: the Video Extension is a software MFT,
     // and it is what makes receiving work at all.
@@ -545,6 +549,7 @@ mod tests {
         }"#;
         let c = parse_probe(json);
         assert_eq!(c.encoders, ["NVIDIA HEVC Encoder MFT"]);
+        assert_eq!(c.decoders, ["Microsoft HEVC Video Extension"]);
         assert_eq!(c.decoders, ["Microsoft HEVC Video Extension"], "software MFT still counts");
 
         // No extension installed: receiving is off, sharing is unaffected.
@@ -559,6 +564,25 @@ mod tests {
         // A probe that failed to produce JSON reads as "nothing", never a panic.
         assert_eq!(parse_probe("boom"), Capabilities::default());
         assert_eq!(parse_probe(""), Capabilities::default());
+
+        // One adapter answering both the sync and async MFT enumerations is
+        // listed twice -- exactly what this dev machine reports. Listing it
+        // twice would read as two GPUs.
+        let dupes = r#"{
+          "hevc_hardware_encoders": [
+            {"friendly_name":"AMDh265Encoder","hardware_url":"vidpn"},
+            {"friendly_name":"NVIDIA HEVC Encoder MFT","hardware_url":"vidpn"},
+            {"friendly_name":"AMDh265Encoder","hardware_url":"vidpn"}
+          ],
+          "hevc_any_decoders": [],
+          "hevc_hardware_decoders": []
+        }"#;
+        let c = parse_probe(dupes);
+        assert_eq!(
+            c.encoders,
+            ["AMDh265Encoder", "NVIDIA HEVC Encoder MFT"],
+            "deduplicated, first-seen order kept"
+        );
     }
 
     /// Locks the stdin command strings to `relay_capture::command`'s shapes.
