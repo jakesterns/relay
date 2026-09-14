@@ -10,6 +10,12 @@
 //! exactly those (recorded in `installed.json`). HKLM because the Windows
 //! Camera Frame Server service hosts the media source as LOCAL SERVICE and
 //! cannot see per-user classes — the same decision as the APO (M3b plan).
+//!
+//! That is measured, not assumed: an HKCU-only registration resolves in the
+//! calling process but `IMFVirtualCamera::Start` fails 0x80070003 and the
+//! Frame Server never loads the DLL. Evidence, control arms and the probe
+//! (`examples/vcam_reg_probe.rs`) are in `docs/dev/vcam-live.md`; do not
+//! re-litigate the hive without reading it.
 
 use crate::installed::{iso_now, Component, CAMERA_MEDIA_SOURCE};
 

@@ -31,7 +31,8 @@ inherited):
 
 **Concurrency.** Groups 1 and 2 are all independent; the practical limit is
 three at once, because they converge on `ipc.rs` / `ipc.ts` and the UI screens.
-S5 should land before S12 — it may delete S12 entirely.
+S5 landed 2026-09-14 and answered its question **no**: per-user registration
+does not work, so S12 still needs the elevated shell and S6 is required.
 
 | # | Session | Branch | Worktree | Blocked on |
 |---|---|---|---|---|
@@ -39,8 +40,8 @@ S5 should land before S12 — it may delete S12 entirely.
 | S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | — |
 | S3 | Vendor VCP opcodes | `feat/monitor-vcp` | `relay-monitor-vcp` | partly: OSD eyes |
 | S4 | MKV container | `feat/mkv-container` | `relay-mkv` | — |
-| S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | — |
-| S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | — |
+| S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | **done 2026-09-14 — HKCU does not work** |
+| S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | — (**required**, not optional: S5 said no) |
 | S7 | Codec robustness | `feat/codec-robustness` | `relay-codec` | — |
 | S8 | WebView UI test harness | `feat/ui-test-harness` | `relay-uitest` | — |
 | S9 | Documentation truth pass | `chore/docs-truth` | main tree | — |
@@ -199,27 +200,34 @@ Recording writes fragmented MP4. Add MKV as a per-preset option, for the reason 
 
 ---
 
-## S5 — Per-user (HKCU) virtual-camera registration
+## S5 — Per-user (HKCU) virtual-camera registration — **done 2026-09-14**
 **Branch** `feat/hkcu-vcam` · **Worktree** `C:\Users\stern\Documents\Code\relay-hkcu-vcam`
 
-**The highest-leverage session in Group 1.** The virtual camera needs one
+**Answer: no.** An HKCU-only registration resolves in the calling process but
+`IMFVirtualCamera::Start` fails `0x80070003` inside the Frame Server, which runs
+as `NT AUTHORITY\LocalService` and never loads the DLL. Evidence, control arms
+and a reproducible probe: `docs/dev/vcam-live.md` (last section). The HKLM write
+and its one elevation stay; **S6 is required and S12 keeps its blocker.**
+
+It was the highest-leverage session in Group 1: the virtual camera needs one
 elevated write to `HKLM\SOFTWARE\Classes\CLSID`, which is why M5's live pass has
-never run and why the installer needs an elevation story at all. If COM
-activation resolves from `HKCU\Software\Classes\CLSID` for the Frame Server,
-the elevation requirement disappears — and with it most of S6 and all of S12.
+never run and why the installer needs an elevation story at all. Had COM
+activation resolved from `HKCU\Software\Classes\CLSID` for the Frame Server, the
+elevation requirement would have disappeared — and with it most of S6 and all of
+S12. It does not, so both stand.
 
 ### Definition of Ready
 - [x] Registration planner and `installed.json` bookkeeping exist and are tested.
 - [x] Live writes double-gated on `RELAY_VDEVICE_ALLOW_LIVE_WRITE` + elevation.
 - [x] The experiment is already written down at the end of `docs/dev/vcam-live.md`.
-- [ ] Understand before writing anything: the Frame Server is a *service*, so it may not see per-user registrations at all. That is the question this session answers.
+- [x] Understand before writing anything: the Frame Server is a *service*, so it may not see per-user registrations at all. That is the question this session answers. (Confirmed: `svchost -k Camera`, running as `NT AUTHORITY\LocalService`.)
 
 ### Definition of Done
-- [ ] A clear, evidenced answer to "can the Relay camera register per-user?" — either it works, or the reason it cannot is documented well enough that nobody retries it.
-- [ ] If it works: HKCU is the default path, registration needs no elevation, `installed.json` records which hive was used, and uninstall removes from the right one.
-- [ ] If it does not: `docs/dev/vcam-live.md` records the negative result and S6's elevated helper becomes required rather than optional.
-- [ ] Either way, no `HKLM` write happens in this session without the user performing it.
-- [ ] `docs/plans/M5-vdevices.md` Deferred item 5 resolved; SESSIONS.md S12 updated to match.
+- [x] A clear, evidenced answer to "can the Relay camera register per-user?" — **no**, with three control arms and DLL-load evidence written up so nobody retries it.
+- [—] If it works: HKCU is the default path… — it does not work, so nothing moved: `reg.rs` still plans HKLM keys and `installed.json` still records them.
+- [x] If it does not: `docs/dev/vcam-live.md` records the negative result and S6's elevated helper becomes required rather than optional.
+- [x] Either way, no `HKLM` write happens in this session without the user performing it — none was written at all; the HKCU key and the `C:\ProgramData` DLL copy used for the experiment were removed afterwards.
+- [x] `docs/plans/M5-vdevices.md` Deferred item 5 resolved; SESSIONS.md S12 updated to match.
 
 ### Kickoff prompt
 ```
@@ -241,11 +249,11 @@ The virtual camera currently needs one elevated write to HKLM\SOFTWARE\Classes\C
 
 The core runs unelevated by design. The Settings cards for the APO and the
 virtual camera are wired and honest about failing, but there is no production
-path to actually install them. **Run S5 first** — it may shrink this to the APO
-only.
+path to actually install them. S5 has run and did **not** shrink this to the APO
+only: the helper covers both components.
 
 ### Definition of Ready
-- [ ] S5 finished, so it is known whether the camera still needs elevation.
+- [x] S5 finished (2026-09-14): the camera **still needs elevation** — per-user registration does not work, so this session covers the camera as well as the APO.
 - [x] Both components already record what they installed (`installed.json`, `apo-backup\<endpoint>.json`), so an elevated helper has a manifest to act on.
 - [x] The uninstall planner is a pure function of probed state and needs no new design.
 
@@ -261,7 +269,7 @@ only.
 ```
 You are starting session S6 (elevated install helper) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S6), docs/plans/M3b-apo.md and docs/plans/M7-installer.md. Work in the worktree C:\Users\stern\Documents\Code\relay-elevation on branch feat/elevated-install.
 
-Check first that session S5 has finished — if per-user camera registration worked, this session covers the APO only.
+S5 has finished: per-user camera registration does not work (docs/dev/vcam-live.md), so this session covers the camera as well as the APO.
 
 The core runs unelevated by design, so the Settings cards for the APO and camera cannot actually install anything. Build the elevated helper that can.
 
@@ -444,10 +452,10 @@ Each of these is written and ready; each waits on one external thing.
 ## S12 — Live virtual-camera pass
 **Branch** `chore/vcam-live` · **Worktree** main tree · **Blocked on: one elevated shell** (~20 min)
 
-Run **S5 first** — if per-user registration works, this session loses its blocker entirely.
+S5 has run (2026-09-14): per-user registration does **not** work, so the elevated shell is still required. Start with the two-minute positive control at the end of `docs/dev/vcam-live.md` — run `vcam_reg_probe` once the key is in HKLM and confirm `Start` returns `S_OK`.
 
 ### Definition of Ready
-- [ ] S5 resolved (HKCU works → no elevation needed; or it does not → elevation required).
+- [x] S5 resolved 2026-09-14: HKCU does not work → elevation required.
 - [ ] If elevation is still required: you are present to approve one UAC prompt for a write to `HKLM\SOFTWARE\Classes\CLSID`.
 - [x] Runbook written: `docs/dev/vcam-live.md` (~20 min, includes the removal check).
 
@@ -462,9 +470,9 @@ Run **S5 first** — if per-user registration works, this session loses its bloc
 ```
 You are starting session S12 (live virtual-camera pass) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S12), docs/plans/M5-vdevices.md and docs/dev/vcam-live.md. Work in the main tree on branch chore/vcam-live.
 
-Check session S5 first: if per-user HKCU registration worked, this needs no elevation at all.
+S5 has answered the hive question: HKCU does not work, so one elevated write to HKLM is still needed. Run the positive-control probe in the runbook first.
 
-1. Verify the Definition of Ready. If elevation is still required, tell me exactly what needs approving and wait — never write HKLM yourself.
+1. Verify the Definition of Ready. Tell me exactly what needs approving and wait — never write HKLM yourself.
 2. Follow docs/dev/vcam-live.md and fill in the results table in docs/plans/M5-vdevices.md with what actually happened in Discord, Zoom and Meet at 1080p60 and 4K30. Do not fill a cell you did not observe.
 3. Run the clap test for A/V alignment and the removal check with the snapshot harness.
 4. Finish only when the Definition of Done is met. Update docs/plans/M5-vdevices.md and docs/ROADMAP.md, then summarise.
