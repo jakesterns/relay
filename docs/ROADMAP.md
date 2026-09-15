@@ -71,8 +71,8 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 ## M4 — Share MVP (headline)
 **Done 2026-09-10** (branch `m4-share`; plan + measurements in `docs/plans/M4-share.md`). Full capture→encode→transport→decode→present pipeline built and green on loopback: capture→present ~4–6 ms, zero AU loss; MF HEVC encode 4K60 p99 10.8 ms (« 20 ms gate, so direct NVENC not needed); core RSS unchanged while sharing. Decision 2026-09-10: dual-PC testing is not currently possible, so the pipeline logic is unit-tested thoroughly instead (101 workspace tests; see the plan's "Unit coverage") and **live two-PC integration testing moves to the future MVP validation pass** (runbook in the plan's Deferred).
 - [x] `relay-capture::source`: Windows.Graphics.Capture (monitor, cursor toggle, border off), DXGI Desktop Duplication fallback. (Window capture: monitor only for now.)
-- [x] `relay-capture::encode`: Media Foundation HEVC hardware encoder (NVENC/QSV/AMF via vendor MFTs), low-latency CBR, B-frames off, keyframe-on-request; no software path (hardware-only enum bound to the capture adapter). Decision gate passed — MF holds the budget.
-- [x] Audio: WASAPI loopback + process loopback (game-only) + mic, Opus 48 kHz stereo 10 ms.
+- [x] `relay-capture::encode`: Media Foundation HEVC hardware encoder (NVENC/QSV/AMF via vendor MFTs), low-latency CBR, B-frames off, keyframe-on-request; no software path (hardware-only enum bound to the capture adapter). Decision gate passed — MF holds the budget. S7: the caller-allocated MFT output path is implemented, and the no-hardware-encoder failure names the adapter and any other GPU that could encode. Software HEVC encode stays out of scope by design.
+- [x] Audio: WASAPI loopback + process loopback (game-only) + mic, Opus 48 kHz stereo 10 ms. S7 (2026-09-14): any endpoint rate and channel count are now folded and converted into that format (`capture/src/resample.rs`) instead of refusing to share.
 - [x] `relay-capture::transport`: webrtc-rs, mDNS discovery, six-digit pairing (HMAC over SDP → DTLS fingerprint pin), DTLS-SRTP, host candidates only. LAN only.
 - [x] Receiver mode in the same app: "Receive" screen; native D3D11 swapchain window, DXVA HEVC decode, WASAPI playback (virtual camera is M5).
 - [x] Instrument strip fed by real `ShareStats` events over IPC (bitrate, latency, drops, encoder load, audio level).
@@ -124,7 +124,7 @@ weeks of identity-verification lead time. It is still not ordered.
 | Milestone | Plan | Session status |
 |---|---|---|
 | M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
-| M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass |
+| M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass. S7 (2026-09-14) closed the codec/capture hard edges and the HEVC-extension question |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | done 2026-09-13; live pass complete on the LG ULTRAGEAR+ (crash-restore + focus restore at 144 ms mean); 2nd monitor / C2 / vendor opcodes / ADLX / Win+L deferred |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |

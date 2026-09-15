@@ -23,7 +23,7 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
     AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX,
+    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -187,6 +187,12 @@ fn capture_thread(
                 let p = client.GetMixFormat()?;
                 ((p), (*p).nSamplesPerSec, (*p).nChannels)
             };
+            if !format_ptr.is_null() {
+                if let Err(e) = check_float32(format_ptr) {
+                    CoTaskMemFree(Some(format_ptr as *const _));
+                    return Err(e);
+                }
+            }
             let own_format = WAVEFORMATEX {
                 wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
                 nChannels: channels,
@@ -255,13 +261,61 @@ fn capture_thread(
     }
 }
 
-/// 10 ms Opus frames from an [`AudioCapture`]. 48 kHz stereo only for now —
-/// endpoints at other rates are reported, not resampled (M3 owns DSP).
+/// `KSDATAFORMAT_SUBTYPE_IEEE_FLOAT`.
+const SUBTYPE_IEEE_FLOAT: windows::core::GUID =
+    windows::core::GUID::from_u128(0x0000_0003_0000_0010_8000_00aa_0038_9b71);
+const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+
+/// The capture loop reads the shared buffer as `f32`, so a mix format that is
+/// not 32-bit float would be reinterpreted rather than converted. Shared-mode
+/// WASAPI mixes in 32-bit float on every supported Windows version, so this is
+/// a guard against an exotic endpoint rather than an expected path — but it
+/// has to say what it found, not just fail.
+///
+/// # Safety
+/// `fmt` must point at a valid `WAVEFORMATEX` (with `cbSize` bytes of extra
+/// data following it when it is a `WAVEFORMATEXTENSIBLE`).
+unsafe fn check_float32(fmt: *const WAVEFORMATEX) -> Result<()> {
+    // WAVEFORMATEX is `#[repr(packed)]`, so every field is read out by value.
+    let f = std::ptr::read_unaligned(fmt);
+    let is_float = match f.wFormatTag {
+        WAVE_FORMAT_IEEE_FLOAT => true,
+        WAVE_FORMAT_EXTENSIBLE if f.cbSize >= 22 => {
+            let ext = fmt as *const WAVEFORMATEXTENSIBLE;
+            std::ptr::addr_of!((*ext).SubFormat).read_unaligned() == SUBTYPE_IEEE_FLOAT
+        }
+        _ => false,
+    };
+    if is_float && f.wBitsPerSample == 32 {
+        return Ok(());
+    }
+    let (bits, tag) = (f.wBitsPerSample, f.wFormatTag);
+    bail!(
+        "this audio endpoint mixes in {}-bit format 0x{:04X}, not the 32-bit float \
+         (0x0003) that shared-mode WASAPI is expected to use, so Relay cannot read its \
+         buffer. Open Sound settings > the device > Properties > Advanced, pick a standard \
+         format such as \"2 channel, 24 bit, 48000 Hz\", and start the share again — or \
+         share without audio",
+        bits,
+        tag
+    )
+}
+
+/// 10 ms Opus frames from an [`AudioCapture`]. Opus on the share path is fixed
+/// at 48 kHz stereo; whatever the endpoint runs at is folded and converted by
+/// [`crate::resample`] on the way in, so a 44.1 kHz interface or a mono headset
+/// microphone shares like anything else.
 pub struct OpusStream {
     capture: AudioCapture,
     encoder: opus::Encoder,
+    convert: crate::resample::ToOpus48,
+    src_channels: u16,
     pending: Vec<f32>,
     frame_samples: usize,
+    /// Set when the endpoint is not already 48 kHz stereo; surfaced once in the
+    /// log so an audio-quality question has the conversion visible.
+    pub conversion: Option<String>,
     /// Peak of the last encoded frame, 0..=1 (for the instrument strip).
     pub peak: f32,
 }
@@ -275,14 +329,11 @@ pub struct OpusPacket {
 impl OpusStream {
     pub fn new(source: AudioSource, bitrate: i32) -> Result<Self> {
         let capture = AudioCapture::start(source)?;
-        if capture.sample_rate != 48_000 {
-            bail!(
-                "endpoint runs at {} Hz; only 48 kHz is supported this milestone",
-                capture.sample_rate
-            );
-        }
-        if capture.channels != 2 {
-            bail!("{}-channel endpoint; only stereo is supported this milestone", capture.channels);
+        let (rate, channels) = (capture.sample_rate, capture.channels);
+        crate::resample::check_format(rate, channels)?;
+        let conversion = crate::resample::conversion_note(rate, channels);
+        if let Some(note) = conversion.as_deref() {
+            tracing::info!("{note}");
         }
         let mut encoder =
             opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio)?;
@@ -291,10 +342,23 @@ impl OpusStream {
         Ok(Self {
             capture,
             encoder,
+            convert: crate::resample::ToOpus48::new(rate),
+            src_channels: channels,
             pending: Vec::with_capacity(frame_samples * 4),
             frame_samples,
+            conversion,
             peak: 0.0,
         })
+    }
+
+    /// The endpoint's own sample rate, before conversion.
+    pub fn endpoint_rate(&self) -> u32 {
+        self.capture.sample_rate
+    }
+
+    /// The endpoint's own channel count, before folding.
+    pub fn endpoint_channels(&self) -> u16 {
+        self.src_channels
     }
 
     /// Block up to `timeout` for the next encoded 10 ms packet.
@@ -306,7 +370,10 @@ impl OpusStream {
                 return Ok(None);
             }
             match self.capture.next(deadline - now) {
-                Some(block) => self.pending.extend_from_slice(&block.samples),
+                Some(block) => {
+                    let stereo = crate::resample::fold_to_stereo(&block.samples, self.src_channels);
+                    self.pending.extend_from_slice(&self.convert.push(&stereo));
+                }
                 None => return Ok(None),
             }
         }

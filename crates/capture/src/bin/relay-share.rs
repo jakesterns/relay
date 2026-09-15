@@ -252,6 +252,11 @@ fn bench_audio(secs: u64, source: relay_capture::audio::AudioSource) -> Result<(
         "{}",
         serde_json::json!({
             "stage": "audio",
+            // The endpoint's own format, so a run on an unusual device shows
+            // what was converted rather than hiding it.
+            "endpoint_rate": stream.endpoint_rate(),
+            "endpoint_channels": stream.endpoint_channels(),
+            "conversion": stream.conversion,
             "packets": packets,
             "expected_packets": (elapsed * 100.0) as u64,
             "kbps": bytes as f64 * 8.0 / elapsed / 1e3,
@@ -363,6 +368,7 @@ const USAGE: &str = "\
 relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
 
   probe          print the capability report (hardware HEVC MFTs, WGC) as JSON
+  bench-audio    capture audio (desktop | mic | pid N), Opus-encode, report packet flow
   bench-capture  measure capture latency on the primary monitor
   bench-encode   measure capture -> NV12 -> HEVC hardware encode latency
   send           share to a paired peer (spawned by relay-core)

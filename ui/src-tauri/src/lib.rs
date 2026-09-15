@@ -300,10 +300,11 @@ async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>
 #[tauri::command]
 async fn share_capabilities() -> CmdResult<serde_json::Value> {
     match call(Method::ShareCapabilities).await? {
-        Reply::Capabilities { can_share, can_receive, encoders, decoders } => {
+        Reply::Capabilities { can_share, can_receive, adapters, encoders, decoders } => {
             Ok(serde_json::json!({
                 "can_share": can_share,
                 "can_receive": can_receive,
+                "adapters": adapters,
                 "encoders": encoders,
                 "decoders": decoders,
             }))

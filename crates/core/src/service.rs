@@ -1129,6 +1129,7 @@ impl IpcHandler {
                     Ok(c) => Reply::Capabilities {
                         can_share: !c.encoders.is_empty(),
                         can_receive: !c.decoders.is_empty(),
+                        adapters: c.adapters,
                         encoders: c.encoders,
                         decoders: c.decoders,
                     },

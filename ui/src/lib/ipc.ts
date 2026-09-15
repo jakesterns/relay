@@ -146,7 +146,7 @@ export interface Preview { original: string; processed: string; sample_rate: num
  *  encoder; receiving needs any decoder, usually the Microsoft HEVC Video
  *  Extension, which is a free Store download and not something Relay bundles. */
 export interface ShareCapabilities {
-  can_share: boolean; can_receive: boolean; encoders: string[]; decoders: string[];
+  can_share: boolean; can_receive: boolean; adapters: string[]; encoders: string[]; decoders: string[];
 }
 /** Mirror of relay-core's `audio_apo::ApoStatus`. */
 export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
@@ -468,7 +468,7 @@ export const api = {
   async shareCapabilities(): Promise<ShareCapabilities> {
     if (!isTauri()) {
       return {
-        can_share: true, can_receive: true,
+        can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 3090"],
         encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
       };
     }

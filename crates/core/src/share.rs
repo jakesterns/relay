@@ -154,6 +154,9 @@ pub fn share_binary() -> Result<PathBuf> {
 /// What this PC can do with HEVC, from `relay-share probe`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capabilities {
+    /// GPUs with a display attached, so the "cannot share" banner can name the
+    /// hardware it is talking about instead of saying "this GPU".
+    pub adapters: Vec<String>,
     /// Hardware HEVC encoder MFTs. Empty = this PC cannot send.
     pub encoders: Vec<String>,
     /// Any HEVC decoder MFT, hardware or the Microsoft HEVC Video Extension.
@@ -199,7 +202,12 @@ fn parse_probe(json: &str) -> Capabilities {
     if decoders.is_empty() {
         decoders = names("hevc_hardware_decoders");
     }
-    Capabilities { encoders: names("hevc_hardware_encoders"), decoders }
+    let adapters = v
+        .get("adapters")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    Capabilities { adapters, encoders: names("hevc_hardware_encoders"), decoders }
 }
 
 /// A running share child. Dropping it stops and reaps the process.
@@ -538,6 +546,7 @@ mod tests {
     #[test]
     fn probe_report_maps_to_capabilities() {
         let json = r#"{
+          "adapters": ["Intel(R) UHD Graphics 630", "NVIDIA GeForce RTX 4060"],
           "hevc_hardware_encoders": [
             {"friendly_name":"NVIDIA HEVC Encoder MFT","hardware_url":"vidpn"}
           ],
@@ -548,6 +557,7 @@ mod tests {
           "wgc_supported": true
         }"#;
         let c = parse_probe(json);
+        assert_eq!(c.adapters, ["Intel(R) UHD Graphics 630", "NVIDIA GeForce RTX 4060"]);
         assert_eq!(c.encoders, ["NVIDIA HEVC Encoder MFT"]);
         assert_eq!(c.decoders, ["Microsoft HEVC Video Extension"]);
         assert_eq!(c.decoders, ["Microsoft HEVC Video Extension"], "software MFT still counts");
@@ -559,7 +569,13 @@ mod tests {
         );
         let c = parse_probe(&json);
         assert!(c.decoders.is_empty());
+
         assert_eq!(c.encoders.len(), 1);
+
+        // A probe report without the key (an older engine) still parses; the
+        // banner falls back to "this PC's GPU" rather than breaking.
+        let c = parse_probe(r#"{"hevc_hardware_encoders":[],"hevc_any_decoders":[]}"#);
+        assert!(c.adapters.is_empty());
 
         // A probe that failed to produce JSON reads as "nothing", never a panic.
         assert_eq!(parse_probe("boom"), Capabilities::default());

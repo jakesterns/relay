@@ -255,6 +255,9 @@ pub enum Reply {
     Capabilities {
         can_share: bool,
         can_receive: bool,
+        /// Display adapters, named so the UI can say which GPU it means.
+        #[serde(default)]
+        adapters: Vec<String>,
         encoders: Vec<String>,
         decoders: Vec<String>,
     },

@@ -860,6 +860,12 @@ fn audio_pipeline(
     recorder: Arc<OnceLock<Recorder>>,
 ) -> Result<()> {
     let mut stream = OpusStream::new(source, 160_000)?;
+    tracing::info!(
+        rate = stream.endpoint_rate(),
+        channels = stream.endpoint_channels(),
+        conversion = stream.conversion.as_deref().unwrap_or("none"),
+        "audio pipeline up"
+    );
     while !stop.load(Ordering::Relaxed) {
         let Some(p) = stream.next(Duration::from_millis(200))? else { continue };
         stats.audio_packets.fetch_add(1, Ordering::Relaxed);

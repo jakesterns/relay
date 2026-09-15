@@ -25,21 +25,34 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
   if (need === "receive" && !caps.can_receive) {
     return (
       <div className="offline"><i />
-        No HEVC decoder on this PC. Install the free "HEVC Video Extensions from Device Manufacturer"
-        from the Microsoft Store, then reopen Relay. Receiving will fail on the first frame without it.
+        No HEVC decoder on this PC, so receiving would fail on the first frame. Install the free
+        "HEVC Video Extensions from Device Manufacturer" from the{" "}
+        <a href={HEVC_STORE_SEARCH}>Microsoft Store</a>, then reopen Relay. Relay cannot bundle it —
+        Microsoft licenses that package to PC makers, not for redistribution by apps.
       </div>
     );
   }
   if (need === "share" && !caps.can_share) {
+    // Name the GPU. "This GPU" is useless on the machine this matters on most:
+    // a laptop where the display hangs off the iGPU and the encoder is on the
+    // dGPU, so the user has somewhere specific to go.
+    const gpu = caps.adapters.length ? caps.adapters.join(" and ") : "this PC's GPU";
     return (
       <div className="offline"><i />
-        No hardware HEVC encoder on this GPU. Relay has no software encode path, so this PC can receive
-        but cannot send.
+        No hardware HEVC encoder on {gpu}. Relay encodes in hardware only (NVENC / Quick Sync /
+        AMF) — there is no software encode path, so this PC can receive a share but not send one.
+        If the GPU is recent, update its graphics driver: Windows only lists the encoder once the
+        vendor driver is installed.
       </div>
     );
   }
   return null;
 }
+
+/** The Store has two HEVC packages and the free one's product ID is not
+ *  something we can verify from here, so link the search rather than ship a
+ *  deep link that might open an error page. */
+const HEVC_STORE_SEARCH = "ms-windows-store://search/?query=HEVC%20Video%20Extensions";
 
 /** Whether a call on this PC will actually see the incoming share.
  *

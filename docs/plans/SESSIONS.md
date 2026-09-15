@@ -283,14 +283,14 @@ one hits a `bail!` instead of a graceful path.
 ### Definition of Ready
 - [x] `Method::ShareCapabilities` already warns before a share or receive fails (added 2026-09-14).
 - [x] The three edges are known: `crates/capture/src/encode/mf.rs:230` (MFT allocator path unimplemented), `mf.rs:294` (no software HEVC encode), `crates/capture/src/audio.rs:258,280,285` (48 kHz stereo only).
-- [ ] Decide which are worth fixing versus documenting as hard limits. Not all three deserve code.
+- [x] Decide which are worth fixing versus documenting as hard limits. Not all three deserve code. **Done 2026-09-14:** the allocator path and the audio format get code; software HEVC encode stays a design limit.
 
 ### Definition of Done
-- [ ] MFT allocator path either implemented or turned into a clear, actionable message naming the adapter.
-- [ ] Non-48 kHz and non-stereo endpoints produce a specific, fixable message rather than a generic failure — or are supported.
-- [ ] No-hardware-encoder machines are told the truth early (S7 should confirm the S1-era banner covers this).
-- [ ] The HEVC Video Extension question is resolved one way: bundle it, detect-and-link to the Store (already done), or document why a DXVA-direct decoder is not worth it.
-- [ ] `docs/plans/M4-share.md:125` updated.
+- [x] MFT allocator path either implemented or turned into a clear, actionable message naming the adapter. **Implemented** (`alloc_output_sample`); not testable end-to-end here because both local MFTs set `PROVIDES_SAMPLES`, so it is unit-tested through the `take_output` read path and `RELAY_FORCE_MFT_ALLOCATOR=1` exists to take it on a machine that reports `CAN_PROVIDE` only.
+- [x] Non-48 kHz and non-stereo endpoints produce a specific, fixable message rather than a generic failure — or are supported. **Supported**: `capture/src/resample.rs` folds any channel count to stereo and converts any rate to 48 kHz. Only a 0-channel or out-of-range endpoint still fails, and it names the number it saw.
+- [x] No-hardware-encoder machines are told the truth early. Confirmed: the S1-era banner covers it, and now names the GPU; the engine-side failure also lists any other adapter in the PC that could encode.
+- [x] The HEVC Video Extension question is resolved one way. **Decision: keep detect-and-warn and link to the Store; do not bundle it (Microsoft licenses it to PC makers, not for redistribution), do not build a DXVA-direct decoder (weeks of HEVC bring-up whose failure mode is corrupt video, for a receiver one free Store install away from working).** Written up in `docs/plans/M4-share.md` → Deferred.
+- [x] `docs/plans/M4-share.md` updated: the Deferred entry is closed and a new "S7 - codec and capture robustness" section records the decisions and measurements.
 
 ### Kickoff prompt
 ```

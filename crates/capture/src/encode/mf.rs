@@ -64,7 +64,12 @@ pub struct MfHevcEncoder {
     codec_api: ICodecAPI,
     in_id: u32,
     out_id: u32,
+    /// The MFT hands back its own output samples. When false we allocate them
+    /// (see [`MfHevcEncoder::alloc_output_sample`]).
     provides_samples: bool,
+    /// `cbSize` / `cbAlignment` from `GetOutputStreamInfo`, for that path.
+    output_sample_size: u32,
+    output_alignment: u32,
     frame_duration_100ns: i64,
     pub name: String,
     /// Keep the device manager alive for the life of the encoder.
@@ -76,8 +81,7 @@ unsafe impl Send for MfHevcEncoder {}
 
 impl MfHevcEncoder {
     pub fn new(gpu: &Gpu, cfg: &EncoderConfig) -> Result<Self> {
-        let (transform, name) =
-            activate_hardware_hevc(gpu.adapter_luid).context("activating hardware HEVC MFT")?;
+        let (transform, name) = activate_hardware_hevc(gpu.adapter_luid, &gpu.adapter_name)?;
 
         // SAFETY: standard MFT setup sequence; all pointers are live COM interfaces.
         unsafe {
@@ -135,10 +139,36 @@ impl MfHevcEncoder {
             transform.SetInputType(in_id, &in_type, 0).context("SetInputType NV12")?;
 
             let info = transform.GetOutputStreamInfo(out_id)?;
-            let provides_samples = info.dwFlags
-                & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
-                    | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32)
-                != 0;
+            // PROVIDES means the MFT insists on supplying its own samples;
+            // CAN_PROVIDE means it will do either. Every hardware HEVC MFT this
+            // was developed against sets one of them, but the contract allows
+            // neither, in which case the caller allocates — so we do, rather
+            // than failing on the first encoded frame the way this used to.
+            let must_provide = info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0;
+            let can_provide = info.dwFlags & (MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32) != 0;
+            // Lets the allocator path be exercised on a machine whose MFT would
+            // otherwise always take the other branch (`CAN_PROVIDE` only).
+            let force_alloc = std::env::var_os("RELAY_FORCE_MFT_ALLOCATOR").is_some();
+            if force_alloc && must_provide {
+                tracing::warn!(
+                    "RELAY_FORCE_MFT_ALLOCATOR ignored: {name} requires MFT-provided samples"
+                );
+            }
+            let provides_samples = must_provide || (can_provide && !force_alloc);
+            // A caller-allocated buffer must be at least cbSize; when the MFT
+            // reports 0 (allowed only alongside PROVIDES) fall back to a frame
+            // of 4:2:0 luma, far above any single HEVC access unit at our rates.
+            let output_sample_size = if info.cbSize > 0 {
+                info.cbSize
+            } else {
+                cfg.width.saturating_mul(cfg.height).max(1 << 20)
+            };
+            tracing::info!(
+                encoder = %name,
+                provides_samples,
+                output_sample_size,
+                "HEVC hardware encoder ready"
+            );
 
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
@@ -151,6 +181,8 @@ impl MfHevcEncoder {
                 in_id,
                 out_id,
                 provides_samples,
+                output_sample_size,
+                output_alignment: info.cbAlignment,
                 frame_duration_100ns: 10_000_000 / cfg.fps as i64,
                 name,
                 _dev_manager: manager,
@@ -218,8 +250,9 @@ impl MfHevcEncoder {
     }
 
     fn take_output(&self) -> Result<EncodedFrame> {
-        // SAFETY: ProcessOutput per the async-MFT contract; sample ownership
-        // is transferred to us (hardware MFTs provide their own samples).
+        // SAFETY: ProcessOutput per the async-MFT contract. When the MFT
+        // provides samples it transfers ownership to us; when it does not we
+        // pass in our own and take the same reference back out.
         unsafe {
             let mut status = 0u32;
             let mut out = [MFT_OUTPUT_DATA_BUFFER {
@@ -227,15 +260,18 @@ impl MfHevcEncoder {
                 pSample: std::mem::ManuallyDrop::new(if self.provides_samples {
                     None
                 } else {
-                    bail!("MFT does not provide output samples; allocator path not implemented")
+                    Some(alloc_output_sample(self.output_sample_size, self.output_alignment)?)
                 }),
                 dwStatus: 0,
                 pEvents: std::mem::ManuallyDrop::new(None),
             }];
-            self.transform.ProcessOutput(0, &mut out, &mut status).context("ProcessOutput")?;
-            let sample = std::mem::ManuallyDrop::take(&mut out[0].pSample)
-                .context("ProcessOutput returned no sample")?;
+            // Reclaim both out-params before propagating, or a failed
+            // ProcessOutput leaks the sample we just allocated.
+            let r = self.transform.ProcessOutput(0, &mut out, &mut status);
+            let sample = std::mem::ManuallyDrop::take(&mut out[0].pSample);
             std::mem::ManuallyDrop::drop(&mut out[0].pEvents);
+            r.context("ProcessOutput")?;
+            let sample = sample.context("ProcessOutput returned no sample")?;
 
             let pts = sample.GetSampleTime().unwrap_or(0);
             let keyframe = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1;
@@ -247,6 +283,26 @@ impl MfHevcEncoder {
             buffer.Unlock()?;
             Ok(EncodedFrame { data, pts_100ns: pts, keyframe })
         }
+    }
+}
+
+/// One output sample for an MFT that does not supply its own. The bitstream
+/// lands in system memory either way, so a plain aligned memory buffer is all
+/// that is needed; a fresh one per call keeps us clear of an MFT that holds a
+/// reference past `ProcessOutput`.
+///
+/// `alignment` is `MFT_OUTPUT_STREAM_INFO::cbAlignment`, a byte count;
+/// `MFCreateAlignedMemoryBuffer` wants the `MF_*_BYTE_ALIGNMENT` form, which
+/// is one less.
+fn alloc_output_sample(size: u32, alignment: u32) -> Result<IMFSample> {
+    // SAFETY: MF allocates both objects; we hand back the only references.
+    unsafe {
+        let buffer = MFCreateAlignedMemoryBuffer(size, alignment.saturating_sub(1))
+            .context("allocating an output buffer for the encoder")?;
+        buffer.SetCurrentLength(0)?;
+        let sample = MFCreateSample()?;
+        sample.AddBuffer(&buffer)?;
+        Ok(sample)
     }
 }
 
@@ -264,8 +320,39 @@ fn stream_ids(transform: &IMFTransform) -> Result<(u32, u32)> {
     }
 }
 
-/// First hardware HEVC encoder MFT on the adapter with `luid`.
-fn activate_hardware_hevc(luid: LUID) -> Result<(IMFTransform, String)> {
+/// Software HEVC encode is out of scope by design, not by omission: a CPU
+/// encoder cannot hold 4K60 inside the <50 ms budget, and CLAUDE.md pins the
+/// share to NVENC / Quick Sync / AMF. So the failure is permanent — which
+/// makes it all the more important that it names the adapter it looked at,
+/// and says whether some *other* adapter in the machine could do the job.
+/// That second case is the common one: a laptop whose display hangs off the
+/// iGPU while the encoder lives on the dGPU.
+fn no_encoder_message(adapter: &str, all_adapters: &[String]) -> String {
+    let mut msg = format!(
+        "no hardware HEVC encoder on \"{adapter}\", the GPU driving the display you are \
+         capturing. Relay encodes HEVC in hardware only (NVENC / Quick Sync / AMF) — there \
+         is no software encode path, so this PC can receive a share but not send one."
+    );
+    if all_adapters.is_empty() {
+        msg.push_str(
+            " No other GPU in this PC has one either. If this GPU is recent, update its \
+             graphics driver: Media Foundation only lists the encoder once the vendor \
+             driver is installed.",
+        );
+    } else {
+        msg.push_str(&format!(
+            " Another GPU in this PC does have one ({}). Move the window or display you are \
+             sharing onto that GPU's output, or set Relay to \"High performance\" under \
+             Settings > System > Display > Graphics, then start the share again.",
+            all_adapters.join(", ")
+        ));
+    }
+    msg
+}
+
+/// First hardware HEVC encoder MFT on the adapter with `luid`. `adapter` is
+/// that GPU's description, used only to make the failure message specific.
+fn activate_hardware_hevc(luid: LUID, adapter: &str) -> Result<(IMFTransform, String)> {
     let out_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_HEVC,
@@ -291,7 +378,12 @@ fn activate_hardware_hevc(luid: LUID) -> Result<(IMFTransform, String)> {
         )
         .context("MFTEnum2")?;
         if count == 0 {
-            bail!("no hardware HEVC encoder on this adapter (software encode is not supported)");
+            bail!(no_encoder_message(
+                adapter,
+                &crate::probe::hevc_hardware_encoders()
+                    .map(|e| e.into_iter().map(|m| m.friendly_name).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            ));
         }
         let slice = std::slice::from_raw_parts(activates, count as usize);
         let first = slice[0].as_ref().context("null activate")?;
@@ -336,7 +428,7 @@ impl InflightClock {
 
 #[cfg(test)]
 mod tests {
-    use super::InflightClock;
+    use super::*;
 
     #[test]
     fn inflight_clock_matches_output_to_input() {
@@ -350,5 +442,63 @@ mod tests {
         assert_eq!(c.in_flight(), 0);
         // An unknown PTS (encoder-generated frame) yields no sample.
         assert_eq!(c.completed(999, 5_000), None);
+    }
+
+    /// The caller-allocated output path cannot be exercised end-to-end on a
+    /// machine whose MFT sets `MFT_OUTPUT_STREAM_PROVIDES_SAMPLES` (both
+    /// encoders on the dev PC do). What *can* be checked without an encoder is
+    /// the part that would actually be wrong: that the sample we hand
+    /// `ProcessOutput` is a writable, correctly sized, zero-length buffer, and
+    /// that `take_output`'s read-back sequence recovers exactly what an MFT
+    /// would have written into it.
+    #[test]
+    fn caller_allocated_samples_round_trip_through_the_read_path() {
+        let _mf = crate::probe::MediaFoundation::start().expect("MFStartup");
+        for alignment in [0u32, 1, 16, 512] {
+            let sample = alloc_output_sample(4096, alignment).expect("allocate");
+            // SAFETY: freshly created sample with exactly one buffer.
+            unsafe {
+                let buffer = sample.GetBufferByIndex(0).unwrap();
+                assert_eq!(buffer.GetCurrentLength().unwrap(), 0, "alignment {alignment}");
+                assert!(buffer.GetMaxLength().unwrap() >= 4096, "alignment {alignment}");
+
+                // Stand in for the MFT writing an access unit.
+                let mut ptr = std::ptr::null_mut();
+                let mut max = 0u32;
+                buffer.Lock(&mut ptr, Some(&mut max), None).unwrap();
+                let written: Vec<u8> = (0..64u8).collect();
+                std::ptr::copy_nonoverlapping(written.as_ptr(), ptr, written.len());
+                buffer.Unlock().unwrap();
+                buffer.SetCurrentLength(written.len() as u32).unwrap();
+                sample.SetSampleTime(123_456).unwrap();
+                sample.SetUINT32(&MFSampleExtension_CleanPoint, 1).unwrap();
+
+                // Exactly what take_output does with it afterwards.
+                assert_eq!(sample.GetSampleTime().unwrap(), 123_456);
+                assert_eq!(sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap(), 1);
+                let contiguous = sample.ConvertToContiguousBuffer().unwrap();
+                let mut ptr = std::ptr::null_mut();
+                let mut len = 0u32;
+                contiguous.Lock(&mut ptr, None, Some(&mut len)).unwrap();
+                let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+                contiguous.Unlock().unwrap();
+                assert_eq!(data, written, "alignment {alignment}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_no_encoder_message_says_which_gpu_and_what_to_do() {
+        let alone = no_encoder_message("Intel(R) UHD Graphics 630", &[]);
+        assert!(alone.contains("Intel(R) UHD Graphics 630"), "{alone}");
+        assert!(alone.contains("No other GPU"), "{alone}");
+        assert!(alone.contains("update its graphics driver"), "{alone}");
+
+        let multi =
+            no_encoder_message("Intel(R) UHD Graphics 630", &["NVIDIA HEVC Encoder MFT".into()]);
+        assert!(multi.contains("NVIDIA HEVC Encoder MFT"), "{multi}");
+        assert!(multi.contains("High performance"), "{multi}");
+        // Never claims the machine is hopeless when another adapter can encode.
+        assert!(!multi.contains("No other GPU"), "{multi}");
     }
 }
