@@ -403,6 +403,10 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0),
                         record_dir: std::env::var("RELAY_RECORD_DIR").ok(),
+                        container: match std::env::var("RELAY_CONTAINER").as_deref() {
+                            Ok("mkv") => relay_core::share::RecordingContainer::Mkv,
+                            _ => relay_core::share::RecordingContainer::Mp4,
+                        },
                         // No window to show it in when started from the CLI.
                         preview_fps: 0,
                     }),

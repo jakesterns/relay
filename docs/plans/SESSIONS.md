@@ -38,7 +38,7 @@ S5 should land before S12 — it may delete S12 entirely.
 | S1 | ADLX display backend | `feat/adlx-display` | `relay-adlx` | — |
 | S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | — |
 | S3 | Vendor VCP opcodes | `feat/monitor-vcp` | `relay-monitor-vcp` | partly: OSD eyes |
-| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | — |
+| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | done 2026-09-14 |
 | S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | — |
 | S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | — |
 | S7 | Codec robustness | `feat/codec-robustness` | `relay-codec` | — |
@@ -176,14 +176,15 @@ priority in Group 1 — start it only if a real compatibility gap appears.
 
 ### Definition of Ready
 - [x] fMP4 muxer with golden-fixture tests is the pattern to follow.
-- [ ] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. Record it, or leave this session unstarted.
+- [x] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. **Found and recorded 2026-09-14**: `Windows.Media.Editing.MediaClip` — the Windows video-editing import API — rejects every Relay fMP4 recording with "The parameter is incorrect." The cause is *not* Opus (Media Foundation reports `OPUS … FullySupported`) but the missing `mfra` index. Full probe matrix: `docs/dev/container-compat.md`.
 
 ### Definition of Done
-- [ ] MKV selectable per preset; fMP4 remains the default.
-- [ ] Golden-fixture byte tests to the same standard as the fMP4 muxer.
-- [ ] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measure and record.
-- [ ] Replay save works in both containers.
-- [ ] `docs/plans/M6-recording-presets.md:50` updated; ROADMAP M6 row updated.
+- [x] MKV selectable per preset; fMP4 remains the default.
+- [x] Golden-fixture byte tests to the same standard as the fMP4 muxer (`tests/fixtures/golden-recording.mkv`, `UPDATE_GOLDEN=1` to regenerate).
+- [x] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measured (MKV vs MP4: arrival p50 2.41 vs 2.32 ms, CPU median 6.22 % vs 6.23 %).
+- [x] Replay save works in both containers (73 ms MKV / 59 ms MP4 on loopback; unit test runs for both).
+- [x] `docs/plans/M6-recording-presets.md` updated (decision 5 + S4 measurements); ROADMAP M6 row updated.
+- [x] Bonus, out of the DoR investigation: `Mp4Muxer` now writes `mfra`, which fixes editor import for *existing* fMP4 recordings too.
 
 ### Kickoff prompt
 ```

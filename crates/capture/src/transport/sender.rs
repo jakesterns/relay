@@ -29,6 +29,7 @@ use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
 use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
 use crate::source::switch::{self, Switcher};
 use crate::time;
+use relay_core::share::RecordingContainer;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -48,6 +49,7 @@ pub struct SendOpts {
     pub size: Option<(u32, u32)>,
     /// Recording folder; `None` disables recording and the replay ring.
     pub record_dir: Option<PathBuf>,
+    pub container: RecordingContainer,
     /// Start continuous recording as soon as the share is up.
     pub record: bool,
     /// Replay ring window; 0 = ring off.
@@ -385,6 +387,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         record_on_start: opts.record,
         replay_secs: opts.replay_secs,
         audio: opts.audio.is_some(),
+        container: opts.container,
     });
 
     // Preview rate, shared so the `preview` stdin command can retune it live.
@@ -626,6 +629,7 @@ struct RecordSetup {
     record_on_start: bool,
     replay_secs: u32,
     audio: bool,
+    container: RecordingContainer,
 }
 
 /// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC MFT → SEI → channel.
@@ -677,6 +681,7 @@ fn video_pipeline(
             budget: DiskBudget::default(),
             roll_secs: 3600,
             record_on_start: rs.record_on_start,
+            container: rs.container,
         }) {
             Ok(r) => {
                 let _ = recorder.set(r);

@@ -347,6 +347,7 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Audio" v={presetAudioLabel[def.audio]} />
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+        <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );
@@ -399,6 +400,10 @@ function PresetCard({ def, locked, onSaved }: {
           <input className="mono" inputMode="numeric" value={draft.replay_secs}
             onChange={(e) => edit({ replay_secs: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
         </div>
+        <Chips label="Recording container" value={draft.container ?? "mp4"}
+          onChange={(v) => edit({ container: v as SharePresetDef["container"] })}
+          options={[{ key: "mp4", label: "MP4" }, { key: "mkv", label: "MKV" }]} />
+        <p className="note">Same video and audio either way — the file is written straight from the stream already being sent, so neither costs an extra encode. MKV is the safer choice if Relay or the PC ever stops mid-recording: the part already written stays usable, where an MP4 cut off without a clean stop will not open in a video editor.</p>
         <div className="ab">
           <button className="btn acc" disabled={busy || !draft.name.trim()}
             onClick={() => void run(async () => {

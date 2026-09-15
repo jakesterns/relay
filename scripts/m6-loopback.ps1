@@ -1,10 +1,13 @@
 # M6 loopback measurement: run a full send->recv share on this PC and record
 # sender/receiver stats, optionally with recording + replay buffer on.
-# Usage: powershell -File scripts\m6-loopback.ps1 [-Record] [-Secs 60] [-OutDir path]
+# Usage: powershell -File scripts\m6-loopback.ps1 [-Record] [-Container mp4|mkv]
+#                    [-Secs 60] [-OutDir path]
 param(
     [switch]$Record,
     [switch]$SwitchTest,
     [int]$Secs = 60,
+    [ValidateSet('mp4','mkv')]
+    [string]$Container = 'mp4',
     [string]$OutDir = "$env:TEMP\relay-m6-loopback"
 )
 
@@ -12,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot '..\target\release\relay-share.exe'
 if (-not (Test-Path $exe)) { throw "build first: cargo build --release -p relay-capture" }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$tag = if ($Record) { 'rec-on' } else { 'rec-off' }
+$tag = if ($Record) { "rec-on-$Container" } else { 'rec-off' }
 $recvLog = Join-Path $OutDir "recv-$tag.ndjson"
 $sendLog = Join-Path $OutDir "send-$tag.ndjson"
 $recDir = Join-Path $OutDir "recordings-$tag"
@@ -36,7 +39,10 @@ Start-Sleep -Seconds 1
 
 # Sender with stdin under our control.
 $args = "send --code 424242 --peer 127.0.0.1:$port"
-if ($Record) { $args += " --record-dir `"$recDir`" --record --replay-secs 60" }
+if ($Record) {
+    $args += " --record-dir `"$recDir`" --record --replay-secs 60"
+    if ($Container -ne 'mp4') { $args += " --container $Container" }
+}
 $sendPsi = New-Object System.Diagnostics.ProcessStartInfo
 $sendPsi.FileName = $exe
 $sendPsi.Arguments = $args

@@ -600,6 +600,7 @@ function SharingSide({ draft, save, dirty }: {
             <Kv k="Audio" v={audio[def.audio]} />
             <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
             <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+            <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
           </>
         ) : (
           <p className="note">Reading presets…</p>
