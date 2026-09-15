@@ -73,7 +73,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       sharing: { kind: "off" },
       audio_chain: "bypass",
       display_state: "default",
-      display_via: { nvapi: false, gamma: false, ddcci: false },
+      display_via: { nvapi: false, amd: false, gamma: false, ddcci: false },
       footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
       hardware: hardware.connected,
       build: {
@@ -91,9 +91,9 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     ),
     hardware,
     presets: [
-      { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: "game", cursor: false, record: false, replay_secs: 60 },
-      { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: "system", cursor: true, record: false, replay_secs: 0 },
-      { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: "system", cursor: true, record: false, replay_secs: 0 },
+      { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
+      { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+      { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
     ],
     recording: { cap_gb: 50, free_floor_gb: 10 },
     processes: [

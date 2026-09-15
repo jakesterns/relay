@@ -233,13 +233,24 @@ struct HardwareReply {
     monitors: Vec<relay_core::hardware::Monitor>,
     interfaces: Vec<relay_core::hardware::AudioInterface>,
     connected: relay_core::hardware::HardwareView,
+    /// Monitors with at least one *verified* vendor DDC/CI control. Forwarded
+    /// verbatim: the UI must not infer a control from the advertised opcode
+    /// list, so dropping this here would silently re-enable guessed sliders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vendor_controls: Vec<relay_core::hardware::MonitorVendorControls>,
 }
 
 #[tauri::command]
 async fn list_hardware() -> CmdResult<HardwareReply> {
     match call(Method::ListHardware).await? {
-        Reply::Hardware { headsets, monitors, interfaces, connected } => {
-            Ok(HardwareReply { headsets, monitors, interfaces, connected: *connected })
+        Reply::Hardware { headsets, monitors, interfaces, connected, vendor_controls } => {
+            Ok(HardwareReply {
+                headsets,
+                monitors,
+                interfaces,
+                connected: *connected,
+                vendor_controls,
+            })
         }
         other => Err(unexpected(other).into()),
     }

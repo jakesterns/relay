@@ -236,7 +236,7 @@ describe("the display editor", () => {
 
   it("reports which paths carried the apply, and what the hardware refused", async () => {
     core.state.display_state = "applied";
-    core.state.display_via = { nvapi: true, gamma: true, ddcci: false, unsupported: ["black equalizer"] };
+    core.state.display_via = { nvapi: true, amd: false, gamma: true, ddcci: false, unsupported: ["black equalizer"] };
     tauri.useFakeCore(core.handler);
     await mount("display");
     expect(kv("Applied via")).toBe("NvAPI + gamma ramp");
