@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Rail, type Screen } from "./components/Rail";
 import { TitleBar } from "./components/TitleBar";
 import { CoreProvider, useCore } from "./lib/core";
+import { useDraft } from "./lib/drafts";
 import { api } from "./lib/ipc";
 import { useEffect } from "react";
 import { FirstRun } from "./screens/FirstRun";
@@ -21,6 +22,9 @@ export default function App() {
 
 function Shell() {
   const { state, offline, mock } = useCore();
+  // An unsaved per-game edit outlives the screen that made it, so the rail is
+  // where it has to be visible from.
+  const unsaved = useDraft()?.profile.name ?? null;
   const [screen, setScreen] = useState<Screen>("profiles");
   const [section, setSection] = useState<Section>("audio");
   // null = unknown yet; true = the first-run consent decision is still due.
@@ -72,7 +76,7 @@ function Shell() {
     <div className="app">
       <TitleBar subtitle={subtitle} idle={idle} />
       <div className="body three">
-        <Rail screen={railKey} onNav={nav} state={state} note={note} />
+        <Rail screen={railKey} onNav={nav} state={state} note={note} unsaved={unsaved} />
         {screen === "share" && <Share />}
         {screen === "receive" && <Receive />}
         {screen === "games" && <Games section={section} onSection={setSection} />}

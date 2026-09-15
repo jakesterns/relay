@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Chips, ChipSet, Kv, Live, Toggle } from "../components/Controls";
+import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
+import { errText } from "../lib/err";
 import {
   api, onCoreEvents, presetAudioLabel,
   type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type SharePresetDef,
@@ -35,7 +36,11 @@ export function Share() {
   const [receivers, setReceivers] = useState<DiscoveredReceiver[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Two error channels, because the controls that fail are at opposite ends
+  // of the screen: session errors belong beside Start/Stop in the side panel,
+  // capture errors beside the source chips and the record row they came from.
   const [error, setError] = useState<string | null>(null);
+  const [capErr, setCapErr] = useState<string | null>(null);
   const [strip, setStrip] = useState<Strip>(idleStrip);
   const histRef = useRef<number[]>(Array(18).fill(0));
   // Recording + replay state pushed by the engine.
@@ -127,38 +132,38 @@ export function Share() {
       const list = await api.discoverReceivers();
       setReceivers(list);
       if (list.length && !selected) setSelected(list[0].name);
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
 
   const start = async () => {
     setBusy(true); setError(null);
     try { await api.startSharePreset(preset, code.trim(), selected); }
-    catch (e) { setError(String(e)); }
+    catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
 
   const stop = async () => {
     setBusy(true);
     setPreview(null);
-    try { await api.stopShare(); } catch (e) { setError(String(e)); }
+    try { await api.stopShare(); } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
 
   const switchTo = async (target: SourceTarget) => {
-    setError(null);
+    setCapErr(null);
     setSource(target); // optimistic; source_changed confirms
-    try { await api.switchSource(target); } catch (e) { setError(String(e)); }
+    try { await api.switchSource(target); } catch (e) { setCapErr(errText(e)); }
   };
 
   const toggleRecord = async () => {
-    setError(null);
-    try { await api.record(!rec.on); } catch (e) { setError(String(e)); }
+    setCapErr(null);
+    try { await api.record(!rec.on); } catch (e) { setCapErr(errText(e)); }
   };
 
   const saveReplay = async () => {
-    setError(null);
-    try { await api.saveReplay(); } catch (e) { setError(String(e)); }
+    setCapErr(null);
+    try { await api.saveReplay(); } catch (e) { setCapErr(errText(e)); }
   };
 
   // "Display 1", "Display 2"… from the connected monitors. Never guess more
@@ -263,6 +268,7 @@ export function Share() {
             {replayToast && <div className="toast">{replayToast}</div>}
           </div>
         )}
+        <ErrorNote text={capErr} onDismiss={() => setCapErr(null)} />
       </section>
       <aside className="side">
         <Card title="Send to">
@@ -287,7 +293,7 @@ export function Share() {
           <Kv k="Path" v={sharing ? "LAN · host candidates only" : "—"} mono />
           <Kv k="Peer" v={peer ?? "—"} mono />
         </Card>
-        {error && <p className="note" style={{ color: "#d98b6a" }}>{error}</p>}
+        <ErrorNote text={error} onDismiss={() => setError(null)} />
         {sharing
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>
           : <button className="btn acc" onClick={start} disabled={!canStart}
@@ -451,22 +457,17 @@ function PresetCard({ def, locked, onSaved }: {
             }}>Duplicate</button>
         </div>
         {!builtin && !isNew && (
-          <button className="btn q" disabled={busy}
-            onClick={() => void run(async () => {
+          <ConfirmButton label="Delete this preset" confirm="Confirm delete" disabled={busy}
+            onConfirm={() => void run(async () => {
               await api.deletePreset(draft.id);
               return undefined;
-            })}>Delete this preset</button>
+            })} />
         )}
         {builtin && <p className="note">Built-in presets can be edited but not deleted. Duplicate it to make a version you can remove.</p>}
-        {error && <div className="offline"><i />{error}</div>}
+        <ErrorNote text={error} onDismiss={() => setError(null)} />
       </div>
     </Card>
   );
-}
-
-function errText(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
-  return String(e);
 }
 
 function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {

@@ -75,7 +75,7 @@ describe("the rail", () => {
     await h.user.click(screen.getByRole("button", { name: "Sharing" }));
     await settle();
     expect(heading()).toContain("— Sharing");
-    expect(rail().getByText("Games").closest("a")).toHaveClass("on");
+    expect(rail().getByText("Games").closest("button")).toHaveAttribute("aria-current", "page");
     await go("Settings");
     expect(heading()).toBe("Settings");
     await go("Profiles");
@@ -87,8 +87,8 @@ describe("the rail", () => {
     const h = await mount();
     await h.user.click(rail().getByText("Display"));
     await settle();
-    expect(rail().getByText("Display").closest("a")).toHaveClass("on");
-    expect(rail().getByText("Audio").closest("a")).not.toHaveClass("on");
+    expect(rail().getByText("Display").closest("button")).toHaveAttribute("aria-current", "page");
+    expect(rail().getByText("Audio").closest("button")).not.toHaveAttribute("aria-current");
   });
 
   it("shows what is running now", async () => {

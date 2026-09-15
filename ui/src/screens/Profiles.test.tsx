@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { screen, within } from "@testing-library/react";
 import { renderScreen, settle } from "../test/render";
 import { card, field, inCard, kv } from "../test/dom";
-import { confirmResult } from "../test/setup";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
 import { Profiles } from "./Profiles";
@@ -230,15 +229,17 @@ describe("profiles", () => {
 });
 
 describe("the hardware library", () => {
-  it("confirms before removing an entry, and does nothing if declined", async () => {
-    confirmResult.value = false;
+  it("asks twice before removing an entry, in Relay's own window", async () => {
     const h = await mount();
-    await h.user.click(within(hwRow("Headsets & IEMs", "HD 560S")).getByRole("button", { name: "Remove" }));
+    const row = () => within(hwRow("Headsets & IEMs", "HD 560S"));
+    await h.user.click(row().getByRole("button", { name: "Remove" }));
     await settle();
+    // Armed, not fired. (`window.confirm` throws in this harness, so a native
+    // dialog here would fail the test rather than pass it silently.)
     expect(tauri.lastCall("delete_hardware")).toBeUndefined();
+    expect(row().getByRole("button", { name: "Remove HD 560S?" })).toBeInTheDocument();
 
-    confirmResult.value = true;
-    await h.user.click(within(hwRow("Headsets & IEMs", "HD 560S")).getByRole("button", { name: "Remove" }));
+    await h.user.click(row().getByRole("button", { name: "Remove HD 560S?" }));
     await settle();
     expect(tauri.lastCall("delete_hardware")?.args).toEqual({ id: "hd560s" });
     expect(core.hardware.headsets.map((x) => x.id)).toEqual(["blessing3"]);

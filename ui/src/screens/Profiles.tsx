@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Card, Chips, Kv, Live, Pill } from "../components/Controls";
+import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
+import { errText } from "../lib/err";
 import {
   api, fmtMb, newProfile,
   type CatalogEntry, type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
@@ -29,10 +30,13 @@ export function Profiles() {
   const [adding, setAdding] = useState<"headset" | "monitor" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hwError, setHwError] = useState<string | null>(null);
+  const [listError, setListError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
 
   const apply = async (id: string) => {
-    try { await api.applyProfile(id); await refresh(); } catch { /* surfaced via offline banner */ }
+    setListError(null);
+    try { await api.applyProfile(id); await refresh(); }
+    catch (e) { setListError(errText(e)); }
   };
 
   const startNew = () => { setEditing(newProfile()); setIsNew(true); setError(null); };
@@ -54,10 +58,13 @@ export function Profiles() {
   /** Remove a headset or monitor from the library.
    *
    *  Profiles that named it keep the id and fall back to matching "Any", so
-   *  this loses the entry's name and measured curve but never a profile. The
-   *  confirm is here because a curve can represent a long import. */
-  const removeHw = async (id: string, name: string) => {
-    if (!window.confirm(`Remove ${name} from the hardware library?\n\nProfiles that use it stay, but stop matching on it.`)) return;
+   *  this loses the entry's name and measured curve but never a profile. It
+   *  still asks, because a curve can represent a long import — through the
+   *  same two-step button every other destructive action uses.
+   *
+   *  It used to ask with window.confirm, which in a window with custom chrome
+   *  arrives looking like another program's dialog. */
+  const removeHw = async (id: string) => {
     setHwError(null);
     try { await api.deleteHardware(id); await refresh(); }
     catch (e) { setHwError(errText(e)); }
@@ -100,6 +107,7 @@ export function Profiles() {
             onSave={save}
             onDelete={isNew ? undefined : remove}
             onCancel={close}
+            onDismissError={() => setError(null)}
           />
         )}
         {adding === "headset" && (
@@ -119,21 +127,34 @@ export function Profiles() {
               <tbody>
                 {profiles.map((p) => (
                   <tr key={p.id} className={active?.id === p.id ? "sel" : ""}
-                      onClick={() => void startEdit(p.id)} onDoubleClick={() => void apply(p.id)}>
-                    <td><b>{p.name}</b><span>{p.note || p.exe}</span></td>
-                    <td>{headsetName(p.headset)}</td>
-                    <td>{monitorName(p.monitor)}</td>
-                    <td>{shareLabel[p.share]}</td>
+                      onDoubleClick={() => void apply(p.id)}>
+                    {/* The name is the control: a real button, so Tab reaches
+                        the row and Enter opens it. The rest of the row stays
+                        clickable for the mouse. */}
+                    <td onClick={() => void startEdit(p.id)}>
+                      <button type="button" className="rowname" onClick={() => void startEdit(p.id)}>
+                        <b>{p.name}</b><span>{p.note || p.exe}</span>
+                      </button>
+                    </td>
+                    <td onClick={() => void startEdit(p.id)}>{headsetName(p.headset)}</td>
+                    <td onClick={() => void startEdit(p.id)}>{monitorName(p.monitor)}</td>
+                    <td onClick={() => void startEdit(p.id)}>{shareLabel[p.share]}</td>
                     <td className="r">
                       {active?.id === p.id
                         ? <Pill kind="on" text="Active" />
                         : p.status === "ready" ? <Pill kind="ready" text="Ready" /> : <Pill kind="off" text="Draft" />}
+                      {active?.id !== p.id && (
+                        <button type="button" className="go" aria-label={`Apply ${p.name} now`}
+                          title={`Apply ${p.name} now`}
+                          onClick={(e) => { e.stopPropagation(); void apply(p.id); }}>Apply</button>
+                      )}
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
+          <ErrorNote text={listError} onDismiss={() => setListError(null)} />
         </Card>
       </section>
       <aside className="side">
@@ -148,8 +169,10 @@ export function Profiles() {
                 <span>{kindLabel[h.kind]}{h.curve ? ` · curve (${h.source || "measured"})` : " · no curve"}</span>
               </div>
               {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
-              <button className="rm" title={`Remove ${h.name} from the library`}
-                onClick={() => void removeHw(h.id, h.name)}>Remove</button>
+              <ConfirmButton className="rm" confirmClassName="rm btn danger"
+                label="Remove" confirm={`Remove ${h.name}?`}
+                title={`Remove ${h.name} from the library. Profiles that use it stay, but stop matching on it.`}
+                onConfirm={() => void removeHw(h.id)} />
             </div>
           ))}
         </Card>
@@ -167,8 +190,10 @@ export function Profiles() {
                   {m.color && <span className="mono" style={{ fontSize: 11 }}>{colorSummary(m.color)}</span>}
                 </div>
                 {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
-                <button className="rm" title={`Remove ${m.name} from the library`}
-                  onClick={() => void removeHw(m.id, m.name)}>Remove</button>
+                <ConfirmButton className="rm" confirmClassName="rm btn danger"
+                  label="Remove" confirm={`Remove ${m.name}?`}
+                  title={`Remove ${m.name} from the library. Profiles that use it stay, but stop matching on it.`}
+                  onConfirm={() => void removeHw(m.id)} />
               </div>
             );
           })}
@@ -180,22 +205,17 @@ export function Profiles() {
           <button className="btn q" disabled={scanning} onClick={() => void rescan()}>
             {scanning ? "Scanning…" : "Scan monitor controls"}
           </button>
-          {hwError && <div className="offline"><i />{hwError}</div>}
+          <ErrorNote text={hwError} onDismiss={() => setHwError(null)} />
         </Card>
         <Card>
           <Kv k="Auto-switch" v="By plugged hardware" />
           <Kv k="Default audio" v={hardware.connected.endpoints.find((e) => e.default)?.name ?? "—"} />
           <Kv k="Foreground" v={state.foreground?.exe || "—"} mono />
         </Card>
-        <p className="note">Click a row to edit it, double-click to apply it now. Profiles are matched to whatever headset and monitor are connected, so swapping gear swaps the tuning.</p>
+        <p className="note">Click a row — or tab to it and press Enter — to edit it. Apply, or a double-click, puts it on now. Profiles are matched to whatever headset and monitor are connected, so swapping gear swaps the tuning.</p>
       </aside>
     </>
   );
-}
-
-function errText(e: unknown): string {
-  if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
-  return String(e);
 }
 
 /** One line of what the panel says about itself: gamut, HDR, bit depth.
@@ -294,7 +314,7 @@ function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () =>
         crinacle and others). Relay ships only the list of names; the curve itself is downloaded
         when you pick a model, cached on this PC, and never redistributed.
       </p>
-      {error && <div className="offline"><i />{error}</div>}
+      <ErrorNote text={error} onDismiss={() => setError(null)} />
     </>
   );
 }
@@ -367,7 +387,7 @@ function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
             onChange={(e) => setCurveText(e.target.value)} />
         </label>
         <p className="p small">Paste the contents of an AutoEQ result file, or leave this empty and use the search above.</p>
-        {error && <div className="offline"><i />{error}</div>}
+        <ErrorNote text={error} onDismiss={() => setError(null)} />
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
           <button className="btn q" onClick={onClose}>Cancel</button>
@@ -433,7 +453,7 @@ function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
           </label>
         </div>
         <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. DDC/CI controls are filled in the first time a display profile probes this panel.</p>
-        {error && <div className="offline"><i />{error}</div>}
+        <ErrorNote text={error} onDismiss={() => setError(null)} />
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
           <button className="btn q" onClick={onClose}>Cancel</button>
@@ -444,24 +464,19 @@ function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
 }
 
 /** New / Edit form. Headset and monitor come from the hardware library. */
-function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel }: {
+function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel, onDismissError }: {
   initial: Profile; isNew: boolean; error: string | null;
   onSave: (p: Profile) => void; onDelete?: (id: string) => void; onCancel: () => void;
+  onDismissError: () => void;
 }) {
   const { hardware } = useCore();
   const [p, setP] = useState<Profile>(initial);
   const [procs, setProcs] = useState<ProcessInfo[]>([]);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const loadProcs = async () => {
     try { setProcs(await api.listProcesses()); } catch { setProcs([]); }
   };
   useEffect(() => { void loadProcs(); }, []);
-  useEffect(() => {
-    if (!confirmDelete) return;
-    const t = setTimeout(() => setConfirmDelete(false), 4000);
-    return () => clearTimeout(t);
-  }, [confirmDelete]);
 
   const set = <K extends keyof Profile>(k: K, v: Profile[K]) => setP({ ...p, [k]: v });
   const valid = p.name.trim().length > 0 && p.game.exe.trim().length > 0;
@@ -527,14 +542,12 @@ function ProfileForm({ initial, isNew, error, onSave, onDelete, onCancel }: {
         <Chips<ProfileStatus> label="Status" value={p.status} onChange={(v) => set("status", v)}
           options={[{ key: "draft", label: "Draft" }, { key: "ready", label: "Ready" }]} />
         <p className="p small">Only <b>Ready</b> profiles apply automatically. With several Ready rows for one game, the row matching the plugged headset and monitor wins.</p>
-        {error && <div className="offline"><i />{error}</div>}
+        <ErrorNote text={error} onDismiss={onDismissError} />
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={submit}>{isNew ? "Create profile" : "Save changes"}</button>
           <button className="btn q" onClick={onCancel}>Cancel</button>
           {onDelete && (
-            confirmDelete
-              ? <button className="btn danger" onClick={() => onDelete(p.id)}>Confirm delete</button>
-              : <button className="btn q" onClick={() => setConfirmDelete(true)}>Delete…</button>
+            <ConfirmButton label="Delete…" confirm="Confirm delete" onConfirm={() => onDelete(p.id)} />
           )}
         </div>
       </div>

@@ -5,11 +5,19 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 import * as tauri from "./tauriMock";
+import { clearDraft } from "../lib/drafts";
 
-/** What `window.confirm` returns next. The hardware-library Remove button is
- *  the only caller; jsdom would otherwise throw "not implemented". */
-export const confirmResult = { value: true };
-window.confirm = () => confirmResult.value;
+/** Relay asks its own questions, inside its own window. A native dialog here
+ *  is a bug, so the three of them throw rather than quietly returning a value
+ *  a test could then assert on. */
+for (const name of ["confirm", "alert", "prompt"] as const) {
+  Object.defineProperty(window, name, {
+    configurable: true,
+    value: () => {
+      throw new Error(`window.${name}() — Relay uses ConfirmButton, not native dialogs`);
+    },
+  });
+}
 
 // jsdom has no media stack; the A/B card constructs an Audio element.
 Object.defineProperty(window.HTMLMediaElement.prototype, "play", {
@@ -31,5 +39,7 @@ if (!("randomUUID" in crypto)) {
 afterEach(() => {
   cleanup();
   tauri.reset();
-  confirmResult.value = true;
+  // The unsaved-edit store outlives the React tree on purpose; it must not
+  // outlive a test.
+  clearDraft();
 });
