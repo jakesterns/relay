@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Card, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, type ApoStatus, type ElevatedOp, type RecordingSettings, type VdeviceStatus } from "../lib/ipc";
+import { api, type ApoStatus, type ElevatedOp, type ElevationResult, type RecordingSettings, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
   const { state, refresh, offline, mock } = useCore();
@@ -198,14 +198,16 @@ function useElevation(op: ElevatedOp, onDone: () => void) {
     api.elevationPlan(op).then(setPlan).catch((e) => setError(msg(e)));
   };
 
-  const run = async () => {
+  const run = async (): Promise<ElevationResult | null> => {
     setBusy(true);
     setError(null);
     try {
       const r = await api.runElevated(op);
       setNote(r.lines);
+      return r;
     } catch (e) {
       setError(msg(e));
+      return null;
     } finally {
       setBusy(false);
       onDone();
@@ -368,8 +370,13 @@ function ElevatedPanel({ op, verb, blurb, onClose, onDone, before, after }: {
     setPrepError(null);
     try {
       if (before) await before();
-      await run();
-      if (after) await after();
+      const r = await run();
+      // Only mirror the result into per-user state if the machine actually
+      // changed. A declined prompt or a failed helper must leave
+      // installed.json exactly as it was: withdrawing consent for a camera
+      // that is still registered leaves a registration nothing consented to,
+      // which is the one state this file is meant to make impossible.
+      if (after && r && r.ok && !r.declined) await after();
     } catch (e) {
       setPrepError(msg(e));
     }
