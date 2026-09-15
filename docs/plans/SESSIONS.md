@@ -143,14 +143,21 @@ instead of a category-wide guess.
 ### Definition of Ready
 - [x] `UnsupportedReason::NoKnownOpcode` already plumbs through to the UI.
 - [x] A real MCCS capability dump from the LG ULTRAGEAR+ is a checked-in fixture (47 codes).
-- [ ] Accept that set-and-readback cannot prove on-screen meaning: each opcode needs either vendor documentation or a human watching the OSD. Unverified entries must be marked unverified, not shipped as fact.
+- [x] Accept that set-and-readback cannot prove on-screen meaning: each opcode needs either vendor documentation or a human watching the OSD. Unverified entries must be marked unverified, not shipped as fact. — Accepted, and built into the types rather than left as a rule to remember: `Evidence` has exactly the two verifying variants plus `Unverified`, and read-back is not one of them.
 
 ### Definition of Done
-- [ ] A per-model quirks table keyed by PNP ID and model string, each entry carrying its evidence (vendor doc URL, or "observed on OSD by <person> <date>").
-- [ ] Verified entries for at least the LG ULTRAGEAR+ on this desk; everything else marked unverified and **not** used to enable a control.
-- [ ] Never guesses: writing an unknown code is impossible by construction, and there is a test proving an unverified entry does not enable the slider.
-- [ ] The UI note in `ui/src/screens/Games.tsx` shrinks to match what is now supported.
-- [ ] `docs/plans/M2-display.md:132` updated; ROADMAP M2 row updated.
+- [x] A per-model quirks table keyed by PNP ID and model string, each entry carrying its evidence (vendor doc URL, or "observed on OSD by <person> <date>"). — `vcp::QUIRKS`, keyed on EDID manufacturer id **plus product code** (`GSM` + `5C7C`), which together name one model; `models` carries the MCCS `model(...)` strings and EDID display names for humans. Every vendor opcode is a `Candidate` = code + `Evidence` (`VendorDoc { title, url }` / `Osd { observer, date, monitor }` / `Unverified { note }`); the field is not optional, so a row without evidence does not compile.
+- [ ] Verified entries for at least the LG ULTRAGEAR+ on this desk; everything else marked unverified and **not** used to enable a control. — **BLOCKED on an OSD observation session with the user.** Zero entries are verified: both LG candidates (0xF6 black equaliser, 0xF5 response) ship as `Evidence::Unverified`, so both sliders are disabled. Set-and-readback cannot close this — a panel will store and return a value for a control whose on-screen meaning is something else — so it needs eyes on the OSD. Runbook `docs/dev/vcp-verification.md`; harness `crates/display/tests/vendor_probe.rs`. Open the OSD on Game Adjust / Picture, hands off the joystick, then one code at a time:
+  ```powershell
+  $env:RELAY_VCP_PROBE = "F5:1|2|3|4"
+  cargo test -p relay-display --test vendor_probe -- --ignored --nocapture
+  ```
+  Sweep `F5:1|2|3|4`, `F6:0|1|2`, `F7:0|1|2|3`, `F8:0|1`, `FA:0|1`, `FE:0|1|2`. (`F4`, `F9`, `FD`, `FF` advertise no value list — not worth sweeping blind.) Record **which OSD label moved and which written value maps to which level**; the code alone is not enough, since knowing 0xF5 is overdrive is useless without knowing whether `2` means "fast" or "off". Deliberately no prediction is published about what each code does: priming the observer with an expected label is how a wrong entry gets confirmed. Any code whose effect nobody can see stays `Unverified` and enables nothing — a legitimate result, not a failed run.
+- [x] Never guesses: writing an unknown code is impossible by construction, and there is a test proving an unverified entry does not enable the slider. — Enforced by a type, not by discipline: `VerifiedCode`'s `u8` is private to its module, `attest(code, evidence)` is its only constructor and returns `None` for `Evidence::Unverified`, and `plan_writes` / `vendor_controls` take `VerifiedCode` rather than `u8`, so there is no path from an unverified entry to a `SetVCPFeature` call. Proof: `unverified_table_entry_does_not_enable_the_slider` — the LG row *has* both candidates, the panel advertises both, the profile asks for both, and still nothing is written and neither slider enables. Backed by `no_unverified_row_ever_resolves_to_a_code`, `vendor_wide_rows_carry_no_vendor_opcodes`, `verified_entries_carry_traceable_evidence` and `model_rows_sort_before_their_vendor_wide_row`.
+- [x] The UI note in `ui/src/screens/Games.tsx` shrinks to match what is now supported. — Down to one sentence, and only rendered when a control is actually off. The two sliders are now driven by `Reply::Hardware.vendor_controls`, which the **core** computes from the table and the advertised opcode list — the client is told, never asked, because a UI that inferred a control from the advertised list would defeat the type guarantee. The hand-maintained `RESPONSE_LEVELS` constant is gone; levels come from the verified value map.
+- [x] `docs/plans/M2-display.md:132` updated; ROADMAP M2 row updated. — Plus a new runbook, `docs/dev/vcp-verification.md`, covering the evidence rules, why set-and-readback is not proof, and the `VerifiedCode` invariant future edits must not break.
+
+**State:** code-complete and pushed (`feat/monitor-vcp`); 24 `relay-display` + 127 `relay-core` tests green, clippy and `tsc` clean. Four of five items done; the session is not finishable without the OSD pass above.
 
 ### Kickoff prompt
 ```
