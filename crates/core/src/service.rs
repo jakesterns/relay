@@ -45,6 +45,24 @@ impl Backends {
     /// when `RELAY_RECORDING_BACKEND=<path>` is set (integration tests only —
     /// the probe stays no-op there so tests never depend on host hardware).
     pub fn from_env() -> Self {
+        // The simulated display rig wins when both are set: it is the more
+        // specific of the two test backends, and the crash-restore harness
+        // wants the recorder for audio and the rig for display.
+        if let Ok(path) = std::env::var(crate::display_sim::SIM_ENV) {
+            if !path.is_empty() {
+                let audio: Arc<dyn AudioControl> = match std::env::var(RECORDING_ENV) {
+                    Ok(rec) if !rec.is_empty() => Arc::new(FileRecorder::at(rec)),
+                    _ => Arc::new(Noop),
+                };
+                return Self {
+                    audio,
+                    display: Arc::new(crate::display_backend::DisplayAdapter::with_io(
+                        crate::display_sim::SimIo::from_env(path),
+                    )),
+                    hardware: Arc::new(crate::display_sim::SimHardwareProbe),
+                };
+            }
+        }
         match std::env::var(RECORDING_ENV) {
             Ok(path) if !path.is_empty() => {
                 let rec = Arc::new(FileRecorder::at(path));

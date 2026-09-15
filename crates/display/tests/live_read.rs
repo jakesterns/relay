@@ -81,3 +81,30 @@ fn live_read_current_state() {
         None => println!("== NvAPI unavailable"),
     }
 }
+
+/// Read-only ADL probe. Separate from the NVIDIA one because on a machine
+/// with both GPUs (this one) the interesting answer is *which* displays each
+/// vendor claims — an AMD adapter with nothing plugged into it must report no
+/// displays, not an empty-but-usable one.
+///
+/// `cargo test -p relay-display --test live_read -- --ignored --nocapture`
+#[test]
+#[ignore = "reads the live AMD driver state; run by hand"]
+fn live_read_amd_state() {
+    use relay_display::amd;
+
+    let Some(adl) = amd::Adl::load() else {
+        println!("== ADL unavailable (no AMD driver, or it refused to start)");
+        return;
+    };
+    for line in adl.adapter_summary() {
+        println!("  {line}");
+    }
+    let displays = adl.displays();
+    println!("== ADL loaded; {} AMD-driven display(s)", displays.len());
+    for d in &displays {
+        println!("  {} on adapter {} ({})", d.gdi_name, d.adapter_index, d.adapter_name);
+        println!("    saturation: {:?}", adl.get_saturation(d));
+        println!("    hue:        {:?}", adl.get_hue(d));
+    }
+}

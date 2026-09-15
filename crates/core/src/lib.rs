@@ -17,6 +17,7 @@ pub mod autostart;
 pub mod backup;
 pub mod config;
 pub mod display_backend;
+pub mod display_sim;
 pub mod footprint;
 pub mod hardware;
 pub mod hotkeys;
