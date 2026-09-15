@@ -73,8 +73,17 @@ export interface MonitorProbe {
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
 export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }
+/** Vendor-private DDC/CI controls the core has a *verified* opcode for on one
+ *  monitor. Mirrors `hardware::MonitorVendorControls`. The core decides: the
+ *  quirks table and the evidence behind each opcode live in Rust, so the UI
+ *  must never infer a vendor control from the advertised opcode list. A
+ *  missing entry means every vendor slider for that panel stays disabled. */
+export interface MonitorVendorControls {
+  monitor: MonitorId; black_equalizer: boolean; response: string[];
+}
 export interface HardwareReply {
   headsets: Headset[]; monitors: HardwareMonitor[]; interfaces: AudioInterface[]; connected: HardwareView;
+  vendor_controls?: MonitorVendorControls[];
 }
 export type HardwareItem =
   | { kind: "headset"; value: Headset }
@@ -215,6 +224,9 @@ export const mockHardware: HardwareReply = {
     { id: "mon:GSM7654:311NDX55X942", name: "LG C2", panel: "OLED" },
   ],
   interfaces: [],
+  // Empty on purpose: no model in `vcp::QUIRKS` has verified vendor evidence
+  // yet, so the mock shows exactly what the real core reports today.
+  vendor_controls: [],
   connected: {
     endpoints: [
       { key: "ep:c:31f634a2-usb-dac", name: "USB Audio 2.0", default: true },

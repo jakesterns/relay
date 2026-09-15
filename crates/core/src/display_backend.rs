@@ -72,7 +72,10 @@ struct Plan {
 }
 
 fn plan(target: &MonitorProbe, settings: &DisplaySettings) -> Plan {
-    let quirks = vcp::quirks_for(&target.id.0);
+    // Keyed on the EDID manufacturer + product code; the display name rides
+    // along for logs only, because one marketing name covers several panels.
+    let key = vcp::MonitorKey::from_id(&target.id.0).map(|k| k.with_name(&target.name));
+    let quirks = key.as_ref().map(vcp::quirks_for_key).unwrap_or_default();
     let (writes, unsupported) =
         vcp::plan_writes(&plan_input(&settings.monitor), target.ddc.as_deref(), &quirks);
     let params = ramp_params(&settings.gpu);

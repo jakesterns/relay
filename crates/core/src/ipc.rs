@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
-use crate::hardware::{AudioInterface, HardwareView, Headset, Monitor, ProbeReport};
+use crate::hardware::{
+    AudioInterface, HardwareView, Headset, Monitor, MonitorVendorControls, ProbeReport,
+};
 use crate::presets::{RecordingSettings, SharePresetDef};
 use crate::share::{ReceiveRequest, ShareRequest, SourceTarget};
 use crate::types::{CoreState, HeadsetId, ProcessInfo, Profile, ProfileSummary};
@@ -234,6 +236,11 @@ pub enum Reply {
         monitors: Vec<Monitor>,
         interfaces: Vec<AudioInterface>,
         connected: Box<HardwareView>,
+        /// Monitors with at least one *verified* vendor DDC/CI control.
+        /// Absent or empty means every vendor slider stays disabled; the
+        /// client must not infer a control from the advertised opcode list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        vendor_controls: Vec<MonitorVendorControls>,
     },
     Probe {
         report: Box<ProbeReport>,

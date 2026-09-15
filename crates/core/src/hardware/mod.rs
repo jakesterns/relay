@@ -212,6 +212,60 @@ pub struct Monitor {
     pub color: Option<edid_color::ColorInfo>,
 }
 
+/// Which vendor-private DDC/CI controls one monitor actually has, decided by
+/// the core from `relay_display::vcp::QUIRKS` and the advertised opcode list.
+///
+/// The client is told, never asked: the quirks table and its evidence live in
+/// Rust, so a UI that got this wrong could enable a slider over an unverified
+/// opcode. `response` is empty when the control is unavailable, otherwise it
+/// lists exactly the level names the verified value map covers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonitorVendorControls {
+    pub monitor: MonitorId,
+    pub black_equalizer: bool,
+    #[serde(default)]
+    pub response: Vec<String>,
+}
+
+impl MonitorVendorControls {
+    pub fn resolve(id: &MonitorId, advertised: Option<&[u8]>) -> Self {
+        let quirks = relay_display::vcp::quirks_for(&id.0);
+        let controls = relay_display::vcp::vendor_controls(&quirks, advertised);
+        Self {
+            monitor: id.clone(),
+            black_equalizer: controls.black_equalizer,
+            response: controls.response.into_iter().map(str::to_owned).collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.black_equalizer && self.response.is_empty()
+    }
+}
+
+/// Vendor controls for every monitor the client knows about — the library
+/// entries plus anything currently attached that is not in the library yet.
+/// Monitors with nothing to offer are omitted, so an empty list means "no
+/// verified vendor opcodes anywhere", which is the shipping state today.
+pub fn vendor_controls(
+    library: &[Monitor],
+    connected: &[MonitorProbe],
+) -> Vec<MonitorVendorControls> {
+    let mut out: Vec<MonitorVendorControls> = Vec::new();
+    let from_library = library.iter().map(|m| (&m.id, m.ddcci.as_deref()));
+    let from_connected = connected.iter().map(|m| (&m.id, m.ddc.as_deref()));
+    for (id, advertised) in from_library.chain(from_connected) {
+        if out.iter().any(|c| &c.monitor == id) {
+            continue;
+        }
+        let controls = MonitorVendorControls::resolve(id, advertised);
+        if !controls.is_empty() {
+            out.push(controls);
+        }
+    }
+    out
+}
+
 /// An audio interface (Scarlett, RØDECaster…) the user wants tracked; used by
 /// the DAW share preset later. Identity reuses endpoint keys.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -344,6 +398,31 @@ mod tests {
             source: String::new(),
             endpoints: endpoints.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    fn monitor(id: &str, ddcci: Option<Vec<u8>>) -> Monitor {
+        Monitor {
+            id: MonitorId(id.into()),
+            name: id.into(),
+            panel: String::new(),
+            ddcci,
+            color: None,
+        }
+    }
+
+    /// Today no model in the quirks table has verified vendor evidence, so
+    /// the reply carries nothing and every vendor slider stays disabled —
+    /// even for the LG that advertises both candidate opcodes.
+    #[test]
+    fn no_vendor_controls_are_offered_while_every_entry_is_unverified() {
+        let library = vec![
+            monitor("mon:GSM5C7C:402NTCZ9E219", Some(vec![0x10, 0x12, 0xF5, 0xF6])),
+            monitor("mon:DEL4099:XYZ", None),
+        ];
+        assert!(vendor_controls(&library, &[]).is_empty());
+        let one = MonitorVendorControls::resolve(&library[0].id, library[0].ddcci.as_deref());
+        assert!(one.is_empty());
+        assert!(!one.black_equalizer && one.response.is_empty());
     }
 
     #[test]
