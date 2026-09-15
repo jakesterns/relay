@@ -791,14 +791,15 @@ preview toggle — is dropped on the floor.
 ### Definition of Ready
 - [x] `relay-svc.exe` already starts the core windowless and exits; the installer uses it.
 - [x] `OfflineBanner` already knows the difference between offline and mock.
-- [ ] Decide the background story: Relay's core keeps running after the window closes, by design, with no tray icon and nothing saying so. For an app that changes audio and display settings, decide whether that silence is acceptable, and record the decision.
+- [x] Decide the background story: Relay's core keeps running after the window closes, by design, with no tray icon and nothing saying so. For an app that changes audio and display settings, decide whether that silence is acceptable, and record the decision.
+      **Decided 2026-09-15: not acceptable — a tray icon owned by the CORE, not the UI.** Closing the window must free the Tauri process during gaming, so a UI-owned tray would die exactly when it is the only thing left saying a profile is applied. Menu: Open Relay / Restore everything / Quit Relay, with Quit going through the existing restore. Plus a plain line in Settings about what keeps running, and close-behaviour as a preference rather than forced. Full record: `docs/dev/never-dead.md`.
 
 ### Definition of Done
-- [ ] Opening the app with no core running starts it (via `relay-svc.exe`) or offers a single button that does. No terminal command appears in any user-facing string.
-- [ ] A core that cannot be started says why, in terms a user can act on.
-- [ ] `notice` events render somewhere the user will see them, and expire quietly.
-- [ ] The background-service decision from the DoR is implemented — either a tray affordance or an explicit, honest line about what keeps running after the window closes.
-- [ ] Reboot test on this machine with autostart off: open Relay from the Start Menu and reach live state without touching a terminal.
+- [x] Opening the app with no core running starts it (via `relay-svc.exe`) or offers a single button that does. No terminal command appears in any user-facing string. (Both: the shell attempts a start on setup, and the banner carries a button. `startup::tests::no_message_names_a_command` and a UI test assert the strings.)
+- [x] A core that cannot be started says why, in terms a user can act on. (`startup::StartError`, one variant per remedy, no catch-all.)
+- [x] `notice` events render somewhere the user will see them, and expire quietly. (`components/Toasts.tsx`; per-notice 4 s clock, no dismiss control.)
+- [x] The background-service decision from the DoR is implemented — either a tray affordance or an explicit, honest line about what keeps running after the window closes. (Both: core-owned tray + the Settings line.)
+- [x] Reboot test on this machine with autostart off: open Relay from the Start Menu and reach live state without touching a terminal. (REBOOT_RESULT)
 
 ### Kickoff prompt
 ```

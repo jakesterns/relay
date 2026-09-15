@@ -35,6 +35,9 @@ export interface Core {
   /** Hardware library + connected view (`list_hardware`). */
   hardware: HardwareReply;
   offline: boolean;
+  /** False until the first status round-trip has resolved one way or the
+   *  other. Nothing may claim Relay is not running before then. */
+  checked: boolean;
   mock: boolean;
   /** The most recent notice, kept for callers that want just the latest. */
   notice: string | null;
@@ -54,6 +57,10 @@ export function CoreProvider({ children }: { children: ReactNode }) {
   const [profiles, setProfiles] = useState<ProfileSummary[]>(isTauri() ? [] : mockProfiles);
   const [hardware, setHardware] = useState<HardwareReply>(isTauri() ? { headsets: [], monitors: [], interfaces: [], connected: { endpoints: [], monitors: [], headset: null } } : mockHardware);
   const [offline, setOffline] = useState(isTauri());
+  // `offline` starts true inside Tauri, so without this the banner would flash
+  // "Relay is not running" for the length of one IPC round-trip on every
+  // perfectly healthy launch.
+  const [checked, setChecked] = useState(!isTauri());
   const [notices, setNotices] = useState<Notice[]>([]);
   const [start, setStart] = useState<CoreStart>({ kind: "idle" });
   // Monotonic, so two identical notices are still two entries.
@@ -76,6 +83,8 @@ export function CoreProvider({ children }: { children: ReactNode }) {
       setOffline(false);
     } catch {
       setOffline(true);
+    } finally {
+      setChecked(true);
     }
   };
 
@@ -106,10 +115,11 @@ export function CoreProvider({ children }: { children: ReactNode }) {
       notice: (t) => pushNotice(t),
       offline: () => setOffline(true),
       // The shell attempts a start of its own the moment it comes up; follow
-      // that attempt rather than racing it with a second one.
-      starting: () => setStart({ kind: "starting" }),
+      // that attempt rather than racing it with a second one. The attempt is
+      // itself an answer — it only happens when no core replied.
+      starting: () => { setChecked(true); setStart({ kind: "starting" }); },
       started: () => { setStart({ kind: "idle" }); void refresh(); },
-      startFailed: (message) => setStart({ kind: "failed", message }),
+      startFailed: (message) => { setChecked(true); setStart({ kind: "failed", message }); },
     }).then((u) => { unsub = u; });
     const t = setInterval(() => { if (offline || !isTauri()) void refresh(); }, 4000);
     return () => { unsub(); clearInterval(t); };
@@ -119,7 +129,7 @@ export function CoreProvider({ children }: { children: ReactNode }) {
   const notice = notices.length ? notices[notices.length - 1].text : null;
 
   return (
-    <Ctx.Provider value={{ state, profiles, hardware, offline, mock: !isTauri(), notice, notices, start, startCore, refresh }}>
+    <Ctx.Provider value={{ state, profiles, hardware, offline, checked, mock: !isTauri(), notice, notices, start, startCore, refresh }}>
       {children}
     </Ctx.Provider>
   );

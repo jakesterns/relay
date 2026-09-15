@@ -70,6 +70,15 @@ describe("reaching live state without a terminal", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
   });
 
+  it("says nothing at all until the first status round-trip has answered", async () => {
+    // `offline` starts true inside Tauri, so a healthy launch would otherwise
+    // flash "Relay is not running" on its way to live state.
+    renderScreen(<Profiles />);
+    expect(document.querySelector(".offline")).toBeNull();
+    await settle();
+    expect(document.querySelector(".offline")).not.toBeNull();
+  });
+
   it("clears the banner once a core answers", async () => {
     const core = makeFakeCore();
     renderScreen(<Profiles />);

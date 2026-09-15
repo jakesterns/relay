@@ -9,8 +9,10 @@ import { useCore } from "../lib/core";
  * in terms the reader can act on and offers to try again.
  */
 export function OfflineBanner() {
-  const { offline, mock, start, startCore } = useCore();
-  if (!offline || mock) return null;
+  const { offline, checked, mock, start, startCore } = useCore();
+  // Nothing is claimed until the first status round-trip has answered — a
+  // healthy launch must not flash "not running" on its way to live state.
+  if (!offline || mock || !checked) return null;
 
   if (start.kind === "starting") {
     return (
