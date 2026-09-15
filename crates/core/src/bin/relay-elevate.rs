@@ -25,26 +25,36 @@ fn main() -> std::process::ExitCode {
         match a.as_str() {
             "--request" => request = args.next().map(PathBuf::from),
             "--help" | "-h" => {
-                log_line("relay-elevate --request <file>  (started by Relay; not a user command)");
+                log_to(
+                    None,
+                    "relay-elevate --request <file>  (started by Relay; not a user command)",
+                );
                 return std::process::ExitCode::SUCCESS;
             }
             other => {
-                log_line(&format!("unknown argument {other}; nothing was done"));
+                log_to(None, &format!("unknown argument {other}; nothing was done"));
                 return std::process::ExitCode::FAILURE;
             }
         }
     }
     let Some(request) = request else {
-        log_line("no --request file given; nothing was done");
+        log_to(None, "no --request file given; nothing was done");
         return std::process::ExitCode::FAILURE;
     };
 
     #[cfg(windows)]
     {
+        // The log belongs to the run's own data root, not to the installed
+        // one: a `--data-dir` run (a test, the footprint gate, a second
+        // instance) must not write into `%LOCALAPPDATA%\Relay`.
+        let root = std::fs::read(&request)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<relay_core::elevate::Request>(&b).ok())
+            .map(|r| r.data_dir);
         match relay_core::elevate::run_request_file(&request) {
             Ok(response) => {
                 for line in response.lines() {
-                    log_line(&line);
+                    log_to(root.as_deref(), &line);
                 }
                 if response.ok() {
                     std::process::ExitCode::SUCCESS
@@ -55,7 +65,7 @@ fn main() -> std::process::ExitCode {
             Err(e) => {
                 // No result file could be written, so the core will report
                 // "the elevated helper wrote no result". Leave a trace here.
-                log_line(&format!("elevation request failed before it ran: {e:#}"));
+                log_to(root.as_deref(), &format!("elevation request failed before it ran: {e:#}"));
                 std::process::ExitCode::FAILURE
             }
         }
@@ -63,17 +73,27 @@ fn main() -> std::process::ExitCode {
     #[cfg(not(windows))]
     {
         let _ = request;
-        log_line("elevated installs are Windows-only");
+        log_to(None, "elevated installs are Windows-only");
         std::process::ExitCode::FAILURE
     }
 }
 
 /// Append one line to `<data root>\logs\elevate.log`, best effort. The helper
 /// has no console, so this is where a hand-run leaves its answer.
-fn log_line(text: &str) {
+///
+/// `root` is the data root the request named; without one (no request, or an
+/// unreadable one) it falls back to the installed location, which is the only
+/// place a helper with nothing to go on could sensibly write.
+fn log_to(root: Option<&std::path::Path>, text: &str) {
     use std::io::Write;
     eprintln!("{text}");
-    let Ok(paths) = relay_core::config::Paths::default_for_user() else { return };
+    let paths = match root {
+        Some(r) => relay_core::config::Paths::at(r),
+        None => match relay_core::config::Paths::default_for_user() {
+            Ok(p) => p,
+            Err(_) => return,
+        },
+    };
     let dir = paths.log_dir();
     if std::fs::create_dir_all(&dir).is_err() {
         return;

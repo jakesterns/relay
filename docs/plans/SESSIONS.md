@@ -32,7 +32,9 @@ inherited):
 **Concurrency.** Groups 1 and 2 are all independent; the practical limit is
 three at once, because they converge on `ipc.rs` / `ipc.ts` and the UI screens.
 S5 landed 2026-09-14 and answered its question **no**: per-user registration
-does not work, so S12 still needs the elevated shell and S6 is required.
+does not work, so the HKLM write is permanent and S6 was required. S6 landed
+the same day and built it, which unblocks S12 — the camera can now be
+registered from the Settings card behind one UAC prompt.
 
 | # | Session | Branch | Worktree | Blocked on |
 |---|---|---|---|---|
@@ -47,7 +49,7 @@ does not work, so S12 still needs the elevated shell and S6 is required.
 | S9 | Documentation truth pass | `chore/docs-truth` | main tree | — |
 | S10 | Human verification pass | `chore/human-pass` | main tree | you, 45 min |
 | S11 | Soak and measurement pass | `chore/soak-pass` | main tree | ~2 h wall clock |
-| S12 | Live virtual-camera pass | `chore/vcam-live` | main tree | one elevated shell |
+| S12 | Live virtual-camera pass | `chore/vcam-live` | main tree | — (S6 unblocked it) |
 | S13 | Clean-VM uninstall diff | `chore/vm-uninstall` | main tree | a hypervisor |
 | S14 | Live APO test-sign pass | `chore/apo-vm` | main tree | a hypervisor |
 | S15 | Two-PC share validation | `chore/two-pc` | main tree | a second PC |
@@ -458,13 +460,14 @@ Three deferred measurements need wall-clock time rather than new hardware: the o
 Each of these is written and ready; each waits on one external thing.
 
 ## S12 — Live virtual-camera pass
-**Branch** `chore/vcam-live` · **Worktree** main tree · **Blocked on: one elevated shell** (~20 min)
+**Branch** `chore/vcam-live` · **Worktree** main tree · **Unblocked** (~20 min, one UAC prompt)
 
-S5 has run (2026-09-14): per-user registration does **not** work, so the elevated shell is still required. Start with the two-minute positive control at the end of `docs/dev/vcam-live.md` — run `vcam_reg_probe` once the key is in HKLM and confirm `Start` returns `S_OK`.
+S5 has run (2026-09-14): per-user registration does **not** work, so the HKLM write is still required — but S6 built the thing that performs it, and the camera has already been registered and removed live through it (`docs/dev/elevation-live.md`). So this session no longer needs a hand-rolled elevated shell: `relay-core elevate run install-camera`, or the Settings card, does it. What is left is the part S6 did not do — pointing a real call at the registered camera. Start with the two-minute positive control at the end of `docs/dev/vcam-live.md`: run `vcam_reg_probe` once the key is in HKLM and confirm `Start` returns `S_OK`.
 
 ### Definition of Ready
 - [x] S5 resolved 2026-09-14: HKCU does not work → elevation required.
-- [ ] If elevation is still required: you are present to approve one UAC prompt for a write to `HKLM\SOFTWARE\Classes\CLSID`.
+- [x] S6 landed 2026-09-14: registration is one approved UAC prompt away, and the removal path is proven.
+- [ ] You are present to approve the prompt.
 - [x] Runbook written: `docs/dev/vcam-live.md` (~20 min, includes the removal check).
 
 ### Definition of Done
@@ -478,9 +481,9 @@ S5 has run (2026-09-14): per-user registration does **not** work, so the elevate
 ```
 You are starting session S12 (live virtual-camera pass) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S12), docs/plans/M5-vdevices.md and docs/dev/vcam-live.md. Work in the main tree on branch chore/vcam-live.
 
-S5 has answered the hive question: HKCU does not work, so one elevated write to HKLM is still needed. Run the positive-control probe in the runbook first.
+S5 answered the hive question (HKCU does not work) and S6 built the elevated helper, which has already registered and removed the camera live. Register it with `relay-core elevate run install-camera` or the Settings card — one UAC prompt, which I approve — then run the positive-control probe in the runbook.
 
-1. Verify the Definition of Ready. Tell me exactly what needs approving and wait — never write HKLM yourself.
+1. Verify the Definition of Ready. Never write HKLM by hand; go through the helper and tell me when the prompt is coming.
 2. Follow docs/dev/vcam-live.md and fill in the results table in docs/plans/M5-vdevices.md with what actually happened in Discord, Zoom and Meet at 1080p60 and 4K30. Do not fill a cell you did not observe.
 3. Run the clap test for A/V alignment and the removal check with the snapshot harness.
 4. Finish only when the Definition of Done is met. Update docs/plans/M5-vdevices.md and docs/ROADMAP.md, then summarise.
