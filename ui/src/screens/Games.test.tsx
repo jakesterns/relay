@@ -198,17 +198,83 @@ describe("the display editor", () => {
     expect(slider("Hue", card("GPU color")).value).toBe("-30°");
   });
 
-  it("disables the DDC/CI controls this panel does not advertise", async () => {
+  it("disables the standard DDC/CI controls this panel does not advertise", async () => {
     await mount("display");
     const mon = card("Monitor");
     expect(slider("Brightness", mon).disabled).toBe(false);
     expect(slider("Contrast", mon).disabled).toBe(false);
-    // 0x87 is absent from the panel's capability string.
+    // 0x87 is absent from the panel's advertised capability string.
     expect(slider("Sharpness", mon).disabled).toBe(true);
-    // Vendor-private codes stay off for every panel until one is verified.
+  });
+
+  it("leaves a vendor control off until the core says it verified an opcode", async () => {
+    await mount("display");
+    const mon = card("Monitor");
+    // The core sent no `vendor_controls` entry for this panel.
     expect(slider("Black equalizer", mon).disabled).toBe(true);
     expect(slider("Response", mon).disabled).toBe(true);
-    expect(mon).toHaveTextContent(/Relay will not guess at one/);
+    expect(mon).toHaveTextContent(
+      /vendor-private codes Relay has not verified on this panel, so they stay off/,
+    );
+  });
+
+  it("enables exactly the vendor controls the core verified, and no more", async () => {
+    core.hardware.vendor_controls = [
+      { monitor: "mon:ULTRAGEAR", black_equalizer: true, response: [] },
+    ];
+    tauri.useFakeCore(core.handler);
+    await mount("display");
+    const mon = card("Monitor");
+    expect(slider("Black equalizer", mon).disabled).toBe(false);
+    // Verified black equalizer must not imply a verified response opcode:
+    // they are separate codes with separate evidence.
+    expect(slider("Response", mon).disabled).toBe(true);
+  });
+
+  it("saves a verified vendor level by name, not by slider index", async () => {
+    core.hardware.vendor_controls = [
+      { monitor: "mon:ULTRAGEAR", black_equalizer: false, response: ["off", "normal", "fast"] },
+    ];
+    tauri.useFakeCore(core.handler);
+    const h = await mount("display");
+    const mon = card("Monitor");
+    expect(slider("Response", mon).disabled).toBe(false);
+
+    setSlider("Response", 2, mon);
+    await h.user.click(screen.getByRole("button", { name: "Save to profile" }));
+    await settle();
+    expect(saved().display.monitor.response).toBe("fast");
+
+    // Index 0 is the panel's own "off"; storing it would write a level the
+    // user never chose, so it must clear the field instead.
+    setSlider("Response", 0, mon);
+    await h.user.click(screen.getByRole("button", { name: "Save to profile" }));
+    await settle();
+    expect(saved().display.monitor.response).toBeUndefined();
+  });
+
+  it("fails safe if the bridge drops vendor_controls entirely", async () => {
+    // `vendor_controls` is optional on the wire, and the Tauri bridge dropped
+    // it once already. If it goes missing the sliders must stay *off* — the
+    // dangerous direction is a guessed opcode writing a setting nobody asked
+    // for, so absent evidence has to read as "not verified", never as "allow".
+    core.hardware.vendor_controls = undefined;
+    tauri.useFakeCore(core.handler);
+    await mount("display");
+    const mon = card("Monitor");
+    expect(slider("Black equalizer", mon).disabled).toBe(true);
+    expect(slider("Response", mon).disabled).toBe(true);
+  });
+
+  it("does not apply one panel's verified opcodes to a different panel", async () => {
+    core.hardware.vendor_controls = [
+      { monitor: "mon:SOME-OTHER-PANEL", black_equalizer: true, response: ["off", "fast"] },
+    ];
+    tauri.useFakeCore(core.handler);
+    await mount("display");
+    const mon = card("Monitor");
+    expect(slider("Black equalizer", mon).disabled).toBe(true);
+    expect(slider("Response", mon).disabled).toBe(true);
   });
 
   it("warns that vibrance clips on a wide-gamut panel", async () => {
