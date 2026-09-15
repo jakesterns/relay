@@ -30,7 +30,7 @@ use ring::{ItemKind, ReplayRing, RingItem};
 /// Everything the writer thread receives.
 pub enum RecordMsg {
     Video { data: Vec<u8>, pts_100ns: i64, keyframe: bool },
-    Audio { data: Vec<u8>, pts_100ns: i64, dur_100ns: i64 },
+    Audio { track: usize, data: Vec<u8>, pts_100ns: i64, dur_100ns: i64 },
     SetRecording(bool),
     SaveReplay,
 }
@@ -57,8 +57,12 @@ pub struct RecordConfig {
     pub dir: PathBuf,
     pub width: u32,
     pub height: u32,
-    /// Mux the Opus track too.
+    /// Mux the program-mix Opus track too.
     pub audio: bool,
+    /// Mux a second Opus track for the microphone. Ignored without `audio`:
+    /// a file whose only audio is the mic still puts it on track 0, so a
+    /// player finds it where it looks.
+    pub mic: bool,
     /// Replay window; 0 disables the ring.
     pub replay_secs: u32,
     /// RAM cap for the ring (bitrate-aware, chosen by the caller).
@@ -102,9 +106,10 @@ impl Recorder {
         self.try_send(RecordMsg::Video { data: data.to_vec(), pts_100ns, keyframe });
     }
 
-    /// Tee one Opus packet. Never blocks.
-    pub fn push_audio(&self, data: &[u8], pts_100ns: i64, dur_100ns: i64) {
-        self.try_send(RecordMsg::Audio { data: data.to_vec(), pts_100ns, dur_100ns });
+    /// Tee one Opus packet onto audio track `track` (0 = program mix,
+    /// 1 = microphone). Never blocks.
+    pub fn push_audio(&self, track: usize, data: &[u8], pts_100ns: i64, dur_100ns: i64) {
+        self.try_send(RecordMsg::Audio { track, data: data.to_vec(), pts_100ns, dur_100ns });
     }
 
     fn try_send(&self, msg: RecordMsg) {
@@ -229,12 +234,16 @@ fn writer_thread(
                     stats.ring_fill_milli.store((r.fill() * 1000.0) as u32, Ordering::Relaxed);
                 }
             }
-            RecordMsg::Audio { data, pts_100ns, dur_100ns } => {
+            RecordMsg::Audio { track, data, pts_100ns, dur_100ns } => {
                 if let Some(a) = &mut active {
-                    a.muxer.push_audio(&data, pts_100ns, dur_100ns)?;
+                    a.muxer.push_audio(track, &data, pts_100ns, dur_100ns)?;
                 }
                 if let Some(r) = &mut ring {
-                    r.push(RingItem { kind: ItemKind::Audio { dur_100ns }, pts_100ns, data });
+                    r.push(RingItem {
+                        kind: ItemKind::Audio { track, dur_100ns },
+                        pts_100ns,
+                        data,
+                    });
                 }
             }
         }
@@ -272,10 +281,10 @@ fn open_recording(cfg: &RecordConfig, stats: &RecordStats) -> Result<ActiveFile>
 }
 
 fn mux_config(cfg: &RecordConfig) -> MuxConfig {
-    if cfg.audio {
-        MuxConfig::with_opus(cfg.width, cfg.height)
-    } else {
-        MuxConfig::video_only(cfg.width, cfg.height)
+    match (cfg.audio, cfg.mic) {
+        (true, true) => MuxConfig::with_opus_and_mic(cfg.width, cfg.height),
+        (true, false) => MuxConfig::with_opus(cfg.width, cfg.height),
+        (false, _) => MuxConfig::video_only(cfg.width, cfg.height),
     }
 }
 
@@ -290,8 +299,8 @@ fn save_replay(cfg: &RecordConfig, ring: &ReplayRing) -> Result<PathBuf> {
             ItemKind::Video { keyframe } => {
                 muxer.push_video(&item.data, item.pts_100ns, keyframe)?
             }
-            ItemKind::Audio { dur_100ns } => {
-                muxer.push_audio(&item.data, item.pts_100ns, dur_100ns)?
+            ItemKind::Audio { track, dur_100ns } => {
+                muxer.push_audio(track, &item.data, item.pts_100ns, dur_100ns)?
             }
         }
     }
@@ -417,6 +426,7 @@ mod tests {
             width: 640,
             height: 480,
             audio: true,
+            mic: true,
             replay_secs: 60,
             ring_max_bytes: 10 << 20,
             budget: DiskBudget { cap_bytes: 0, free_floor_bytes: 0 },
@@ -428,7 +438,8 @@ mod tests {
         for i in 0..120i64 {
             rec.push_video(&mux::tests::key_or_p(i % 60 == 0, i as u8), i * f, i % 60 == 0);
             if i % 2 == 0 {
-                rec.push_audio(&[0xAA, i as u8], i * f, 100_000);
+                rec.push_audio(0, &[0xAA, i as u8], i * f, 100_000);
+                rec.push_audio(1, &[0xBB, i as u8], i * f, 100_000);
             }
         }
         rec.save_replay();

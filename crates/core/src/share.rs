@@ -32,7 +32,9 @@ pub struct ShareRequest {
     /// Capture just this process's audio (game-only) instead of the desktop mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_pid: Option<u32>,
-    /// Send the default microphone instead of the desktop mix.
+    /// Also send the default microphone, as a second Opus track alongside
+    /// the desktop/game mix rather than instead of it. Mic-only is `audio:
+    /// false` with `mic: true`.
     #[serde(default)]
     pub mic: bool,
     #[serde(default = "default_true")]
@@ -330,7 +332,9 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     } else if let Some(pid) = req.audio_pid {
         args.push("--audio-pid".into());
         args.push(pid.to_string());
-    } else if req.mic {
+    }
+    // Independent of the program source: `--audio-mic` adds a track.
+    if req.mic {
         args.push("--audio-mic".into());
     }
     if !req.cursor {
@@ -526,12 +530,31 @@ mod tests {
         let args = send_args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--record") || a == "--replay-secs"));
 
-        // Game-only audio beats the mic toggle (single-track contract).
+        // Game-only audio and the mic now travel together: two tracks.
         let req: ShareRequest =
             serde_json::from_str(r#"{"code":"1","mic":true,"audio_pid":42}"#).unwrap();
         let args = send_args(&req);
         assert!(args.contains(&"--audio-pid".to_string()));
-        assert!(!args.contains(&"--audio-mic".to_string()));
+        assert!(args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// Mic-only: the engine gets `--no-audio --audio-mic`, which is what it
+    /// used to get from a legacy `mic` preset, so nothing changes for one.
+    #[test]
+    fn send_args_mic_without_program_audio() {
+        let req: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","audio":false,"mic":true}"#).unwrap();
+        let args = send_args(&req);
+        assert!(args.contains(&"--no-audio".to_string()));
+        assert!(args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// And no mic asked for means no mic flag: single-track peers and
+    /// presets are untouched.
+    #[test]
+    fn send_args_without_mic_are_unchanged() {
+        let req: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert!(!send_args(&req).contains(&"--audio-mic".to_string()));
     }
 
     /// Shape copied from a real `relay-share probe` run on this dev machine.

@@ -6,6 +6,7 @@
 //! Shared-mode WASAPI only — nothing here touches the endpoint's
 //! configuration, volume, or default-device selection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
@@ -261,6 +262,10 @@ pub struct OpusStream {
     capture: AudioCapture,
     encoder: opus::Encoder,
     pending: Vec<f32>,
+    /// Arrival stamps for the samples in `pending`: `(qpc, samples left from
+    /// that block)`, oldest first. Lets a packet report when its first sample
+    /// reached us, which is the packetization latency the bench reports.
+    stamps: VecDeque<(i64, usize)>,
     frame_samples: usize,
     /// Peak of the last encoded frame, 0..=1 (for the instrument strip).
     pub peak: f32,
@@ -268,7 +273,10 @@ pub struct OpusStream {
 
 pub struct OpusPacket {
     pub data: Vec<u8>,
+    /// QPC when the packet finished encoding.
     pub qpc_100ns: i64,
+    /// QPC when WASAPI delivered the block this packet starts in.
+    pub captured_qpc_100ns: i64,
     pub duration: Duration,
 }
 
@@ -292,6 +300,7 @@ impl OpusStream {
             capture,
             encoder,
             pending: Vec::with_capacity(frame_samples * 4),
+            stamps: VecDeque::new(),
             frame_samples,
             peak: 0.0,
         })
@@ -306,8 +315,22 @@ impl OpusStream {
                 return Ok(None);
             }
             match self.capture.next(deadline - now) {
-                Some(block) => self.pending.extend_from_slice(&block.samples),
+                Some(block) => {
+                    self.stamps.push_back((block.qpc_100ns, block.samples.len()));
+                    self.pending.extend_from_slice(&block.samples);
+                }
                 None => return Ok(None),
+            }
+        }
+        let captured_qpc_100ns = self.stamps.front().map(|(q, _)| *q).unwrap_or(0);
+        let mut left = self.frame_samples;
+        while left > 0 {
+            let Some((_, n)) = self.stamps.front_mut() else { break };
+            let take = left.min(*n);
+            *n -= take;
+            left -= take;
+            if *n == 0 {
+                self.stamps.pop_front();
             }
         }
         let frame: Vec<f32> = self.pending.drain(..self.frame_samples).collect();
@@ -316,6 +339,7 @@ impl OpusStream {
         Ok(Some(OpusPacket {
             data,
             qpc_100ns: qpc_now_100ns(),
+            captured_qpc_100ns,
             duration: Duration::from_millis(10),
         }))
     }

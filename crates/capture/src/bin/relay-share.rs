@@ -52,12 +52,15 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "bench-audio" => {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(5);
-            let source = match args.get(2).map(String::as_str) {
-                Some("mic") => relay_capture::audio::AudioSource::Microphone,
-                Some(pid) => relay_capture::audio::AudioSource::Process { pid: pid.parse()? },
-                None => relay_capture::audio::AudioSource::Desktop,
-            };
-            bench_audio(secs, source)
+            match args.get(2).map(String::as_str) {
+                Some("dual") => bench_audio_dual(secs),
+                Some("mic") => bench_audio(secs, relay_capture::audio::AudioSource::Microphone),
+                Some(pid) => bench_audio(
+                    secs,
+                    relay_capture::audio::AudioSource::Process { pid: pid.parse()? },
+                ),
+                None => bench_audio(secs, relay_capture::audio::AudioSource::Desktop),
+            }
         }
         #[cfg(windows)]
         "bench-capture" => {
@@ -137,10 +140,10 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
                     pid: it.next().context("--audio-pid PID")?.parse()?,
                 })
             }
-            "--audio-mic" => {
-                opts.mic = true;
-                opts.audio = Some(relay_capture::audio::AudioSource::Microphone);
-            }
+            // Additive since S2: this adds a second Opus track rather than
+            // replacing the program mix. Mic-only is `--no-audio --audio-mic`,
+            // which is what the core emits for a legacy `mic` preset.
+            "--audio-mic" => opts.mic = true,
             "--no-cursor" => opts.cursor = false,
             "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
@@ -231,31 +234,82 @@ fn bench_capture(secs: u64) -> Result<()> {
 /// Capture audio for `secs`, Opus-encode 10 ms frames, report packet flow.
 #[cfg(windows)]
 fn bench_audio(secs: u64, source: relay_capture::audio::AudioSource) -> Result<()> {
+    eprintln!("audio source: {source:?}, {secs}s");
+    let run = run_audio_source(source, secs)?;
+    println!("{}", serde_json::json!({ "stage": "audio", "program": run.report() }));
+    Ok(())
+}
+
+/// One source run: counters plus the packetization latency distribution
+/// (WASAPI block arrival → Opus packet encoded).
+#[cfg(windows)]
+struct AudioRun {
+    packets: u64,
+    bytes: u64,
+    peak: f32,
+    elapsed: f64,
+    lat: relay_capture::Percentiles,
+}
+
+#[cfg(windows)]
+impl AudioRun {
+    fn report(&self) -> serde_json::Value {
+        let (p50, p99, max) = self.lat.summary().unwrap_or((0.0, 0.0, 0.0));
+        serde_json::json!({
+            "packets": self.packets,
+            "expected_packets": (self.elapsed * 100.0) as u64,
+            "kbps": self.bytes as f64 * 8.0 / self.elapsed / 1e3,
+            "peak": self.peak,
+            "packetize_ms": { "p50": p50, "p99": p99, "max": max },
+        })
+    }
+}
+
+#[cfg(windows)]
+fn run_audio_source(source: relay_capture::audio::AudioSource, secs: u64) -> Result<AudioRun> {
     use relay_capture::audio::OpusStream;
+    use relay_capture::{time, Percentiles};
     use std::time::{Duration, Instant};
 
-    eprintln!("audio source: {source:?}, {secs}s");
     let mut stream = OpusStream::new(source, 160_000)?;
-    let mut packets = 0u64;
-    let mut bytes = 0u64;
-    let mut peak = 0.0f32;
+    let mut run =
+        AudioRun { packets: 0, bytes: 0, peak: 0.0, elapsed: 0.0, lat: Percentiles::default() };
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(secs) {
         if let Some(p) = stream.next(Duration::from_millis(200))? {
-            packets += 1;
-            bytes += p.data.len() as u64;
-            peak = peak.max(stream.peak);
+            run.packets += 1;
+            run.bytes += p.data.len() as u64;
+            run.peak = run.peak.max(stream.peak);
+            run.lat.push_ms(time::ticks_to_ms(p.qpc_100ns - p.captured_qpc_100ns));
         }
     }
-    let elapsed = start.elapsed().as_secs_f64();
+    run.elapsed = start.elapsed().as_secs_f64();
+    Ok(run)
+}
+
+/// Both audio sources at once, the way a share with `--audio-mic` runs them:
+/// two WASAPI clients, two Opus encoders, two threads. The number that
+/// matters is whether the program mix packetizes any slower with the mic
+/// alongside it than it does alone.
+#[cfg(windows)]
+fn bench_audio_dual(secs: u64) -> Result<()> {
+    use relay_capture::audio::AudioSource;
+
+    eprintln!("audio sources: desktop + microphone, {secs}s");
+    let mic = std::thread::Builder::new()
+        .name("bench-mic".into())
+        .spawn(move || run_audio_source(AudioSource::Microphone, secs))?;
+    let program = run_audio_source(AudioSource::Desktop, secs)?;
+    let mic = mic.join().map_err(|_| anyhow::anyhow!("mic bench thread panicked"))??;
+    let fp = relay_core::footprint::FootprintMeter::new().sample();
     println!(
         "{}",
         serde_json::json!({
-            "stage": "audio",
-            "packets": packets,
-            "expected_packets": (elapsed * 100.0) as u64,
-            "kbps": bytes as f64 * 8.0 / elapsed / 1e3,
-            "peak": peak,
+            "stage": "audio-dual",
+            "program": program.report(),
+            "mic": mic.report(),
+            "process_cpu_percent": fp.cpu_percent,
+            "process_rss_mb": fp.rss_bytes as f64 / 1e6,
         })
     );
     Ok(())
@@ -365,7 +419,12 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
   probe          print the capability report (hardware HEVC MFTs, WGC) as JSON
   bench-capture  measure capture latency on the primary monitor
   bench-encode   measure capture -> NV12 -> HEVC hardware encode latency
+  bench-audio    measure Opus packetization latency for one source, or for
+                 the program mix and the microphone together (`dual`)
   send           share to a paired peer (spawned by relay-core)
+                 (--audio-pid <pid> narrows the program mix to one process;
+                  --audio-mic *adds* a second microphone track;
+                  --no-audio --audio-mic sends the microphone alone)
   recv           receive a share and render it to a window
                  (--vcam mirrors into the Relay virtual camera;
                   --mic-route <endpoint-id> renders audio to that endpoint)
@@ -395,14 +454,40 @@ mod tests {
         assert_eq!(o.size, None);
     }
 
+    /// `--audio-mic` *adds* the microphone: the program mix keeps its own
+    /// track, which is the whole point of S2.
     #[test]
     fn send_size_and_mic_flags() {
         let o =
             parse_send_args(&s(&["--code", "1", "--size", "2560x1440", "--audio-mic"])).unwrap();
         assert_eq!(o.size, Some((2560, 1440)));
         assert!(o.mic);
-        assert!(matches!(o.audio, Some(AudioSource::Microphone)));
+        assert!(matches!(o.audio, Some(AudioSource::Desktop)), "desktop mix is still sent");
         assert!(parse_send_args(&s(&["--code", "1", "--size", "huge"])).is_err());
+    }
+
+    /// Game audio and the mic together: two tracks, neither displacing the
+    /// other.
+    #[test]
+    fn game_audio_and_mic_coexist() {
+        let o =
+            parse_send_args(&s(&["--code", "1", "--audio-pid", "4321", "--audio-mic"])).unwrap();
+        assert!(matches!(o.audio, Some(AudioSource::Process { pid: 4321 })));
+        assert!(o.mic);
+    }
+
+    /// Mic alone is still expressible, and is what the core emits for a
+    /// legacy `mic` preset — so those presets behave exactly as before.
+    #[test]
+    fn mic_only_is_no_audio_plus_audio_mic() {
+        let o = parse_send_args(&s(&["--code", "1", "--no-audio", "--audio-mic"])).unwrap();
+        assert!(o.audio.is_none(), "no program track");
+        assert!(o.mic);
+    }
+
+    #[test]
+    fn send_defaults_to_no_mic_track() {
+        assert!(!parse_send_args(&s(&["--code", "1"])).unwrap().mic);
     }
 
     #[test]

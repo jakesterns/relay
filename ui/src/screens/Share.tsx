@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Chips, Kv, Live, Toggle } from "../components/Controls";
+import { Card, Chips, ChipSet, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import {
-  api, onCoreEvents,
-  type DiscoveredReceiver, type ProcessInfo, type SharePresetDef, type ShareStats,
-  type SharePreview, type SourceTarget,
+  api, onCoreEvents, presetAudioLabel,
+  type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type SharePresetDef,
+  type ShareStats, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
@@ -20,10 +20,6 @@ const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
-};
-
-const presetAudioLabel: Record<SharePresetDef["audio"], string> = {
-  system: "System mix", game: "Game only", mic: "Microphone", off: "None",
 };
 
 export function Share() {
@@ -344,7 +340,7 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
         <Kv k="Frame rate" v={`${def.fps} fps`} mono />
         <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
-        <Kv k="Audio" v={presetAudioLabel[def.audio]} />
+        <Kv k="Audio" v={presetAudioLabel(def.audio)} />
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
@@ -382,13 +378,28 @@ function PresetCard({ def, locked, onSaved }: {
               edit({ size: m ? [Number(m[1]), Number(m[2])] : undefined });
             }} />
         </div>
-        <Chips label="Audio" value={draft.audio}
-          onChange={(v) => edit({ audio: v as SharePresetDef["audio"] })}
+        <ChipSet label="Audio"
+          values={[
+            ...(draft.audio.desktop === "off" ? [] : [draft.audio.desktop]),
+            ...(draft.audio.mic ? ["mic" as const] : []),
+          ]}
           options={[
             { key: "system", label: "System mix" }, { key: "game", label: "Game only" },
-            { key: "mic", label: "Microphone" }, { key: "off", label: "None" },
-          ]} />
-        <p className="note">One audio track per share: picking Microphone sends your mic <em>instead of</em> the desktop mix, not alongside it. Mic-plus-desktop needs a second track and is not built yet.</p>
+            { key: "mic", label: "Microphone" },
+          ]}
+          onToggle={(k) => {
+            // The two desktop sources exclude each other — you cannot capture
+            // the whole endpoint and one process at once — but the microphone
+            // is its own track and rides alongside either.
+            if (k === "mic") edit({ audio: { ...draft.audio, mic: !draft.audio.mic } });
+            else edit({
+              audio: {
+                ...draft.audio,
+                desktop: (draft.audio.desktop === k ? "off" : k) as DesktopAudio,
+              },
+            });
+          }} />
+        <p className="note">Pick any combination: the microphone travels as its own track alongside the desktop mix, and the person on the other end hears them together. Nothing selected means a silent share.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}

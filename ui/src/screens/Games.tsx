@@ -3,7 +3,7 @@ import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
-  api, isTauri,
+  api, isTauri, presetAudioLabel,
   type ApoStatus, type ColorInfo, type Limiter, type Preview, type Profile, type SharePreset,
   type SharePresetDef,
 } from "../lib/ipc";
@@ -582,9 +582,6 @@ function SharingSide({ draft, save, dirty }: {
 
   const chosen = draft?.share ?? "off";
   const def = presets.find((p) => p.id === chosen);
-  const audio: Record<SharePresetDef["audio"], string> = {
-    system: "System mix", game: "Game only", mic: "Microphone", off: "None",
-  };
 
   return (
     <aside className="side">
@@ -597,7 +594,7 @@ function SharingSide({ draft, save, dirty }: {
             <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
             <Kv k="Frame rate" v={`${def.fps} fps`} mono />
             <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
-            <Kv k="Audio" v={audio[def.audio]} />
+            <Kv k="Audio" v={presetAudioLabel(def.audio)} />
             <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
             <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
           </>

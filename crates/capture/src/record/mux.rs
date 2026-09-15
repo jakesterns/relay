@@ -24,8 +24,9 @@ pub const VIDEO_TIMESCALE: u32 = 10_000_000;
 pub struct MuxConfig {
     pub width: u32,
     pub height: u32,
-    /// `None` = video-only file.
-    pub audio: Option<AudioConfig>,
+    /// One entry per audio track, in track order; empty = video-only file.
+    /// Track 0 is the program mix, track 1 (when present) the microphone.
+    pub audio: Vec<AudioConfig>,
     /// Target fragment duration in 100 ns units (default 1 s).
     pub fragment_100ns: i64,
 }
@@ -36,21 +37,44 @@ pub struct AudioConfig {
     pub channels: u8,
     /// Opus pre-skip in 48 kHz samples (0 is fine for a live stream).
     pub pre_skip: u16,
+    /// `hdlr` track name, so an editor can tell the two apart.
+    pub name: &'static str,
 }
 
 impl MuxConfig {
     pub fn video_only(width: u32, height: u32) -> Self {
-        Self { width, height, audio: None, fragment_100ns: 10_000_000 }
+        Self { width, height, audio: Vec::new(), fragment_100ns: 10_000_000 }
     }
 
+    /// Video plus the program-mix Opus track.
     pub fn with_opus(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
-            audio: Some(AudioConfig { sample_rate: 48_000, channels: 2, pre_skip: 0 }),
+            audio: vec![opus_track(PROGRAM_TRACK_NAME)],
             fragment_100ns: 10_000_000,
         }
     }
+
+    /// Video plus the program mix *and* a second Opus track for the
+    /// microphone. Both are 48 kHz stereo; see
+    /// `docs/dev/dual-audio-decision.md` for why they stay unmixed.
+    pub fn with_opus_and_mic(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            audio: vec![opus_track(PROGRAM_TRACK_NAME), opus_track(MIC_TRACK_NAME)],
+            fragment_100ns: 10_000_000,
+        }
+    }
+}
+
+/// `hdlr` names for the two audio tracks, so players and editors label them.
+pub const PROGRAM_TRACK_NAME: &str = "Relay Audio";
+pub const MIC_TRACK_NAME: &str = "Relay Microphone";
+
+fn opus_track(name: &'static str) -> AudioConfig {
+    AudioConfig { sample_rate: 48_000, channels: 2, pre_skip: 0, name }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +100,8 @@ pub struct Mp4Muxer<W: Write> {
     t0: i64,
     seq: u32,
     video: Vec<PendingSample>,
-    audio: Vec<PendingSample>,
+    /// Pending samples per audio track, parallel to `cfg.audio`.
+    audio: Vec<Vec<PendingSample>>,
     /// Video AUs dropped while waiting for the first keyframe.
     pub dropped_awaiting_key: u64,
     bytes_written: u64,
@@ -85,6 +110,7 @@ pub struct Mp4Muxer<W: Write> {
 
 impl<W: Write> Mp4Muxer<W> {
     pub fn new(w: W, cfg: MuxConfig) -> Self {
+        let audio = cfg.audio.iter().map(|_| Vec::new()).collect();
         Self {
             w,
             cfg,
@@ -92,7 +118,7 @@ impl<W: Write> Mp4Muxer<W> {
             t0: 0,
             seq: 0,
             video: Vec::new(),
-            audio: Vec::new(),
+            audio,
             dropped_awaiting_key: 0,
             bytes_written: 0,
             last_video_dur: 166_667, // 60 fps until the stream says otherwise
@@ -148,18 +174,27 @@ impl<W: Write> Mp4Muxer<W> {
         Ok(())
     }
 
-    /// Feed one Opus packet. Dropped (not an error) before the first video
-    /// keyframe so the file always starts on a decodable picture.
-    pub fn push_audio(&mut self, packet: &[u8], pts_100ns: i64, dur_100ns: i64) -> Result<()> {
+    /// Feed one Opus packet to audio track `track` (0 = program mix, 1 = mic).
+    /// Dropped (not an error) before the first video keyframe so the file
+    /// always starts on a decodable picture, and dropped for a track this
+    /// file does not carry — a mic packet arriving at a program-only muxer is
+    /// a configuration mismatch, not a reason to fail a recording.
+    pub fn push_audio(
+        &mut self,
+        track: usize,
+        packet: &[u8],
+        pts_100ns: i64,
+        dur_100ns: i64,
+    ) -> Result<()> {
         match self.state {
             MuxState::Finalized => bail!("muxer already finalized"),
             MuxState::AwaitingKeyframe => return Ok(()),
             MuxState::Streaming => {}
         }
-        if self.cfg.audio.is_none() {
+        let Some(pending) = self.audio.get_mut(track) else {
             return Ok(());
-        }
-        self.audio.push(PendingSample {
+        };
+        pending.push(PendingSample {
             data: packet.to_vec(),
             pts: (pts_100ns - self.t0).max(0),
             dur: Some(dur_100ns),
@@ -194,8 +229,15 @@ impl<W: Write> Mp4Muxer<W> {
         if let Some(d) = self.video.last().and_then(|s| s.dur) {
             self.last_video_dur = d;
         }
-        let split = self.audio.iter().position(|a| a.pts >= until_pts).unwrap_or(self.audio.len());
-        let audio: Vec<PendingSample> = self.audio.drain(..split).collect();
+        let audio: Vec<Vec<PendingSample>> = self
+            .audio
+            .iter_mut()
+            .map(|pending| {
+                let split =
+                    pending.iter().position(|a| a.pts >= until_pts).unwrap_or(pending.len());
+                pending.drain(..split).collect()
+            })
+            .collect();
         let video = std::mem::take(&mut self.video);
 
         self.seq += 1;
@@ -289,16 +331,16 @@ fn init_segment(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummar
             b.u32(m);
         }
         b.zeros(24); // pre_defined
-        b.u32(u32::from(cfg.audio.is_some()) + 2); // next_track_ID
+        b.u32(cfg.audio.len() as u32 + 2); // next_track_ID
         b.close(mvhd);
 
         video_trak(&mut b, cfg, ps, sps);
-        if let Some(a) = &cfg.audio {
-            audio_trak(&mut b, a);
+        for (i, a) in cfg.audio.iter().enumerate() {
+            audio_trak(&mut b, a, audio_track_id(i));
         }
 
         let mvex = b.open(b"mvex");
-        for track_id in 1..=(1 + u32::from(cfg.audio.is_some())) {
+        for track_id in 1..=(1 + cfg.audio.len() as u32) {
             let trex = b.full(b"trex", 0, 0);
             b.u32(track_id);
             b.u32(1); // default_sample_description_index
@@ -412,13 +454,18 @@ fn hvc1(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::Sp
     b.close(entry);
 }
 
-fn audio_trak(b: &mut Boxes, a: &AudioConfig) {
+/// Track ids: video is 1, audio tracks follow in order.
+fn audio_track_id(index: usize) -> u32 {
+    index as u32 + 2
+}
+
+fn audio_trak(b: &mut Boxes, a: &AudioConfig, track_id: u32) {
     let trak = b.open(b"trak");
     {
         let tkhd = b.full(b"tkhd", 0, 3);
         b.u32(0);
         b.u32(0);
-        b.u32(2); // track id
+        b.u32(track_id);
         b.u32(0);
         b.u32(0);
         b.zeros(8);
@@ -444,7 +491,9 @@ fn audio_trak(b: &mut Boxes, a: &AudioConfig) {
             b.u16(0);
             b.close(mdhd);
 
-            hdlr(b, b"soun", b"Relay Audio\0");
+            let mut name = a.name.as_bytes().to_vec();
+            name.push(0);
+            hdlr(b, b"soun", &name);
 
             let minf = b.open(b"minf");
             {
@@ -529,7 +578,7 @@ fn fragment(
     cfg: &MuxConfig,
     seq: u32,
     video: &[PendingSample],
-    audio: &[PendingSample],
+    audio: &[Vec<PendingSample>],
 ) -> Vec<u8> {
     let mut b = Boxes::new();
     let moof = b.open(b"moof");
@@ -540,10 +589,13 @@ fn fragment(
     }
     let mut offset_patches: Vec<usize> = Vec::new();
     traf(&mut b, 1, VIDEO_TIMESCALE, video, true, &mut offset_patches);
-    if let Some(a) = &cfg.audio {
-        if !audio.is_empty() {
-            traf(&mut b, 2, a.sample_rate, audio, false, &mut offset_patches);
-        }
+    // Only tracks with samples this fragment get a `traf`; `written` records
+    // which, so the data-offset patches and the mdat payload stay in step.
+    let mut written: Vec<usize> = Vec::new();
+    for (i, cfg_a) in cfg.audio.iter().enumerate() {
+        let Some(samples) = audio.get(i).filter(|s| !s.is_empty()) else { continue };
+        traf(&mut b, audio_track_id(i), cfg_a.sample_rate, samples, false, &mut offset_patches);
+        written.push(i);
     }
     b.close(moof);
 
@@ -558,12 +610,14 @@ fn fragment(
     if let Some(at) = patches.next() {
         patch(&mut b, at, video);
     }
-    if let Some(at) = patches.next() {
-        patch(&mut b, at, audio);
+    for &i in &written {
+        if let Some(at) = patches.next() {
+            patch(&mut b, at, &audio[i]);
+        }
     }
 
     let mdat = b.open(b"mdat");
-    for s in video.iter().chain(audio.iter()) {
+    for s in video.iter().chain(written.iter().flat_map(|&i| audio[i].iter())) {
         b.bytes(&s.data);
     }
     b.close(mdat);
@@ -681,7 +735,7 @@ pub(crate) mod tests {
         let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus(1920, 1080));
         assert_eq!(m.state(), MuxState::AwaitingKeyframe);
         m.push_video(&p_au(1), 0, false).unwrap();
-        m.push_audio(b"opus", 0, 100_000).unwrap();
+        m.push_audio(0, b"opus", 0, 100_000).unwrap();
         assert_eq!(m.dropped_awaiting_key, 1);
         assert_eq!(m.bytes_written(), 0, "nothing written before the first keyframe");
 
@@ -710,7 +764,7 @@ pub(crate) mod tests {
         let f = 166_667i64; // 60 fps
         m.push_video(&key_au(), 0, true).unwrap();
         for i in 1..=6 {
-            m.push_audio(&[0xA0 + i as u8], (i - 1) * 100_000, 100_000).unwrap();
+            m.push_audio(0, &[0xA0 + i as u8], (i - 1) * 100_000, 100_000).unwrap();
             m.push_video(&p_au(i as u8), i * f, false).unwrap();
         }
         let out = m.finalize().unwrap();
@@ -731,18 +785,116 @@ pub(crate) mod tests {
         let mut m2 = Mp4Muxer::new(m.finalize().unwrap(), MuxConfig::video_only(640, 480));
         m2.state = MuxState::Finalized;
         assert!(m2.push_video(&key_au(), 0, true).is_err());
-        assert!(m2.push_audio(b"x", 0, 1).is_err());
+        assert!(m2.push_audio(0, b"x", 0, 1).is_err());
     }
 
     #[test]
     fn video_only_config_ignores_audio() {
         let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::video_only(640, 480));
         m.push_video(&key_au(), 0, true).unwrap();
-        m.push_audio(b"opus", 0, 100_000).unwrap();
+        m.push_audio(0, b"opus", 0, 100_000).unwrap();
         let out = m.finalize().unwrap();
         // One traf only: no audio track anywhere in the moof.
         let pos = out.windows(4).filter(|w| w == b"traf").count();
         assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn mic_track_is_a_second_audio_track_in_the_same_file() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        for i in 0..4i64 {
+            m.push_audio(0, &[0xB0, i as u8], i * 100_000, 100_000).unwrap();
+            m.push_audio(1, &[0xC0, i as u8], i * 100_000, 100_000).unwrap();
+        }
+        let out = m.finalize().unwrap();
+        assert_eq!(
+            out.windows(4).filter(|w| w == b"traf").count(),
+            3,
+            "video + program + mic each get a traf"
+        );
+        assert_eq!(out.windows(4).filter(|w| w == b"trak").count(), 3);
+        let count = |needle: &[u8]| out.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(count(PROGRAM_TRACK_NAME.as_bytes()), 1, "program track is named");
+        assert_eq!(count(MIC_TRACK_NAME.as_bytes()), 1, "mic track is named");
+        for i in 0..4u8 {
+            assert!(count(&[0xB0, i]) > 0, "program packet {i} in the file");
+            assert!(count(&[0xC0, i]) > 0, "mic packet {i} in the file");
+        }
+    }
+
+    /// Opening a two-track file but never feeding the mic (the user muted it,
+    /// or the capture endpoint vanished) must still produce a valid file: the
+    /// empty track gets a `trak` but no `traf`, and offsets stay in step.
+    #[test]
+    fn a_silent_mic_track_does_not_desync_the_fragment() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        m.push_audio(0, b"program", 0, 100_000).unwrap();
+        m.push_video(&p_au(1), 166_667, false).unwrap();
+        let out = m.finalize().unwrap();
+        assert_eq!(out.windows(4).filter(|w| w == b"traf").count(), 2);
+        assert_eq!(out.windows(4).filter(|w| w == b"trak").count(), 3);
+        boxes_at(&out); // sizes all consistent
+        assert_mdat_offsets(&out);
+    }
+
+    /// The mic feeding but the program silent is the mirror case, and the one
+    /// that would break a naive offset patcher: the *second* audio track's
+    /// data offset must point past the video, not past a program run that is
+    /// not there.
+    #[test]
+    fn a_silent_program_track_keeps_the_mic_offset_right() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        m.push_audio(1, b"mic-only-packet", 0, 100_000).unwrap();
+        m.push_video(&p_au(1), 166_667, false).unwrap();
+        let out = m.finalize().unwrap();
+        assert_eq!(out.windows(4).filter(|w| w == b"traf").count(), 2);
+        assert_mdat_offsets(&out);
+    }
+
+    /// Walk each `moof`'s `trun` data offsets and check they tile the `mdat`
+    /// payload exactly: sum of sample sizes per track, laid end to end from
+    /// the first offset, must land on the end of the mdat.
+    fn assert_mdat_offsets(data: &[u8]) {
+        let mut i = 0usize;
+        while i + 8 <= data.len() {
+            let size = u32::from_be_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+            if &data[i + 4..i + 8] == b"moof" {
+                let moof = &data[i..i + size];
+                let mdat_size =
+                    u32::from_be_bytes(data[i + size..i + size + 4].try_into().unwrap()) as usize;
+                let mut runs: Vec<(usize, usize)> = Vec::new(); // (offset, total bytes)
+                let mut j = 0usize;
+                while j + 8 <= moof.len() {
+                    if &moof[j + 4..j + 8] == b"trun" {
+                        let count =
+                            u32::from_be_bytes(moof[j + 12..j + 16].try_into().unwrap()) as usize;
+                        let offset =
+                            u32::from_be_bytes(moof[j + 16..j + 20].try_into().unwrap()) as usize;
+                        let bytes: usize = (0..count)
+                            .map(|k| {
+                                let at = j + 20 + k * 12 + 4;
+                                u32::from_be_bytes(moof[at..at + 4].try_into().unwrap()) as usize
+                            })
+                            .sum();
+                        runs.push((offset, bytes));
+                    }
+                    j += 1;
+                }
+                runs.sort_unstable();
+                let mut cursor = size + 8; // first payload byte, from moof start
+                for (offset, bytes) in &runs {
+                    assert_eq!(*offset, cursor, "run starts where the previous one ended");
+                    cursor += bytes;
+                }
+                assert_eq!(cursor, size + mdat_size, "runs tile the mdat exactly");
+                i += size + mdat_size;
+                continue;
+            }
+            i += size;
+        }
     }
 
     #[test]
@@ -754,7 +906,7 @@ pub(crate) mod tests {
             m.push_video(&p_au(9), base - f, false).unwrap(); // dropped
             m.push_video(&key_au(), base, true).unwrap();
             for i in 1..=4 {
-                m.push_audio(&[0xB0, i as u8], base + (i - 1) * 100_000, 100_000).unwrap();
+                m.push_audio(0, &[0xB0, i as u8], base + (i - 1) * 100_000, 100_000).unwrap();
                 m.push_video(&p_au(i as u8), base + i * f, false).unwrap();
             }
             m.finalize().unwrap()

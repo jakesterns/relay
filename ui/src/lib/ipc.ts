@@ -112,7 +112,24 @@ export type SourceTarget =
   | { kind: "window"; hwnd: number }
   | { kind: "region"; display: number; x: number; y: number; w: number; h: number };
 /** Mirror of `crates/core/src/presets.rs`. */
-export type PresetAudio = "system" | "game" | "mic" | "off";
+export type DesktopAudio = "system" | "game" | "off";
+/**
+ * The share's audio *source set*. The sender carries two Opus tracks, so the
+ * microphone is independent of the desktop source rather than one of four
+ * exclusive choices. See `docs/dev/dual-audio-decision.md`.
+ *
+ * The core still reads the pre-S2 four-way string from disk, but everything
+ * it hands out and takes back on the wire is this object.
+ */
+export interface PresetAudio { desktop: DesktopAudio; mic: boolean }
+
+/** Human summary of an audio source set, e.g. "Game only + microphone". */
+export function presetAudioLabel(a: PresetAudio): string {
+  const desktop = { system: "System mix", game: "Game only", off: "" }[a.desktop];
+  if (desktop && a.mic) return `${desktop} + microphone`;
+  if (desktop) return desktop;
+  return a.mic ? "Microphone" : "None";
+}
 export interface SharePresetDef {
   id: string; name: string; bitrate_mbps: number; fps: number;
   size?: [number, number]; audio: PresetAudio; cursor: boolean;
@@ -128,6 +145,8 @@ export interface ShareStats {
   bitrate_mbps?: number; fps?: number; frames?: number; keyframes?: number;
   dropped?: number; encode_ms?: number; capture_to_send_ms?: number;
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
+  /** Second audio track (microphone); absent when only one track is sent. */
+  mic_packets?: number; mic_peak?: number;
   cpu_percent?: number; rss_mb?: number;
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;
@@ -288,9 +307,9 @@ const mockVdevice: VdeviceStatus = {
 
 /** The three built-ins, mirroring `presets.rs::builtins()`. */
 const mockPresets: SharePresetDef[] = [
-  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: "game", cursor: false, record: false, replay_secs: 60 },
-  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: "system", cursor: true, record: false, replay_secs: 0 },
-  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: "system", cursor: true, record: false, replay_secs: 0 },
+  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60 },
+  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0 },
+  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0 },
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 

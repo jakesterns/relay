@@ -50,6 +50,32 @@ pub fn video_codec() -> RTCRtpCodecParameters {
     }
 }
 
+/// Which of the two audio streams an arriving track carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioRole {
+    /// The desktop mix or one game process: what the share sounds like.
+    Program,
+    /// The sender microphone.
+    Mic,
+}
+
+/// Classify an arriving audio track. `track_id` is the msid track id the
+/// sender set ([`sender::PROGRAM_TRACK_ID`] / [`sender::MIC_TRACK_ID`]);
+/// `index` is how many audio tracks arrived before this one.
+///
+/// The id is authoritative when we recognise it. Everything else falls back
+/// to arrival order, which is what keeps an older peer — one that sends a
+/// single unnamed audio track, or names it something else — working: its one
+/// track is the program mix, and there is nothing to confuse it with.
+pub fn audio_role(track_id: &str, index: usize) -> AudioRole {
+    match track_id {
+        sender::MIC_TRACK_ID => AudioRole::Mic,
+        sender::PROGRAM_TRACK_ID => AudioRole::Program,
+        _ if index == 0 => AudioRole::Program,
+        _ => AudioRole::Mic,
+    }
+}
+
 pub fn audio_codec() -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
@@ -150,4 +176,34 @@ pub fn local_ip_towards(peer: IpAddr) -> Result<IpAddr> {
     let s = std::net::UdpSocket::bind(if peer.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" })?;
     s.connect((peer, 9)).context("no route to peer")?;
     Ok(s.local_addr()?.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_tracks_classify_by_id_whatever_the_order() {
+        assert_eq!(audio_role(sender::PROGRAM_TRACK_ID, 0), AudioRole::Program);
+        assert_eq!(audio_role(sender::MIC_TRACK_ID, 1), AudioRole::Mic);
+        // SDP m-line order is not guaranteed to survive the answer, so the
+        // id has to win over the index when we recognise it.
+        assert_eq!(audio_role(sender::MIC_TRACK_ID, 0), AudioRole::Mic);
+        assert_eq!(audio_role(sender::PROGRAM_TRACK_ID, 1), AudioRole::Program);
+    }
+
+    /// An older sender ships one audio track with whatever msid it likes.
+    /// It must land on the program mix, not the mic.
+    #[test]
+    fn an_older_peer_single_track_is_the_program_mix() {
+        assert_eq!(audio_role("audio", 0), AudioRole::Program);
+        assert_eq!(audio_role("", 0), AudioRole::Program);
+        assert_eq!(audio_role("6f2e1b3a-audio", 0), AudioRole::Program);
+    }
+
+    #[test]
+    fn unrecognised_extra_tracks_fall_back_to_arrival_order() {
+        assert_eq!(audio_role("something-else", 1), AudioRole::Mic);
+        assert_eq!(audio_role("something-else", 2), AudioRole::Mic);
+    }
 }
