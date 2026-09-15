@@ -257,13 +257,21 @@ only: the helper covers both components.
 - [x] Both components already record what they installed (`installed.json`, `apo-backup\<endpoint>.json`), so an elevated helper has a manifest to act on.
 - [x] The uninstall planner is a pure function of probed state and needs no new design.
 
-### Definition of Done
-- [ ] One elevated helper, launched on demand with a UAC prompt, that performs exactly the recorded install/uninstall steps and nothing else.
-- [ ] The user sees what will be changed *before* the prompt — the same dry-run listing the uninstall card already renders.
-- [ ] Helper refuses to run anything not in the plan; the live-write gates stay in force.
-- [ ] Declining UAC leaves the machine untouched and says so plainly.
-- [ ] Settings "Install APO" and the camera card work end to end on this machine.
-- [ ] `docs/plans/M3b-apo.md` Deferred item 3 closed; M7 plan updated.
+### Definition of Done — **met 2026-09-14**
+- [x] One elevated helper, launched on demand with a UAC prompt, that performs exactly the recorded install/uninstall steps and nothing else. `relay-elevate.exe` + `crates/core/src/elevate.rs`; the request carries no registry path, value or DLL path, so there is no field capable of naming anything else.
+- [x] The user sees what will be changed *before* the prompt — for the two removal ops it *is* the uninstall card's listing, narrowed to that step and rendered by `Plan::lines`. Asserted over the pipe for all four ops.
+- [x] Helper refuses to run anything not in the plan; the live-write gates stay in force. Four-variant op enum, COM keys vetted against our own CLSID, endpoint ids vetted as GUIDs, versioned + expiring + location-checked requests. Each gate is armed around one vetted call and removed after; nothing else in the product arms them.
+- [x] Declining UAC leaves the machine untouched and says so plainly. Verified live: *"Nothing on this PC was changed. You declined the Windows permission prompt."*, camera left registered, registry unchanged.
+- [x] Settings "Install APO" and the camera card work end to end on this machine. Both installed and removed from the cards; the endpoint's `FxProperties` export is byte-identical before and after. `docs/dev/elevation-live.md`.
+- [x] `docs/plans/M3b-apo.md` Deferred item 3 closed; M7 plan updated (its Deferred item 2 closed too).
+
+### What it also fixed
+The uninstaller's elevated phase could not have worked: it re-ran `relay-core
+uninstall --components-only` under `runas` with the live-write gates set in the
+*parent*, and elevation starts the child from the user's logon environment
+block. And `RegCreateKeyExW(KEY_WRITE)` is denied on an endpoint's
+`FxProperties` even when elevated — administrators get `SetValue` without
+`CreateSubKey`. Both are written up in `docs/dev/elevation-live.md`.
 
 ### Kickoff prompt
 ```

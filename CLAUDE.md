@@ -47,7 +47,10 @@ Dark, restrained, hardware-inspired. Warm black `#0E0D0C`, surfaces `#151312`/`#
 ## Repo layout (scaffolded 2026-09-09)
 ```
 Cargo.toml            workspace (resolver 2, size-optimised release profile)
-crates/core/          relay-core  — lib + `relay-core` binary. The always-on service.
+crates/core/          relay-core  — lib + three binaries: `relay-core` (the always-on
+                      service and the CLI), `relay-svc` (GUI-subsystem launcher, no console
+                      flash), `relay-elevate` (the elevated install helper — the ONLY Relay
+                      binary that writes HKLM; see src/elevate.rs and docs/dev/elevation-live.md).
 crates/audio/         relay-audio — DSP (biquad EQ, band-split limiter, partitioned-conv HRTF),
                       WASAPI session/exclusive probing, offline A/B render, `relay-preview` bin.
                       `dsp` feature (default on) holds the FFT; the core links default-features=false
@@ -87,6 +90,7 @@ relay-handoff/        original handoff bundle; do not edit
 - `status.rs` — human summary for `relay-core status` (`--json` for the raw state).
 - `audio_bridge.rs` — `AudioSettings` → `relay_audio::ChainParams`; spawns `relay-preview` for the A/B render.
 - `vdevice.rs` — virtual-device glue: status probe, consent record, camera install/uninstall (record-then-apply into `installed.json`), receive routing (service decides `--vcam`/`--mic-route` from consent + registration, never the client); `relay-core vdevice` CLI.
+- `elevate.rs` — the elevated install helper's protocol and rules: a four-variant op allow-list, requests that carry no registry path or DLL path (the helper re-derives them), CLSID-scope and GUID vetting, versioned/expiring/location-checked requests, and the gate armed around one vetted call. `relay-core elevate plan|run <op>`; `Method::ElevationPlan` / `RunElevated`.
 - `audio_apo.rs` — the production `AudioControl`: params to the APO over `relay_audio::shm` (apply = write + un-bypass, restore = bypass); read-only `apo_status()` probe; gated `install_live`/`uninstall_live` (backup-then-apply to `apo-backup\<endpoint>.json`); `relay-core apo` CLI.
 - `service.rs` — wires the above; single-threaded tokio runtime. 1 s tick runs the WASAPI-exclusive watcher (only while a profile with audio processing is active) → `AudioChainState::ExclusiveBypassed`.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.

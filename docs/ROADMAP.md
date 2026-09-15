@@ -102,6 +102,8 @@ Small items that unblock everything else. **Done 2026-09-09** (session log in `d
 - [ ] Clean-VM snapshot test. Scripts written and green on the dev machine (`scripts/vm-cycle.ps1`, `machine-snapshot.ps1`, `snapshot-diff.ps1`); the checkpoint run itself is deferred — runbook in `docs/dev/uninstall-vm.md`.
 - [ ] Signed installer and binaries (EV cert).
 
+**S6, 2026-09-14 — the elevated install helper landed, and both components round-tripped live.** `relay-elevate.exe` is now the only Relay binary that writes `HKLM`: the core shows the exact listing, the user approves one UAC prompt, and the helper performs only what the four-variant op enum names, re-deriving every key and DLL path itself. From the Settings cards on this dev machine the camera and the APO were each registered and removed, and the endpoint's `FxProperties` `reg export` came back **byte-identical** to the pre-install export — which promotes M3b's byte-for-byte restore claim from fixture-proven to live-proven for the registry half, and closes M7's "live removal of the two opt-in components". Declining the prompt was verified to change nothing and say so. Two real defects fell out: `RegCreateKeyExW(KEY_WRITE)` is denied on an endpoint's `FxProperties` even when elevated (administrators get `SetValue` without `CreateSubKey`, so the fix was to ask for less, not to take ownership), and the uninstaller's elevated phase had been passing the live-write gates through an environment block that elevation does not inherit. Evidence and runbook: `docs/dev/elevation-live.md`. Still deferred, unchanged: loading the APO into audiodg (test-signing VM + EV cert).
+
 ## What is left
 
 All eight milestones are merged into `main` as of 2026-09-14. Every remaining
@@ -129,9 +131,9 @@ weeks of identity-verification lead time. It is still not ordered.
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | done 2026-09-13; live pass complete on the LG ULTRAGEAR+ (crash-restore + focus restore at 144 ms mean); 2nd monitor / C2 / vendor opcodes / ADLX / Win+L deferred |
 | M3 Audio DSP & detection | `docs/plans/M3-audio-dsp.md` | done 2026-09-10; listening session + real-game exclusive check deferred to MVP validation |
-| M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; VM pass + signing deferred (EV cert not ordered, no hypervisor on dev PC) |
+| M3b Endpoint APO | `docs/plans/M3b-apo.md` | code-complete 2026-09-11; **registration + byte-identical restore live-verified 2026-09-14** (S6, `docs/dev/elevation-live.md`); audiodg load + signing still deferred (EV cert, no hypervisor) |
 | M5 Virtual devices | `docs/plans/M5-vdevices.md` | code-complete 2026-09-12; live pass → `docs/dev/vcam-live.md` (needs elevation — per-user HKCU registration tested and ruled out 2026-09-14); mic driver still EV-cert-blocked |
 | M6 Recording & presets | `docs/plans/M6-recording-presets.md` | done 2026-09-11; measured on loopback (0 ms / +0.06 pt CPU / 55 ms replay save); MKV + 1 h roll soak + full-motion 4K60 → MVP validation pass |
-| M7 Installer | `docs/plans/M7-installer.md` | code-complete 2026-09-12; install/uninstall cycle green on the dev machine (empty diff); clean-VM + component live removal + signing deferred |
+| M7 Installer | `docs/plans/M7-installer.md` | code-complete 2026-09-12; install/uninstall cycle green on the dev machine (empty diff); **elevated phase fixed and live-verified 2026-09-14** (S6); clean-VM + signing deferred |
 
 Update the status column when a session starts or finishes a milestone.
