@@ -725,7 +725,7 @@ Four deliverables wait on this one certificate: the signed installer, the signed
 ---
 
 ## S22 — Firewall rules in the installer
-**Branch** `feat/firewall-rules` · **Worktree** create when started
+**Branch** `feat/firewall-rules` · **Worktree** `C:\Users\stern\Documents\Code\relay-firewall`
 
 Found 2026-09-14 on the dev machine: ten accumulated Block rules for
 `relay-share.exe` and not one Allow rule. Windows prompts the first time a
@@ -775,7 +775,7 @@ feel unfinished in the first ten minutes. **S23 and S24 both touch
 ---
 
 ## S23 — Never look dead
-**Branch** `feat/never-dead` · **Worktree** create when started
+**Branch** `feat/never-dead` · **Worktree** `C:\Users\stern\Documents\Code\relay-never-dead`
 
 The worst first impression in the product. Autostart is off by default, the UI
 never starts the core, and the offline banner tells a desktop user to type
@@ -817,7 +817,7 @@ Autostart is off by default, the UI never starts the core, and ui/src/components
 ---
 
 ## S24 — Stop the UI lying
-**Branch** `feat/honest-ui` · **Worktree** create when started · **Not concurrent with S23**
+**Branch** `feat/honest-ui` · **Worktree** `C:\Users\stern\Documents\Code\relay-honest-ui` · **Not concurrent with S23**
 
 Three places render invented content as if it were measured. These are worse
 than blank space because a user tests them early and believes them.
@@ -848,7 +848,7 @@ Three parts of the UI render invented content as if it were measured: the Displa
 ---
 
 ## S25 — Keyboard, focus and destructive actions
-**Branch** `feat/ui-safety` · **Worktree** create when started
+**Branch** `feat/ui-safety` · **Worktree** `C:\Users\stern\Documents\Code\relay-ui-safety`
 
 The app is mouse-only, and the same class of destructive action is handled four
 different ways.
@@ -885,7 +885,7 @@ Separately, four different patterns exist for destructive actions: preset delete
 ---
 
 ## S26 — Shell polish
-**Branch** `feat/shell-polish` · **Worktree** create when started
+**Branch** `feat/shell-polish` · **Worktree** `C:\Users\stern\Documents\Code\relay-shell-polish`
 
 Small Windows-integration details, none hard, all noticed.
 
