@@ -481,11 +481,13 @@ function Scene() {
   );
 }
 
-/** "NvAPI + gamma ramp + DDC/CI", from the live apply. */
+/** "NvAPI + gamma ramp + DDC/CI", from the live apply. AMD machines read
+ * "AMD ADL" in the same slot -- whichever vendor drives the target monitor. */
 function appliedViaText(state: ReturnType<typeof useCore>["state"]): string {
   if (state.display_state !== "applied") return "—";
   const parts = [
     state.display_via.nvapi && "NvAPI",
+    state.display_via.amd && "AMD ADL",
     state.display_via.gamma && "gamma ramp",
     state.display_via.ddcci && "DDC/CI",
   ].filter(Boolean) as string[];

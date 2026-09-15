@@ -301,7 +301,12 @@ pub enum DisplayState {
 /// "Applied via" line, plus profile fields this hardware could not honour.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DisplayVia {
+    /// GPU colour went through NvAPI.
     pub nvapi: bool,
+    /// GPU colour went through the AMD Display Library. Mutually exclusive
+    /// with `nvapi` for one monitor — whichever vendor drives it.
+    #[serde(default)]
+    pub amd: bool,
     pub gamma: bool,
     pub ddcci: bool,
     /// Field names from `MonitorSettings`/`GpuColor` that were skipped,

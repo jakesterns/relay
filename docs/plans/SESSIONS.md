@@ -120,14 +120,14 @@ verifiable here.
 ### Definition of Ready
 - [x] M2 merged and NVIDIA live-verified (2026-09-13, restore at 144 ms mean).
 - [x] `DisplayIo` trait exists as the seam (`crates/display`).
-- [ ] Confirm whether an AMD GPU drives any display on this machine, or whether ADLX can only be exercised against fixtures. If fixtures only, say so in the plan and unit-test the mapping.
+- [x] Confirmed 2026-09-14: **no AMD GPU drives a display here** (Raphael iGPU present, nothing attached; the LG hangs off the RTX 3090). Fixtures for the colour writes, plus a live read-only ADL probe that verifies the FFI. Recorded in `docs/plans/M2-display.md`.
 
 ### Definition of Done
-- [ ] ADLX backend behind `DisplayIo`, selected at runtime by which vendor owns the target monitor; NVIDIA path unchanged.
-- [ ] Backup-then-apply and restore-on-blur behave identically on both vendors — proven by running the existing crash-restore harness against the ADLX backend.
-- [ ] Vibrance/gamma/contrast/hue mapping unit-tested against fixtures; the mapping is *not* one-to-one with NvAPI, so record the curve you chose and why.
-- [ ] A machine with neither vendor degrades to "unsupported" in the UI, never a panic.
-- [ ] `docs/plans/M2-display.md` ADLX line checked off; ROADMAP M2 row updated.
+- [x] `relay-display::amd` behind `DisplayIo`, selected at runtime by vendor; NVIDIA path unchanged. Transport is ADL (`atiadlxx.dll`), not the ADLX vtables — reasoning in the plan file.
+- [x] Proven by `crash_restore_amd.rs`: the same profile through a real `taskkill /F`, once per vendor, asserting exact value-for-value restore. `crash_restore.rs` unchanged and green.
+- [x] Curve recorded in the plan file (piecewise-linear with the knee at the driver default; hue clamped, not rescaled) and unit-tested, including the deliberate NVIDIA/AMD divergence on desaturation.
+- [x] `neither_vendor_degrades_to_unsupported_and_never_panics`: gamma ramp and DDC/CI still carry what they can, vendor-only fields report unsupported.
+- [x] `docs/plans/M2-display.md` ADLX line checked off (with an S1 session log); ROADMAP M2 row and checklist updated.
 
 ### Kickoff prompt
 ```

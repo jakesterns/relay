@@ -86,7 +86,7 @@ export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
-export interface DisplayVia { nvapi: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
+export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
 export interface Footprint { rss_bytes: number; cpu_percent: number }
 export interface CoreState {
   active_profile: ProfileSummary | null; foreground: Foreground | null;
@@ -267,7 +267,7 @@ export const mockState: CoreState = {
   sharing: { kind: "off" },
   audio_chain: "bypass",
   display_state: "default",
-  display_via: { nvapi: false, gamma: false, ddcci: false },
+  display_via: { nvapi: false, amd: false, gamma: false, ddcci: false },
   footprint: { rss_bytes: 9 * 1024 * 1024, cpu_percent: 0 },
   hardware: mockHardware.connected,
   build: {
