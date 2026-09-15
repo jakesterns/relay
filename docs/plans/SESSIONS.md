@@ -845,7 +845,7 @@ than blank space because a user tests them early and believes them.
 
 ### Kickoff prompt
 ```
-You are starting session S24 (stop the UI lying) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S24). Check first that session S23 has finished — it touches the same files, so do not run alongside it. Create the worktree: git worktree add -b feat/honest-ui ..\relay-honest-ui main, then pnpm install in ui/.
+You are starting session S24 (stop the UI lying) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S24). Check first that session S23 has finished — it touches the same files, so do not run alongside it. Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/honest-ui. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 Three parts of the UI render invented content as if it were measured: the Display tab's A/B comparison (both halves are the same scene, so the colour sliders change nothing), the EQ graph's "Headset raw response" (a hard-coded path, shown even when the headset has no curve), and the Share overlay's resolution/fps/encoder labels (hard-coded 4K60 NVENC regardless of preset or GPU).
 
@@ -879,7 +879,7 @@ different ways.
 
 ### Kickoff prompt
 ```
-You are starting session S25 (keyboard, focus and destructive actions) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S25). Create the worktree: git worktree add -b feat/ui-safety ..\relay-ui-safety main, then pnpm install in ui/.
+You are starting session S25 (keyboard, focus and destructive actions) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S25). Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/ui-safety. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 The app is mouse-only — rail nav items are <a> with no href, Toggle puts role="switch" on a non-focusable inner div, profile rows are <tr onClick>, and there are no focus styles anywhere. Global user-select: none also prevents copying paths, the pairing code, and error text.
 
@@ -912,7 +912,7 @@ Small Windows-integration details, none hard, all noticed.
 
 ### Kickoff prompt
 ```
-You are starting session S26 (shell polish) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S26). Create the worktree: git worktree add -b feat/shell-polish ..\relay-shell-polish main, then pnpm install in ui/.
+You are starting session S26 (shell polish) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S26). Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/shell-polish. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 Small Windows-integration details that are all individually minor and collectively make the app feel unfinished: the window forgets its size and position, a second launch opens a second window (the core has a single-instance mutex, the UI has none), Add/Remove Programs shows the publisher as the lowercase crate name "relay" with no support URL, disabled sliders hide their value behind an em-dash so you cannot read a locked setting, and the pairing-code placeholder renders as six em-dashes at 34 px which reads as an error state.
 
