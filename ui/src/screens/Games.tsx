@@ -162,7 +162,7 @@ function HeadsetCorrectionCard({ draft, update }: {
   const on = draft?.audio.headset_correction ?? false;
 
   const sub = !draft
-    ? (offline && !mock ? "Core offline." : "No profile selected.")
+    ? (offline && !mock ? "Relay is not running." : "No profile selected.")
     : !headset
       ? "No headset chosen for this profile, and none recognised as plugged in."
       : points === 0

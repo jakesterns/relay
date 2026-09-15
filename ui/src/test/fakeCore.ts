@@ -11,7 +11,7 @@ import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
   ElevatedOp,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
-  SharePresetDef, VdeviceStatus,
+  SharePresetDef, UiPrefs, VdeviceStatus,
 } from "../lib/ipc";
 import { newProfile, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
@@ -28,6 +28,8 @@ export interface FakeCore {
   vdevice: VdeviceStatus;
   capabilities: ShareCapabilities;
   autostart: boolean;
+  /** `settings.json`: what closing the window means. */
+  prefs: UiPrefs;
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
@@ -126,6 +128,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
     },
     autostart: false,
+    prefs: { close_action: "keep_running" },
     elevation: { decline: false },
     fail: new Map(),
     handler: () => undefined,
@@ -161,6 +164,10 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     list_processes: () => structuredClone(core.processes),
     get_autostart: () => core.autostart,
     set_autostart: (a) => (core.autostart = a.enabled as boolean),
+    get_ui_prefs: () => structuredClone(core.prefs),
+    set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
+    // A core is already answering, so there is nothing to launch.
+    start_core: () => false,
     start_share: (a) => {
       const req = a.request as { peer?: string | null };
       core.state.sharing = { kind: "sharing", peer: req.peer ?? "peer" };
@@ -336,6 +343,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
 export const KNOWN_COMMANDS: readonly string[] = [
   "core_status", "list_profiles", "get_profile", "save_profile", "delete_profile",
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
+  "get_ui_prefs", "set_ui_prefs", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "list_hardware",

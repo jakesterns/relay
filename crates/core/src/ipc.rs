@@ -58,6 +58,11 @@ pub enum Method {
     SetAutostart {
         enabled: bool,
     },
+    /// App preferences that are not about any one game (`settings.json`).
+    GetUiPrefs,
+    SetUiPrefs {
+        prefs: crate::uiprefs::UiPrefs,
+    },
     /// Spawn the share engine (a child process) to share this PC to a peer.
     StartShare {
         request: Box<ShareRequest>,
@@ -241,6 +246,9 @@ pub enum Reply {
     Autostart {
         enabled: bool,
     },
+    UiPrefs {
+        prefs: crate::uiprefs::UiPrefs,
+    },
     Receivers {
         receivers: serde_json::Value,
     },
@@ -316,6 +324,11 @@ pub enum Event {
     Notice {
         text: String,
     },
+    /// The core is shutting down on purpose (the tray's "Quit Relay", or the
+    /// window's close-and-quit preference). The shell closes its window on
+    /// this rather than falling back to the offline state, which would tell
+    /// the user something went wrong when nothing did.
+    Quitting,
     /// Instrument-strip stats from the share engine (verbatim JSON).
     ShareStats {
         data: serde_json::Value,

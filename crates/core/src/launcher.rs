@@ -29,6 +29,9 @@ use anyhow::{Context, Result};
 pub const LAUNCHER_EXE: &str = "relay-svc.exe";
 /// Name of the service/CLI binary the launcher starts.
 pub const CORE_EXE: &str = "relay-core.exe";
+/// Name of the Tauri window. The core launches it from the tray; it is never
+/// required for the core to run.
+pub const UI_EXE: &str = "relay-ui.exe";
 
 /// `CREATE_NO_WINDOW` — run a console application without giving it a visible
 /// console window. The child still has valid standard handles, so the core's
@@ -80,6 +83,52 @@ pub fn spawn_core(args: &[String]) -> Result<u32> {
 #[cfg(not(windows))]
 pub fn spawn_core(_args: &[String]) -> Result<u32> {
     anyhow::bail!("the windowless launcher is Windows-only")
+}
+
+/// Bring the Relay window up: focus the one that is already running, or start
+/// it if there is none. Used by the tray's "Open Relay".
+///
+/// Focusing first matters — the Tauri shell has no single-instance guard, so
+/// spawning unconditionally would give the user a second window every time
+/// they clicked the tray icon.
+#[cfg(windows)]
+pub fn open_ui() -> Result<()> {
+    if focus_ui() {
+        return Ok(());
+    }
+    let me = std::env::current_exe().context("locating relay-core.exe")?;
+    let ui = sibling_of(&me, UI_EXE)
+        .filter(|p| p.exists())
+        .with_context(|| format!("{UI_EXE} not found next to {}", me.display()))?;
+    std::process::Command::new(&ui)
+        .spawn()
+        .with_context(|| format!("starting {}", ui.display()))?;
+    Ok(())
+}
+
+/// Restore and focus an existing Relay window. `false` if none is up.
+#[cfg(windows)]
+fn focus_ui() -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
+
+    let Some(p) =
+        crate::processes::list_windowed().into_iter().find(|p| p.exe.eq_ignore_ascii_case(UI_EXE))
+    else {
+        return false;
+    };
+    let hwnd = HWND(p.hwnd as usize as *mut std::ffi::c_void);
+    // SAFETY: a window handle the enumeration just produced. Both calls are
+    // no-ops on a handle that died in between.
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd).as_bool()
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_ui() -> Result<()> {
+    anyhow::bail!("the Relay window is Windows-only")
 }
 
 #[cfg(test)]

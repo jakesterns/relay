@@ -26,6 +26,8 @@ pub enum CoreEvent {
     SessionLock(bool),
     /// Console Ctrl-C / close / logoff / shutdown.
     Shutdown,
+    /// The user picked something from the notification-area icon.
+    Tray(crate::tray::TrayCommand),
 }
 
 /// Handle to the loop thread. Dropping it asks the loop to quit and joins it.
@@ -97,7 +99,9 @@ pub fn exe_name(path: &str) -> String {
 mod imp {
     use super::*;
     use parking_lot::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use tracing::{debug, warn};
+    use windows::core::w;
     use windows::core::BOOL;
     use windows::core::PWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
@@ -121,9 +125,10 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetForegroundWindow,
         GetMessageW, GetWindowTextW, GetWindowThreadProcessId, PostThreadMessageW, RegisterClassW,
-        TranslateMessage, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MOVESIZEEND, MSG, WINDOW_EX_STYLE,
-        WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_DEVICECHANGE, WM_DISPLAYCHANGE,
-        WM_HOTKEY, WM_QUIT, WNDCLASSW, WS_OVERLAPPED,
+        RegisterWindowMessageW, TranslateMessage, EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_MOVESIZEEND, MSG, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
+        WINEVENT_SKIPOWNPROCESS, WM_DEVICECHANGE, WM_DISPLAYCHANGE, WM_HOTKEY, WM_QUIT, WNDCLASSW,
+        WS_OVERLAPPED,
     };
 
     /// `WM_WTSSESSION_CHANGE` and its lock/unlock reasons (wtsapi32.h; the
@@ -135,6 +140,33 @@ mod imp {
     /// The hook callback is a bare `extern "system"` fn and cannot capture, so the
     /// sender lives in a process-wide slot. One loop per process is the design.
     static SENDER: Mutex<Option<UnboundedSender<CoreEvent>>> = Mutex::new(None);
+
+    thread_local! {
+        /// The notification-area icon. Thread-local rather than static
+        /// because `Tray` may only be touched from the thread that owns the
+        /// window — which is this thread, and is also where the window
+        /// procedure runs.
+        static TRAY: std::cell::RefCell<Option<crate::tray::Tray>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// `RegisterWindowMessageW("TaskbarCreated")`. Registered message ids are
+    /// process-wide and never 0, so 0 doubles as "not registered yet".
+    static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+    /// Tiny wrapper so the registration site reads as a plain assignment.
+    trait SetOnce {
+        fn set(&self, v: u32);
+        fn matches(&self, v: u32) -> bool;
+    }
+    impl SetOnce for AtomicU32 {
+        fn set(&self, v: u32) {
+            self.store(v, Ordering::Relaxed);
+        }
+        fn matches(&self, v: u32) -> bool {
+            v != 0 && self.load(Ordering::Relaxed) == v
+        }
+    }
 
     pub fn spawn(tx: UnboundedSender<CoreEvent>, hotkeys: Vec<Hotkey>) -> Result<WinLoop> {
         *SENDER.lock() = Some(tx);
@@ -183,12 +215,18 @@ mod imp {
                 // Hidden top-level window: the only way to receive the
                 // WM_DISPLAYCHANGE / WM_DEVICECHANGE broadcasts (thread
                 // message loops and message-only windows do not get them).
+                // It also owns the notification-area icon, so the tray lives
+                // exactly as long as the core does.
                 let hw_window = create_hardware_window();
                 if let Some(w) = hw_window {
                     // Lock/unlock notifications for restore-on-lock.
                     if WTSRegisterSessionNotification(w, NOTIFY_FOR_THIS_SESSION).is_err() {
                         warn!("session notifications unavailable; no restore-on-lock");
                     }
+                    // Explorer's "I just restarted, re-add your icons"
+                    // broadcast. Registered once, before the icon goes up.
+                    TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
+                    TRAY.with(|t| *t.borrow_mut() = crate::tray::Tray::add(w));
                 }
 
                 // Seed with whatever is in front right now.
@@ -208,6 +246,9 @@ mod imp {
                     DispatchMessageW(&msg);
                 }
 
+                // Drop the icon before the window it hangs off goes away, or
+                // it lingers in the notification area as a dead entry.
+                TRAY.with(|t| t.borrow_mut().take());
                 if let Some(w) = hw_window {
                     let _ = WTSUnRegisterSessionNotification(w);
                     let _ = DestroyWindow(w);
@@ -319,6 +360,29 @@ mod imp {
                 if matches!(wparam.0, 0x0007 | 0x8000 | 0x8004) {
                     emit(CoreEvent::HardwareChanged);
                 }
+            }
+            // A click on the notification-area icon. Tracking the menu blocks
+            // inside this call, which is fine: the window exists only for
+            // these broadcasts and the service runs on another thread.
+            crate::tray::WM_TRAY => {
+                // SAFETY: the window procedure runs on the thread that owns
+                // both the window and the `Tray`.
+                let cmd = TRAY.with(|t| unsafe {
+                    t.borrow().as_ref().and_then(|tray| tray.on_message(lparam))
+                });
+                if let Some(cmd) = cmd {
+                    emit(CoreEvent::Tray(cmd));
+                }
+            }
+            other if TASKBAR_CREATED.matches(other) => {
+                // Explorer restarted and dropped every icon. Put ours back,
+                // or Relay goes invisible for the rest of the session.
+                // SAFETY: owning thread, as above.
+                TRAY.with(|t| unsafe {
+                    if let Some(tray) = t.borrow().as_ref() {
+                        tray.readd();
+                    }
+                });
             }
             _ => {}
         }

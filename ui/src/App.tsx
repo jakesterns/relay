@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Rail, type Screen } from "./components/Rail";
 import { TitleBar } from "./components/TitleBar";
+import { Toasts } from "./components/Toasts";
 import { CoreProvider, useCore } from "./lib/core";
 import { api } from "./lib/ipc";
 import { useEffect } from "react";
@@ -41,7 +42,7 @@ function Shell() {
   const subtitle = sharing && state.sharing.kind === "sharing"
     ? `Sending to ${state.sharing.peer}`
     : profile ? `${profile.name} · profile active`
-    : offline && !mock ? "Core offline"
+    : offline && !mock ? "Not running"
     : "Idle";
 
   const note = sharing
@@ -64,6 +65,7 @@ function Shell() {
         <div className="body solo">
           <FirstRun onDone={() => setFirstRun(false)} />
         </div>
+        <Toasts />
       </div>
     );
   }
@@ -79,6 +81,7 @@ function Shell() {
         {screen === "profiles" && <Profiles />}
         {screen === "settings" && <Settings />}
       </div>
+      <Toasts />
     </div>
   );
 }

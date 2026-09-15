@@ -23,6 +23,10 @@ impl From<anyhow::Error> for CmdError {
 
 type CmdResult<T> = Result<T, CmdError>;
 
+/// Set once the window's close has been intercepted, so the programmatic
+/// close that follows is let through instead of being intercepted again.
+static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 async fn call(method: Method) -> anyhow::Result<Reply> {
     #[cfg(windows)]
     {
@@ -103,6 +107,39 @@ async fn restore_all() -> CmdResult<()> {
 async fn list_processes() -> CmdResult<Vec<ProcessInfo>> {
     match call(Method::ListProcesses).await? {
         Reply::Processes { processes } => Ok(processes),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// Start the core if it is not already up, and wait until it answers.
+///
+/// This is what makes Relay an app rather than a service with a viewer: the
+/// window is opened from the Start Menu, finds nothing listening, and fixes
+/// that itself. Errors come back already worded for a person to read — see
+/// `relay_core::startup`.
+#[tauri::command]
+async fn start_core() -> CmdResult<bool> {
+    match relay_core::startup::ensure_running().await {
+        Ok(relay_core::startup::Started::Already) => Ok(false),
+        Ok(relay_core::startup::Started::Launched) => Ok(true),
+        Err(e) => Err(CmdError { message: e.message() }),
+    }
+}
+
+#[tauri::command]
+async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
+    match call(Method::GetUiPrefs).await? {
+        Reply::UiPrefs { prefs } => Ok(prefs),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_ui_prefs(
+    prefs: relay_core::uiprefs::UiPrefs,
+) -> CmdResult<relay_core::uiprefs::UiPrefs> {
+    match call(Method::SetUiPrefs { prefs }).await? {
+        Reply::UiPrefs { prefs } => Ok(prefs),
         other => Err(unexpected(other).into()),
     }
 }
@@ -472,6 +509,14 @@ fn spawn_event_bridge(app: AppHandle) {
                                 Event::Notice { text } => {
                                     let _ = app.emit("core://notice", text);
                                 }
+                                // The core is stopping on purpose (tray quit).
+                                // Close with it rather than sitting there
+                                // reporting an offline service, which would
+                                // look like a fault instead of a choice.
+                                Event::Quitting => {
+                                    app.exit(0);
+                                    return;
+                                }
                                 Event::ShareStats { data } => {
                                     let _ = app.emit("core://share-stats", data);
                                 }
@@ -536,6 +581,37 @@ fn spawn_event_bridge(app: AppHandle) {
 #[cfg(not(windows))]
 fn spawn_event_bridge(_app: AppHandle) {}
 
+/// Try to bring a core up as soon as the window exists, reporting progress to
+/// the frontend so the offline screen can say "starting…" instead of "dead".
+///
+/// Fire-and-forget: the event bridge above reconnects on its own, so a core
+/// that comes up late still lands. The frontend can re-run this from a button
+/// if it failed — `ensure_running` is safe to call repeatedly.
+fn spawn_core_autostart(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let _ = app.emit("core://starting", ());
+        match relay_core::startup::ensure_running().await {
+            Ok(_) => {
+                let _ = app.emit("core://started", ());
+            }
+            Err(e) => {
+                let _ = app.emit("core://start-failed", e.message());
+            }
+        }
+    });
+}
+
+/// Does closing the window also stop the core? Reads the user's preference;
+/// anything unreadable (including an already-dead core) means "no", which is
+/// the default and the one that cannot surprise anybody.
+async fn close_should_quit_core() -> bool {
+    matches!(
+        call(Method::GetUiPrefs).await,
+        Ok(Reply::UiPrefs { prefs })
+            if prefs.close_action == relay_core::uiprefs::CloseAction::QuitRelay
+    )
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -546,7 +622,30 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             spawn_event_bridge(app.handle().clone());
+            spawn_core_autostart(app.handle().clone());
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Closing the window normally leaves the core running — that
+                // is the whole point of the split, and the notification-area
+                // icon is there to say so. If the user chose otherwise in
+                // Settings, stop the core first; its own teardown restores
+                // everything, so this cannot leave a profile applied.
+                if CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_close();
+                let window = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    if close_should_quit_core().await {
+                        let _ = call(Method::Shutdown).await;
+                    }
+                    // `destroy` does not raise CloseRequested again, so this
+                    // cannot loop back into the branch above.
+                    let _ = window.destroy();
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             core_status,
@@ -559,6 +658,9 @@ pub fn run() {
             list_processes,
             get_autostart,
             set_autostart,
+            start_core,
+            get_ui_prefs,
+            set_ui_prefs,
             start_share,
             stop_share,
             start_share_preset,
