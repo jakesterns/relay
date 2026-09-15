@@ -324,6 +324,17 @@ async fn share_capabilities() -> CmdResult<serde_json::Value> {
     }
 }
 
+/// Whether Windows Firewall will let an incoming share through. Read-only
+/// and unelevated; the Share and Receive screens call it when they open so a
+/// blocked machine is named as blocked rather than looking like a dead LAN.
+#[tauri::command]
+async fn firewall_status() -> CmdResult<relay_core::firewall::FirewallStatus> {
+    match call(Method::FirewallStatus).await? {
+        Reply::Firewall { status } => Ok(*status),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
     match call(Method::ApoStatus).await? {
@@ -579,6 +590,7 @@ pub fn run() {
             import_curve,
             render_preview,
             share_capabilities,
+            firewall_status,
             apo_status,
             install_apo,
             uninstall_apo,

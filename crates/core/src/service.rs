@@ -1145,6 +1145,15 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
+            Method::FirewallStatus => {
+                drop(g);
+                match crate::firewall::share_program() {
+                    Ok(program) => {
+                        Reply::Firewall { status: Box::new(crate::firewall::status(&program)) }
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
             Method::ShareCapabilities => {
                 drop(g);
                 match crate::share::capabilities() {

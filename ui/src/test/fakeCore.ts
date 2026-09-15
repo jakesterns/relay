@@ -9,7 +9,7 @@
  */
 import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
-  ElevatedOp,
+  ElevatedOp, FirewallStatus,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, VdeviceStatus,
 } from "../lib/ipc";
@@ -27,6 +27,9 @@ export interface FakeCore {
   apo: ApoStatus;
   vdevice: VdeviceStatus;
   capabilities: ShareCapabilities;
+  /** What Windows Firewall will do to an incoming share. Defaults to the
+   *  healthy machine so screens that do not care show no banner. */
+  firewall: FirewallStatus;
   autostart: boolean;
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
@@ -125,6 +128,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 3090"],
       encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
     },
+    firewall: {
+      state: "allowed",
+      program: "C:\\Relay\\relay-share.exe",
+      rule_present: true, blocking_rules: 0, stale_rules: 0,
+      policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
+      unknown: false,
+    },
     autostart: false,
     elevation: { decline: false },
     fail: new Map(),
@@ -217,6 +227,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       hrtf_applied: true,
     }),
     share_capabilities: () => structuredClone(core.capabilities),
+    firewall_status: () => structuredClone(core.firewall),
     apo_status: () => structuredClone(core.apo),
     // The two halves of the S6 flow. `elevation_plan` is read-only and is
     // what the user reads *before* Windows asks; `run_elevated` is the only
@@ -252,6 +263,16 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       if (op === "uninstall_apo") core.apo = { installed: false, endpoint: null, running: false };
       if (op === "install_camera") core.vdevice.camera_registered = true;
       if (op === "uninstall_camera") core.vdevice.camera_registered = false;
+      if (op === "allow_firewall") {
+        core.firewall = {
+          ...core.firewall, state: "allowed", rule_present: true, blocking_rules: 0,
+        };
+      }
+      if (op === "remove_firewall") {
+        core.firewall = {
+          ...core.firewall, state: "will_prompt", rule_present: false, blocking_rules: 0,
+        };
+      }
       return { declined: false, ok: true, lines: [`${op}: done.`] };
     },
     install_apo: () => {
@@ -340,7 +361,8 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "switch_source", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "list_hardware",
   "save_hardware", "delete_hardware", "probe_hardware", "import_curve",
-  "render_preview", "share_capabilities", "apo_status", "install_apo", "uninstall_apo",
+  "render_preview", "share_capabilities", "firewall_status",
+  "apo_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",

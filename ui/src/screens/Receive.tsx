@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Card, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
-import { api, onCoreEvents, type ShareCapabilities, type VdeviceStatus } from "../lib/ipc";
+import { api, onCoreEvents, type FirewallStatus, type ShareCapabilities, type VdeviceStatus } from "../lib/ipc";
 
 /** Warn before the user tries, not after it fails.
  *
@@ -47,6 +47,107 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
     );
   }
   return null;
+}
+
+/** Say "Windows Firewall is blocking this", not "the other PC never
+ *  connected".
+ *
+ *  Windows prompts the first time a given path listens, and dismissing that
+ *  prompt writes a Block rule that is permanent, invisible and never
+ *  mentioned again. Every symptom after that points at the network: the
+ *  pairing code is accepted, mDNS finds nothing, the share sits waiting. So
+ *  the same warn-before-you-fail shape as `CodecBanner` — read the state when
+ *  the screen opens, and if it is going to fail, name the real reason and
+ *  offer the one action that fixes it.
+ *
+ *  The fix goes through the elevated helper, which means a UAC prompt the
+ *  user can read and decline. Declining is a supported answer: the banner
+ *  stays, the rest of the app keeps working, and on a network that is not
+ *  dropping inbound traffic the share works anyway (`permissive`). */
+export function FirewallBanner() {
+  const { offline } = useCore();
+  const [fw, setFw] = useState<FirewallStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  const probe = () => {
+    api.firewallStatus().then(setFw).catch(() => setFw(null));
+  };
+  useEffect(() => {
+    let live = true;
+    api.firewallStatus()
+      .then((s) => { if (live) setFw(s); })
+      .catch(() => { if (live) setFw(null); });
+    return () => { live = false; };
+  }, [offline]);
+
+  // A probe that failed says nothing rather than guessing, and a healthy
+  // machine gets no banner at all.
+  if (!fw || fw.unknown) return null;
+  if (fw.state === "allowed" || fw.state === "firewall_off" || fw.state === "permissive") return null;
+
+  const allow = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await api.runElevated("allow_firewall");
+      // `declined` is a normal answer, not an error: nothing was changed and
+      // saying so plainly is the whole point.
+      setNote(r.declined
+        ? "You declined the Windows permission prompt, so nothing was changed. Relay still works everywhere it can; only incoming shares to this PC stay blocked."
+        : r.lines.join(" "));
+      probe();
+    } catch (e) {
+      setNote(String((e as { message?: string })?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const body =
+    fw.state === "blocked" ? (
+      <>
+        <b>Windows Firewall is blocking Relay.</b> This is a firewall rule, not a network
+        fault — {fw.blocking_rules === 1 ? "a rule was" : `${fw.blocking_rules} rules were`} created
+        when somebody dismissed Windows' "allow this app?" prompt, and Windows applies a block
+        before any allow. Incoming shares to this PC will not connect until it is removed.
+      </>
+    ) : fw.state === "public_network" ? (
+      <>
+        <b>This network is set to Public.</b> Relay only opens the firewall on private and domain
+        networks, so a share cannot reach this PC here. Set the network to Private in Windows
+        Settings → Network &amp; internet, or connect to your home or work network.
+      </>
+    ) : (
+      <>
+        <b>Windows will ask whether to allow Relay</b> the first time you share, and declining that
+        prompt blocks Relay permanently with no visible cause. You can settle it now instead.
+      </>
+    );
+
+  return (
+    <div className="offline">
+      <i />
+      <div>
+        {body}
+        {fw.state !== "public_network" && (
+          <div style={{ marginTop: 8 }}>
+            <button className="btn q" disabled={busy} onClick={() => void allow()}>
+              {busy ? "Waiting for Windows…" : "Allow Relay through Windows Firewall…"}
+            </button>
+          </div>
+        )}
+        <p className="note" style={{ marginTop: 8 }}>
+          {note ?? (
+            <>
+              Relay asks Windows for permission — it never takes it silently. The rule covers
+              private and domain networks only, never public, and the uninstaller removes it.
+            </>
+          )}
+        </p>
+      </div>
+    </div>
+  );
 }
 
 /** The Store has two HEVC packages and the free one's product ID is not
@@ -155,6 +256,7 @@ export function Receive() {
         </div>
         <OfflineBanner />
         <CodecBanner need="receive" />
+        <FirewallBanner />
         <div className="preview">
           <div className={"scene" + (sender ? "" : " idle")} />
           {sender

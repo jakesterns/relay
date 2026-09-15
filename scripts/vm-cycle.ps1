@@ -237,6 +237,20 @@ function Phase-OptIn {
     if ("$vd" -notmatch 'camera registered: true') { Fail "camera did not register: $vd" }
     Say 'both components registered; installed.json records them'
 
+    # The third machine-wide change: the inbound rule for relay-share.exe.
+    # Added here rather than by the installer because the installer is
+    # per-user and unelevated and never grabs a token on its own.
+    $env:RELAY_FIREWALL_ALLOW_LIVE_WRITE = '1'
+    Relay-Core @('firewall', 'allow') | ForEach-Object { Say "    $_" }
+    $fw = Relay-Core @('firewall', 'status')
+    if ("$fw" -notmatch 'our rule: present') { Fail "firewall rule did not go in: $fw" }
+    # Backup-then-apply applies here too: the record is what the uninstaller
+    # plans the removal from.
+    if (-not (Test-Path "$env:LOCALAPPDATA\Relay\firewall.json")) {
+        Fail 'firewall rule added without writing firewall.json'
+    }
+    Say 'firewall rule added and recorded in firewall.json'
+
     Say 'restarting audiosrv so the APO is picked up by new streams'
     Restart-Service audiosrv -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3

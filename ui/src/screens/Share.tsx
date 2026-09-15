@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
-import { CodecBanner } from "./Receive";
+import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import {
   api, onCoreEvents, presetAudioLabel,
@@ -176,6 +176,7 @@ export function Share() {
         </div>
         <OfflineBanner />
         <CodecBanner need="share" />
+        <FirewallBanner />
         <Chips label="Preset" value={preset} onChange={setPreset}
           options={presets.map((p) => ({ key: p.id, label: p.name }))} />
         {sharing && (

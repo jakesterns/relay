@@ -10,6 +10,12 @@
 //!   demonstrably never loads a per-user registration (S5, measured — see
 //!   `docs/dev/vcam-live.md`).
 //!
+//! S22 added a third: the inbound Windows Firewall rule for
+//! `relay-share.exe`. Firewall policy is machine-wide, so it needs the same
+//! token — and it needs the same honesty, because the installer is per-user
+//! and unelevated and must never reach for an administrator token behind the
+//! user's back.
+//!
 //! So `relay-elevate.exe` exists: a tiny GUI-subsystem binary the core
 //! launches through `ShellExecuteExW`'s `runas` verb, which is what raises
 //! the UAC prompt. It is not a service, it is not resident, and it has no
@@ -18,7 +24,7 @@
 //!
 //! # What keeps this honest
 //!
-//! 1. **A closed op set.** [`ElevatedOp`] has four variants and no free-form
+//! 1. **A closed op set.** [`ElevatedOp`] has six variants and no free-form
 //!    "run this key" escape hatch. A request that does not deserialise into
 //!    one of them is refused before anything is touched.
 //! 2. **The helper re-derives the work; the request never carries it.** No
@@ -76,6 +82,11 @@ pub enum ElevatedOp {
     InstallCamera,
     /// Delete exactly the camera keys recorded in `installed.json`.
     UninstallCamera,
+    /// Add the inbound Windows Firewall Allow rule for `relay-share.exe`,
+    /// after backing up and removing any Block rule that would override it.
+    AllowFirewall,
+    /// Remove the firewall rule Relay added.
+    RemoveFirewall,
 }
 
 impl ElevatedOp {
@@ -86,6 +97,8 @@ impl ElevatedOp {
             ElevatedOp::UninstallApo => "Restore the endpoint audio chain",
             ElevatedOp::InstallCamera => "Register the virtual camera",
             ElevatedOp::UninstallCamera => "Unregister the virtual camera",
+            ElevatedOp::AllowFirewall => "Allow Relay through Windows Firewall",
+            ElevatedOp::RemoveFirewall => "Remove Relay's Windows Firewall rule",
         }
     }
 
@@ -96,6 +109,8 @@ impl ElevatedOp {
             ElevatedOp::UninstallApo => "uninstall-apo",
             ElevatedOp::InstallCamera => "install-camera",
             ElevatedOp::UninstallCamera => "uninstall-camera",
+            ElevatedOp::AllowFirewall => "allow-firewall",
+            ElevatedOp::RemoveFirewall => "remove-firewall",
         }
     }
 
@@ -105,6 +120,8 @@ impl ElevatedOp {
             "uninstall-apo" => Some(ElevatedOp::UninstallApo),
             "install-camera" => Some(ElevatedOp::InstallCamera),
             "uninstall-camera" => Some(ElevatedOp::UninstallCamera),
+            "allow-firewall" => Some(ElevatedOp::AllowFirewall),
+            "remove-firewall" => Some(ElevatedOp::RemoveFirewall),
             _ => None,
         }
     }
@@ -331,6 +348,13 @@ pub fn plan_lines(paths: &Paths, op: ElevatedOp) -> Vec<String> {
         }
         ElevatedOp::UninstallCamera => {
             uninstall_step_lines(paths, crate::uninstall::StepKind::RemoveVcam)
+        }
+        ElevatedOp::AllowFirewall => match crate::firewall::share_program() {
+            Ok(program) => crate::firewall::install_dry_run(&program),
+            Err(e) => vec![format!("could not locate relay-share.exe: {e:#}")],
+        },
+        ElevatedOp::RemoveFirewall => {
+            uninstall_step_lines(paths, crate::uninstall::StepKind::RemoveFirewallRule)
         }
     };
     lines.push(String::new());
@@ -581,6 +605,7 @@ mod imp {
 
     const APO_GATE: &str = "RELAY_APO_ALLOW_LIVE_WRITE";
     const VCAM_GATE: &str = "RELAY_VDEVICE_ALLOW_LIVE_WRITE";
+    const FIREWALL_GATE: &str = crate::firewall::LIVE_WRITE_GATE;
 
     fn run_op(paths: &Paths, op: ElevatedOp) -> OpOutcome {
         match op {
@@ -588,6 +613,58 @@ mod imp {
             ElevatedOp::UninstallApo => uninstall_apo(paths),
             ElevatedOp::InstallCamera => install_camera(paths),
             ElevatedOp::UninstallCamera => uninstall_camera(paths),
+            ElevatedOp::AllowFirewall => allow_firewall(paths),
+            ElevatedOp::RemoveFirewall => remove_firewall(paths),
+        }
+    }
+
+    /// Add the inbound Allow rule. Like every other op here, the helper
+    /// re-derives the target from its *own* directory — the request carries
+    /// no path — so a tampered request cannot point a firewall rule at
+    /// somebody else's binary.
+    fn allow_firewall(paths: &Paths) -> OpOutcome {
+        let program = match crate::firewall::share_program() {
+            Ok(p) => p,
+            Err(e) => return OpOutcome::Failed { error: format!("{e:#}") },
+        };
+        if !program.exists() {
+            return OpOutcome::Refused { reason: format!("{} is not on disk", program.display()) };
+        }
+        let before = crate::firewall::status(&program);
+        if before.verdict == crate::firewall::Verdict::Allowed && before.blocking_rules == 0 {
+            return OpOutcome::Skipped { reason: "Relay is already allowed through".into() };
+        }
+        match armed(FIREWALL_GATE, || crate::firewall::install_live(paths, &program)) {
+            Ok(after) => OpOutcome::Done {
+                detail: format!(
+                    "{} allowed on private and domain networks{}",
+                    program.display(),
+                    if before.blocking_rules > 0 {
+                        format!(" ({} blocking rule(s) removed)", before.blocking_rules)
+                    } else {
+                        String::new()
+                    }
+                ) + if after.verdict.can_share() {
+                    ""
+                } else {
+                    " — but still not reachable"
+                },
+            },
+            Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
+        }
+    }
+
+    fn remove_firewall(paths: &Paths) -> OpOutcome {
+        let recorded = crate::firewall::load_record(&paths.firewall_file()).ok().flatten();
+        let program = crate::firewall::share_program().ok();
+        let present =
+            program.as_ref().map(|p| crate::firewall::status(p).rule_present).unwrap_or(false);
+        if recorded.is_none() && !present {
+            return OpOutcome::Skipped { reason: "Relay added no firewall rule".into() };
+        }
+        match armed(FIREWALL_GATE, || crate::firewall::uninstall_live(paths)) {
+            Ok(n) => OpOutcome::Done { detail: format!("{n} rule(s) removed") },
+            Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
         }
     }
 
@@ -687,6 +764,8 @@ mod tests {
             ElevatedOp::UninstallApo,
             ElevatedOp::InstallCamera,
             ElevatedOp::UninstallCamera,
+            ElevatedOp::AllowFirewall,
+            ElevatedOp::RemoveFirewall,
         ] {
             assert_eq!(ElevatedOp::parse(op.as_str()), Some(op));
         }
