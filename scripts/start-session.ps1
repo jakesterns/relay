@@ -117,6 +117,49 @@ function Read-Catalogue($path) {
     return $found
 }
 
+<#
+  Stale-prompt guard.
+
+  A finished session updates SESSIONS.md on ITS branch. Until that branch is
+  merged, this file still carries the pre-result prompt, and launching the
+  dependent session hands it a stale premise. That happened for real on
+  2026-09-14: S5 proved per-user camera registration impossible and rewrote
+  S6's section, but S6 was launched from main's older copy telling it to cover
+  the APO only, and it narrowed its scope accordingly.
+
+  So: warn when any pushed branch has SESSIONS.md commits that main does not.
+#>
+function Test-CatalogueStale {
+    Push-Location $repo
+    try {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & git fetch --quiet origin 2>$null | Out-Null
+        $branches = & git for-each-ref --format='%(refname:short)' refs/remotes/origin 2>$null
+        $stale = @()
+        foreach ($b in $branches) {
+            if ($b -eq 'origin/HEAD' -or $b -eq 'origin/main') { continue }
+            $touched = & git log --oneline "main..$b" -- docs/plans/SESSIONS.md 2>$null
+            if ($touched) { $stale += [pscustomobject]@{ Branch = $b; Commits = @($touched).Count } }
+        }
+        $ErrorActionPreference = $prev
+        return $stale
+    } finally { Pop-Location }
+}
+
+$stale = @(Test-CatalogueStale)
+if ($stale.Count -gt 0) {
+    Write-Host ''
+    Write-Host 'WARNING: SESSIONS.md has been updated on branches not yet merged into main.'
+    Write-Host 'The prompts below may be stale. A session launched with a stale prompt works'
+    Write-Host 'from a premise that is no longer true.'
+    foreach ($s in $stale) {
+        Write-Host ("  {0,-34} {1} commit(s) touching SESSIONS.md" -f $s.Branch, $s.Commits)
+    }
+    Write-Host 'Merge those branches into main first, or pass the corrected prompt by hand.'
+    Write-Host ''
+}
+
 $catalog = Read-Catalogue $catalogue
 
 if ($All) {
@@ -209,3 +252,7 @@ if ($started.Count -gt 0) {
     Write-Host 'claude attach <id>   open one in this terminal'
     Write-Host 'claude stop <id>     end one'
 }
+
+# Explicit, or the script inherits $LASTEXITCODE from whichever git call ran
+# last in the stale-prompt check and reports a failure that did not happen.
+exit 0
