@@ -87,8 +87,28 @@ impl Key {
         Ok(Self(hkey))
     }
 
-    /// Create (or open) `path` relative to HKLM, for writing.
+    /// Open `path` for setting values, creating it only if it is not there.
+    ///
+    /// The two-step matters, and it was measured: an endpoint's
+    /// `FxProperties` key is owned by SYSTEM and grants `BUILTIN\Administrators`
+    /// only **SetValue + ReadKey** — not `CreateSubKey`. `RegCreateKeyExW`
+    /// with `KEY_WRITE` therefore fails `ERROR_ACCESS_DENIED` on an
+    /// *existing* key, even from an elevated process, because `KEY_WRITE`
+    /// includes rights we do not need. (Live proof, 2026-09-14: the first
+    /// elevated install on this dev machine failed with Win32 error 5 and the
+    /// FX store came back byte-identical.)
+    ///
+    /// The right answer is to ask for less, not to take ownership of a key
+    /// Windows owns — an installer that rewrites that DACL leaves the machine
+    /// permanently different, which is exactly what Relay promises not to do.
+    /// So: open with `KEY_SET_VALUE`, and fall back to creating (which needs
+    /// the parent's `CreateSubKey`) only for keys that do not exist yet — our
+    /// own CLSID keys under `SOFTWARE\Classes`, where administrators do have
+    /// it.
     fn create(path: &str) -> Result<Self, LiveRegError> {
+        if let Ok(key) = Self::open(path, KEY_SET_VALUE) {
+            return Ok(key);
+        }
         let path_w = wide(path);
         let mut hkey = HKEY::default();
         // SAFETY: as above; all pointers are valid for the duration of the

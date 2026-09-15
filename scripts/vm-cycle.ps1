@@ -160,10 +160,11 @@ function Phase-Install {
     Say "installed to $dir"
 
     # Everything the core spawns has to be beside it, or the on-demand
-    # children (share engine, preview renderer) and the two opt-in DLLs are
-    # unreachable at runtime.
-    $needed = @('relay-ui.exe', 'relay-core.exe', 'relay-svc.exe', 'relay-share.exe',
-                'relay-preview.exe', 'relay_apo.dll', 'relay_vdevice.dll', 'uninstall.exe')
+    # children (share engine, preview renderer, elevated install helper) and
+    # the two opt-in DLLs are unreachable at runtime.
+    $needed = @('relay-ui.exe', 'relay-core.exe', 'relay-svc.exe', 'relay-elevate.exe',
+                'relay-share.exe', 'relay-preview.exe', 'relay_apo.dll',
+                'relay_vdevice.dll', 'uninstall.exe')
     $missing = @()
     foreach ($f in $needed) { if (-not (Test-Path (Join-Path $dir $f))) { $missing += $f } }
     if ($missing.Count -gt 0) { Fail "missing from the install: $($missing -join ', ')" }

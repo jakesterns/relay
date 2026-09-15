@@ -173,6 +173,15 @@ export interface Preview { original: string; processed: string; sample_rate: num
 export interface ShareCapabilities {
   can_share: boolean; can_receive: boolean; encoders: string[]; decoders: string[];
 }
+/** Mirror of relay-core's `elevate::ElevatedOp` — the complete set of things
+ *  the elevated helper will do. There is no free-form variant: this is the
+ *  allow-list, and the core refuses anything else. */
+export type ElevatedOp = "install_apo" | "uninstall_apo" | "install_camera" | "uninstall_camera";
+
+/** Result of one `runElevated`. `declined` means the user dismissed the UAC
+ *  prompt, which is a normal answer: nothing was attempted. */
+export interface ElevationResult { declined: boolean; ok: boolean; lines: string[] }
+
 /** Mirror of relay-core's `audio_apo::ApoStatus`. */
 export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
 /** Mirror of relay-vdevice's `installed::Consent`. */
@@ -310,6 +319,29 @@ const mockVdevice: VdeviceStatus = {
   consent: null,
   elevated: false,
 };
+
+/** Browser-only stand-in for the dry-run listings, so the Settings cards can
+ *  be read without a core. The real lines come from the uninstall planner and
+ *  the live FX store. */
+function mockElevationPlan(op: ElevatedOp): string[] {
+  const cam = "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}";
+  const tail = ["", "Windows will ask for permission before any of this happens. Decline and nothing on this PC changes."];
+  switch (op) {
+    case "install_apo":
+      return [
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{endpoint}\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
+        "HKLM\\SOFTWARE\\Classes\\CLSID\\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
+        "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\{endpoint}.json (written before anything is changed)",
+        ...tail,
+      ];
+    case "install_camera":
+      return [cam, cam + "\\InprocServer32", ...tail];
+    case "uninstall_apo":
+      return ["[x] Restore the endpoint audio chain — {endpoint} (needs admin)", ...tail];
+    default:
+      return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
+  }
+}
 
 /** The three built-ins, mirroring `presets.rs::builtins()`. */
 const mockPresets: SharePresetDef[] = [
@@ -504,7 +536,9 @@ export const api = {
     if (!isTauri()) return { installed: false, endpoint: null, running: false };
     return invoke<ApoStatus>("apo_status");
   },
-  /** Register the APO (backup-then-apply). Gated in the core; errors explain. */
+  /** Register the APO (backup-then-apply). Direct, unelevated path — the
+   *  Settings card goes through `runElevated` instead. Kept for the CLI and
+   *  the VM runbook, where the gates are already armed. */
   async installApo(): Promise<void> {
     if (!isTauri()) throw new Error("Installing the APO needs the Relay core");
     return invoke<void>("install_apo");
@@ -513,6 +547,22 @@ export const api = {
   async uninstallApo(): Promise<void> {
     if (!isTauri()) throw new Error("Removing the APO needs the Relay core");
     return invoke<void>("uninstall_apo");
+  },
+  /** Exactly what an elevated op would change on this PC. Read-only, and the
+   *  listing the user reads *before* the Windows permission prompt. */
+  async elevationPlan(op: ElevatedOp): Promise<string[]> {
+    if (!isTauri()) return mockElevationPlan(op);
+    return invoke<string[]>("elevation_plan", { op });
+  },
+  /** Ask for administrator rights and run one op. Resolves (never throws) on
+   *  a declined prompt — `declined` is the answer, and nothing changed. */
+  async runElevated(op: ElevatedOp): Promise<ElevationResult> {
+    if (!isTauri()) {
+      if (op === "install_camera") mockVdevice.camera_registered = true;
+      if (op === "uninstall_camera") mockVdevice.camera_registered = false;
+      return { declined: false, ok: true, lines: [`${op}: done (mock)`] };
+    }
+    return invoke<ElevationResult>("run_elevated", { op });
   },
   /** Read-only: Windows support, registration, consent, OBS / VB-Cable. */
   async vdeviceStatus(): Promise<VdeviceStatus> {

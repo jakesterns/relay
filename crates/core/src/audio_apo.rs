@@ -92,6 +92,53 @@ pub fn apo_status() -> ApoStatus {
     ApoStatus { installed: false, endpoint: None, running: false }
 }
 
+/// Exactly what an install would write, read-only — the listing the user
+/// reads *before* the UAC prompt. Reads the endpoint's live FX store and
+/// plans against it, so the values named are the ones that would really
+/// change on this machine rather than a generic description.
+#[cfg(windows)]
+pub fn install_dry_run(backup_dir: &std::path::Path) -> Vec<String> {
+    let Ok(endpoint) = relay_audio::sessions::default_render_endpoint_guid() else {
+        return vec!["No default render endpoint — there is nothing to install on.".into()];
+    };
+    let dll = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
+        .filter(|p| p.exists());
+    let dll_text = dll
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| r"<install dir>\relay_apo.dll (not built yet)".into());
+
+    let mut lines = Vec::new();
+    match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
+        Ok(current) => {
+            let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll_text);
+            let fx_root = relay_apo::ids::fx_key(&endpoint);
+            for (rel, name) in relay_apo::fxstore::diff(&plan.backup.store, &plan.new_store) {
+                let key =
+                    if rel.is_empty() { fx_root.clone() } else { format!(r"{fx_root}\{rel}") };
+                lines.push(format!(r"HKLM\{key} :: {name}"));
+            }
+            for path in plan.com_keys.keys() {
+                lines.push(format!(r"HKLM\{path}"));
+            }
+        }
+        Err(e) => lines.push(format!("Could not read the endpoint's FX chain: {e}")),
+    }
+    lines.push(format!(
+        "backup: {} (written before anything is changed)",
+        backup_dir.join(format!("{endpoint}.json")).display()
+    ));
+    lines.push(format!("file: {dll_text} (stays in place; only registered)"));
+    lines
+}
+
+#[cfg(not(windows))]
+pub fn install_dry_run(_backup_dir: &std::path::Path) -> Vec<String> {
+    vec!["The endpoint APO is Windows-only.".into()]
+}
+
 /// Register the APO on the default render endpoint. Backup-then-apply, same
 /// contract as the `Applier`: the complete prior FX property store lands in
 /// `<backup_dir>\<endpoint>.json` *before* the registry changes.
@@ -125,8 +172,30 @@ pub fn install_live(backup_dir: &std::path::Path) -> Result<String> {
     std::fs::write(&tmp, serde_json::to_vec_pretty(&plan.backup)?)?;
     std::fs::rename(&tmp, &backup_file).context("persisting the backup")?;
 
-    relay_apo::livereg::LiveRegistry::apply_install(&plan)
-        .context("registering the APO (VM / installer only; RELAY_APO_ALLOW_LIVE_WRITE gate)")?;
+    if let Err(e) = relay_apo::livereg::LiveRegistry::apply_install(&plan) {
+        // Roll the backup file back, or the next attempt refuses with "a
+        // backup already exists — the APO looks installed" and the user is
+        // stuck with a failure that reads like a success. Reconciling the
+        // live tree to the backup first is what makes deleting it safe: if
+        // the install died half-way it undoes the half, and if it never
+        // started it is a no-op. A restore that itself fails keeps the file,
+        // because then the backup is the only record of the prior state.
+        match relay_apo::livereg::LiveRegistry::restore(&plan.backup) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&backup_file);
+                return Err(anyhow::Error::from(e)
+                    .context("registering the APO; the endpoint was left exactly as it was"));
+            }
+            Err(restore_err) => {
+                tracing::warn!(error = %restore_err, "could not roll back a failed APO install");
+                return Err(anyhow::Error::from(e).context(format!(
+                    "registering the APO, and the rollback also failed ({restore_err}); \
+                     the prior state is kept in {}",
+                    backup_file.display()
+                )));
+            }
+        }
+    }
     info!(%endpoint, "APO registered; endpoint streams pick it up on their next start");
     Ok(endpoint)
 }

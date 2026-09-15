@@ -94,6 +94,25 @@ pub fn camera_dry_run() -> Vec<String> {
     lines
 }
 
+/// The registry keys a camera install would create, derived here rather
+/// than taken from anyone's input — the elevated helper vets these against
+/// our own CLSID before it arms the live-write gate.
+pub fn camera_plan_keys() -> Vec<String> {
+    let dll = camera_dll_path().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    relay_vdevice::reg::plan_camera_install(&dll).keys.into_iter().map(|k| k.path).collect()
+}
+
+/// The keys `installed.json` says we created, deepest first. Empty when
+/// nothing is recorded, which is how the helper tells "nothing to do" from
+/// "something to remove".
+pub fn recorded_camera_keys(paths: &Paths) -> Vec<String> {
+    load(paths)
+        .ok()
+        .and_then(|f| f.component(CAMERA_MEDIA_SOURCE).cloned())
+        .map(|c| relay_vdevice::reg::plan_camera_uninstall(&c))
+        .unwrap_or_default()
+}
+
 const CAMERA_DLL: &str = "relay_vdevice.dll";
 
 fn camera_dll_path() -> Result<std::path::PathBuf> {

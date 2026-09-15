@@ -472,50 +472,28 @@ mod imp {
     }
 }
 
-/// Re-launch `relay-core uninstall` elevated to finish the HKLM steps, with
-/// the live-write gates set for the child. One UAC prompt, and only when
-/// there is something left that needs it.
+/// Finish the two HKLM steps in the elevated helper. One UAC prompt, and
+/// only when there is something left that needs it.
+///
+/// This used to re-launch `relay-core uninstall --components-only` under
+/// `runas`, which could not work: elevation starts the child from the user's
+/// logon environment block, not the parent's, so the live-write gates the
+/// parent set never reached it and both steps failed the gate check. The
+/// helper needs no inherited environment — it arms each gate itself, around
+/// one vetted call, and reports what it did.
 #[cfg(windows)]
-pub fn relaunch_elevated(keep_data: bool) -> Result<()> {
-    use anyhow::Context;
-    use windows::core::HSTRING;
-    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
-    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
-
-    let exe = std::env::current_exe().context("locating relay-core.exe")?;
-    let mut args = String::from("uninstall --silent --components-only");
-    if keep_data {
-        args.push_str(" --keep-data");
-    }
-    let file = HSTRING::from(exe.as_os_str());
-    let params = HSTRING::from(args);
-    let verb = HSTRING::from("runas");
-
-    let mut info = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_NOCLOSEPROCESS,
-        lpVerb: windows::core::PCWSTR(verb.as_ptr()),
-        lpFile: windows::core::PCWSTR(file.as_ptr()),
-        lpParameters: windows::core::PCWSTR(params.as_ptr()),
-        nShow: SW_HIDE.0,
-        ..Default::default()
-    };
-    // SAFETY: `info` is fully initialised and the HSTRINGs outlive the call.
-    unsafe { ShellExecuteExW(&mut info) }
-        .context("UAC prompt for the elevated uninstall phase was declined or failed")?;
-    if !info.hProcess.is_invalid() {
-        use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
-        // SAFETY: handle came from ShellExecuteExW with NOCLOSEPROCESS.
-        unsafe {
-            WaitForSingleObject(info.hProcess, INFINITE);
-            let _ = windows::Win32::Foundation::CloseHandle(info.hProcess);
-        }
-    }
-    Ok(())
+pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
+    use crate::elevate::{ElevatedOp, LaunchError};
+    crate::elevate::run(paths, &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera]).map_err(
+        |e| match e {
+            LaunchError::Declined => anyhow::anyhow!("{e}"),
+            LaunchError::Other(e) => e,
+        },
+    )
 }
 
 #[cfg(not(windows))]
-pub fn relaunch_elevated(_keep_data: bool) -> Result<()> {
+pub fn finish_elevated(_paths: &Paths) -> Result<crate::elevate::Response> {
     anyhow::bail!("elevation is Windows-only")
 }
 
