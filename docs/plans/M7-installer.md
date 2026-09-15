@@ -279,8 +279,11 @@ results below show.
       every render endpoint's `FxProperties` store is in the snapshot and the
       registry diff was zero on every run. Note that with `-SkipOptIn` the APO
       was never registered, so this proves the installer does not disturb the
-      chain; it does **not** yet prove the *restore* path live. That is the
-      first thing the VM pass has to check.
+      chain. **Updated 2026-09-14 (S6):** the *restore* path is now live-proven
+      too — the APO was registered and removed through `relay-elevate.exe` on
+      this dev machine and the endpoint's `FxProperties` `reg export` came back
+      byte-identical (`docs/dev/elevation-live.md`). What the VM pass still owes
+      is the same cycle on a clean checkpoint, run *without* `-SkipOptIn`.
 
 ## Deferred
 1. **Clean-VM broad-tier pass** — needs the Hyper-V role (elevated install +

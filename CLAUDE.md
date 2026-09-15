@@ -5,7 +5,7 @@ Working name: **Relay**. Single Windows desktop app that (1) shares one PC's scr
 ## Non-negotiables
 - **Never trip anti-cheat.** OS/hardware-layer only: DXGI Desktop Duplication / Windows.Graphics.Capture for video, WASAPI process loopback + endpoint APO for audio, NvAPI/ADLX + DDC/CI for color. No DLL injection, no game hooks, no memory reads, no kernel driver except the signed audio-class virtual device.
 - **Never touch global config.** No default-device changes, no global EQ, no edits to other apps. Profiles apply only while the target app has focus and restore on blur, exit, crash, or reboot. Original state is written to disk before any change.
-- **Zero network config for the user.** WebRTC (ICE/STUN, mDNS discovery, DTLS-SRTP). LAN-first; pairing by code.
+- **Zero network config for the user.** WebRTC (ICE/STUN, mDNS discovery, DTLS-SRTP). LAN-first; pairing by code. Relay makes exactly one *other* outbound request: the user-initiated AutoEQ curve fetch in `hardware/catalog.rs` (https, one host, cached, skippable by pasting a curve).
 - **Low footprint.** Always-on core ≤ ~10 MB RAM, ~0% idle CPU. Audio engine, capture/encode, and UI load only on demand and tear down fully. Hardware encode only (NVENC/QSV/AMF). Target 4K60 HEVC at 40–80 Mb/s on LAN, <50 ms latency.
 - **Two explicit opt-ins** at first run: the endpoint APO and the virtual camera/mic. Clear "what we install / how to remove" screen.
 
@@ -53,6 +53,9 @@ crates/core/          relay-core  — lib + three binaries: `relay-core` (the al
                       binary that writes HKLM; see src/elevate.rs and docs/dev/elevation-live.md).
 crates/audio/         relay-audio — DSP (biquad EQ, band-split limiter, partitioned-conv HRTF),
                       WASAPI session/exclusive probing, offline A/B render, `relay-preview` bin.
+                      `fit.rs` turns a measured AutoEQ curve into a shelf/peaking cascade within
+                      MAX_BANDS (shelves at fixed corners, then greedy peaking placement against
+                      the actual cascade response) — this is the headset-correction path.
                       `dsp` feature (default on) holds the FFT; the core links default-features=false
                       (params + sessions only) and spawns `relay-preview` on demand — keep it that way
                       or the footprint gate fails. Bundled HRIRs: SADIE II D1 (assets/hrtf, Apache 2.0).
@@ -61,14 +64,25 @@ crates/audio/apo/     relay-apo — the endpoint APO cdylib (COM, feature "com" 
                       fixture-tested; live writes double-gated on RELAY_APO_ALLOW_LIVE_WRITE + elevation,
                       VM only). The core links it default-features=false (no FFT). Test-sign runbook:
                       docs/dev/apo-testsign.md.
-crates/capture/       relay-capture — placeholder for DXGI/WGC → encoder → WebRTC
+crates/capture/       relay-capture — the share engine (`relay-share` child process, spawned
+                      per share, torn down after). WGC + DXGI Desktop Duplication capture,
+                      Media Foundation HEVC hardware MFT (no CPU path), `resample` (any endpoint
+                      rate/channels → Opus 48 kHz stereo, one track for desktop and one for mic),
+                      webrtc-rs transport (mDNS, six-digit pairing, DTLS-SRTP, LAN only),
+                      DXVA decode + D3D11 present on the receiver, fMP4/MKV recording + replay
+                      buffer, 480×270 JPEG preview tap, instrument-strip stats.
 crates/vdevice/       relay-vdevice — virtual camera: NV12 frame ring (seqlock slots; receiver
                       writes, camera reads), frame-server media source cdylib (feature "com" —
                       core/capture link default-features=false), MFCreateVirtualCamera control,
                       HKLM registration planner + gated livereg (RELAY_VDEVICE_ALLOW_LIVE_WRITE
                       + elevation), installed.json model (consent + registered components),
                       OBS VirtualCam / VB-Cable detection. Live runbook: docs/dev/vcam-live.md.
-crates/display/       relay-display — placeholder for NvAPI/ADLX + DDC/CI
+crates/display/       relay-display — primitive display controls, no relay-core dependency:
+                      `vcp` (opcodes + evidence-typed per-model quirks; a `VerifiedCode` is the
+                      only thing `SetVCPFeature` accepts, so a guess cannot reach a monitor),
+                      `gamma` (SetDeviceGammaRamp, vendor-neutral), `ddc` (dxva2 with retries),
+                      `nvapi` and `amd` (vibrance + hue, both dynamically loaded). Snapshots are
+                      vendor-tagged so a restore goes back through the API that captured it.
 ui/                   Vite + React + TypeScript frontend (ported from mocks/)
 ui/src-tauri/         relay-ui — Tauri 2 shell, workspace member; talks to core over IPC
 mocks/                design mocks (HTML + 2× PNG) and Geist fonts
@@ -88,7 +102,8 @@ relay-handoff/        original handoff bundle; do not edit
 - `autostart.rs` — the one Run-key value (`HKCU\...\Run\Relay`); `relay-core autostart on|off`.
 - `processes.rs` — windowed processes for the exe picker (`Method::ListProcesses`).
 - `status.rs` — human summary for `relay-core status` (`--json` for the raw state).
-- `audio_bridge.rs` — `AudioSettings` → `relay_audio::ChainParams`; spawns `relay-preview` for the A/B render.
+- `audio_bridge.rs` — `AudioSettings` → `relay_audio::ChainParams`; `chain_params_with` prepends the fitted headset-correction bands (budgeted by `CORRECTION_BUDGET`) ahead of the profile's own, so profile EQ is taste on top of a corrected headset. Spawns `relay-preview` for the A/B render.
+- `hardware/` — the probe and library: endpoint/monitor ids (`mod.rs`, `edid.rs`), `probe_win.rs`, device-change watcher (`watch_win.rs`), DDC/CI capability parse (`ddc.rs`), AutoEQ file/paste importer (`autoeq.rs`), and `catalog.rs` — the bundled 8,849-model index (`autoeq-index.tsv`, read and dropped, not `include_str!`) plus the on-demand WinHTTP curve fetch. The index ships; the CC BY-NC-SA measurements never do.
 - `vdevice.rs` — virtual-device glue: status probe, consent record, camera install/uninstall (record-then-apply into `installed.json`), receive routing (service decides `--vcam`/`--mic-route` from consent + registration, never the client); `relay-core vdevice` CLI.
 - `elevate.rs` — the elevated install helper's protocol and rules: a four-variant op allow-list, requests that carry no registry path or DLL path (the helper re-derives them), CLSID-scope and GUID vetting, versioned/expiring/location-checked requests, and the gate armed around one vetted call. `relay-core elevate plan|run <op>`; `Method::ElevationPlan` / `RunElevated`.
 - `audio_apo.rs` — the production `AudioControl`: params to the APO over `relay_audio::shm` (apply = write + un-bypass, restore = bypass); read-only `apo_status()` probe; gated `install_live`/`uninstall_live` (backup-then-apply to `apo-backup\<endpoint>.json`); `relay-core apo` CLI.
