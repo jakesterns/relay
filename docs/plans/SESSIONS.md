@@ -93,6 +93,7 @@ sessions beat eight neglected ones.
 | S15 | Two-PC share validation | `chore/two-pc` | main tree | a second PC |
 | S16 | Second-monitor display pass | `chore/second-monitor` | main tree | a second panel |
 | S17 | EV certificate and signing | `chore/signing` | main tree | the certificate |
+| S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
 | S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 (v1.1) |
 | S20 | Stream Deck and NDI output | `feat/streamdeck-ndi` | create when started | — (v1.1) |
@@ -666,6 +667,47 @@ Four deliverables wait on this one certificate: the signed installer, the signed
 2. Start with the installer: bundle.windows.certificateThumbprint plus signCommand, with the NSIS template's UNINSTALLERSIGNCOMMAND already threaded.
 3. Record SmartScreen behaviour on a clean machine before and after. That is the user-visible reason any of this matters.
 4. Finish only when the Definition of Done is met. Check off the five tracking lines named in the DoD and update docs/ROADMAP.md.
+```
+
+---
+
+## S22 — Firewall rules in the installer
+**Branch** `feat/firewall-rules` · **Worktree** create when started
+
+Found 2026-09-14 on the dev machine: ten accumulated Block rules for
+`relay-share.exe` and not one Allow rule. Windows prompts the first time a
+given *path* listens, and dismissing that prompt writes a Block rule that never
+goes away.
+
+This is not a dev-only annoyance. **"Zero network config for the user" is a
+non-negotiable in `CLAUDE.md`**, and today a real user installs Relay, starts a
+share, gets a Windows firewall prompt they do not understand, clicks the wrong
+button once, and Relay is permanently broken for them with no visible cause.
+`scripts/firewall-rules.ps1` cleans it up after the fact; the installer should
+mean nobody needs it.
+
+### Definition of Ready
+- [x] Only `relay-share.exe` listens on the network (WebRTC + mDNS); `relay-core` is named-pipe only.
+- [x] `scripts/firewall-rules.ps1` exists and can list, clean and allow.
+- [ ] Decide the scope: Private profile only (Relay is LAN-only by design) versus Private + Domain. Public should stay blocked.
+
+### Definition of Done
+- [ ] The NSIS installer adds an inbound Allow rule for the installed `relay-share.exe` on the agreed profiles, and the **uninstaller removes it** — a leftover firewall rule would fail the clean-VM diff, so this must be in the uninstall plan like everything else.
+- [ ] Rules are added by the existing elevated path, not by a silent elevation grab; a user who declines still gets a working app on an already-permissive network, with an explanation.
+- [ ] The app detects the "blocked by firewall" state and says so plainly, rather than looking like a network fault — the same warn-before-you-fail shape as the HEVC capability banner.
+- [ ] Verified in the clean-VM cycle (S13): install, share, uninstall, empty diff.
+
+### Kickoff prompt
+```
+You are starting session S22 (firewall rules in the installer) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S22), docs/plans/M7-installer.md and scripts/firewall-rules.ps1. Create the worktree first: git worktree add -b feat/firewall-rules ..\relay-firewall main, then cd into it and run pnpm install in ui/.
+
+Zero network config for the user is a non-negotiable, and right now a user who dismisses one Windows firewall prompt breaks Relay permanently with no visible cause. On this dev machine that produced ten Block rules and zero Allow rules.
+
+1. Only relay-share.exe listens; relay-core is named-pipe only. Do not add rules for anything else.
+2. The installer adds the rule and the uninstaller removes it. A leftover firewall rule would fail the clean-VM diff, so it belongs in the uninstall plan like every other change.
+3. Never grab elevation silently. If the user declines, the app must still work where it can and explain where it cannot.
+4. Add detection so the blocked state is reported as what it is, not as a network fault — copy the shape of the HEVC capability banner we added on the Share and Receive screens.
+5. Finish only when the Definition of Done is met. Update docs/plans/M7-installer.md and docs/ROADMAP.md, then summarise.
 ```
 
 ---
