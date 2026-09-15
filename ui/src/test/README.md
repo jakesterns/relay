@@ -28,6 +28,13 @@ at all was the screens, and that is what this fills.
 input-synthesis package appears in `package.json`, or if the Tauri aliases stop
 pointing at the fake.
 
+The keyboard tests do not weaken this. `user.tab()` and `user.keyboard()` move
+focus inside *this jsdom document*; nothing is handed to the OS input stack.
+
+`setup.ts` also makes `window.confirm`, `alert` and `prompt` throw. Relay asks
+its own questions inside its own window (`ConfirmButton`), and
+`confirm.test.tsx` scans the sources to keep it that way.
+
 ## The three modes
 
 `src/lib/ipc.ts` reaches the desktop in exactly three places — dynamic imports
@@ -85,3 +92,13 @@ in `beforeEach`.
 - `FirstRun.test.tsx` — the consent flow, and that consenting installs nothing.
 - `Games.test.tsx` — EQ/limiter/display serialisation into a profile.
 - `Receive.test.tsx` — pairing, and whether a call will see the stream.
+- `keyboard.test.tsx` — the rail as real buttons, toggles as named switches,
+  the profile table's keyboard path to edit and apply, and the two stylesheet
+  rules that make focus visible and error text copyable.
+- `confirm.test.tsx` — the one confirmation pattern: two presses, Escape and
+  blur disarm it, it times out, and every destructive action in the app goes
+  through it. Plus the no-native-dialogs scan.
+- `unsaved.test.tsx` — an unsaved per-game edit surviving a trip through the
+  rail and the focused game changing under it.
+- `err.test.ts` — `errText()`, which exists because `String(e)` rendered
+  `[object Object]` for every non-string rejection.

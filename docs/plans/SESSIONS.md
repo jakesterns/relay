@@ -100,7 +100,7 @@ sessions beat eight neglected ones.
 | S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
 | S23 | Never look dead | `feat/never-dead` | create when started | — |
 | S24 | Stop the UI lying | `feat/honest-ui` | create when started | — (not with S23) |
-| S25 | Keyboard, focus, destructive actions | `feat/ui-safety` | create when started | — |
+| S25 | Keyboard, focus, destructive actions | `feat/ui-safety` | main tree | **done 2026-09-15** |
 | S26 | Shell polish | `feat/shell-polish` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
 | S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 done, so unblocked (v1.1) |
@@ -859,24 +859,27 @@ Three parts of the UI render invented content as if it were measured: the Displa
 ---
 
 ## S25 — Keyboard, focus and destructive actions
-**Branch** `feat/ui-safety` · **Worktree** main tree
+**Branch** `feat/ui-safety` · **Worktree** main tree · **Done 2026-09-15**
 
-The app is mouse-only, and the same class of destructive action is handled four
-different ways.
+The app was mouse-only, and the same class of destructive action was handled
+four different ways. Both closed: `ConfirmButton` is now the only way Relay
+asks, an unsaved per-game edit survives navigation and a focus change
+(`ui/src/lib/drafts.ts`), and `errText()` (`ui/src/lib/err.ts`) replaced every
+`String(e)`. 203 UI tests, still jsdom only.
 
 ### Definition of Ready
 - [x] S8's harness (`pnpm test`, 170 tests) can assert keyboard interaction in jsdom without touching the desktop.
 - [x] Profiles already has the good two-step delete pattern to standardise on.
 
 ### Definition of Done
-- [ ] Every interactive control is reachable and operable by keyboard: rail nav items are real buttons/links, `Toggle` is focusable with an accessible name, profile rows have a keyboard path to edit and apply.
-- [ ] Visible `:focus-visible` styling everywhere, in the existing design language.
-- [ ] Global `user-select: none` is relaxed for text worth copying: paths, pairing code, error messages, monitor ids.
-- [ ] **One** confirmation pattern for destructive actions, replacing the current four (instant preset delete, unconfirmed Restore-all, native `window.confirm` for hardware, two-step for profiles). Native dialogs go.
-- [ ] "Restore original state now" gets a `.catch` and success feedback; today a failure is indistinguishable from success.
-- [ ] Editing a profile and navigating away, or the focused game changing mid-edit, no longer discards changes silently.
-- [ ] Errors use the existing `errText()` helper rather than `String(e)` (which renders `[object Object]` for non-string rejections), appear near the control that failed, and are dismissible.
-- [ ] Keyboard paths and the confirmation pattern are covered by tests.
+- [x] Every interactive control is reachable and operable by keyboard: rail nav items are real buttons/links, `Toggle` is focusable with an accessible name, profile rows have a keyboard path to edit and apply.
+- [x] Visible `:focus-visible` styling everywhere, in the existing design language.
+- [x] Global `user-select: none` is relaxed for text worth copying: paths, pairing code, error messages, monitor ids.
+- [x] **One** confirmation pattern for destructive actions, replacing the current four (instant preset delete, unconfirmed Restore-all, native `window.confirm` for hardware, two-step for profiles). Native dialogs go.
+- [x] "Restore original state now" gets a `.catch` and success feedback; today a failure is indistinguishable from success.
+- [x] Editing a profile and navigating away, or the focused game changing mid-edit, no longer discards changes silently.
+- [x] Errors use the existing `errText()` helper rather than `String(e)` (which renders `[object Object]` for non-string rejections), appear near the control that failed, and are dismissible.
+- [x] Keyboard paths and the confirmation pattern are covered by tests.
 
 ### Kickoff prompt
 ```

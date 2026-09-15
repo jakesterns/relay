@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
+import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
+import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
+import { errText } from "../lib/err";
 import {
   api, isTauri, presetAudioLabel,
   type ApoStatus, type ColorInfo, type Limiter, type Preview, type Profile, type SharePreset,
@@ -23,48 +25,71 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
   const { state, profiles } = useCore();
   const active = state.active_profile;
   const subject = active ?? profiles[0] ?? null;
-  const title = subject?.name ?? "No game";
   const sectionLabel = section === "audio" ? "Audio" : section === "display" ? "Display" : "Sharing";
 
-  // Draft of the subject profile, shared by the Audio and Display editors.
-  const [draft, setDraft] = useState<Profile | null>(null);
-  const [dirty, setDirty] = useState(false);
+  // The profile these editors are working on. An unsaved edit lives outside
+  // this component (see lib/drafts) so it survives both things that used to
+  // throw it away without a word: leaving the screen, and the focused game
+  // changing under you.
+  const kept = useDraft();
+  const [loaded, setLoaded] = useState<Profile | null>(null);
+  const draft = kept?.profile ?? loaded;
+  const dirty = kept !== null;
   const subjectId = subject?.id ?? null;
+
   useEffect(() => {
+    // An unsaved edit outranks whatever is in focus: reloading here is exactly
+    // the silent discard this guards against.
+    if (getDraft()) return;
     let live = true;
     if (subjectId) {
       api.getProfile(subjectId)
-        .then((p) => { if (live) { setDraft(p); setDirty(false); } })
-        .catch(() => { if (live) setDraft(null); });
+        .then((p) => { if (live) setLoaded(p); })
+        .catch(() => { if (live) setLoaded(null); });
     } else {
-      setDraft(null);
+      setLoaded(null);
     }
     return () => { live = false; };
-  }, [subjectId]);
+  }, [subjectId, dirty]);
 
   const update = (fn: (p: Profile) => void) => {
-    setDraft((d) => {
-      if (!d) return d;
-      const next = structuredClone(d);
-      fn(next);
-      return next;
-    });
-    setDirty(true);
+    const base = getDraft()?.profile ?? draft;
+    if (!base) return;
+    const next = structuredClone(base);
+    fn(next);
+    setDraft(next);
   };
   const save = async () => {
-    if (!draft) return;
-    await api.saveProfile(draft);
-    setDirty(false);
+    const d = getDraft()?.profile ?? draft;
+    if (!d) return;
+    await api.saveProfile(d);
+    setLoaded(d);
+    clearDraft();
   };
+  const discard = () => clearDraft();
+
+  // The edit belongs to a profile that is no longer the one in focus.
+  const stray = kept && subjectId !== null && kept.profile.id !== subjectId ? kept.profile : null;
 
   return (
     <>
       <section className="main">
         <div className="hdr">
-          <h1>{title} <em>— {sectionLabel}</em></h1>
+          <h1>{draft?.name ?? subject?.name ?? "No game"} <em>— {sectionLabel}</em></h1>
           <Live on={!!active} text={active ? "Active · in focus" : "Not in focus"} />
         </div>
         <OfflineBanner />
+        {stray && (
+          <div className="warnbanner">
+            <i />
+            <span className="msg">
+              <b>{stray.name}</b> has unsaved changes. {subject?.name ?? "Another game"} is in focus
+              now — your edit is kept until you say otherwise.
+            </span>
+            <button type="button" className="btn q" onClick={() => void save()}>Save {stray.name}</button>
+            <ConfirmButton label="Discard…" confirm="Discard changes" onConfirm={discard} />
+          </div>
+        )}
         <Chips label="Section" value={section} onChange={onSection}
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
         {section === "audio" && <AudioSection draft={draft} update={update} />}
@@ -74,6 +99,30 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
       {section === "audio" && <AudioSide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "display" && <DisplaySide draft={draft} update={update} save={save} dirty={dirty} />}
       {section === "sharing" && <SharingSide draft={draft} save={save} dirty={dirty} />}
+    </>
+  );
+}
+
+/** The save button all three side panels share.
+ *
+ *  A refused save used to reject into nothing: the button went back to
+ *  "Save to profile" and the reason never reached the screen. */
+function SaveRow({ disabled, dirty, save }: {
+  disabled: boolean; dirty: boolean; save: () => Promise<void>;
+}) {
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setErr(null);
+    setBusy(true);
+    try { await save(); } catch (e) { setErr(errText(e)); } finally { setBusy(false); }
+  };
+  return (
+    <>
+      <button className="btn acc" disabled={disabled || !dirty || busy} onClick={() => void run()}>
+        {busy ? "Saving…" : dirty ? "Save to profile" : "Saved"}
+      </button>
+      <ErrorNote text={err} onDismiss={() => setErr(null)} />
     </>
   );
 }
@@ -240,7 +289,7 @@ function AbListeningCard({ profileId }: { profileId: string | null }) {
     try {
       setPreview(await api.renderPreview(profileId));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errText(e));
     } finally {
       setBusy(false);
     }
@@ -284,7 +333,7 @@ function AbListeningCard({ profileId }: { profileId: string | null }) {
           {preview.sample_rate / 1000} kHz · {preview.hrtf_applied ? "EQ + limiter + HRTF" : "EQ + limiter (no HRTF at this rate)"}
         </p>
       )}
-      {error && <p className="note" style={{ marginTop: 8 }}>{error}</p>}
+      <ErrorNote text={error} onDismiss={() => setError(null)} />
       {!isTauri() && <p className="note" style={{ marginTop: 8 }}>Requires the Relay core (desktop app).</p>}
     </Card>
   );
@@ -371,9 +420,7 @@ function AudioSide({ draft, update, save, dirty }: {
           onChange={off ? undefined : (v) => update((p) => { p.audio.apply_to_share = v; })} />
       </Card>
       <ChainReadout chain={chain} hrtf={hrtf} tamer={tamer} />
-      <button className="btn acc" disabled={off || !dirty} onClick={() => void save()}>
-        {dirty ? "Save to profile" : "Saved"}
-      </button>
+      <SaveRow disabled={off} dirty={dirty} save={save} />
       <p className="note">Runs inside Windows audio on this headset only. Other apps and your desktop are unaffected.</p>
     </aside>
   );
@@ -551,9 +598,7 @@ function DisplaySide({ draft, update, save, dirty }: {
         <Kv k="In-game hooks" v="None" />
         <Kv k="Backup" v={state.display_state === "applied" ? "Saved before change" : "Nothing to back up"} />
       </Card>
-      <button className="btn acc" disabled={!draft || !dirty} onClick={() => void save()}>
-        {dirty ? "Save to profile" : "Saved"}
-      </button>
+      <SaveRow disabled={!draft} dirty={dirty} save={save} />
       <p className="note">Original monitor and GPU settings are stored on disk and restored on exit, crash, or reboot.</p>
     </aside>
   );
@@ -619,9 +664,7 @@ function SharingSide({ draft, save, dirty }: {
           <p className="note">Reading presets…</p>
         )}
       </Card>
-      <button className="btn acc" disabled={!draft || !dirty} onClick={() => void save()}>
-        {dirty ? "Save to profile" : "Saved"}
-      </button>
+      <SaveRow disabled={!draft} dirty={dirty} save={save} />
       <p className="note">Edit these numbers on the Share screen. Everything stays on your local network. Nothing on this PC was changed.</p>
     </aside>
   );

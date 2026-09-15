@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, Toggle } from "../components/Controls";
+import { Card, ErrorNote, Toggle } from "../components/Controls";
+import { errText } from "../lib/err";
 import { api } from "../lib/ipc";
 
 /** First-run consent: the two optional components, exactly what each one
@@ -29,7 +30,7 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
       if (autostart) await api.setAutostart(true);
       onDone();
     } catch (e) {
-      setError(String((e as { message?: string })?.message ?? e));
+      setError(errText(e));
       setBusy(false);
     }
   };
@@ -81,7 +82,7 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
           {busy ? "Saving…" : "Continue"}
         </button>
       </div>
-      {error && <div className="offline"><i />{error}</div>}
+      <ErrorNote text={error} onDismiss={() => setError(null)} />
       <p className="note" style={{ marginTop: 10 }}>Saying yes here only records your consent —
         each component still shows an explicit install step (administrator required) before it
         touches the machine.</p>

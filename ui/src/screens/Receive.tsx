@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Card, Kv, Live } from "../components/Controls";
+import { Card, ErrorNote, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
+import { errText } from "../lib/err";
 import { api, onCoreEvents, type ShareCapabilities, type VdeviceStatus } from "../lib/ipc";
 
 /** Warn before the user tries, not after it fails.
@@ -137,12 +138,12 @@ export function Receive() {
   const start = async () => {
     setBusy(true); setError(null);
     try { await api.startReceive({}); setReceiving(true); }
-    catch (e) { setError(String(e)); }
+    catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
   const stop = async () => {
     setBusy(true);
-    try { await api.stopReceive(); } catch (e) { setError(String(e)); }
+    try { await api.stopReceive(); } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
 
@@ -178,7 +179,7 @@ export function Receive() {
           <Kv k="Codec" v={receiving ? "HEVC" : "—"} mono />
         </Card>
         <VirtualDeviceCard />
-        {error && <p className="note" style={{ color: "#d98b6a" }}>{error}</p>}
+        <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}

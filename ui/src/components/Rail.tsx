@@ -12,18 +12,30 @@ const items: { key: Screen; label: string; round?: boolean }[] = [
   { key: "settings", label: "Settings" },
 ];
 
-export function Rail({ screen, onNav, state, note }: {
+/** The three entries that lead to the per-game editor, and so to an edit that
+ *  might be unsaved. */
+const GAME_SCREENS: Screen[] = ["games", "audio", "display"];
+
+export function Rail({ screen, onNav, state, note, unsaved }: {
   screen: Screen; onNav: (s: Screen) => void; state: CoreState; note: string;
+  /** Name of the profile with unsaved edits, if there is one. */
+  unsaved?: string | null;
 }) {
   const sharing = state.sharing.kind === "sharing";
   const profile = state.active_profile;
   return (
-    <nav className="rail">
-      {items.map((it) => (
-        <a key={it.key} className={screen === it.key ? "on" : ""} onClick={() => onNav(it.key)}>
-          <i className={it.round ? "round" : ""} />{it.label}
-        </a>
-      ))}
+    <nav className="rail" aria-label="Screens">
+      {items.map((it) => {
+        const mark = unsaved && GAME_SCREENS.includes(it.key);
+        return (
+          <button type="button" key={it.key} className={screen === it.key ? "on" : ""}
+            aria-current={screen === it.key ? "page" : undefined}
+            onClick={() => onNav(it.key)}>
+            <i className={it.round ? "round" : ""} />{it.label}
+            {mark && <em title={`${unsaved} has unsaved changes`} aria-label="unsaved changes">•</em>}
+          </button>
+        );
+      })}
       <div className="grp">Now</div>
       <div className={"st" + (sharing ? " on" : "")}>
         <i />Sharing<small>{sharing ? "on" : "off"}</small>

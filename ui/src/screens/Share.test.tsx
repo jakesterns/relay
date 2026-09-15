@@ -247,6 +247,7 @@ describe("the preset editor", () => {
 
     await h.user.click(inCard(/preset/i).getByRole("button", { name: "Edit" }));
     await h.user.click(screen.getByRole("button", { name: "Delete this preset" }));
+    await h.user.click(screen.getByRole("button", { name: "Confirm delete" }));
     await settle();
 
     expect(core.presets.some((p) => p.name === "Game copy")).toBe(false);

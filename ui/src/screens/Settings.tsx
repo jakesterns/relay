@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import { Card, Kv, Live, Toggle } from "../components/Controls";
+import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
+import { errText } from "../lib/err";
 import { api, type ApoStatus, type ElevatedOp, type ElevationResult, type RecordingSettings, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
@@ -11,6 +12,9 @@ export function Settings() {
   const [recording, setRecording] = useState<RecordingSettings | null>(null);
   const [recDirty, setRecDirty] = useState(false);
   const [recErr, setRecErr] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [restored, setRestored] = useState<string | null>(null);
+  const [restoreErr, setRestoreErr] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,7 +30,25 @@ export function Settings() {
   const toggleAutostart = async (v: boolean) => {
     setAutostartErr(null);
     try { setAutostart(await api.setAutostart(v)); }
-    catch (e) { setAutostartErr(String((e as { message?: string })?.message ?? e)); }
+    catch (e) { setAutostartErr(errText(e)); }
+  };
+
+  /** The one button that undoes everything Relay applied. It used to have no
+   *  catch at all: a core that refused looked exactly like a core that had
+   *  done the work. */
+  const restoreAll = async () => {
+    setRestoring(true);
+    setRestoreErr(null);
+    setRestored(null);
+    try {
+      await api.restoreAll();
+      await refresh();
+      setRestored("Audio and display are back to the settings Windows had before Relay.");
+    } catch (e) {
+      setRestoreErr(errText(e));
+    } finally {
+      setRestoring(false);
+    }
   };
 
   const editRecording = (patch: Partial<RecordingSettings>) => {
@@ -43,7 +65,7 @@ export function Settings() {
     };
     if (recording.dir?.trim()) settings.dir = recording.dir.trim();
     try { await api.setRecordingSettings(settings); setRecDirty(false); }
-    catch (e) { setRecErr(String((e as { message?: string })?.message ?? e)); }
+    catch (e) { setRecErr(errText(e)); }
   };
 
   return (
@@ -62,7 +84,7 @@ export function Settings() {
             sub={autostart === null
               ? (offline && !mock ? "Core offline — cannot read the setting." : "Reading…")
               : "Adds one value under HKCU\\...\\CurrentVersion\\Run. Nothing else on your PC is changed; turning this off removes it."} />
-          {autostartErr && <div className="offline"><i />{autostartErr}</div>}
+          <ErrorNote text={autostartErr} onDismiss={() => setAutostartErr(null)} />
         </Card>
         <Card title="What Relay installs">
           <p className="p">Relay works at the OS and hardware layer only. It never injects into games, reads their memory, or changes your default devices. Two optional components need your explicit consent:</p>
@@ -96,7 +118,7 @@ export function Settings() {
                 <button className="btn" onClick={() => void saveRecording()} disabled={!recDirty}>
                   {recDirty ? "Save recording settings" : "Saved"}
                 </button>
-                {recErr && <div className="offline"><i />{recErr}</div>}
+                <ErrorNote text={recErr} onDismiss={() => setRecErr(null)} />
               </div>
             )}
         </Card>
@@ -108,7 +130,12 @@ export function Settings() {
         </Card>
         <Card title="Restore">
           <p className="p" style={{ marginBottom: 10 }}>Put every audio and display setting back to what Windows had before Relay touched it. Safe to press at any time.</p>
-          <button className="btn" onClick={() => api.restoreAll().then(refresh)}>Restore original state now</button>
+          <ConfirmButton className="btn" confirmClassName="btn danger"
+            label="Restore original state now" confirm="Confirm restore"
+            disabled={restoring}
+            onConfirm={() => void restoreAll()} />
+          <DoneNote text={restored} onDismiss={() => setRestored(null)} />
+          <ErrorNote text={restoreErr} onDismiss={() => setRestoreErr(null)} />
         </Card>
         <UninstallCard />
       </section>
@@ -167,12 +194,12 @@ function UninstallCard() {
             ))}
           <div className="ab">
             <button className="btn" disabled={lines === null}
-              onClick={() => void api.launchUninstaller().catch((e) => setError(String((e as { message?: string })?.message ?? e)))}>
+              onClick={() => void api.launchUninstaller().catch((e) => setError(errText(e)))}>
               Uninstall Relay
             </button>
             <button className="btn q" onClick={() => setOpen(false)}>Cancel</button>
           </div>
-          {error && <div className="offline"><i />{error}</div>}
+          <ErrorNote text={error} onDismiss={() => setError(null)} />
         </div>
       )}
     </Card>
@@ -195,7 +222,7 @@ function useElevation(op: ElevatedOp, onDone: () => void) {
     setPlan(null);
     setNote(null);
     setError(null);
-    api.elevationPlan(op).then(setPlan).catch((e) => setError(msg(e)));
+    api.elevationPlan(op).then(setPlan).catch((e) => setError(errText(e)));
   };
 
   const run = async (): Promise<ElevationResult | null> => {
@@ -206,7 +233,7 @@ function useElevation(op: ElevatedOp, onDone: () => void) {
       setNote(r.lines);
       return r;
     } catch (e) {
-      setError(msg(e));
+      setError(errText(e));
       return null;
     } finally {
       setBusy(false);
@@ -214,10 +241,12 @@ function useElevation(op: ElevatedOp, onDone: () => void) {
     }
   };
 
-  return { plan, busy, note, error, loadPlan, run, reset: () => { setPlan(null); setNote(null); setError(null); } };
+  return {
+    plan, busy, note, error, loadPlan, run,
+    clearError: () => setError(null),
+    reset: () => { setPlan(null); setNote(null); setError(null); },
+  };
 }
-
-const msg = (e: unknown) => String((e as { message?: string })?.message ?? e);
 
 /** The plan listing, rendered the same way the uninstall card renders its
  *  own — because for the removal ops it is literally the same lines. */
@@ -362,7 +391,7 @@ function ElevatedPanel({ op, verb, blurb, onClose, onDone, before, after }: {
   before?: () => Promise<void>;
   after?: () => Promise<void>;
 }) {
-  const { plan, busy, note, error, loadPlan, run } = useElevation(op, onDone);
+  const { plan, busy, note, error, loadPlan, run, clearError } = useElevation(op, onDone);
   const [prepError, setPrepError] = useState<string | null>(null);
   useEffect(loadPlan, [op]);
 
@@ -378,7 +407,7 @@ function ElevatedPanel({ op, verb, blurb, onClose, onDone, before, after }: {
       // which is the one state this file is meant to make impossible.
       if (after && r && r.ok && !r.declined) await after();
     } catch (e) {
-      setPrepError(msg(e));
+      setPrepError(errText(e));
     }
   };
 
@@ -399,7 +428,7 @@ function ElevatedPanel({ op, verb, blurb, onClose, onDone, before, after }: {
           <div className="ab"><button className="btn q" onClick={onClose}>Close</button></div>
         </>
       )}
-      {(error ?? prepError) && <div className="offline"><i />{error ?? prepError}</div>}
+      <ErrorNote text={error ?? prepError} onDismiss={() => { clearError(); setPrepError(null); }} />
     </div>
   );
 }

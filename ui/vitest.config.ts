@@ -22,6 +22,10 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Without this, every .css id resolves to an empty string -- including
+    // `shell.css?raw`, which keyboard.test.tsx reads to check the focus and
+    // text-selection rules are still there.
+    css: true,
     globals: true,
     setupFiles: ["src/test/setup.ts"],
     include: ["src/**/*.test.tsx", "src/**/*.test.ts"],

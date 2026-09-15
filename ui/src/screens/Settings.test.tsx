@@ -378,6 +378,8 @@ describe("startup, recording and restore", () => {
     expect(screen.getByText("Profile applied")).toBeInTheDocument();
 
     await h.user.click(screen.getByRole("button", { name: "Restore original state now" }));
+    expect(tauri.lastCall("restore_all")).toBeUndefined();
+    await h.user.click(screen.getByRole("button", { name: "Confirm restore" }));
     await settle();
 
     expect(tauri.lastCall("restore_all")).toBeDefined();
