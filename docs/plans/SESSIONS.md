@@ -97,6 +97,10 @@ sessions beat eight neglected ones.
 | S16 | Second-monitor display pass | `chore/second-monitor` | main tree | a second panel |
 | S17 | EV certificate and signing | `chore/signing` | main tree | the certificate |
 | S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
+| S23 | Never look dead | `feat/never-dead` | create when started | — |
+| S24 | Stop the UI lying | `feat/honest-ui` | create when started | — (not with S23) |
+| S25 | Keyboard, focus, destructive actions | `feat/ui-safety` | create when started | — |
+| S26 | Shell polish | `feat/shell-polish` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
 | S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 done, so unblocked (v1.1) |
 | S20 | Stream Deck and NDI output | `feat/streamdeck-ndi` | create when started | — (v1.1) |
@@ -757,6 +761,154 @@ Zero network config for the user is a non-negotiable, and right now a user who d
 3. Never grab elevation silently. If the user declines, the app must still work where it can and explain where it cannot.
 4. Add detection so the blocked state is reported as what it is, not as a network fault — copy the shape of the HEVC capability banner we added on the Share and Receive screens.
 5. Finish only when the Definition of Done is met. Update docs/plans/M7-installer.md and docs/ROADMAP.md, then summarise.
+```
+
+---
+
+# Group 6 — MVP polish
+
+Found by an audit on 2026-09-15, after all eight code sessions merged. None of
+these are missing features; they are the things that make a finished product
+feel unfinished in the first ten minutes. **S23 and S24 both touch
+`Share.tsx` and `Games.tsx` — do not run them concurrently.**
+
+---
+
+## S23 — Never look dead
+**Branch** `feat/never-dead` · **Worktree** create when started
+
+The worst first impression in the product. Autostart is off by default, the UI
+never starts the core, and the offline banner tells a desktop user to type
+`relay-core run` in a terminal. So: install, reboot, open Relay, and every
+screen reports the service is not running with no way to fix it from the app.
+That is also a regression against an explicit product decision — Relay exists
+as an installed app precisely so nobody has to run terminal commands.
+
+Separately, the core sends `notice` strings over IPC and `core.tsx` expires
+them after 4 s, but nothing renders them. Every backend toast — including the
+preview toggle — is dropped on the floor.
+
+### Definition of Ready
+- [x] `relay-svc.exe` already starts the core windowless and exits; the installer uses it.
+- [x] `OfflineBanner` already knows the difference between offline and mock.
+- [ ] Decide the background story: Relay's core keeps running after the window closes, by design, with no tray icon and nothing saying so. For an app that changes audio and display settings, decide whether that silence is acceptable, and record the decision.
+
+### Definition of Done
+- [ ] Opening the app with no core running starts it (via `relay-svc.exe`) or offers a single button that does. No terminal command appears in any user-facing string.
+- [ ] A core that cannot be started says why, in terms a user can act on.
+- [ ] `notice` events render somewhere the user will see them, and expire quietly.
+- [ ] The background-service decision from the DoR is implemented — either a tray affordance or an explicit, honest line about what keeps running after the window closes.
+- [ ] Reboot test on this machine with autostart off: open Relay from the Start Menu and reach live state without touching a terminal.
+
+### Kickoff prompt
+```
+You are starting session S23 (never look dead) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S23). Create the worktree first: git worktree add -b feat/never-dead ..\relay-never-dead main, then cd into it and run pnpm install in ui/.
+
+Autostart is off by default, the UI never starts the core, and ui/src/components/Offline.tsx tells a desktop user to run `relay-core run` in a terminal. Install, reboot, open Relay, and the app is dead with no in-app remedy. Relay is an installed app specifically so nobody has to use terminal commands, so this is a regression against a product decision, not a missing nicety.
+
+1. Make opening the app reach live state without a terminal. relay-svc.exe already starts the core windowless; the installer uses it.
+2. No user-facing string may name a CLI command. If the core cannot start, say why in terms the user can act on.
+3. The core emits `notice` events that ui/src/lib/core.tsx stores and expires after 4 s, and nothing renders them. Surface them.
+4. Check the DoR question with me before building: the core keeps running after the window closes, with no tray icon and nothing saying so. Tell me what you think and let me decide.
+5. Prove it with a real reboot on this machine, autostart off, launching from the Start Menu.
+6. Finish only when the Definition of Done is met, then update docs/ROADMAP.md and summarise.
+```
+
+---
+
+## S24 — Stop the UI lying
+**Branch** `feat/honest-ui` · **Worktree** create when started · **Not concurrent with S23**
+
+Three places render invented content as if it were measured. These are worse
+than blank space because a user tests them early and believes them.
+
+### Definition of Ready
+- [x] The real data exists for all three: profile colour values, the headset curve in the hardware library, and the live preset plus `ShareCapabilities.adapters`.
+- [ ] Decide per case: make it real, or remove it. A removed element is a perfectly good outcome — decoration that cannot be driven by real data should not be in a product whose every screen claims nothing was faked.
+
+### Definition of Done
+- [ ] `Games.tsx` display A/B: both halves currently render the identical `<Scene/>` differing only by a hard-coded gradient, so Vibrance/Gamma/Contrast change nothing. Either it reflects the profile's actual colour settings, or it goes.
+- [ ] `Games.tsx` EQ graph: the dashed "Headset raw response" is a hard-coded path shown even for a headset with no curve. Drive it from the real curve, and hide it when there is none.
+- [ ] `Share.tsx`: the overlay's `3840×2160 / 60 fps / HEVC` and `NVENC · CPU x%` are hard-coded. Derive from the live preset and the adapter name the capability probe already returns.
+- [ ] `Receive.tsx` / `Share.tsx` `.scene` decoration: either a real thumbnail or an honest placeholder; not a painted gradient under a real caption.
+- [ ] A test pins at least the EQ and share-label cases, so the next session cannot quietly re-hard-code them.
+
+### Kickoff prompt
+```
+You are starting session S24 (stop the UI lying) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S24). Check first that session S23 has finished — it touches the same files, so do not run alongside it. Create the worktree: git worktree add -b feat/honest-ui ..\relay-honest-ui main, then pnpm install in ui/.
+
+Three parts of the UI render invented content as if it were measured: the Display tab's A/B comparison (both halves are the same scene, so the colour sliders change nothing), the EQ graph's "Headset raw response" (a hard-coded path, shown even when the headset has no curve), and the Share overlay's resolution/fps/encoder labels (hard-coded 4K60 NVENC regardless of preset or GPU).
+
+1. For each, decide: make it real or remove it. Removal is a good outcome — this product tells the user on every screen that nothing was faked, so decoration that cannot be driven by real data does not belong.
+2. The real data already exists in all three cases: the profile's colour values, the hardware library's curve, and the live preset plus ShareCapabilities.adapters.
+3. Pin at least the EQ and the share labels with tests so they cannot quietly regress to hard-coded values.
+4. Finish only when the Definition of Done is met, then update docs/ROADMAP.md and summarise.
+```
+
+---
+
+## S25 — Keyboard, focus and destructive actions
+**Branch** `feat/ui-safety` · **Worktree** create when started
+
+The app is mouse-only, and the same class of destructive action is handled four
+different ways.
+
+### Definition of Ready
+- [x] S8's harness (`pnpm test`, 170 tests) can assert keyboard interaction in jsdom without touching the desktop.
+- [x] Profiles already has the good two-step delete pattern to standardise on.
+
+### Definition of Done
+- [ ] Every interactive control is reachable and operable by keyboard: rail nav items are real buttons/links, `Toggle` is focusable with an accessible name, profile rows have a keyboard path to edit and apply.
+- [ ] Visible `:focus-visible` styling everywhere, in the existing design language.
+- [ ] Global `user-select: none` is relaxed for text worth copying: paths, pairing code, error messages, monitor ids.
+- [ ] **One** confirmation pattern for destructive actions, replacing the current four (instant preset delete, unconfirmed Restore-all, native `window.confirm` for hardware, two-step for profiles). Native dialogs go.
+- [ ] "Restore original state now" gets a `.catch` and success feedback; today a failure is indistinguishable from success.
+- [ ] Editing a profile and navigating away, or the focused game changing mid-edit, no longer discards changes silently.
+- [ ] Errors use the existing `errText()` helper rather than `String(e)` (which renders `[object Object]` for non-string rejections), appear near the control that failed, and are dismissible.
+- [ ] Keyboard paths and the confirmation pattern are covered by tests.
+
+### Kickoff prompt
+```
+You are starting session S25 (keyboard, focus and destructive actions) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S25). Create the worktree: git worktree add -b feat/ui-safety ..\relay-ui-safety main, then pnpm install in ui/.
+
+The app is mouse-only — rail nav items are <a> with no href, Toggle puts role="switch" on a non-focusable inner div, profile rows are <tr onClick>, and there are no focus styles anywhere. Global user-select: none also prevents copying paths, the pairing code, and error text.
+
+Separately, four different patterns exist for destructive actions: preset delete fires instantly, Restore-all has no confirm and no .catch so a failure looks like success, hardware removal uses a native window.confirm inside a custom-chrome window, and profiles do it properly in two steps.
+
+1. Make everything keyboard-operable with visible focus styling in the existing design language. Standardise on one confirmation pattern — the Profiles two-step is the one to keep. Native dialogs go.
+2. Unsaved profile edits are currently discarded silently when navigating away or when the focused game changes. Fix that.
+3. Use the existing errText() helper instead of String(e), which renders [object Object] for non-string rejections.
+4. Cover the keyboard paths and the confirmation pattern with tests. S8's harness runs in jsdom, so nothing touches the real desktop — keep it that way.
+5. Finish only when the Definition of Done is met, then update docs/ROADMAP.md and summarise.
+```
+
+---
+
+## S26 — Shell polish
+**Branch** `feat/shell-polish` · **Worktree** create when started
+
+Small Windows-integration details, none hard, all noticed.
+
+### Definition of Ready
+- [x] Icons are already custom and on-brand, not the Tauri default.
+- [ ] Decide the publisher string. It shows in Add/Remove Programs and, now that S6 added an elevation prompt, in the UAC dialog. Unsigned binaries will still read "Unknown publisher" there until the EV certificate lands (S17).
+
+### Definition of Done
+- [ ] Window size and position persist across launches (currently resets to 1280×800 centred every time).
+- [ ] A second launch focuses the existing window instead of opening a second one. The core has a single-instance mutex; the UI has none.
+- [ ] Add/Remove Programs shows a real publisher rather than the lowercase crate name `relay`, plus a support URL.
+- [ ] Disabled sliders show their current value instead of `—`, so a locked setting is still readable.
+- [ ] Loading states do not pop: at minimum the pairing-code placeholder stops rendering six em-dashes at 34 px, which reads as an error.
+
+### Kickoff prompt
+```
+You are starting session S26 (shell polish) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S26). Create the worktree: git worktree add -b feat/shell-polish ..\relay-shell-polish main, then pnpm install in ui/.
+
+Small Windows-integration details that are all individually minor and collectively make the app feel unfinished: the window forgets its size and position, a second launch opens a second window (the core has a single-instance mutex, the UI has none), Add/Remove Programs shows the publisher as the lowercase crate name "relay" with no support URL, disabled sliders hide their value behind an em-dash so you cannot read a locked setting, and the pairing-code placeholder renders as six em-dashes at 34 px which reads as an error state.
+
+1. Ask me for the publisher string before setting it — it appears in Add/Remove Programs and in the UAC prompt.
+2. Keep the footprint gate green; window-state persistence must not pull weight into the always-on core, which is a separate process from the UI.
+3. Finish only when the Definition of Done is met, then update docs/ROADMAP.md and summarise.
 ```
 
 ---
