@@ -6,6 +6,7 @@
 //! Shared-mode WASAPI only — nothing here touches the endpoint's
 //! configuration, volume, or default-device selection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
@@ -312,6 +313,10 @@ pub struct OpusStream {
     convert: crate::resample::ToOpus48,
     src_channels: u16,
     pending: Vec<f32>,
+    /// Arrival stamps for the samples in `pending`: `(qpc, samples left from
+    /// that block)`, oldest first. Lets a packet report when its first sample
+    /// reached us, which is the packetization latency the bench reports.
+    stamps: VecDeque<(i64, usize)>,
     frame_samples: usize,
     /// Set when the endpoint is not already 48 kHz stereo; surfaced once in the
     /// log so an audio-quality question has the conversion visible.
@@ -322,12 +327,66 @@ pub struct OpusStream {
 
 pub struct OpusPacket {
     pub data: Vec<u8>,
+    /// QPC when the packet finished encoding.
     pub qpc_100ns: i64,
+    /// QPC when WASAPI delivered the block this packet starts in.
+    pub captured_qpc_100ns: i64,
     pub duration: Duration,
 }
 
+/// Encoder tuning for one track.
+///
+/// The program mix is music-grade and keeps exactly the settings it has always
+/// had. A microphone is speech: it does not need 160 kb/s stereo at libopus's
+/// default complexity, and since the second encoder's CPU is the whole cost of
+/// the mic track on the share hot path, it gets a cheaper one.
+#[derive(Debug, Clone, Copy)]
+pub struct OpusProfile {
+    pub bitrate_bps: i32,
+    pub application: opus::Application,
+    /// `None` leaves libopus's default, which is what the program mix has
+    /// always encoded at — this keeps the single-track path unchanged.
+    pub complexity: Option<i32>,
+}
+
+impl OpusProfile {
+    /// The desktop mix or a game: music-grade, unchanged since M4.
+    pub fn program() -> Self {
+        Self { bitrate_bps: 160_000, application: opus::Application::Audio, complexity: None }
+    }
+
+    /// A microphone: speech at a sane rate and a cheaper search.
+    pub fn voice() -> Self {
+        Self { bitrate_bps: 64_000, application: opus::Application::Voip, complexity: Some(5) }
+    }
+}
+
+/// Spend `frame_samples` worth of capture stamps and return the capture time
+/// of the oldest sample in that frame — what the receiver rebases A/V sync on.
+///
+/// Extracted so the arithmetic is testable without WASAPI, because the way it
+/// breaks is silent: the counts must be in the same units as the buffer they
+/// describe (post-conversion interleaved samples). Count source samples
+/// instead and the deque drains at the wrong rate, so the reported capture
+/// time slides further behind real time the longer the share runs — and only
+/// on endpoints that are not already 48 kHz stereo.
+fn take_capture_stamp(stamps: &mut VecDeque<(i64, usize)>, frame_samples: usize) -> i64 {
+    let captured = stamps.front().map(|(q, _)| *q).unwrap_or(0);
+    let mut left = frame_samples;
+    while left > 0 {
+        let Some((_, n)) = stamps.front_mut() else { break };
+        let take = left.min(*n);
+        *n -= take;
+        left -= take;
+        if *n == 0 {
+            stamps.pop_front();
+        }
+    }
+    captured
+}
+
 impl OpusStream {
-    pub fn new(source: AudioSource, bitrate: i32) -> Result<Self> {
+    pub fn new(source: AudioSource, profile: OpusProfile) -> Result<Self> {
         let capture = AudioCapture::start(source)?;
         let (rate, channels) = (capture.sample_rate, capture.channels);
         crate::resample::check_format(rate, channels)?;
@@ -335,9 +394,11 @@ impl OpusStream {
         if let Some(note) = conversion.as_deref() {
             tracing::info!("{note}");
         }
-        let mut encoder =
-            opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio)?;
-        encoder.set_bitrate(opus::Bitrate::Bits(bitrate))?;
+        let mut encoder = opus::Encoder::new(48_000, opus::Channels::Stereo, profile.application)?;
+        encoder.set_bitrate(opus::Bitrate::Bits(profile.bitrate_bps))?;
+        if let Some(c) = profile.complexity {
+            encoder.set_complexity(c)?;
+        }
         let frame_samples = 480 * 2; // 10 ms stereo
         Ok(Self {
             capture,
@@ -345,6 +406,7 @@ impl OpusStream {
             convert: crate::resample::ToOpus48::new(rate),
             src_channels: channels,
             pending: Vec::with_capacity(frame_samples * 4),
+            stamps: VecDeque::new(),
             frame_samples,
             conversion,
             peak: 0.0,
@@ -371,19 +433,132 @@ impl OpusStream {
             }
             match self.capture.next(deadline - now) {
                 Some(block) => {
+                    // The stamp must count what lands in `pending`, not what
+                    // WASAPI handed us: the resampler changes the sample count,
+                    // and the drain below spends `pending` units. Counting
+                    // source samples here would walk A/V sync off by the rate
+                    // ratio — silently, and only on the endpoints that are not
+                    // already 48 kHz stereo, which is exactly where nobody
+                    // would be looking. The sub-millisecond skew from the
+                    // converter's own history is far inside one 10 ms packet,
+                    // so the block's capture time still describes its samples.
                     let stereo = crate::resample::fold_to_stereo(&block.samples, self.src_channels);
-                    self.pending.extend_from_slice(&self.convert.push(&stereo));
+                    let converted = self.convert.push(&stereo);
+                    if !converted.is_empty() {
+                        self.stamps.push_back((block.qpc_100ns, converted.len()));
+                        self.pending.extend_from_slice(&converted);
+                    }
                 }
                 None => return Ok(None),
             }
         }
+        let captured_qpc_100ns = take_capture_stamp(&mut self.stamps, self.frame_samples);
         let frame: Vec<f32> = self.pending.drain(..self.frame_samples).collect();
         self.peak = frame.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         let data = self.encoder.encode_vec_float(&frame, 1500)?;
         Ok(Some(OpusPacket {
             data,
             qpc_100ns: qpc_now_100ns(),
+            captured_qpc_100ns,
             duration: Duration::from_millis(10),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resample::{fold_to_stereo, ToOpus48};
+
+    const FRAME_SAMPLES: usize = 480 * 2; // 10 ms stereo
+
+    #[test]
+    fn a_stamp_is_spent_in_step_with_the_buffer_it_describes() {
+        let mut stamps: VecDeque<(i64, usize)> = VecDeque::new();
+        stamps.push_back((100, 600));
+        stamps.push_back((200, 600));
+        stamps.push_back((300, 600));
+
+        // 960 spends all of block 100 and 360 of block 200.
+        assert_eq!(take_capture_stamp(&mut stamps, FRAME_SAMPLES), 100);
+        // The oldest sample left is now in block 200, which has 240 to give;
+        // the rest comes from block 300.
+        assert_eq!(take_capture_stamp(&mut stamps, FRAME_SAMPLES), 200);
+        // Everything is spent: 1800 stamped samples covered only one and
+        // seven-eighths frames, so the deque is empty rather than negative.
+        assert!(stamps.is_empty());
+        // Running dry reports 0 rather than panicking or reusing a stale time.
+        assert_eq!(take_capture_stamp(&mut stamps, FRAME_SAMPLES), 0);
+    }
+
+    /// The merge trap, made loud. S2 stamps each WASAPI block with the number
+    /// of samples it contributed; S7 put a resampler in front of that buffer.
+    /// If the stamp keeps counting *source* samples it describes a different
+    /// quantity than the buffer it is spent against, and the receiver's A/V
+    /// sync loses its reference — silently, and only on endpoints that are not
+    /// already 48 kHz stereo, which is exactly where nobody is looking.
+    ///
+    /// This drives the real converter through ten seconds of a 44.1 kHz mono
+    /// microphone and asserts both halves: counting converted samples gives
+    /// every packet a real capture time, and counting source samples does not.
+    #[test]
+    fn stamps_counted_in_source_samples_lose_the_capture_time() {
+        let (rate, channels) = (44_100u32, 1u16);
+        let mut convert = ToOpus48::new(rate);
+        let mut pending = 0usize;
+        let mut correct: VecDeque<(i64, usize)> = VecDeque::new();
+        let mut wrong: VecDeque<(i64, usize)> = VecDeque::new();
+        let (mut source_total, mut converted_total) = (0usize, 0usize);
+        let (mut packets, mut disagreed, mut skew_total) = (0usize, 0usize, 0i64);
+
+        for block in 1..=1000i64 {
+            let samples = vec![0.0f32; rate as usize / 100]; // 10 ms mono
+            let stereo = fold_to_stereo(&samples, channels);
+            let out = convert.push(&stereo);
+            source_total += samples.len();
+            converted_total += out.len();
+            if !out.is_empty() {
+                correct.push_back((block, out.len()));
+                wrong.push_back((block, samples.len()));
+                pending += out.len();
+            }
+            while pending >= FRAME_SAMPLES {
+                pending -= FRAME_SAMPLES;
+                packets += 1;
+                let good = take_capture_stamp(&mut correct, FRAME_SAMPLES);
+                let bad = take_capture_stamp(&mut wrong, FRAME_SAMPLES);
+                if good != bad {
+                    disagreed += 1;
+                }
+                // Block numbers stand in for capture time: one per 10 ms.
+                skew_total += bad - good;
+            }
+        }
+
+        // The units really do differ, or this test proves nothing: one mono
+        // sample becomes two stereo samples, then the rate ratio scales it
+        // again — about 2.18x.
+        let ratio = converted_total as f64 / source_total as f64;
+        assert!((2.1..2.3).contains(&ratio), "conversion ratio {ratio}");
+        assert!(packets > 900, "only {packets} packets from ten seconds");
+
+        // Counted in converted samples the stamps stay in step with the
+        // buffer: what is left in the deque is exactly the residue still
+        // sitting in `pending`, after ten seconds.
+        let left: usize = correct.iter().map(|(_, n)| *n).sum();
+        assert_eq!(left, pending, "stamps drifted out of step with the buffer");
+
+        // Counted in source samples the deque is fed 441 per block but spent
+        // 960 per packet, so it is permanently starved: instead of naming the
+        // block the oldest queued sample came from, it names whichever block
+        // was pushed most recently. The reported capture time is biased new,
+        // which shows up downstream as under-reported latency and audio that
+        // will not line up with video.
+        assert!(
+            disagreed > packets * 9 / 10,
+            "source-counted stamps should disagree on nearly every packet; {disagreed} of {packets}"
+        );
+        let mean_skew = skew_total as f64 / packets as f64;
+        assert!(mean_skew > 0.5, "source-counted stamps should read newer; mean skew {mean_skew}");
     }
 }

@@ -53,6 +53,51 @@ git worktree remove ..\relay-<name>
 `target` is present. Delete the folder yourself afterwards and run
 `git worktree prune`.
 
+## Environment gotchas that cost sessions time
+
+Two things bit real sessions on this machine. Both are environment, not code,
+so nothing in the repo reveals them.
+
+**CMake is required to build `relay-capture` and is not on the default PATH.**
+`opusic-sys` needs it. Without it the crate does not build at all, which looks
+like a broken checkout. Two copies exist on this machine, neither on PATH, and
+both work — verified 2026-09-14:
+
+```
+C:\Program Files\CMake\bin                                                    (4.4.3)
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin   (3.31.6-msvc6)
+```
+
+Prepend either to `PATH` for the session before building anything touching
+`crates/capture`. The standalone install is the tidier choice; the BuildTools
+one is a working fallback if it is ever missing.
+
+**WASAPI loopback of a silent endpoint delivers no packets at all.** This is
+the dangerous one, because it does not fail — it quietly produces a zero-filled
+audio track and plausible-looking latency numbers measured over nothing. S2
+nearly recorded a bogus p99 from two passes that were measuring silence. If you
+are benchmarking or validating any audio path, play actual audio through the
+default endpoint for the duration and assert the packet count, the way
+`scripts/dual-audio-check.ps1` does with a generated 440 Hz tone.
+
+**Windows Firewall blocks `relay-share.exe` by path.** Windows prompts the
+first time a given executable path opens a socket, and dismissing that prompt
+writes a permanent Block rule. Every worktree and every build profile is a
+different path, so the prompt returns and Block rules accumulate — ten of them
+had piled up by 2026-09-14, with no Allow rule anywhere. Symptom: loopback
+share and pairing fail with what look like network errors.
+
+`scripts/firewall-rules.ps1 -List` shows the state without elevation. Clearing
+and allowing needs an elevated shell and belongs to the user:
+
+```
+powershell -NoProfile -File scripts\firewall-rules.ps1 -Clean -Allow
+```
+
+**Never change firewall rules from a session.** It needs elevation the user
+owns. Report the block and let them run it. The product-side fix — the
+installer adding the rule and the uninstaller removing it — is session S22.
+
 ## The shared local install
 
 `scripts/install-local.ps1` runs from the post-commit hook in **every** tree

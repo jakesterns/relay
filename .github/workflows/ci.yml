@@ -46,6 +46,12 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
+      # Component tests against a mocked `api` module, in jsdom. They never
+      # drive a real window: see ui/src/test/README.md.
+      - name: UI tests
+        working-directory: ui
+        run: pnpm test
+
       - name: cargo fmt
         run: cargo fmt --all --check
 

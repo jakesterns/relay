@@ -53,6 +53,9 @@ pub struct RecvStats {
     pub video_bytes: AtomicU64,
     pub video_aus: AtomicU64,
     pub audio_packets: AtomicU64,
+    /// Packets on the second (microphone) audio track, 0 when the sender
+    /// ships only one.
+    pub mic_packets: AtomicU64,
     /// network (+jitter) latency of the last AU: arrival − capture, in µs.
     pub arrival_latency_us_last: AtomicI64,
 }
@@ -157,12 +160,16 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let stats = Arc::new(RecvStats::default());
     let (au_tx, mut au_rx) = mpsc::channel::<AccessUnit>(8);
     let (opus_tx, mut opus_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (mic_tx, mut mic_rx) = mpsc::channel::<Vec<u8>>(64);
     {
         let stats = stats.clone();
         let offset = clock_offset_ns.clone();
         let runtime2 = runtime.clone();
         tokio::spawn(async move {
             let mut events_tracks = events.tracks;
+            // How many audio tracks have arrived, for the arrival-order
+            // fallback in `audio_role`.
+            let mut audio_seen = 0usize;
             while let Some(track) = events_tracks.recv().await {
                 let kind = track.kind().await;
                 info!(?kind, "track arrived");
@@ -177,13 +184,27 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         )));
                     }
                     _ => {
+                        let track_id = track.track_id().await;
+                        let role = super::audio_role(&track_id, audio_seen);
+                        audio_seen += 1;
+                        info!(%track_id, ?role, "audio track arrived");
                         let stats = stats.clone();
-                        let opus_tx = opus_tx.clone();
+                        let tx = match role {
+                            super::AudioRole::Program => opus_tx.clone(),
+                            super::AudioRole::Mic => mic_tx.clone(),
+                        };
                         runtime2.spawn(Box::pin(async move {
                             while let Some(ev) = track.poll().await {
                                 if let TrackRemoteEvent::OnRtpPacket(p) = ev {
-                                    stats.audio_packets.fetch_add(1, Ordering::Relaxed);
-                                    if opus_tx.send(p.payload.to_vec()).await.is_err() {
+                                    match role {
+                                        super::AudioRole::Program => {
+                                            stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        super::AudioRole::Mic => {
+                                            stats.mic_packets.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                    }
+                                    if tx.send(p.payload.to_vec()).await.is_err() {
                                         break;
                                     }
                                 }
@@ -210,6 +231,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                     }
                 }
                 Some(_pkt) = opus_rx.recv() => {}
+                Some(_pkt) = mic_rx.recv() => {}
                 _ = ticker.tick() => {
                     let aus = stats2.video_aus.load(Ordering::Relaxed);
                     let (p50, p99, max) = lat.summary().unwrap_or((0.0, 0.0, 0.0));
@@ -219,6 +241,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         "fps": (aus - last_aus) as f64 / 0.5,
                         "video_bytes": stats2.video_bytes.load(Ordering::Relaxed),
                         "audio_packets": stats2.audio_packets.load(Ordering::Relaxed),
+                        "mic_packets": stats2.mic_packets.load(Ordering::Relaxed),
                         "capture_to_arrival_ms": { "p50": p50, "p99": p99, "max": max },
                     }));
                     last_aus = aus;
@@ -246,7 +269,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Full receive mode is attached by the caller (decode + present + audio).
     let render_opts =
         crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
-    crate::render::run(au_rx, opus_rx, stats, events.closed, pc, render_opts).await
+    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts).await
 }
 
 /// Depacketize one video track into access units (marker bit = AU boundary).

@@ -24,8 +24,9 @@ pub const VIDEO_TIMESCALE: u32 = 10_000_000;
 pub struct MuxConfig {
     pub width: u32,
     pub height: u32,
-    /// `None` = video-only file.
-    pub audio: Option<AudioConfig>,
+    /// One entry per audio track, in track order; empty = video-only file.
+    /// Track 0 is the program mix, track 1 (when present) the microphone.
+    pub audio: Vec<AudioConfig>,
     /// Target fragment duration in 100 ns units (default 1 s).
     pub fragment_100ns: i64,
 }
@@ -36,21 +37,44 @@ pub struct AudioConfig {
     pub channels: u8,
     /// Opus pre-skip in 48 kHz samples (0 is fine for a live stream).
     pub pre_skip: u16,
+    /// `hdlr` track name, so an editor can tell the two apart.
+    pub name: &'static str,
 }
 
 impl MuxConfig {
     pub fn video_only(width: u32, height: u32) -> Self {
-        Self { width, height, audio: None, fragment_100ns: 10_000_000 }
+        Self { width, height, audio: Vec::new(), fragment_100ns: 10_000_000 }
     }
 
+    /// Video plus the program-mix Opus track.
     pub fn with_opus(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
-            audio: Some(AudioConfig { sample_rate: 48_000, channels: 2, pre_skip: 0 }),
+            audio: vec![opus_track(PROGRAM_TRACK_NAME)],
             fragment_100ns: 10_000_000,
         }
     }
+
+    /// Video plus the program mix *and* a second Opus track for the
+    /// microphone. Both are 48 kHz stereo; see
+    /// `docs/dev/dual-audio-decision.md` for why they stay unmixed.
+    pub fn with_opus_and_mic(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            audio: vec![opus_track(PROGRAM_TRACK_NAME), opus_track(MIC_TRACK_NAME)],
+            fragment_100ns: 10_000_000,
+        }
+    }
+}
+
+/// `hdlr` names for the two audio tracks, so players and editors label them.
+pub const PROGRAM_TRACK_NAME: &str = "Relay Audio";
+pub const MIC_TRACK_NAME: &str = "Relay Microphone";
+
+fn opus_track(name: &'static str) -> AudioConfig {
+    AudioConfig { sample_rate: 48_000, channels: 2, pre_skip: 0, name }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +93,18 @@ struct PendingSample {
     key: bool,
 }
 
+/// One random-access point, for the `tfra` index written at finalize.
+struct SyncPoint {
+    /// Decode time in the *track's* timescale.
+    time: u64,
+    /// Byte offset of the enclosing `moof` from the start of the file.
+    moof_offset: u64,
+    /// 1-based index of the `traf` within that `moof`.
+    traf: u32,
+    /// 1-based index of the sample within the `trun`.
+    sample: u32,
+}
+
 pub struct Mp4Muxer<W: Write> {
     w: W,
     cfg: MuxConfig,
@@ -76,15 +112,24 @@ pub struct Mp4Muxer<W: Write> {
     t0: i64,
     seq: u32,
     video: Vec<PendingSample>,
-    audio: Vec<PendingSample>,
+    /// Pending samples per audio track, parallel to `cfg.audio`.
+    audio: Vec<Vec<PendingSample>>,
     /// Video AUs dropped while waiting for the first keyframe.
     pub dropped_awaiting_key: u64,
     bytes_written: u64,
     last_video_dur: i64,
+    /// Random-access points per track — index 0 is video, then one entry per
+    /// audio track — accumulated as fragments are written and emitted as
+    /// `mfra` by `finalize`. Without this index the Windows video-editing API
+    /// (`Windows.Media.Editing.MediaClip`) refuses the file outright — see
+    /// `docs/dev/container-compat.md`.
+    sync: Vec<Vec<SyncPoint>>,
 }
 
 impl<W: Write> Mp4Muxer<W> {
     pub fn new(w: W, cfg: MuxConfig) -> Self {
+        let audio_len = cfg.audio.len();
+        let audio = cfg.audio.iter().map(|_| Vec::new()).collect();
         Self {
             w,
             cfg,
@@ -92,10 +137,11 @@ impl<W: Write> Mp4Muxer<W> {
             t0: 0,
             seq: 0,
             video: Vec::new(),
-            audio: Vec::new(),
+            audio,
             dropped_awaiting_key: 0,
             bytes_written: 0,
             last_video_dur: 166_667, // 60 fps until the stream says otherwise
+            sync: (0..=audio_len).map(|_| Vec::new()).collect(),
         }
     }
 
@@ -148,18 +194,27 @@ impl<W: Write> Mp4Muxer<W> {
         Ok(())
     }
 
-    /// Feed one Opus packet. Dropped (not an error) before the first video
-    /// keyframe so the file always starts on a decodable picture.
-    pub fn push_audio(&mut self, packet: &[u8], pts_100ns: i64, dur_100ns: i64) -> Result<()> {
+    /// Feed one Opus packet to audio track `track` (0 = program mix, 1 = mic).
+    /// Dropped (not an error) before the first video keyframe so the file
+    /// always starts on a decodable picture, and dropped for a track this
+    /// file does not carry — a mic packet arriving at a program-only muxer is
+    /// a configuration mismatch, not a reason to fail a recording.
+    pub fn push_audio(
+        &mut self,
+        track: usize,
+        packet: &[u8],
+        pts_100ns: i64,
+        dur_100ns: i64,
+    ) -> Result<()> {
         match self.state {
             MuxState::Finalized => bail!("muxer already finalized"),
             MuxState::AwaitingKeyframe => return Ok(()),
             MuxState::Streaming => {}
         }
-        if self.cfg.audio.is_none() {
+        let Some(pending) = self.audio.get_mut(track) else {
             return Ok(());
-        }
-        self.audio.push(PendingSample {
+        };
+        pending.push(PendingSample {
             data: packet.to_vec(),
             pts: (pts_100ns - self.t0).max(0),
             dur: Some(dur_100ns),
@@ -179,6 +234,11 @@ impl<W: Write> Mp4Muxer<W> {
             }
             // Flush everything pending: audio cut-off = end of time.
             self.flush_fragment(i64::MAX)?;
+            // The random-access index goes last, so a crash before this point
+            // simply leaves an unindexed — but still playable — file.
+            let mfra = mfra(&self.cfg, &self.sync);
+            self.w.write_all(&mfra)?;
+            self.bytes_written += mfra.len() as u64;
             self.w.flush()?;
         }
         self.state = MuxState::Finalized;
@@ -194,12 +254,50 @@ impl<W: Write> Mp4Muxer<W> {
         if let Some(d) = self.video.last().and_then(|s| s.dur) {
             self.last_video_dur = d;
         }
-        let split = self.audio.iter().position(|a| a.pts >= until_pts).unwrap_or(self.audio.len());
-        let audio: Vec<PendingSample> = self.audio.drain(..split).collect();
+        let audio: Vec<Vec<PendingSample>> = self
+            .audio
+            .iter_mut()
+            .map(|pending| {
+                let split =
+                    pending.iter().position(|a| a.pts >= until_pts).unwrap_or(pending.len());
+                pending.drain(..split).collect()
+            })
+            .collect();
         let video = std::mem::take(&mut self.video);
 
+        // Which audio tracks have samples this fragment, in track order. Only
+        // those get a `traf`, so a `traf` number is a *position* in this moof,
+        // not a track id — with two audio tracks the mic can be traf 2 or 3
+        // depending on whether the program mix had anything to say.
+        let written: Vec<usize> =
+            (0..self.cfg.audio.len()).filter(|&i| !audio[i].is_empty()).collect();
+
+        // Index this fragment's random-access points before writing it, while
+        // `bytes_written` still points at the `moof` about to go out.
+        let moof_offset = self.bytes_written;
+        for (i, s) in video.iter().enumerate() {
+            if s.key {
+                self.sync[0].push(SyncPoint {
+                    time: to_timescale(s.pts, VIDEO_TIMESCALE),
+                    moof_offset,
+                    traf: 1,
+                    sample: i as u32 + 1,
+                });
+            }
+        }
+        // Every Opus packet is a random-access point; one entry per fragment
+        // is enough to seek by and keeps the index small.
+        for (pos, &i) in written.iter().enumerate() {
+            self.sync[i + 1].push(SyncPoint {
+                time: to_timescale(audio[i][0].pts, self.cfg.audio[i].sample_rate),
+                moof_offset,
+                traf: pos as u32 + 2, // video is always traf 1
+                sample: 1,
+            });
+        }
+
         self.seq += 1;
-        let frag = fragment(&self.cfg, self.seq, &video, &audio);
+        let frag = fragment(&self.cfg, self.seq, &video, &audio, &written);
         self.w.write_all(&frag)?;
         self.bytes_written += frag.len() as u64;
         Ok(())
@@ -289,16 +387,16 @@ fn init_segment(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummar
             b.u32(m);
         }
         b.zeros(24); // pre_defined
-        b.u32(u32::from(cfg.audio.is_some()) + 2); // next_track_ID
+        b.u32(cfg.audio.len() as u32 + 2); // next_track_ID
         b.close(mvhd);
 
         video_trak(&mut b, cfg, ps, sps);
-        if let Some(a) = &cfg.audio {
-            audio_trak(&mut b, a);
+        for (i, a) in cfg.audio.iter().enumerate() {
+            audio_trak(&mut b, a, audio_track_id(i));
         }
 
         let mvex = b.open(b"mvex");
-        for track_id in 1..=(1 + u32::from(cfg.audio.is_some())) {
+        for track_id in 1..=(1 + cfg.audio.len() as u32) {
             let trex = b.full(b"trex", 0, 0);
             b.u32(track_id);
             b.u32(1); // default_sample_description_index
@@ -386,6 +484,16 @@ fn hvc1(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::Sp
     b.i16(-1); // pre_defined
 
     let hvcc = b.open(b"hvcC");
+    b.bytes(&hvcc_payload(ps, sps));
+    b.close(hvcc);
+    b.close(entry);
+}
+
+/// The `hvcC` decoder-configuration payload (everything after the box header).
+/// Matroska carries the identical bytes as the video track's `CodecPrivate`,
+/// so both containers describe the stream the same way.
+pub(crate) fn hvcc_payload(ps: &annexb::ParamSets, sps: &annexb::SpsSummary) -> Vec<u8> {
+    let mut b = Boxes::new();
     b.u8(1); // configurationVersion
     b.u8((sps.general_profile_space << 6) | (sps.general_tier_flag << 5) | sps.general_profile_idc);
     b.u32(sps.general_profile_compatibility_flags);
@@ -408,17 +516,21 @@ fn hvc1(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::Sp
         b.u16(nal.len() as u16);
         b.bytes(nal);
     }
-    b.close(hvcc);
-    b.close(entry);
+    b.buf
 }
 
-fn audio_trak(b: &mut Boxes, a: &AudioConfig) {
+/// Track ids: video is 1, audio tracks follow in order.
+fn audio_track_id(index: usize) -> u32 {
+    index as u32 + 2
+}
+
+fn audio_trak(b: &mut Boxes, a: &AudioConfig, track_id: u32) {
     let trak = b.open(b"trak");
     {
         let tkhd = b.full(b"tkhd", 0, 3);
         b.u32(0);
         b.u32(0);
-        b.u32(2); // track id
+        b.u32(track_id);
         b.u32(0);
         b.u32(0);
         b.zeros(8);
@@ -444,7 +556,9 @@ fn audio_trak(b: &mut Boxes, a: &AudioConfig) {
             b.u16(0);
             b.close(mdhd);
 
-            hdlr(b, b"soun", b"Relay Audio\0");
+            let mut name = a.name.as_bytes().to_vec();
+            name.push(0);
+            hdlr(b, b"soun", &name);
 
             let minf = b.open(b"minf");
             {
@@ -521,6 +635,49 @@ fn empty_stbl_tail(b: &mut Boxes) {
 }
 
 const TRUN_FLAGS: u32 = 0x000701; // data-offset + duration + size + flags per sample
+/// The `mfra` movie-fragment random-access box: one `tfra` per track that has
+/// any random-access points, then `mfro` with the box's own total size so a
+/// reader can find it by seeking to the end of the file.
+fn mfra(cfg: &MuxConfig, sync: &[Vec<SyncPoint>]) -> Vec<u8> {
+    let mut b = Boxes::new();
+    let mfra = b.open(b"mfra");
+    // `sync[0]` is video (track 1); the rest follow `cfg.audio` in order.
+    let ids = std::iter::once(1u32).chain((0..cfg.audio.len()).map(audio_track_id));
+    for (track_id, points) in ids.zip(sync) {
+        if points.is_empty() {
+            continue;
+        }
+        let tfra = b.full(b"tfra", 1, 0);
+        b.u32(track_id);
+        // 26 reserved bits, then 2 bits each of length-1 for traf / trun /
+        // sample number: 0 = 1 byte, 3 = 4 bytes. Sample numbers can exceed
+        // 255 in a long fragment, so give that field 4 bytes.
+        b.u32(0b11);
+        b.u32(points.len() as u32);
+        for p in points {
+            b.u64(p.time);
+            b.u64(p.moof_offset);
+            b.u8(p.traf as u8);
+            b.u8(1); // trun number: one trun per traf
+            b.u32(p.sample);
+        }
+        b.close(tfra);
+    }
+    let mfro = b.full(b"mfro", 0, 0);
+    b.u32(0); // patched below: size of the whole mfra
+    b.close(mfro);
+    b.close(mfra);
+    let total = b.buf.len() as u32;
+    let at = b.buf.len() - 4;
+    b.buf[at..].copy_from_slice(&total.to_be_bytes());
+    b.buf
+}
+
+/// Rebased 100 ns PTS → a track timescale, saturating at zero.
+fn to_timescale(pts_100ns: i64, timescale: u32) -> u64 {
+    (pts_100ns.max(0) as u128 * timescale as u128 / 10_000_000u128) as u64
+}
+
 const SAMPLE_FLAG_SYNC: u32 = 0x0200_0000; // depends_on = no
 const SAMPLE_FLAG_NON_SYNC: u32 = 0x0101_0000; // depends_on = yes, non-sync
 
@@ -529,7 +686,11 @@ fn fragment(
     cfg: &MuxConfig,
     seq: u32,
     video: &[PendingSample],
-    audio: &[PendingSample],
+    audio: &[Vec<PendingSample>],
+    // Audio track indices with samples this fragment, in track order — the
+    // caller already worked this out to build the `mfra` index, and both must
+    // agree on which tracks got a `traf`.
+    written: &[usize],
 ) -> Vec<u8> {
     let mut b = Boxes::new();
     let moof = b.open(b"moof");
@@ -540,10 +701,15 @@ fn fragment(
     }
     let mut offset_patches: Vec<usize> = Vec::new();
     traf(&mut b, 1, VIDEO_TIMESCALE, video, true, &mut offset_patches);
-    if let Some(a) = &cfg.audio {
-        if !audio.is_empty() {
-            traf(&mut b, 2, a.sample_rate, audio, false, &mut offset_patches);
-        }
+    for &i in written {
+        traf(
+            &mut b,
+            audio_track_id(i),
+            cfg.audio[i].sample_rate,
+            &audio[i],
+            false,
+            &mut offset_patches,
+        );
     }
     b.close(moof);
 
@@ -558,12 +724,14 @@ fn fragment(
     if let Some(at) = patches.next() {
         patch(&mut b, at, video);
     }
-    if let Some(at) = patches.next() {
-        patch(&mut b, at, audio);
+    for &i in written {
+        if let Some(at) = patches.next() {
+            patch(&mut b, at, &audio[i]);
+        }
     }
 
     let mdat = b.open(b"mdat");
-    for s in video.iter().chain(audio.iter()) {
+    for s in video.iter().chain(written.iter().flat_map(|&i| audio[i].iter())) {
         b.bytes(&s.data);
     }
     b.close(mdat);
@@ -578,9 +746,7 @@ fn traf(
     video: bool,
     offset_patches: &mut Vec<usize>,
 ) {
-    let to_ts = |pts_100ns: i64| -> u64 {
-        (pts_100ns.max(0) as u128 * timescale as u128 / 10_000_000u128) as u64
-    };
+    let to_ts = |pts_100ns: i64| -> u64 { to_timescale(pts_100ns, timescale) };
     let traf = b.open(b"traf");
     {
         let tfhd = b.full(b"tfhd", 0, 0x020000); // default-base-is-moof
@@ -681,7 +847,7 @@ pub(crate) mod tests {
         let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus(1920, 1080));
         assert_eq!(m.state(), MuxState::AwaitingKeyframe);
         m.push_video(&p_au(1), 0, false).unwrap();
-        m.push_audio(b"opus", 0, 100_000).unwrap();
+        m.push_audio(0, b"opus", 0, 100_000).unwrap();
         assert_eq!(m.dropped_awaiting_key, 1);
         assert_eq!(m.bytes_written(), 0, "nothing written before the first keyframe");
 
@@ -691,7 +857,7 @@ pub(crate) mod tests {
 
         let out = m.finalize().unwrap();
         let names: Vec<_> = boxes_at(&out).into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["ftyp", "moov", "moof", "mdat"]);
+        assert_eq!(names, ["ftyp", "moov", "moof", "mdat", "mfra"]);
     }
 
     #[test]
@@ -710,7 +876,7 @@ pub(crate) mod tests {
         let f = 166_667i64; // 60 fps
         m.push_video(&key_au(), 0, true).unwrap();
         for i in 1..=6 {
-            m.push_audio(&[0xA0 + i as u8], (i - 1) * 100_000, 100_000).unwrap();
+            m.push_audio(0, &[0xA0 + i as u8], (i - 1) * 100_000, 100_000).unwrap();
             m.push_video(&p_au(i as u8), i * f, false).unwrap();
         }
         let out = m.finalize().unwrap();
@@ -719,7 +885,7 @@ pub(crate) mod tests {
         // newcomer crosses the boundary: 2 mid-stream rolls + final flush.
         assert_eq!(
             names,
-            ["ftyp", "moov", "moof", "mdat", "moof", "mdat", "moof", "mdat"],
+            ["ftyp", "moov", "moof", "mdat", "moof", "mdat", "moof", "mdat", "mfra"],
             "every closed fragment is a self-contained moof+mdat"
         );
     }
@@ -731,18 +897,116 @@ pub(crate) mod tests {
         let mut m2 = Mp4Muxer::new(m.finalize().unwrap(), MuxConfig::video_only(640, 480));
         m2.state = MuxState::Finalized;
         assert!(m2.push_video(&key_au(), 0, true).is_err());
-        assert!(m2.push_audio(b"x", 0, 1).is_err());
+        assert!(m2.push_audio(0, b"x", 0, 1).is_err());
     }
 
     #[test]
     fn video_only_config_ignores_audio() {
         let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::video_only(640, 480));
         m.push_video(&key_au(), 0, true).unwrap();
-        m.push_audio(b"opus", 0, 100_000).unwrap();
+        m.push_audio(0, b"opus", 0, 100_000).unwrap();
         let out = m.finalize().unwrap();
         // One traf only: no audio track anywhere in the moof.
         let pos = out.windows(4).filter(|w| w == b"traf").count();
         assert_eq!(pos, 1);
+    }
+
+    #[test]
+    fn mic_track_is_a_second_audio_track_in_the_same_file() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        for i in 0..4i64 {
+            m.push_audio(0, &[0xB0, i as u8], i * 100_000, 100_000).unwrap();
+            m.push_audio(1, &[0xC0, i as u8], i * 100_000, 100_000).unwrap();
+        }
+        let out = m.finalize().unwrap();
+        assert_eq!(
+            out.windows(4).filter(|w| w == b"traf").count(),
+            3,
+            "video + program + mic each get a traf"
+        );
+        assert_eq!(out.windows(4).filter(|w| w == b"trak").count(), 3);
+        let count = |needle: &[u8]| out.windows(needle.len()).filter(|w| *w == needle).count();
+        assert_eq!(count(PROGRAM_TRACK_NAME.as_bytes()), 1, "program track is named");
+        assert_eq!(count(MIC_TRACK_NAME.as_bytes()), 1, "mic track is named");
+        for i in 0..4u8 {
+            assert!(count(&[0xB0, i]) > 0, "program packet {i} in the file");
+            assert!(count(&[0xC0, i]) > 0, "mic packet {i} in the file");
+        }
+    }
+
+    /// Opening a two-track file but never feeding the mic (the user muted it,
+    /// or the capture endpoint vanished) must still produce a valid file: the
+    /// empty track gets a `trak` but no `traf`, and offsets stay in step.
+    #[test]
+    fn a_silent_mic_track_does_not_desync_the_fragment() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        m.push_audio(0, b"program", 0, 100_000).unwrap();
+        m.push_video(&p_au(1), 166_667, false).unwrap();
+        let out = m.finalize().unwrap();
+        assert_eq!(out.windows(4).filter(|w| w == b"traf").count(), 2);
+        assert_eq!(out.windows(4).filter(|w| w == b"trak").count(), 3);
+        boxes_at(&out); // sizes all consistent
+        assert_mdat_offsets(&out);
+    }
+
+    /// The mic feeding but the program silent is the mirror case, and the one
+    /// that would break a naive offset patcher: the *second* audio track's
+    /// data offset must point past the video, not past a program run that is
+    /// not there.
+    #[test]
+    fn a_silent_program_track_keeps_the_mic_offset_right() {
+        let mut m = Mp4Muxer::new(Vec::new(), MuxConfig::with_opus_and_mic(1920, 1080));
+        m.push_video(&key_au(), 0, true).unwrap();
+        m.push_audio(1, b"mic-only-packet", 0, 100_000).unwrap();
+        m.push_video(&p_au(1), 166_667, false).unwrap();
+        let out = m.finalize().unwrap();
+        assert_eq!(out.windows(4).filter(|w| w == b"traf").count(), 2);
+        assert_mdat_offsets(&out);
+    }
+
+    /// Walk each `moof`'s `trun` data offsets and check they tile the `mdat`
+    /// payload exactly: sum of sample sizes per track, laid end to end from
+    /// the first offset, must land on the end of the mdat.
+    fn assert_mdat_offsets(data: &[u8]) {
+        let mut i = 0usize;
+        while i + 8 <= data.len() {
+            let size = u32::from_be_bytes(data[i..i + 4].try_into().unwrap()) as usize;
+            if &data[i + 4..i + 8] == b"moof" {
+                let moof = &data[i..i + size];
+                let mdat_size =
+                    u32::from_be_bytes(data[i + size..i + size + 4].try_into().unwrap()) as usize;
+                let mut runs: Vec<(usize, usize)> = Vec::new(); // (offset, total bytes)
+                let mut j = 0usize;
+                while j + 8 <= moof.len() {
+                    if &moof[j + 4..j + 8] == b"trun" {
+                        let count =
+                            u32::from_be_bytes(moof[j + 12..j + 16].try_into().unwrap()) as usize;
+                        let offset =
+                            u32::from_be_bytes(moof[j + 16..j + 20].try_into().unwrap()) as usize;
+                        let bytes: usize = (0..count)
+                            .map(|k| {
+                                let at = j + 20 + k * 12 + 4;
+                                u32::from_be_bytes(moof[at..at + 4].try_into().unwrap()) as usize
+                            })
+                            .sum();
+                        runs.push((offset, bytes));
+                    }
+                    j += 1;
+                }
+                runs.sort_unstable();
+                let mut cursor = size + 8; // first payload byte, from moof start
+                for (offset, bytes) in &runs {
+                    assert_eq!(*offset, cursor, "run starts where the previous one ended");
+                    cursor += bytes;
+                }
+                assert_eq!(cursor, size + mdat_size, "runs tile the mdat exactly");
+                i += size + mdat_size;
+                continue;
+            }
+            i += size;
+        }
     }
 
     #[test]
@@ -754,7 +1018,7 @@ pub(crate) mod tests {
             m.push_video(&p_au(9), base - f, false).unwrap(); // dropped
             m.push_video(&key_au(), base, true).unwrap();
             for i in 1..=4 {
-                m.push_audio(&[0xB0, i as u8], base + (i - 1) * 100_000, 100_000).unwrap();
+                m.push_audio(0, &[0xB0, i as u8], base + (i - 1) * 100_000, 100_000).unwrap();
                 m.push_video(&p_au(i as u8), base + i * f, false).unwrap();
             }
             m.finalize().unwrap()
@@ -773,6 +1037,69 @@ pub(crate) mod tests {
              UPDATE_GOLDEN=1 cargo test -p relay-capture golden",
         );
         assert_eq!(a, golden, "muxer bytes drifted from the golden fixture");
+    }
+
+    /// The `mfra` index is what makes the file importable into the Windows
+    /// video-editing API; a wrong offset in it is worse than none at all, so
+    /// check every entry actually lands on a `moof`.
+    #[test]
+    fn mfra_indexes_every_keyframe_at_a_real_moof_offset() {
+        let mut cfg = MuxConfig::with_opus(1920, 1080);
+        cfg.fragment_100ns = 500_000; // 50 ms fragments
+        let mut m = Mp4Muxer::new(Vec::new(), cfg);
+        let f = 166_667i64;
+        m.push_video(&key_au(), 0, true).unwrap();
+        for i in 1..=6i64 {
+            m.push_audio(0, &[0xA0 + i as u8], (i - 1) * 100_000, 100_000).unwrap();
+            // Every third frame is a keyframe, so the index has to carry more
+            // than just the first one.
+            m.push_video(&key_or_p(i % 3 == 0, i as u8), i * f, i % 3 == 0).unwrap();
+        }
+        let out = m.finalize().unwrap();
+
+        let boxes = boxes_at(&out);
+        let mut offsets = Vec::new();
+        let mut at = 0usize;
+        for (name, size) in &boxes {
+            if name == "moof" {
+                offsets.push(at as u64);
+            }
+            at += size;
+        }
+        let mfra_at = at - boxes.last().unwrap().1;
+        let mfra = &out[mfra_at..];
+
+        // mfro's trailing u32 must restate the whole mfra size.
+        let stated = u32::from_be_bytes(out[out.len() - 4..].try_into().unwrap()) as usize;
+        assert_eq!(stated, mfra.len(), "mfro size must match the mfra box");
+
+        // Walk the first tfra (track 1, video) and check its entries.
+        let tfra_at = mfra.windows(4).position(|w| w == b"tfra").unwrap() - 4;
+        let track = u32::from_be_bytes(mfra[tfra_at + 12..tfra_at + 16].try_into().unwrap());
+        assert_eq!(track, 1);
+        let lengths = u32::from_be_bytes(mfra[tfra_at + 16..tfra_at + 20].try_into().unwrap());
+        assert_eq!(lengths, 0b11, "1-byte traf/trun numbers, 4-byte sample number");
+        let count =
+            u32::from_be_bytes(mfra[tfra_at + 20..tfra_at + 24].try_into().unwrap()) as usize;
+        assert_eq!(count, 3, "one entry per keyframe: the IDR plus frames 3 and 6");
+
+        let mut e = tfra_at + 24;
+        let mut times = Vec::new();
+        for _ in 0..count {
+            let time = u64::from_be_bytes(mfra[e..e + 8].try_into().unwrap());
+            let moof = u64::from_be_bytes(mfra[e + 8..e + 16].try_into().unwrap());
+            let traf = mfra[e + 16];
+            let trun = mfra[e + 17];
+            let sample = u32::from_be_bytes(mfra[e + 18..e + 22].try_into().unwrap());
+            assert!(offsets.contains(&moof), "entry points at {moof}, not a moof: {offsets:?}");
+            assert_eq!(traf, 1);
+            assert_eq!(trun, 1);
+            assert!(sample >= 1, "sample numbers are 1-based");
+            times.push(time);
+            e += 22;
+        }
+        assert_eq!(times[0], 0, "first keyframe is the rebased origin");
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "times ascend: {times:?}");
     }
 
     #[test]

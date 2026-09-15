@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::config::IPC_MAX_LINE;
-use crate::hardware::{AudioInterface, HardwareView, Headset, Monitor, ProbeReport};
+use crate::hardware::{
+    AudioInterface, HardwareView, Headset, Monitor, MonitorVendorControls, ProbeReport,
+};
 use crate::presets::{RecordingSettings, SharePresetDef};
 use crate::share::{ReceiveRequest, ShareRequest, SourceTarget};
 use crate::types::{CoreState, HeadsetId, ProcessInfo, Profile, ProfileSummary};
@@ -181,6 +183,19 @@ pub enum Method {
         #[serde(default = "crate::ipc::default_true")]
         keep_data: bool,
     },
+    /// Exactly what an elevated install or removal would change on this
+    /// machine, read-only — the listing shown *before* the UAC prompt. For
+    /// the two removal ops it is the uninstall card's own listing, narrowed
+    /// to that step, so the two can never disagree.
+    ElevationPlan {
+        op: crate::elevate::ElevatedOp,
+    },
+    /// Ask for administrator rights and run one op in `relay-elevate.exe`.
+    /// Blocks until the helper exits. Declining the prompt is an answer, not
+    /// an error: the reply says so and nothing on the PC changed.
+    RunElevated {
+        op: crate::elevate::ElevatedOp,
+    },
     /// Hand over to the Windows uninstaller (one installer, one uninstaller)
     /// and stop the core. Does not itself remove anything.
     LaunchUninstaller,
@@ -234,6 +249,11 @@ pub enum Reply {
         monitors: Vec<Monitor>,
         interfaces: Vec<AudioInterface>,
         connected: Box<HardwareView>,
+        /// Monitors with at least one *verified* vendor DDC/CI control.
+        /// Absent or empty means every vendor slider stays disabled; the
+        /// client must not infer a control from the advertised opcode list.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        vendor_controls: Vec<MonitorVendorControls>,
     },
     Probe {
         report: Box<ProbeReport>,
@@ -268,6 +288,13 @@ pub enum Reply {
         status: Box<crate::vdevice::VdeviceStatus>,
     },
     DryRun {
+        lines: Vec<String>,
+    },
+    /// Result of a `RunElevated`. `declined` is the UAC prompt being
+    /// dismissed — the one case where nothing at all was attempted.
+    Elevation {
+        declined: bool,
+        ok: bool,
         lines: Vec<String>,
     },
     Presets {

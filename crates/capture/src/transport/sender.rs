@@ -23,12 +23,13 @@ use webrtc::media_stream::Track;
 use webrtc::peer_connection::PeerConnection;
 
 use super::{audio_codec, build_pc, discovery, sei, signal, video_codec};
-use crate::audio::{AudioSource, OpusStream};
+use crate::audio::{AudioSource, OpusProfile, OpusStream};
 use crate::command::{self, EngineCmd, SourceTarget};
 use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
 use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
 use crate::source::switch::{self, Switcher};
 use crate::time;
+use relay_core::share::RecordingContainer;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
@@ -39,8 +40,12 @@ pub struct SendOpts {
     pub code: String,
     pub bitrate_bps: u32,
     pub fps: u32,
-    /// `None` = no audio; `Some(Desktop)` is the default share audio.
+    /// The program-mix track: `None` = no program audio; `Some(Desktop)` is
+    /// the default share audio, `Some(Process)` game-only.
     pub audio: Option<AudioSource>,
+    /// Also send the default microphone as a *second* Opus track, alongside
+    /// the program mix rather than instead of it. The receiver sums them;
+    /// see `docs/dev/dual-audio-decision.md`.
     pub mic: bool,
     pub cursor: bool,
     /// Encode size cap `(w, h)`; `None` = native capture size. The capture is
@@ -48,6 +53,7 @@ pub struct SendOpts {
     pub size: Option<(u32, u32)>,
     /// Recording folder; `None` disables recording and the replay ring.
     pub record_dir: Option<PathBuf>,
+    pub container: RecordingContainer,
     /// Start continuous recording as soon as the share is up.
     pub record: bool,
     /// Replay ring window; 0 = ring off.
@@ -164,6 +170,9 @@ pub struct Stats {
     pub audio_packets: AtomicU64,
     /// Audio peak scaled by 1e3.
     pub audio_peak_milli: AtomicU32,
+    /// Counters for the mic track, when a second track is being sent.
+    pub mic_packets: AtomicU64,
+    pub mic_peak_milli: AtomicU32,
 }
 
 struct VideoAu {
@@ -222,6 +231,38 @@ async fn resolve_peer(peer: &Option<String>) -> Result<(SocketAddr, String)> {
     Ok((SocketAddr::new(pick.addr, pick.port), pick.name.clone()))
 }
 
+/// msid track ids for the two audio tracks. These are the wire contract the
+/// receiver classifies on; see [`super::audio_role`].
+pub const PROGRAM_TRACK_ID: &str = "relay-audio";
+pub const MIC_TRACK_ID: &str = "relay-audio-mic";
+
+type AudioTrackPair = (Arc<TrackLocalStaticSample>, Arc<dyn webrtc::rtp_transceiver::RtpSender>);
+
+/// Add one Opus track to the peer connection and return it with its sender.
+async fn add_audio_track(
+    pc: &impl PeerConnection,
+    stream_id: &str,
+    track_id: &str,
+    label: &str,
+) -> Result<AudioTrackPair> {
+    let track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
+        stream_id.into(),
+        track_id.into(),
+        label.into(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(rand::random::<u32>()),
+                ..Default::default()
+            },
+            codec: audio_codec().rtp_codec,
+            ..Default::default()
+        }],
+    ))?);
+    let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await?;
+    Ok((track, sender))
+}
+
 pub async fn run(opts: SendOpts) -> Result<()> {
     let (peer_addr, peer_name) = resolve_peer(&opts.peer).await?;
     info!(%peer_addr, %peer_name, "connecting to receiver");
@@ -249,26 +290,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     ))?);
     let video_sender = pc.add_track(video_track.clone() as Arc<dyn TrackLocal>).await?;
 
-    let audio_track = if opts.audio.is_some() {
-        let track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
-            "relay-audio-stream".into(),
-            "relay-audio".into(),
-            "Relay Audio".into(),
-            RtpCodecKind::Audio,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(rand::random::<u32>()),
-                    ..Default::default()
-                },
-                codec: audio_codec().rtp_codec,
-                ..Default::default()
-            }],
-        ))?);
-        let sender = pc.add_track(track.clone() as Arc<dyn TrackLocal>).await?;
-        Some((track, sender))
-    } else {
-        None
-    };
+    // Up to two audio tracks. The msid track ids are the contract the
+    // receiver classifies on: see `super::audio_role`.
+    let mut audio_track = None;
+    if opts.audio.is_some() {
+        audio_track = Some(
+            add_audio_track(&pc, "relay-audio-stream", PROGRAM_TRACK_ID, "Relay Audio").await?,
+        );
+    }
+    let mut mic_track = None;
+    if opts.mic {
+        mic_track =
+            Some(add_audio_track(&pc, "relay-mic-stream", MIC_TRACK_ID, "Relay Microphone").await?);
+    }
 
     // Offer / answer, both MAC'd with the pairing code.
     let offer = pc.create_offer(None).await?;
@@ -385,6 +419,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         record_on_start: opts.record,
         replay_secs: opts.replay_secs,
         audio: opts.audio.is_some(),
+        mic: opts.mic,
+        container: opts.container,
     });
 
     // Preview rate, shared so the `preview` stdin command can retune it live.
@@ -429,15 +465,38 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         })?
     };
 
-    // Audio thread: WASAPI → Opus → channel.
-    let (atx, mut arx) = mpsc::channel::<(Vec<u8>, Duration)>(16);
+    // Audio threads: WASAPI → Opus → channel, one per track. They stay
+    // independent all the way to the wire; nothing on this side mixes.
+    let (atx, arx) = mpsc::channel::<(Vec<u8>, Duration)>(16);
     let audio_join = if let Some(source) = opts.audio.clone() {
         let stats = stats.clone();
         let stop = stop.clone();
         let rec = recorder.clone();
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
-            if let Err(e) = audio_pipeline(source, atx, stats, stop, rec) {
+            if let Err(e) = audio_pipeline(source, AudioTrack::Program, atx, stats, stop, rec) {
                 warn!(error = %e, "audio pipeline stopped");
+            }
+        })?)
+    } else {
+        None
+    };
+
+    let (mtx, mrx) = mpsc::channel::<(Vec<u8>, Duration)>(16);
+    let mic_join = if opts.mic {
+        let stats = stats.clone();
+        let stop = stop.clone();
+        let rec = recorder.clone();
+        Some(std::thread::Builder::new().name("relay-mic-pipeline".into()).spawn(move || {
+            // A missing or exclusively-held microphone must not take the
+            // share down with it: video and the program mix carry on.
+            if let Err(e) =
+                audio_pipeline(AudioSource::Microphone, AudioTrack::Mic, mtx, stats, stop, rec)
+            {
+                warn!(error = %e, "microphone pipeline stopped");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "error", "where": "mic", "message": e.to_string() })
+                );
             }
         })?)
     } else {
@@ -484,7 +543,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
-    if let Some((track, sender)) = audio_track {
+    for (slot, rx) in [(audio_track, arx), (mic_track, mrx)] {
+        let Some((track, sender)) = slot else { continue };
+        let mut rx = rx;
         runtime.spawn(Box::pin(async move {
             let Ok(params) = sender.get_parameters().await else { return };
             let Some(pt) = params.rtp_parameters.codecs.first().map(|c| c.payload_type) else {
@@ -492,7 +553,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             };
             let ssrcs = track.ssrcs().await;
             let Some(&ssrc) = ssrcs.first() else { return };
-            while let Some((data, dur)) = arx.recv().await {
+            while let Some((data, dur)) = rx.recv().await {
                 let res = track
                     .sample_writer(ssrc, pt)
                     .write_sample(&Sample {
@@ -539,6 +600,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "capture_to_send_ms": stats.capture_to_send_us_last.load(Ordering::Relaxed) as f64 / 1e3,
                     "audio_packets": stats.audio_packets.load(Ordering::Relaxed),
                     "audio_peak": stats.audio_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
+                    "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
+                    "mic_peak": stats.mic_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
                     "rss_mb": fp.rss_bytes as f64 / 1e6,
                 });
@@ -609,7 +672,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     info!("stopping share");
     stop.store(true, Ordering::Relaxed);
     let _ = video_join.join();
-    if let Some(j) = audio_join {
+    for j in [audio_join, mic_join].into_iter().flatten() {
         let _ = j.join();
     }
     // `sig` is owned by the loss-feedback task; closing the peer connection and
@@ -626,6 +689,8 @@ struct RecordSetup {
     record_on_start: bool,
     replay_secs: u32,
     audio: bool,
+    mic: bool,
+    container: RecordingContainer,
 }
 
 /// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC MFT → SEI → channel.
@@ -672,11 +737,13 @@ fn video_pipeline(
             width: size.0,
             height: size.1,
             audio: rs.audio,
+            mic: rs.mic,
             replay_secs: rs.replay_secs,
             ring_max_bytes: ring_max,
             budget: DiskBudget::default(),
             roll_secs: 3600,
             record_on_start: rs.record_on_start,
+            container: rs.container,
         }) {
             Ok(r) => {
                 let _ = recorder.set(r);
@@ -852,26 +919,52 @@ fn create_target_source(
     }
 }
 
+/// Which of the two audio tracks a pipeline feeds. The discriminant doubles
+/// as the recorder audio-track index, so wire and file agree by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioTrack {
+    Program = 0,
+    Mic = 1,
+}
+
 fn audio_pipeline(
     source: AudioSource,
+    which: AudioTrack,
     tx: mpsc::Sender<(Vec<u8>, Duration)>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
     recorder: Arc<OnceLock<Recorder>>,
 ) -> Result<()> {
-    let mut stream = OpusStream::new(source, 160_000)?;
+    let profile = match which {
+        AudioTrack::Program => OpusProfile::program(),
+        AudioTrack::Mic => OpusProfile::voice(),
+    };
+    let mut stream = OpusStream::new(source, profile)?;
+    // Per track, not per share: the program mix and the microphone are
+    // different endpoints and can run at different rates, so each one reports
+    // its own conversion.
     tracing::info!(
+        track = ?which,
         rate = stream.endpoint_rate(),
         channels = stream.endpoint_channels(),
         conversion = stream.conversion.as_deref().unwrap_or("none"),
         "audio pipeline up"
     );
+    let (packets, peak) = match which {
+        AudioTrack::Program => (&stats.audio_packets, &stats.audio_peak_milli),
+        AudioTrack::Mic => (&stats.mic_packets, &stats.mic_peak_milli),
+    };
     while !stop.load(Ordering::Relaxed) {
         let Some(p) = stream.next(Duration::from_millis(200))? else { continue };
-        stats.audio_packets.fetch_add(1, Ordering::Relaxed);
-        stats.audio_peak_milli.store((stream.peak * 1e3) as u32, Ordering::Relaxed);
+        packets.fetch_add(1, Ordering::Relaxed);
+        peak.store((stream.peak * 1e3) as u32, Ordering::Relaxed);
         if let Some(r) = recorder.get() {
-            r.push_audio(&p.data, p.qpc_100ns, (p.duration.as_nanos() / 100) as i64);
+            r.push_audio(
+                which as usize,
+                &p.data,
+                p.qpc_100ns,
+                (p.duration.as_nanos() / 100) as i64,
+            );
         }
         if tx.blocking_send((p.data, p.duration)).is_err() {
             break;

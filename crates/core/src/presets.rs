@@ -9,23 +9,105 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::profiles::write_atomic;
-use crate::share::{ShareRequest, DEFAULT_PREVIEW_FPS};
+use crate::share::{RecordingContainer, ShareRequest, DEFAULT_PREVIEW_FPS};
 
 const FILE_VERSION: u32 = 1;
 
-/// Which audio goes with the share.
+/// Which desktop audio goes with the share. The microphone is a separate,
+/// independent choice — see [`PresetAudio`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum PresetAudio {
+pub enum DesktopAudio {
     /// Default render endpoint loopback (everything you hear).
     #[default]
     System,
     /// The focused game's process tree only.
     Game,
-    /// Default microphone.
-    Mic,
-    /// No audio track.
+    /// No desktop audio track.
     Off,
+}
+
+/// The share's audio *source set*. Since S2 the sender can carry two Opus
+/// tracks, so the microphone is no longer one of four mutually exclusive
+/// choices — it rides alongside whatever desktop source is picked. See
+/// `docs/dev/dual-audio-decision.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PresetAudio {
+    pub desktop: DesktopAudio,
+    pub mic: bool,
+}
+
+impl PresetAudio {
+    /// No audio at all.
+    pub fn off() -> Self {
+        Self { desktop: DesktopAudio::Off, mic: false }
+    }
+
+    pub fn desktop(desktop: DesktopAudio) -> Self {
+        Self { desktop, mic: false }
+    }
+
+    /// Does this preset ask for any audio track at all?
+    pub fn is_silent(self) -> bool {
+        self.desktop == DesktopAudio::Off && !self.mic
+    }
+}
+
+/// On-disk shape. The old four-way string (`system` / `game` / `mic` / `off`)
+/// still reads, so an existing `presets.json` keeps its meaning: `mic` was
+/// mic-*instead-of*-desktop, which is exactly `{desktop: off, mic: true}`.
+/// Writing always uses the new object form.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum PresetAudioRepr {
+    Set {
+        #[serde(default)]
+        desktop: DesktopAudio,
+        #[serde(default)]
+        mic: bool,
+    },
+    Legacy(LegacyAudio),
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+enum LegacyAudio {
+    System,
+    Game,
+    Mic,
+    Off,
+}
+
+impl From<PresetAudioRepr> for PresetAudio {
+    fn from(r: PresetAudioRepr) -> Self {
+        match r {
+            PresetAudioRepr::Set { desktop, mic } => Self { desktop, mic },
+            PresetAudioRepr::Legacy(LegacyAudio::System) => Self::desktop(DesktopAudio::System),
+            PresetAudioRepr::Legacy(LegacyAudio::Game) => Self::desktop(DesktopAudio::Game),
+            PresetAudioRepr::Legacy(LegacyAudio::Mic) => {
+                Self { desktop: DesktopAudio::Off, mic: true }
+            }
+            PresetAudioRepr::Legacy(LegacyAudio::Off) => Self::off(),
+        }
+    }
+}
+
+impl From<PresetAudio> for PresetAudioRepr {
+    fn from(a: PresetAudio) -> Self {
+        PresetAudioRepr::Set { desktop: a.desktop, mic: a.mic }
+    }
+}
+
+impl Serialize for PresetAudio {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        PresetAudioRepr::from(*self).serialize(ser)
+    }
+}
+
+impl<'de> Deserialize<'de> for PresetAudio {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        PresetAudioRepr::deserialize(de).map(Into::into)
+    }
 }
 
 /// One share preset. Encoder codec is HEVC by construction (the engine has no
@@ -51,6 +133,9 @@ pub struct SharePresetDef {
     /// Replay ring window in seconds; 0 = off.
     #[serde(default = "default_replay")]
     pub replay_secs: u32,
+    /// Container for recordings and replay saves made under this preset.
+    #[serde(default)]
+    pub container: RecordingContainer,
 }
 
 fn default_true() -> bool {
@@ -111,10 +196,11 @@ pub fn builtins() -> Vec<SharePresetDef> {
             bitrate_mbps: 60,
             fps: 60,
             size: None,
-            audio: PresetAudio::Game,
+            audio: PresetAudio::desktop(DesktopAudio::Game),
             cursor: false,
             record: false,
             replay_secs: 60,
+            container: RecordingContainer::Mp4,
         },
         SharePresetDef {
             id: "daw".into(),
@@ -122,10 +208,11 @@ pub fn builtins() -> Vec<SharePresetDef> {
             bitrate_mbps: 40,
             fps: 60,
             size: Some((2560, 1440)),
-            audio: PresetAudio::System,
+            audio: PresetAudio::desktop(DesktopAudio::System),
             cursor: true,
             record: false,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         },
         SharePresetDef {
             id: "desktop".into(),
@@ -133,10 +220,11 @@ pub fn builtins() -> Vec<SharePresetDef> {
             bitrate_mbps: 60,
             fps: 60,
             size: None,
-            audio: PresetAudio::System,
+            audio: PresetAudio::desktop(DesktopAudio::System),
             cursor: true,
             record: false,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         },
     ]
 }
@@ -222,12 +310,14 @@ pub fn to_share_request(
     game_pid: Option<u32>,
     recording: &RecordingSettings,
 ) -> ShareRequest {
-    let (audio, audio_pid, mic) = match preset.audio {
-        PresetAudio::System => (true, None, false),
-        PresetAudio::Game => (true, game_pid, false),
-        PresetAudio::Mic => (true, None, true),
-        PresetAudio::Off => (false, None, false),
+    let (audio, audio_pid) = match preset.audio.desktop {
+        DesktopAudio::System => (true, None),
+        DesktopAudio::Game => (true, game_pid),
+        DesktopAudio::Off => (false, None),
     };
+    // `mic` is additive: it asks for a *second* Opus track, so a preset can
+    // now carry the game and the microphone at once.
+    let mic = preset.audio.mic;
     ShareRequest {
         peer,
         code,
@@ -242,6 +332,7 @@ pub fn to_share_request(
         record: preset.record,
         replay_secs: preset.replay_secs,
         record_dir: Some(recording.resolved_dir()),
+        container: preset.container,
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,
@@ -260,9 +351,9 @@ mod tests {
         // DAW preset: 1440p60, default endpoint audio, nothing touched.
         assert_eq!(daw.size, Some((2560, 1440)));
         assert_eq!(daw.fps, 60);
-        assert_eq!(daw.audio, PresetAudio::System);
+        assert_eq!(daw.audio, PresetAudio::desktop(DesktopAudio::System));
         let game = &b[0];
-        assert_eq!(game.audio, PresetAudio::Game);
+        assert_eq!(game.audio, PresetAudio::desktop(DesktopAudio::Game));
         assert_eq!(game.replay_secs, 60, "replay buffer defaults to 60 s");
         assert!(!game.cursor, "games render their own cursor");
     }
@@ -302,10 +393,11 @@ mod tests {
             bitrate_mbps: 20,
             fps: 30,
             size: Some((1920, 1080)),
-            audio: PresetAudio::Mic,
+            audio: PresetAudio { desktop: DesktopAudio::Off, mic: true },
             cursor: true,
             record: true,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         });
         store.save().unwrap();
 
@@ -337,9 +429,61 @@ mod tests {
         assert_eq!(req.size, Some((2560, 1440)), "DAW defaults to 1440p60");
         assert!(!req.mic);
 
-        let custom = SharePresetDef { audio: PresetAudio::Off, ..daw.clone() };
+        let custom = SharePresetDef { audio: PresetAudio::off(), ..daw.clone() };
         let req = to_share_request(&custom, "1".into(), None, None, &rec);
         assert!(!req.audio);
+    }
+
+    /// The point of S2: a preset can name the game *and* the microphone, and
+    /// the request carries both.
+    #[test]
+    fn a_preset_can_ask_for_game_audio_and_the_microphone_together() {
+        let rec = RecordingSettings::default();
+        let both = SharePresetDef {
+            audio: PresetAudio { desktop: DesktopAudio::Game, mic: true },
+            ..builtins()[0].clone()
+        };
+        let req = to_share_request(&both, "1".into(), None, Some(99), &rec);
+        assert!(req.audio, "program track still asked for");
+        assert_eq!(req.audio_pid, Some(99), "and it is still the game only");
+        assert!(req.mic, "plus a second microphone track");
+    }
+
+    /// An existing `presets.json` written before S2 must keep its meaning:
+    /// `"audio": "mic"` meant mic *instead of* the desktop mix.
+    #[test]
+    fn legacy_audio_strings_still_load_with_the_same_meaning() {
+        let parse = |json: &str| serde_json::from_str::<PresetAudio>(json).unwrap();
+        assert_eq!(parse("\"system\""), PresetAudio::desktop(DesktopAudio::System));
+        assert_eq!(parse("\"game\""), PresetAudio::desktop(DesktopAudio::Game));
+        assert_eq!(parse("\"off\""), PresetAudio::off());
+        assert_eq!(
+            parse("\"mic\""),
+            PresetAudio { desktop: DesktopAudio::Off, mic: true },
+            "legacy mic was mic-instead-of-desktop"
+        );
+        // And a legacy mic preset still resolves to a mic-only share.
+        let rec = RecordingSettings::default();
+        let legacy = SharePresetDef { audio: parse("\"mic\""), ..builtins()[2].clone() };
+        let req = to_share_request(&legacy, "1".into(), None, None, &rec);
+        assert!(!req.audio);
+        assert!(req.mic);
+    }
+
+    #[test]
+    fn audio_sets_round_trip_through_json() {
+        for a in [
+            PresetAudio::off(),
+            PresetAudio::desktop(DesktopAudio::System),
+            PresetAudio::desktop(DesktopAudio::Game),
+            PresetAudio { desktop: DesktopAudio::Game, mic: true },
+            PresetAudio { desktop: DesktopAudio::Off, mic: true },
+        ] {
+            let json = serde_json::to_string(&a).unwrap();
+            assert_eq!(serde_json::from_str::<PresetAudio>(&json).unwrap(), a, "{json}");
+        }
+        assert!(PresetAudio::off().is_silent());
+        assert!(!PresetAudio { desktop: DesktopAudio::Off, mic: true }.is_silent());
     }
 
     #[test]

@@ -21,7 +21,7 @@ use relay_display::vcp::{self, MonitorPlanInput, Unsupported, VcpWrite};
 use tracing::warn;
 
 use crate::apply::DisplayControl;
-use crate::backup::{DisplayStateSnapshot, MonitorStateSnapshot, NvApiSnapshot};
+use crate::backup::{DisplayStateSnapshot, GpuColorSnapshot, GpuVendor, MonitorStateSnapshot};
 use crate::hardware::MonitorProbe;
 use crate::types::{DisplaySettings, DisplayVia, GpuColor, MonitorSettings};
 
@@ -34,14 +34,32 @@ pub trait DisplayIo: Send + Sync {
     fn write_vcp(&self, hmonitor: i64, delay_ms: u64, writes: &[(u8, u32)]) -> Result<()>;
     fn get_ramp(&self, gdi_name: &str) -> Result<Ramp>;
     fn set_ramp(&self, gdi_name: &str, ramp: &Ramp) -> Result<()>;
-    /// Raw NvAPI state, `None` when NvAPI or this display is unavailable.
-    fn nv_read(&self, gdi_name: &str) -> Option<NvApiSnapshot>;
-    /// Apply profile-unit vibrance/hue. `Ok(false)` = path unavailable.
-    fn nv_apply(&self, gdi_name: &str, vibrance_percent: i32, hue_deg: i32) -> Result<bool>;
-    /// Put back raw NvAPI state.
-    fn nv_restore(&self, gdi_name: &str, snap: &NvApiSnapshot) -> Result<()>;
+    /// Raw vendor colour state, `None` when no vendor API drives this
+    /// display. Which vendor answered is recorded in the snapshot, because
+    /// restore has to go back through the same one.
+    fn gpu_read(&self, gdi_name: &str) -> Option<GpuColorSnapshot>;
+    /// Apply profile-unit vibrance/hue. `Ok(None)` = no vendor path here, so
+    /// the caller reports those fields unsupported instead of pretending.
+    /// The returned strings are fields the vendor could not honour in full
+    /// (AMD's hue range is a narrow trim, so a large angle is clamped).
+    fn gpu_apply(
+        &self,
+        gdi_name: &str,
+        vibrance_percent: i32,
+        hue_deg: i32,
+    ) -> Result<Option<GpuApplied>>;
+    /// Put back raw vendor state, through the vendor that captured it.
+    fn gpu_restore(&self, gdi_name: &str, snap: &GpuColorSnapshot) -> Result<()>;
     /// Currently attached monitors, for re-resolving stale snapshots.
     fn monitors(&self) -> Vec<MonitorProbe>;
+}
+
+/// What a vendor colour apply actually managed to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuApplied {
+    pub vendor: GpuVendor,
+    /// Fields the hardware honoured only partially, for `DisplayVia`.
+    pub partial: Vec<String>,
 }
 
 fn plan_input(m: &MonitorSettings) -> MonitorPlanInput {
@@ -58,7 +76,10 @@ fn ramp_params(gpu: &GpuColor) -> RampParams {
     RampParams { gamma: gpu.gamma, contrast: gpu.contrast, shadow_lift: gpu.shadow_lift }
 }
 
-fn wants_nv(gpu: &GpuColor) -> bool {
+/// Does this profile ask for anything only a vendor colour API can do?
+/// Gamma, contrast and shadow lift ride the vendor-neutral ramp instead, so
+/// they are deliberately not here.
+fn wants_gpu_color(gpu: &GpuColor) -> bool {
     gpu.vibrance != 50 || gpu.hue_deg != 0
 }
 
@@ -68,11 +89,14 @@ struct Plan {
     unsupported: Vec<Unsupported>,
     delay_ms: u64,
     ramp: Option<Ramp>,
-    nv: bool,
+    gpu: bool,
 }
 
 fn plan(target: &MonitorProbe, settings: &DisplaySettings) -> Plan {
-    let quirks = vcp::quirks_for(&target.id.0);
+    // Keyed on the EDID manufacturer + product code; the display name rides
+    // along for logs only, because one marketing name covers several panels.
+    let key = vcp::MonitorKey::from_id(&target.id.0).map(|k| k.with_name(&target.name));
+    let quirks = key.as_ref().map(vcp::quirks_for_key).unwrap_or_default();
     let (writes, unsupported) =
         vcp::plan_writes(&plan_input(&settings.monitor), target.ddc.as_deref(), &quirks);
     let params = ramp_params(&settings.gpu);
@@ -81,7 +105,7 @@ fn plan(target: &MonitorProbe, settings: &DisplaySettings) -> Plan {
         unsupported,
         delay_ms: quirks.write_delay_ms,
         ramp: (!params.is_neutral()).then(|| build_ramp(&params)),
-        nv: wants_nv(&settings.gpu),
+        gpu: wants_gpu_color(&settings.gpu),
     }
 }
 
@@ -131,7 +155,7 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
             hmonitor: t.hmonitor,
             vcp: Vec::new(),
             gamma: None,
-            nvapi: None,
+            gpu: None,
         };
         if !plan.writes.is_empty() {
             let codes: Vec<u8> = plan.writes.iter().map(|w| w.code).collect();
@@ -143,11 +167,13 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
         if plan.ramp.is_some() {
             ms.gamma = Some(self.io.get_ramp(&t.gdi_name).context("reading original gamma ramp")?);
         }
-        if plan.nv {
-            // Unavailable NvAPI is not an error — apply will skip the path.
-            ms.nvapi = self.io.nv_read(&t.gdi_name);
+        if plan.gpu {
+            // No vendor colour API is not an error — apply will skip the
+            // path and say so. A machine with neither NVIDIA nor AMD gets
+            // the gamma ramp and DDC/CI, never a failure.
+            ms.gpu = self.io.gpu_read(&t.gdi_name);
         }
-        if !ms.vcp.is_empty() || ms.gamma.is_some() || ms.nvapi.is_some() {
+        if !ms.vcp.is_empty() || ms.gamma.is_some() || ms.gpu.is_some() {
             snap.targets.push(ms);
         }
         Ok(snap)
@@ -172,19 +198,26 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
             self.io.set_ramp(&t.gdi_name, ramp).context("setting gamma ramp")?;
             via.gamma = true;
         }
-        if plan.nv {
-            if self
+        if plan.gpu {
+            match self
                 .io
-                .nv_apply(&t.gdi_name, settings.gpu.vibrance, settings.gpu.hue_deg)
-                .context("applying NvAPI vibrance/hue")?
+                .gpu_apply(&t.gdi_name, settings.gpu.vibrance, settings.gpu.hue_deg)
+                .context("applying GPU vibrance/hue")?
             {
-                via.nvapi = true;
-            } else {
-                if settings.gpu.vibrance != 50 {
-                    via.unsupported.push("vibrance".into());
+                Some(applied) => {
+                    match applied.vendor {
+                        GpuVendor::Nvidia => via.nvapi = true,
+                        GpuVendor::Amd => via.amd = true,
+                    }
+                    via.unsupported.extend(applied.partial);
                 }
-                if settings.gpu.hue_deg != 0 {
-                    via.unsupported.push("hue".into());
+                None => {
+                    if settings.gpu.vibrance != 50 {
+                        via.unsupported.push("vibrance".into());
+                    }
+                    if settings.gpu.hue_deg != 0 {
+                        via.unsupported.push("hue".into());
+                    }
                 }
             }
         }
@@ -195,7 +228,7 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
         let mut first_err: Option<anyhow::Error> = None;
         let current = if original.targets.is_empty() { Vec::new() } else { self.io.monitors() };
         // Reverse of capture order, and within one monitor reverse of apply
-        // order: NvAPI, then ramp, then VCP codes last-written-first.
+        // order: GPU colour, then ramp, then VCP codes last-written-first.
         for ms in original.targets.iter().rev() {
             let Some((hmonitor, gdi_name)) = self.resolve(&current, ms) else {
                 warn!(monitor = %ms.monitor.0, "monitor not attached; restore stays pending");
@@ -204,9 +237,9 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
                 });
                 continue;
             };
-            if let Some(nv) = &ms.nvapi {
-                if let Err(e) = self.io.nv_restore(&gdi_name, nv) {
-                    warn!(error = %e, "NvAPI restore failed");
+            if let Some(gpu) = &ms.gpu {
+                if let Err(e) = self.io.gpu_restore(&gdi_name, gpu) {
+                    warn!(error = %e, "GPU colour restore failed");
                     first_err.get_or_insert(e);
                 }
             }
@@ -242,7 +275,7 @@ pub use real::{RealIo, WinDisplay};
 #[cfg(windows)]
 mod real {
     use super::*;
-    use relay_display::{ddc, gamma, nvapi};
+    use relay_display::{amd, ddc, gamma, nvapi};
 
     /// The production backend type wired in `service::Backends`.
     pub type WinDisplay = DisplayAdapter<RealIo>;
@@ -283,46 +316,143 @@ mod real {
             gamma::io::set_ramp(gdi_name, ramp)
         }
 
-        fn nv_read(&self, gdi_name: &str) -> Option<NvApiSnapshot> {
-            let api = nvapi::NvApi::load()?;
-            let d = api.display_by_gdi_name(gdi_name)?;
-            let dvc = api.get_vibrance(&d).ok()?;
-            let (hue, _default) = api.get_hue(&d).ok()?;
-            Some(NvApiSnapshot {
-                dvc: dvc.current,
-                dvc_min: dvc.min,
-                dvc_max: dvc.max,
-                hue_deg: hue,
-            })
+        fn gpu_read(&self, gdi_name: &str) -> Option<GpuColorSnapshot> {
+            nv_read(gdi_name).or_else(|| amd_read(gdi_name))
         }
 
-        fn nv_apply(&self, gdi_name: &str, vibrance_percent: i32, hue_deg: i32) -> Result<bool> {
-            let Some(api) = nvapi::NvApi::load() else { return Ok(false) };
-            let Some(d) = api.display_by_gdi_name(gdi_name) else { return Ok(false) };
-            let dvc = api.get_vibrance(&d)?;
-            let level = nvapi::vibrance_percent_to_dvc(vibrance_percent, dvc.min, dvc.max);
-            api.set_vibrance(&d, level)?;
-            api.set_hue(&d, hue_deg.rem_euclid(360))?;
-            Ok(true)
+        fn gpu_apply(
+            &self,
+            gdi_name: &str,
+            vibrance_percent: i32,
+            hue_deg: i32,
+        ) -> Result<Option<GpuApplied>> {
+            match nv_apply(gdi_name, vibrance_percent, hue_deg)? {
+                Some(a) => Ok(Some(a)),
+                None => amd_apply(gdi_name, vibrance_percent, hue_deg),
+            }
         }
 
-        fn nv_restore(&self, gdi_name: &str, snap: &NvApiSnapshot) -> Result<()> {
-            let Some(api) = nvapi::NvApi::load() else {
-                bail!("NvAPI unavailable while restoring {gdi_name}")
-            };
-            let Some(d) = api.display_by_gdi_name(gdi_name) else {
-                bail!("NvAPI no longer drives {gdi_name}")
-            };
-            api.set_vibrance(&d, snap.dvc)?;
-            api.set_hue(&d, snap.hue_deg)?;
-            Ok(())
+        fn gpu_restore(&self, gdi_name: &str, snap: &GpuColorSnapshot) -> Result<()> {
+            // Through the vendor that captured it, never "whichever answers
+            // now": on a two-GPU machine the raw units are not comparable.
+            match snap.vendor {
+                GpuVendor::Nvidia => nv_restore(gdi_name, snap),
+                GpuVendor::Amd => amd_restore(gdi_name, snap),
+            }
         }
 
         fn monitors(&self) -> Vec<MonitorProbe> {
             crate::hardware::probe_win::probe_monitors(false)
         }
     }
+
+    // -----------------------------------------------------------------
+    // NVIDIA
+    // -----------------------------------------------------------------
+
+    fn nv_read(gdi_name: &str) -> Option<GpuColorSnapshot> {
+        let api = nvapi::NvApi::load()?;
+        let d = api.display_by_gdi_name(gdi_name)?;
+        let dvc = api.get_vibrance(&d).ok()?;
+        let (hue, _default) = api.get_hue(&d).ok()?;
+        Some(GpuColorSnapshot {
+            vendor: GpuVendor::Nvidia,
+            dvc: dvc.current,
+            dvc_min: dvc.min,
+            dvc_max: dvc.max,
+            hue_deg: hue,
+            hue_min: 0,
+            hue_max: 0,
+        })
+    }
+
+    fn nv_apply(gdi_name: &str, vibrance_percent: i32, hue_deg: i32) -> Result<Option<GpuApplied>> {
+        let Some(api) = nvapi::NvApi::load() else { return Ok(None) };
+        let Some(d) = api.display_by_gdi_name(gdi_name) else { return Ok(None) };
+        let dvc = api.get_vibrance(&d)?;
+        let level = nvapi::vibrance_percent_to_dvc(vibrance_percent, dvc.min, dvc.max);
+        api.set_vibrance(&d, level)?;
+        api.set_hue(&d, hue_deg.rem_euclid(360))?;
+        let mut partial = Vec::new();
+        // NvAPI's DVC cannot go below neutral; say so rather than leaving the
+        // user wondering why the bottom half of the slider does nothing.
+        if vibrance_percent < 50 {
+            partial.push("vibrance (NVIDIA cannot desaturate below neutral)".into());
+        }
+        Ok(Some(GpuApplied { vendor: GpuVendor::Nvidia, partial }))
+    }
+
+    fn nv_restore(gdi_name: &str, snap: &GpuColorSnapshot) -> Result<()> {
+        let Some(api) = nvapi::NvApi::load() else {
+            bail!("NvAPI unavailable while restoring {gdi_name}")
+        };
+        let Some(d) = api.display_by_gdi_name(gdi_name) else {
+            bail!("NvAPI no longer drives {gdi_name}")
+        };
+        api.set_vibrance(&d, snap.dvc)?;
+        api.set_hue(&d, snap.hue_deg)?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // AMD
+    // -----------------------------------------------------------------
+
+    fn amd_read(gdi_name: &str) -> Option<GpuColorSnapshot> {
+        let adl = amd::Adl::load()?;
+        let d = adl.display_by_gdi_name(gdi_name)?;
+        let sat = adl.get_saturation(&d).ok()?;
+        let hue = adl.get_hue(&d).ok()?;
+        Some(GpuColorSnapshot {
+            vendor: GpuVendor::Amd,
+            dvc: sat.current,
+            dvc_min: sat.min,
+            dvc_max: sat.max,
+            hue_deg: hue.current,
+            hue_min: hue.min,
+            hue_max: hue.max,
+        })
+    }
+
+    fn amd_apply(
+        gdi_name: &str,
+        vibrance_percent: i32,
+        hue_deg: i32,
+    ) -> Result<Option<GpuApplied>> {
+        let Some(adl) = amd::Adl::load() else { return Ok(None) };
+        let Some(d) = adl.display_by_gdi_name(gdi_name) else { return Ok(None) };
+        let sat = adl.get_saturation(&d)?;
+        adl.set_saturation(&d, amd::vibrance_percent_to_saturation(vibrance_percent, &sat))?;
+        let hue_range = adl.get_hue(&d)?;
+        let (value, clamped) = amd::hue_deg_to_adl(hue_deg, &hue_range);
+        adl.set_hue(&d, value)?;
+        let mut partial = Vec::new();
+        if clamped {
+            partial.push(format!(
+                "hue (AMD trims to {}..{}°, asked for {hue_deg}°)",
+                hue_range.min, hue_range.max
+            ));
+        }
+        Ok(Some(GpuApplied { vendor: GpuVendor::Amd, partial }))
+    }
+
+    fn amd_restore(gdi_name: &str, snap: &GpuColorSnapshot) -> Result<()> {
+        let Some(adl) = amd::Adl::load() else {
+            bail!("ADL unavailable while restoring {gdi_name}")
+        };
+        let Some(d) = adl.display_by_gdi_name(gdi_name) else {
+            bail!("AMD no longer drives {gdi_name}")
+        };
+        // The captured raw values, not a re-derived mapping.
+        adl.set_saturation(&d, snap.dvc)?;
+        adl.set_hue(&d, snap.hue_deg)?;
+        Ok(())
+    }
 }
+
+#[cfg(test)]
+#[path = "display_backend_vendor_tests.rs"]
+mod vendor_tests;
 
 #[cfg(test)]
 mod tests {
@@ -332,10 +462,12 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Arc;
 
-    /// In-memory display topology: per-monitor VCP registers, ramps, NvAPI
+    const RAW_DISPLAY1: &str = r"\\.\DISPLAY1";
+
+    /// In-memory display topology: per-monitor VCP registers, ramps, vendor
     /// state, plus failure injection and a write log.
     #[derive(Default)]
-    struct FakeIo {
+    pub(super) struct FakeIo {
         state: Mutex<FakeState>,
     }
 
@@ -345,8 +477,8 @@ mod tests {
         vcp: BTreeMap<i64, BTreeMap<u8, u32>>,
         /// gdi name → ramp
         ramps: BTreeMap<String, Ramp>,
-        /// gdi name → nv state
-        nv: BTreeMap<String, NvApiSnapshot>,
+        /// gdi name → raw vendor colour state (whichever vendor drives it)
+        nv: BTreeMap<String, GpuColorSnapshot>,
         monitors: Vec<MonitorProbe>,
         log: Vec<String>,
         /// Fail every VCP write after this many have succeeded.
@@ -374,8 +506,42 @@ mod tests {
         }
     }
 
+    /// Raw NVIDIA state as a real RTX reports it: DVC 0..63, neutral at the
+    /// minimum.
+    pub(super) fn nvidia_state() -> GpuColorSnapshot {
+        GpuColorSnapshot {
+            vendor: GpuVendor::Nvidia,
+            dvc: 0,
+            dvc_min: 0,
+            dvc_max: 63,
+            hue_deg: 0,
+            hue_min: 0,
+            hue_max: 0,
+        }
+    }
+
+    /// Raw AMD state as Radeon Software reports it: saturation 0..200 with
+    /// the default at 100, and hue a narrow signed trim.
+    pub(super) fn amd_state() -> GpuColorSnapshot {
+        GpuColorSnapshot {
+            vendor: GpuVendor::Amd,
+            dvc: 100,
+            dvc_min: 0,
+            dvc_max: 200,
+            hue_deg: 0,
+            hue_min: -30,
+            hue_max: 30,
+        }
+    }
+
     impl FakeIo {
-        fn two_monitors() -> Arc<Self> {
+        pub(super) fn two_monitors() -> Arc<Self> {
+            Self::two_monitors_with(nvidia_state())
+        }
+
+        /// The same two-monitor rig driven by the given vendor, so every
+        /// invariant can be asserted against both without a second harness.
+        pub(super) fn two_monitors_with(gpu: GpuColorSnapshot) -> Arc<Self> {
             let io = Arc::new(FakeIo::default());
             {
                 let mut s = io.state.lock();
@@ -387,24 +553,41 @@ mod tests {
                 s.vcp.insert(2, BTreeMap::from([(0x10u8, 55u32), (0x12u8, 60u32)]));
                 s.ramps.insert(r"\\.\DISPLAY1".into(), Ramp::identity());
                 s.ramps.insert(r"\\.\DISPLAY2".into(), Ramp::identity());
-                s.nv.insert(
-                    r"\\.\DISPLAY1".into(),
-                    NvApiSnapshot { dvc: 0, dvc_min: 0, dvc_max: 63, hue_deg: 0 },
-                );
-                s.nv.insert(
-                    r"\\.\DISPLAY2".into(),
-                    NvApiSnapshot { dvc: 0, dvc_min: 0, dvc_max: 63, hue_deg: 0 },
-                );
+                s.nv.insert(r"\\.\DISPLAY1".into(), gpu);
+                s.nv.insert(r"\\.\DISPLAY2".into(), gpu);
             }
             io
         }
 
-        fn log(&self) -> Vec<String> {
+        pub(super) fn log(&self) -> Vec<String> {
             self.state.lock().log.clone()
         }
 
-        fn snapshot_of(&self, hmonitor: i64) -> BTreeMap<u8, u32> {
+        pub(super) fn snapshot_of(&self, hmonitor: i64) -> BTreeMap<u8, u32> {
             self.state.lock().vcp.get(&hmonitor).cloned().unwrap_or_default()
+        }
+
+        pub(super) fn gpu_of(&self, gdi: &str) -> GpuColorSnapshot {
+            self.state.lock().nv[gdi]
+        }
+
+        /// No NvAPI and no ADL: the machine has neither vendor.
+        pub(super) fn clear_gpu_vendors(&self) {
+            self.state.lock().nv.clear();
+        }
+
+        /// Simulate a reboot: monitor A comes back on a new handle and a new
+        /// GDI name, with its registers intact.
+        pub(super) fn rename_display_1(&self, hmonitor: i64, gdi: &str) {
+            let mut s = self.state.lock();
+            let regs = s.vcp.remove(&1).unwrap();
+            s.vcp.insert(hmonitor, regs);
+            let ramp = s.ramps.remove(RAW_DISPLAY1).unwrap();
+            s.ramps.insert(gdi.into(), ramp);
+            let gpu = s.nv.remove(RAW_DISPLAY1).unwrap();
+            s.nv.insert(gdi.into(), gpu);
+            s.monitors[0].hmonitor = hmonitor;
+            s.monitors[0].gdi_name = gdi.into();
         }
     }
 
@@ -444,26 +627,68 @@ mod tests {
             Ok(())
         }
 
-        fn nv_read(&self, gdi: &str) -> Option<NvApiSnapshot> {
+        fn gpu_read(&self, gdi: &str) -> Option<GpuColorSnapshot> {
             self.state.lock().nv.get(gdi).copied()
         }
 
-        fn nv_apply(&self, gdi: &str, vibrance: i32, hue: i32) -> Result<bool> {
+        /// Mirrors `RealIo`'s dispatch, running the *production* mapping
+        /// functions so the fixtures exercise the real curves.
+        fn gpu_apply(&self, gdi: &str, vibrance: i32, hue: i32) -> Result<Option<GpuApplied>> {
             let mut s = self.state.lock();
-            let Some(nv) = s.nv.get(gdi).copied() else { return Ok(false) };
-            let dvc =
-                relay_display::nvapi::vibrance_percent_to_dvc(vibrance, nv.dvc_min, nv.dvc_max);
-            s.log.push(format!("nv {gdi} dvc={dvc} hue={hue}"));
+            let Some(cur) = s.nv.get(gdi).copied() else { return Ok(None) };
+            let mut partial = Vec::new();
+            let (raw, hue_raw) = match cur.vendor {
+                GpuVendor::Nvidia => {
+                    if vibrance < 50 {
+                        partial.push("vibrance (NVIDIA cannot desaturate below neutral)".into());
+                    }
+                    (
+                        relay_display::nvapi::vibrance_percent_to_dvc(
+                            vibrance,
+                            cur.dvc_min,
+                            cur.dvc_max,
+                        ),
+                        hue.rem_euclid(360),
+                    )
+                }
+                GpuVendor::Amd => {
+                    let sat = relay_display::amd::AdlRange {
+                        current: cur.dvc,
+                        default: 100,
+                        min: cur.dvc_min,
+                        max: cur.dvc_max,
+                        step: 1,
+                    };
+                    let hue_range = relay_display::amd::AdlRange {
+                        current: cur.hue_deg,
+                        default: 0,
+                        min: cur.hue_min,
+                        max: cur.hue_max,
+                        step: 1,
+                    };
+                    let (hue_raw, clamped) = relay_display::amd::hue_deg_to_adl(hue, &hue_range);
+                    if clamped {
+                        partial.push(format!(
+                            "hue (AMD trims to {}..{}°, asked for {hue}°)",
+                            hue_range.min, hue_range.max
+                        ));
+                    }
+                    (relay_display::amd::vibrance_percent_to_saturation(vibrance, &sat), hue_raw)
+                }
+            };
+            s.log.push(format!("gpu {gdi} raw={raw} hue={hue_raw}"));
             let entry = s.nv.get_mut(gdi).unwrap();
-            entry.dvc = dvc;
-            entry.hue_deg = hue;
-            Ok(true)
+            entry.dvc = raw;
+            entry.hue_deg = hue_raw;
+            Ok(Some(GpuApplied { vendor: cur.vendor, partial }))
         }
 
-        fn nv_restore(&self, gdi: &str, snap: &NvApiSnapshot) -> Result<()> {
+        fn gpu_restore(&self, gdi: &str, snap: &GpuColorSnapshot) -> Result<()> {
             let mut s = self.state.lock();
-            s.log.push(format!("nv-restore {gdi}"));
-            *s.nv.get_mut(gdi).context("display gone")? = *snap;
+            s.log.push(format!("gpu-restore {gdi}"));
+            let entry = s.nv.get_mut(gdi).context("display gone")?;
+            assert_eq!(entry.vendor, snap.vendor, "restore went to the wrong vendor API");
+            *entry = *snap;
             Ok(())
         }
 
@@ -472,7 +697,7 @@ mod tests {
         }
     }
 
-    fn settings() -> DisplaySettings {
+    pub(super) fn settings() -> DisplaySettings {
         let mut d = DisplaySettings::default();
         d.monitor.brightness = Some(80);
         d.monitor.contrast = Some(50);
@@ -481,7 +706,7 @@ mod tests {
         d
     }
 
-    fn target_a(io: &Arc<FakeIo>) -> MonitorProbe {
+    pub(super) fn target_a(io: &Arc<FakeIo>) -> MonitorProbe {
         io.state.lock().monitors[0].clone()
     }
 
@@ -497,7 +722,7 @@ mod tests {
         let ms = &snap.targets[0];
         assert_eq!(ms.vcp, vec![(0x10, 40), (0x12, 70)], "originals recorded");
         assert!(ms.gamma.is_some());
-        assert!(ms.nvapi.is_some());
+        assert!(ms.gpu.is_some());
 
         let via = adapter.apply(Some(&t), &settings()).unwrap();
         assert!(via.ddcci && via.gamma && via.nvapi);
@@ -526,7 +751,7 @@ mod tests {
         let ms = &snap.targets[0];
         assert_eq!(ms.vcp, vec![(0x10, 40)]);
         assert!(ms.gamma.is_none());
-        assert!(ms.nvapi.is_none());
+        assert!(ms.gpu.is_none());
     }
 
     #[test]
@@ -572,7 +797,7 @@ mod tests {
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
         let snap = adapter.capture(Some(&t), &settings()).unwrap();
-        assert!(snap.targets[0].nvapi.is_none());
+        assert!(snap.targets[0].gpu.is_none());
         let via = adapter.apply(Some(&t), &settings()).unwrap();
         assert!(via.gamma && via.ddcci && !via.nvapi);
         assert_eq!(via.unsupported, vec!["vibrance".to_string()]);

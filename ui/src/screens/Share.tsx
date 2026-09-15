@@ -1,29 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, Chips, Kv, Live, Toggle } from "../components/Controls";
+import { Card, Chips, ChipSet, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import {
-  api, onCoreEvents,
-  type DiscoveredReceiver, type ProcessInfo, type SharePresetDef, type ShareStats,
-  type SharePreview, type SourceTarget,
+  api, onCoreEvents, presetAudioLabel,
+  type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type SharePresetDef,
+  type ShareStats, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
 interface Strip {
   mbps: number; latencyMs: number; dropped: number; sent: number;
   gpuPct: number; cpuPct: number; audioDb: number; history: number[];
+  /** Mic track level, and whether a second audio track is arriving at all. */
+  micDb: number; micLive: boolean;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
 }
 const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
+  micDb: -Infinity, micLive: false,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
-};
-
-const presetAudioLabel: Record<SharePresetDef["audio"], string> = {
-  system: "System mix", game: "Game only", mic: "Microphone", off: "None",
 };
 
 export function Share() {
@@ -86,6 +85,10 @@ export function Share() {
           gpuPct: Math.round(s.encode_ms ? (s.encode_ms / (1000 / 60)) * 100 : 0),
           cpuPct: Math.round((s.cpu_percent ?? 0) * 10) / 10,
           audioDb: s.audio_peak ? 20 * Math.log10(Math.max(1e-4, s.audio_peak)) : -Infinity,
+          micDb: s.mic_peak ? 20 * Math.log10(Math.max(1e-4, s.mic_peak)) : -Infinity,
+          // Packets, not level: a muted mic is still a live track, and the
+          // meter should say so rather than vanish.
+          micLive: (s.mic_packets ?? 0) > 0,
           history: h,
           recording: s.recording ?? false,
           recMb: s.rec_mb ?? 0,
@@ -313,6 +316,11 @@ function PresetCard({ def, locked, onSaved }: {
   onSaved: (select?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<SharePresetDef | null>(null);
+  // Encode size is typed, not picked, and "2560x" is not a valid size — so
+  // the text has to live outside the draft. Deriving the field's value from
+  // `draft.size` alone makes React reset the box on every keystroke that does
+  // not yet parse, which means it can never be typed into at all.
+  const [sizeText, setSizeText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isNew = !!draft && !!def && draft.id !== def.id;
@@ -320,6 +328,12 @@ function PresetCard({ def, locked, onSaved }: {
 
   const edit = (patch: Partial<SharePresetDef>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
+
+  const open = (d: SharePresetDef) => {
+    setDraft(d);
+    setSizeText(d.size ? `${d.size[0]}x${d.size[1]}` : "");
+    setError(null);
+  };
 
   const run = async (action: () => Promise<string | undefined>) => {
     setBusy(true);
@@ -340,13 +354,14 @@ function PresetCard({ def, locked, onSaved }: {
   if (!draft) {
     return (
       <Card title={`${def.name} preset`} action={locked ? undefined : "Edit"}
-        onAction={locked ? undefined : () => { setDraft({ ...def }); setError(null); }}>
+        onAction={locked ? undefined : () => open({ ...def })}>
         <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
         <Kv k="Frame rate" v={`${def.fps} fps`} mono />
         <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
-        <Kv k="Audio" v={presetAudioLabel[def.audio]} />
+        <Kv k="Audio" v={presetAudioLabel(def.audio)} />
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+        <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );
@@ -374,21 +389,38 @@ function PresetCard({ def, locked, onSaved }: {
         <div className="field">
           <span>Encode size</span>
           <input className="mono" placeholder="Native — or 2560x1440"
-            value={draft.size ? `${draft.size[0]}x${draft.size[1]}` : ""}
+            value={sizeText}
             onChange={(e) => {
               // Blank means "capture at the monitor's native size"; the
-              // engine only scales when a cap is given.
+              // engine only scales when a cap is given. Anything half-typed
+              // reads as blank until it parses.
+              setSizeText(e.target.value);
               const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/.exec(e.target.value);
               edit({ size: m ? [Number(m[1]), Number(m[2])] : undefined });
             }} />
         </div>
-        <Chips label="Audio" value={draft.audio}
-          onChange={(v) => edit({ audio: v as SharePresetDef["audio"] })}
+        <ChipSet label="Audio"
+          values={[
+            ...(draft.audio.desktop === "off" ? [] : [draft.audio.desktop]),
+            ...(draft.audio.mic ? ["mic" as const] : []),
+          ]}
           options={[
             { key: "system", label: "System mix" }, { key: "game", label: "Game only" },
-            { key: "mic", label: "Microphone" }, { key: "off", label: "None" },
-          ]} />
-        <p className="note">One audio track per share: picking Microphone sends your mic <em>instead of</em> the desktop mix, not alongside it. Mic-plus-desktop needs a second track and is not built yet.</p>
+            { key: "mic", label: "Microphone" },
+          ]}
+          onToggle={(k) => {
+            // The two desktop sources exclude each other — you cannot capture
+            // the whole endpoint and one process at once — but the microphone
+            // is its own track and rides alongside either.
+            if (k === "mic") edit({ audio: { ...draft.audio, mic: !draft.audio.mic } });
+            else edit({
+              audio: {
+                ...draft.audio,
+                desktop: (draft.audio.desktop === k ? "off" : k) as DesktopAudio,
+              },
+            });
+          }} />
+        <p className="note">Pick any combination: the microphone travels as its own track alongside the desktop mix, and the person on the other end hears them together. Nothing selected means a silent share.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
@@ -399,6 +431,10 @@ function PresetCard({ def, locked, onSaved }: {
           <input className="mono" inputMode="numeric" value={draft.replay_secs}
             onChange={(e) => edit({ replay_secs: Number(e.target.value.replace(/\D/g, "")) || 0 })} />
         </div>
+        <Chips label="Recording container" value={draft.container ?? "mp4"}
+          onChange={(v) => edit({ container: v as SharePresetDef["container"] })}
+          options={[{ key: "mp4", label: "MP4" }, { key: "mkv", label: "MKV" }]} />
+        <p className="note">Same video and audio either way — the file is written straight from the stream already being sent, so neither costs an extra encode. MKV is the safer choice if Relay or the PC ever stops mid-recording: the part already written stays usable, where an MP4 cut off without a clean stop will not open in a video editor.</p>
         <div className="ab">
           <button className="btn acc" disabled={busy || !draft.name.trim()}
             onClick={() => void run(async () => {
@@ -410,7 +446,7 @@ function PresetCard({ def, locked, onSaved }: {
               // Duplicate-as-new: the fastest way to a custom preset is to
               // start from one that already works.
               const id = `custom-${Date.now().toString(36)}`;
-              setDraft({ ...draft, id, name: `${draft.name} copy` });
+              open({ ...draft, id, name: `${draft.name} copy` });
             }}>Duplicate</button>
         </div>
         {!builtin && !isNew && (
@@ -434,7 +470,10 @@ function errText(e: unknown): string {
 
 function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {
   const audioSegs = 12;
-  const lit = live && isFinite(s.audioDb) ? Math.round(((s.audioDb + 40) / 40) * audioSegs) : 0;
+  const segsFor = (db: number) =>
+    live && isFinite(db) ? Math.round(((db + 40) / 40) * audioSegs) : 0;
+  const lit = segsFor(s.audioDb);
+  const micLit = segsFor(s.micDb);
   const recording = live && (s.recording || recOn);
   const recWarn = live && (s.recDropped > 0 || s.recStoppedDisk);
   return (
@@ -464,10 +503,17 @@ function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: b
         <div className="hint">{live ? `NVENC · CPU ${s.cpuPct}%` : "Encoder not loaded"}</div>
       </div>
       <div>
-        <label>Audio</label>
+        <label>{s.micLive ? "Desktop audio" : "Audio"}</label>
         <div className="v">{live && isFinite(s.audioDb) ? s.audioDb.toFixed(1) : "—"}<u>dB</u></div>
         <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < lit ? "" : "off"} />)}</div>
       </div>
+      {s.micLive && (
+        <div>
+          <label>Mic</label>
+          <div className="v">{isFinite(s.micDb) ? s.micDb.toFixed(1) : "—"}<u>dB</u></div>
+          <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < micLit ? "" : "off"} />)}</div>
+        </div>
+      )}
       <div className={recWarn ? "warn" : ""}>
         <label><i className={"recdot" + (recording ? " on" : "")} />Rec</label>
         <div className="v">{recording ? s.recMb.toFixed(0) : "—"}<u>MB</u></div>

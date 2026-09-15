@@ -31,29 +31,74 @@ inherited):
 
 **Concurrency.** Groups 1 and 2 are all independent; the practical limit is
 three at once, because they converge on `ipc.rs` / `ipc.ts` and the UI screens.
-S5 should land before S12 — it may delete S12 entirely.
+S5 landed 2026-09-14 and answered its question **no**: per-user registration
+does not work, so the HKLM write is permanent and S6 was required. S6 landed
+the same day and built it, which unblocks S12 — the camera can now be
+registered from the Settings card behind one UAC prompt.
+
+## Starting a session
+
+Either paste the kickoff prompt into a new Claude Code chat opened in that
+session's worktree, or let the launcher do it:
+
+```
+pwsh scripts\start-session.ps1                      # list every session
+pwsh scripts\start-session.ps1 -Session S5 -DryRun  # show the resolved prompt
+pwsh scripts\start-session.ps1 -Session S1,S2,S3    # start three (commas, not spaces)
+pwsh scripts\start-session.ps1 -All                 # start S1-S8
+```
+
+Session ids are **comma-separated**. Space separation binds the second id to
+the next parameter and fails with a confusing complaint about
+`PermissionMode`.
+
+The launcher reads the kickoff prompts out of *this file*, so there is one copy
+of each — edit the catalogue, not the script. It starts each session with
+`claude --bg`, which returns immediately and prints a short id:
+
+- `claude agents` — list running sessions
+- `claude attach <id>` — open one in your terminal, to answer a question or
+  take over
+- `claude stop <id>` — end one
+
+Feature trees are launched with `RELAY_NO_INSTALL=1`, so eight sessions cannot
+fight over the single installed app; the main tree is left alone. Launches are
+staggered 20 s apart, because eight simultaneous Rust release builds is not a
+good use of the machine.
+
+**`-All` deliberately covers only S1–S8.** The rest need you at the keyboard
+(S10 is nothing *but* asking you questions) or an external unblock, so starting
+them unattended burns tokens waiting. Name them explicitly if you want them.
+
+Two things worth knowing before starting several at once. The default
+`-PermissionMode acceptEdits` lets a session edit files in its own worktree
+without prompting but still asks before running commands, so a background
+session will sit waiting until you attach — that is the intended shape, not a
+hang. And every running session costs tokens continuously, so three attentive
+sessions beat eight neglected ones.
 
 | # | Session | Branch | Worktree | Blocked on |
 |---|---|---|---|---|
 | S1 | ADLX display backend | `feat/adlx-display` | `relay-adlx` | — |
-| S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | — |
+| S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | **done 2026-09-14** |
 | S3 | Vendor VCP opcodes | `feat/monitor-vcp` | `relay-monitor-vcp` | partly: OSD eyes |
-| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | — |
-| S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | — |
-| S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | — |
+| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | **done 2026-09-14** |
+| S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | **done 2026-09-14 — HKCU does not work** |
+| S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | **done 2026-09-14** (was required, not optional: S5 said no) |
 | S7 | Codec robustness | `feat/codec-robustness` | `relay-codec` | — |
 | S8 | WebView UI test harness | `feat/ui-test-harness` | `relay-uitest` | — |
 | S9 | Documentation truth pass | `chore/docs-truth` | main tree | — |
 | S10 | Human verification pass | `chore/human-pass` | main tree | you, 45 min |
 | S11 | Soak and measurement pass | `chore/soak-pass` | main tree | ~2 h wall clock |
-| S12 | Live virtual-camera pass | `chore/vcam-live` | main tree | one elevated shell |
+| S12 | Live virtual-camera pass | `chore/vcam-live` | main tree | — (S6 unblocked it) |
 | S13 | Clean-VM uninstall diff | `chore/vm-uninstall` | main tree | a hypervisor |
 | S14 | Live APO test-sign pass | `chore/apo-vm` | main tree | a hypervisor |
 | S15 | Two-PC share validation | `chore/two-pc` | main tree | a second PC |
 | S16 | Second-monitor display pass | `chore/second-monitor` | main tree | a second panel |
 | S17 | EV certificate and signing | `chore/signing` | main tree | the certificate |
+| S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
-| S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 (v1.1) |
+| S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 done, so unblocked (v1.1) |
 | S20 | Stream Deck and NDI output | `feat/streamdeck-ndi` | create when started | — (v1.1) |
 | S21 | AI tuning loop | `feat/ai-tuning` | create when started | — (v1.1) |
 
@@ -75,14 +120,14 @@ verifiable here.
 ### Definition of Ready
 - [x] M2 merged and NVIDIA live-verified (2026-09-13, restore at 144 ms mean).
 - [x] `DisplayIo` trait exists as the seam (`crates/display`).
-- [ ] Confirm whether an AMD GPU drives any display on this machine, or whether ADLX can only be exercised against fixtures. If fixtures only, say so in the plan and unit-test the mapping.
+- [x] Confirmed 2026-09-14: **no AMD GPU drives a display here** (Raphael iGPU present, nothing attached; the LG hangs off the RTX 3090). Fixtures for the colour writes, plus a live read-only ADL probe that verifies the FFI. Recorded in `docs/plans/M2-display.md`.
 
 ### Definition of Done
-- [ ] ADLX backend behind `DisplayIo`, selected at runtime by which vendor owns the target monitor; NVIDIA path unchanged.
-- [ ] Backup-then-apply and restore-on-blur behave identically on both vendors — proven by running the existing crash-restore harness against the ADLX backend.
-- [ ] Vibrance/gamma/contrast/hue mapping unit-tested against fixtures; the mapping is *not* one-to-one with NvAPI, so record the curve you chose and why.
-- [ ] A machine with neither vendor degrades to "unsupported" in the UI, never a panic.
-- [ ] `docs/plans/M2-display.md` ADLX line checked off; ROADMAP M2 row updated.
+- [x] `relay-display::amd` behind `DisplayIo`, selected at runtime by vendor; NVIDIA path unchanged. Transport is ADL (`atiadlxx.dll`), not the ADLX vtables — reasoning in the plan file.
+- [x] Proven by `crash_restore_amd.rs`: the same profile through a real `taskkill /F`, once per vendor, asserting exact value-for-value restore. `crash_restore.rs` unchanged and green.
+- [x] Curve recorded in the plan file (piecewise-linear with the knee at the driver default; hue clamped, not rescaled) and unit-tested, including the deliberate NVIDIA/AMD divergence on desaturation.
+- [x] `neither_vendor_degrades_to_unsupported_and_never_panics`: gamma ramp and DDC/CI still carry what they can, vendor-only fields report unsupported.
+- [x] `docs/plans/M2-display.md` ADLX line checked off (with an S1 session log); ROADMAP M2 row and checklist updated.
 
 ### Kickoff prompt
 ```
@@ -98,24 +143,42 @@ The display path is NVIDIA-only today. Add the AMD equivalent behind the existin
 
 ---
 
-## S2 — Second Opus track (mic *and* desktop audio)
+## S2 — Second Opus track (mic *and* desktop audio) — **DONE 2026-09-14**
 **Branch** `feat/dual-audio` · **Worktree** `C:\Users\stern\Documents\Code\relay-dual-audio`
 
-The sender ships one audio track, so choosing Microphone *replaces* the desktop
-mix. This is the deferred item most likely to embarrass someone mid-call.
+The sender shipped one audio track, so choosing Microphone *replaced* the
+desktop mix. This was the deferred item most likely to embarrass someone
+mid-call.
+
+**Outcome.** Two Opus tracks on the wire, summed on the receiver one op before
+the render buffer — decision and rationale in `docs/dev/dual-audio-decision.md`,
+written before the code as the DoR required. Cost measured against M4's
+baseline: **+0.05 ms p50 / +0.57 ms p99** on capture→arrival, encode mean
+unchanged, 60 fps and zero drops (4 alternating reps,
+`scripts/dual-audio-check.ps1`). Merged S4's MKV work into this tree so both
+containers carry both tracks rather than leaving MKV silently single-track.
+
+Two findings worth carrying forward:
+- **The mic's encoder profile is load-bearing.** Giving the mic the program
+  mix's music-grade encoder cost the *video* path a repeatable regression
+  (encode mean 5.12 → 5.86 ms, arrival p99 3.3 → 7.6 ms) through CPU
+  contention alone. `OpusProfile::voice()` removed it entirely.
+- **WASAPI loopback of a silent endpoint delivers no packets at all**, so a
+  quiet desktop makes an audio comparison measure nothing while looking fine.
+  Two passes were thrown away before this was caught.
 
 ### Definition of Ready
 - [x] Mic path built and benchmarked (`AudioSource::Microphone`).
 - [x] M4 measurements table is the latency baseline to beat.
-- [ ] Decide where mixing happens: receiver-side mix, or two tracks the receiver routes separately (the virtual mic wants them separate; a plain call wants them mixed). Record the decision before writing code.
+- [x] Decide where mixing happens: receiver-side mix, or two tracks the receiver routes separately (the virtual mic wants them separate; a plain call wants them mixed). Record the decision before writing code. → **Two tracks, receiver mixes, mixing is the default** (`docs/dev/dual-audio-decision.md`).
 
 ### Definition of Done
-- [ ] Sender can carry desktop mix **and** microphone simultaneously as two Opus tracks; existing single-track presets are unchanged.
-- [ ] Receiver handles one track or two, and an older peer sending one track still works.
-- [ ] Added latency measured against M4's baseline and recorded; still inside the budget.
-- [ ] The warning note under the Audio chips in `ui/src/screens/Share.tsx` is removed, and the chips become a source *set* rather than a single choice.
-- [ ] Recording carries both tracks (closes `docs/plans/M6-recording-presets.md:53`).
-- [ ] M4 and M6 Deferred entries struck; ROADMAP rows updated.
+- [x] Sender can carry desktop mix **and** microphone simultaneously as two Opus tracks; existing single-track presets are unchanged. (`relay-audio` + `relay-audio-mic`; `--audio-mic` is additive, and a legacy `mic` preset still resolves to `--no-audio --audio-mic`, byte-identical to before.)
+- [x] Receiver handles one track or two, and an older peer sending one track still works. (`transport::audio_role` classifies by msid track id with arrival order as the fallback; unit-tested for unnamed and unrecognised ids.)
+- [x] Added latency measured against M4's baseline and recorded; still inside the budget. (+0.05 ms p50 / +0.57 ms p99, versus a 50 ms glass-to-glass budget — table in `docs/plans/M4-share.md`.)
+- [x] The warning note under the Audio chips in `ui/src/screens/Share.tsx` is removed, and the chips become a source *set* rather than a single choice. (New `ChipSet` component; the two desktop sources exclude each other, the mic toggles independently. The instrument strip grows a Mic meter when a second track arrives.)
+- [x] Recording carries both tracks. (Both containers: program on track 2, mic on track 3, named, unmixed. ffprobe-verified on real loopback recordings.)
+- [x] M4 and M6 Deferred entries struck; ROADMAP rows updated.
 
 ### Kickoff prompt
 ```
@@ -143,14 +206,21 @@ instead of a category-wide guess.
 ### Definition of Ready
 - [x] `UnsupportedReason::NoKnownOpcode` already plumbs through to the UI.
 - [x] A real MCCS capability dump from the LG ULTRAGEAR+ is a checked-in fixture (47 codes).
-- [ ] Accept that set-and-readback cannot prove on-screen meaning: each opcode needs either vendor documentation or a human watching the OSD. Unverified entries must be marked unverified, not shipped as fact.
+- [x] Accept that set-and-readback cannot prove on-screen meaning: each opcode needs either vendor documentation or a human watching the OSD. Unverified entries must be marked unverified, not shipped as fact. — Accepted, and built into the types rather than left as a rule to remember: `Evidence` has exactly the two verifying variants plus `Unverified`, and read-back is not one of them.
 
 ### Definition of Done
-- [ ] A per-model quirks table keyed by PNP ID and model string, each entry carrying its evidence (vendor doc URL, or "observed on OSD by <person> <date>").
-- [ ] Verified entries for at least the LG ULTRAGEAR+ on this desk; everything else marked unverified and **not** used to enable a control.
-- [ ] Never guesses: writing an unknown code is impossible by construction, and there is a test proving an unverified entry does not enable the slider.
-- [ ] The UI note in `ui/src/screens/Games.tsx` shrinks to match what is now supported.
-- [ ] `docs/plans/M2-display.md:132` updated; ROADMAP M2 row updated.
+- [x] A per-model quirks table keyed by PNP ID and model string, each entry carrying its evidence (vendor doc URL, or "observed on OSD by <person> <date>"). — `vcp::QUIRKS`, keyed on EDID manufacturer id **plus product code** (`GSM` + `5C7C`), which together name one model; `models` carries the MCCS `model(...)` strings and EDID display names for humans. Every vendor opcode is a `Candidate` = code + `Evidence` (`VendorDoc { title, url }` / `Osd { observer, date, monitor }` / `Unverified { note }`); the field is not optional, so a row without evidence does not compile.
+- [ ] Verified entries for at least the LG ULTRAGEAR+ on this desk; everything else marked unverified and **not** used to enable a control. — **BLOCKED on an OSD observation session with the user.** Zero entries are verified: both LG candidates (0xF6 black equaliser, 0xF5 response) ship as `Evidence::Unverified`, so both sliders are disabled. Set-and-readback cannot close this — a panel will store and return a value for a control whose on-screen meaning is something else — so it needs eyes on the OSD. Runbook `docs/dev/vcp-verification.md`; harness `crates/display/tests/vendor_probe.rs`. Open the OSD on Game Adjust / Picture, hands off the joystick, then one code at a time:
+  ```powershell
+  $env:RELAY_VCP_PROBE = "F5:1|2|3|4"
+  cargo test -p relay-display --test vendor_probe -- --ignored --nocapture
+  ```
+  Sweep `F5:1|2|3|4`, `F6:0|1|2`, `F7:0|1|2|3`, `F8:0|1`, `FA:0|1`, `FE:0|1|2`. (`F4`, `F9`, `FD`, `FF` advertise no value list — not worth sweeping blind.) Record **which OSD label moved and which written value maps to which level**; the code alone is not enough, since knowing 0xF5 is overdrive is useless without knowing whether `2` means "fast" or "off". Deliberately no prediction is published about what each code does: priming the observer with an expected label is how a wrong entry gets confirmed. Any code whose effect nobody can see stays `Unverified` and enables nothing — a legitimate result, not a failed run.
+- [x] Never guesses: writing an unknown code is impossible by construction, and there is a test proving an unverified entry does not enable the slider. — Enforced by a type, not by discipline: `VerifiedCode`'s `u8` is private to its module, `attest(code, evidence)` is its only constructor and returns `None` for `Evidence::Unverified`, and `plan_writes` / `vendor_controls` take `VerifiedCode` rather than `u8`, so there is no path from an unverified entry to a `SetVCPFeature` call. Proof: `unverified_table_entry_does_not_enable_the_slider` — the LG row *has* both candidates, the panel advertises both, the profile asks for both, and still nothing is written and neither slider enables. Backed by `no_unverified_row_ever_resolves_to_a_code`, `vendor_wide_rows_carry_no_vendor_opcodes`, `verified_entries_carry_traceable_evidence` and `model_rows_sort_before_their_vendor_wide_row`.
+- [x] The UI note in `ui/src/screens/Games.tsx` shrinks to match what is now supported. — Down to one sentence, and only rendered when a control is actually off. The two sliders are now driven by `Reply::Hardware.vendor_controls`, which the **core** computes from the table and the advertised opcode list — the client is told, never asked, because a UI that inferred a control from the advertised list would defeat the type guarantee. The hand-maintained `RESPONSE_LEVELS` constant is gone; levels come from the verified value map.
+- [x] `docs/plans/M2-display.md:132` updated; ROADMAP M2 row updated. — Plus a new runbook, `docs/dev/vcp-verification.md`, covering the evidence rules, why set-and-readback is not proof, and the `VerifiedCode` invariant future edits must not break.
+
+**State:** code-complete and pushed (`feat/monitor-vcp`); 24 `relay-display` + 127 `relay-core` tests green, clippy and `tsc` clean. Four of five items done; the session is not finishable without the OSD pass above.
 
 ### Kickoff prompt
 ```
@@ -176,14 +246,15 @@ priority in Group 1 — start it only if a real compatibility gap appears.
 
 ### Definition of Ready
 - [x] fMP4 muxer with golden-fixture tests is the pattern to follow.
-- [ ] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. Record it, or leave this session unstarted.
+- [x] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. **Found and recorded 2026-09-14**: `Windows.Media.Editing.MediaClip` — the Windows video-editing import API — rejects every Relay fMP4 recording with "The parameter is incorrect." The cause is *not* Opus (Media Foundation reports `OPUS … FullySupported`) but the missing `mfra` index. Full probe matrix: `docs/dev/container-compat.md`.
 
 ### Definition of Done
-- [ ] MKV selectable per preset; fMP4 remains the default.
-- [ ] Golden-fixture byte tests to the same standard as the fMP4 muxer.
-- [ ] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measure and record.
-- [ ] Replay save works in both containers.
-- [ ] `docs/plans/M6-recording-presets.md:50` updated; ROADMAP M6 row updated.
+- [x] MKV selectable per preset; fMP4 remains the default.
+- [x] Golden-fixture byte tests to the same standard as the fMP4 muxer (`tests/fixtures/golden-recording.mkv`, `UPDATE_GOLDEN=1` to regenerate).
+- [x] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measured (MKV vs MP4: arrival p50 2.41 vs 2.32 ms, CPU median 6.22 % vs 6.23 %).
+- [x] Replay save works in both containers (73 ms MKV / 59 ms MP4 on loopback; unit test runs for both).
+- [x] `docs/plans/M6-recording-presets.md` updated (decision 5 + S4 measurements); ROADMAP M6 row updated.
+- [x] Bonus, out of the DoR investigation: `Mp4Muxer` now writes `mfra`, which fixes editor import for *existing* fMP4 recordings too.
 
 ### Kickoff prompt
 ```
@@ -199,27 +270,34 @@ Recording writes fragmented MP4. Add MKV as a per-preset option, for the reason 
 
 ---
 
-## S5 — Per-user (HKCU) virtual-camera registration
+## S5 — Per-user (HKCU) virtual-camera registration — **done 2026-09-14**
 **Branch** `feat/hkcu-vcam` · **Worktree** `C:\Users\stern\Documents\Code\relay-hkcu-vcam`
 
-**The highest-leverage session in Group 1.** The virtual camera needs one
+**Answer: no.** An HKCU-only registration resolves in the calling process but
+`IMFVirtualCamera::Start` fails `0x80070003` inside the Frame Server, which runs
+as `NT AUTHORITY\LocalService` and never loads the DLL. Evidence, control arms
+and a reproducible probe: `docs/dev/vcam-live.md` (last section). The HKLM write
+and its one elevation stay; **S6 is required and S12 keeps its blocker.**
+
+It was the highest-leverage session in Group 1: the virtual camera needs one
 elevated write to `HKLM\SOFTWARE\Classes\CLSID`, which is why M5's live pass has
-never run and why the installer needs an elevation story at all. If COM
-activation resolves from `HKCU\Software\Classes\CLSID` for the Frame Server,
-the elevation requirement disappears — and with it most of S6 and all of S12.
+never run and why the installer needs an elevation story at all. Had COM
+activation resolved from `HKCU\Software\Classes\CLSID` for the Frame Server, the
+elevation requirement would have disappeared — and with it most of S6 and all of
+S12. It does not, so both stand.
 
 ### Definition of Ready
 - [x] Registration planner and `installed.json` bookkeeping exist and are tested.
 - [x] Live writes double-gated on `RELAY_VDEVICE_ALLOW_LIVE_WRITE` + elevation.
 - [x] The experiment is already written down at the end of `docs/dev/vcam-live.md`.
-- [ ] Understand before writing anything: the Frame Server is a *service*, so it may not see per-user registrations at all. That is the question this session answers.
+- [x] Understand before writing anything: the Frame Server is a *service*, so it may not see per-user registrations at all. That is the question this session answers. (Confirmed: `svchost -k Camera`, running as `NT AUTHORITY\LocalService`.)
 
 ### Definition of Done
-- [ ] A clear, evidenced answer to "can the Relay camera register per-user?" — either it works, or the reason it cannot is documented well enough that nobody retries it.
-- [ ] If it works: HKCU is the default path, registration needs no elevation, `installed.json` records which hive was used, and uninstall removes from the right one.
-- [ ] If it does not: `docs/dev/vcam-live.md` records the negative result and S6's elevated helper becomes required rather than optional.
-- [ ] Either way, no `HKLM` write happens in this session without the user performing it.
-- [ ] `docs/plans/M5-vdevices.md` Deferred item 5 resolved; SESSIONS.md S12 updated to match.
+- [x] A clear, evidenced answer to "can the Relay camera register per-user?" — **no**, with three control arms and DLL-load evidence written up so nobody retries it.
+- [—] If it works: HKCU is the default path… — it does not work, so nothing moved: `reg.rs` still plans HKLM keys and `installed.json` still records them.
+- [x] If it does not: `docs/dev/vcam-live.md` records the negative result and S6's elevated helper becomes required rather than optional.
+- [x] Either way, no `HKLM` write happens in this session without the user performing it — none was written at all; the HKCU key and the `C:\ProgramData` DLL copy used for the experiment were removed afterwards.
+- [x] `docs/plans/M5-vdevices.md` Deferred item 5 resolved; SESSIONS.md S12 updated to match.
 
 ### Kickoff prompt
 ```
@@ -241,27 +319,35 @@ The virtual camera currently needs one elevated write to HKLM\SOFTWARE\Classes\C
 
 The core runs unelevated by design. The Settings cards for the APO and the
 virtual camera are wired and honest about failing, but there is no production
-path to actually install them. **Run S5 first** — it may shrink this to the APO
-only.
+path to actually install them. S5 has run and did **not** shrink this to the APO
+only: the helper covers both components.
 
 ### Definition of Ready
-- [ ] S5 finished, so it is known whether the camera still needs elevation.
+- [x] S5 finished (2026-09-14): the camera **still needs elevation** — per-user registration does not work, so this session covers the camera as well as the APO.
 - [x] Both components already record what they installed (`installed.json`, `apo-backup\<endpoint>.json`), so an elevated helper has a manifest to act on.
 - [x] The uninstall planner is a pure function of probed state and needs no new design.
 
-### Definition of Done
-- [ ] One elevated helper, launched on demand with a UAC prompt, that performs exactly the recorded install/uninstall steps and nothing else.
-- [ ] The user sees what will be changed *before* the prompt — the same dry-run listing the uninstall card already renders.
-- [ ] Helper refuses to run anything not in the plan; the live-write gates stay in force.
-- [ ] Declining UAC leaves the machine untouched and says so plainly.
-- [ ] Settings "Install APO" and the camera card work end to end on this machine.
-- [ ] `docs/plans/M3b-apo.md` Deferred item 3 closed; M7 plan updated.
+### Definition of Done — **met 2026-09-14**
+- [x] One elevated helper, launched on demand with a UAC prompt, that performs exactly the recorded install/uninstall steps and nothing else. `relay-elevate.exe` + `crates/core/src/elevate.rs`; the request carries no registry path, value or DLL path, so there is no field capable of naming anything else.
+- [x] The user sees what will be changed *before* the prompt — for the two removal ops it *is* the uninstall card's listing, narrowed to that step and rendered by `Plan::lines`. Asserted over the pipe for all four ops.
+- [x] Helper refuses to run anything not in the plan; the live-write gates stay in force. Four-variant op enum, COM keys vetted against our own CLSID, endpoint ids vetted as GUIDs, versioned + expiring + location-checked requests. Each gate is armed around one vetted call and removed after; nothing else in the product arms them.
+- [x] Declining UAC leaves the machine untouched and says so plainly. Verified live: *"Nothing on this PC was changed. You declined the Windows permission prompt."*, camera left registered, registry unchanged.
+- [x] Settings "Install APO" and the camera card work end to end on this machine. Both installed and removed from the cards; the endpoint's `FxProperties` export is byte-identical before and after. `docs/dev/elevation-live.md`.
+- [x] `docs/plans/M3b-apo.md` Deferred item 3 closed; M7 plan updated (its Deferred item 2 closed too).
+
+### What it also fixed
+The uninstaller's elevated phase could not have worked: it re-ran `relay-core
+uninstall --components-only` under `runas` with the live-write gates set in the
+*parent*, and elevation starts the child from the user's logon environment
+block. And `RegCreateKeyExW(KEY_WRITE)` is denied on an endpoint's
+`FxProperties` even when elevated — administrators get `SetValue` without
+`CreateSubKey`. Both are written up in `docs/dev/elevation-live.md`.
 
 ### Kickoff prompt
 ```
 You are starting session S6 (elevated install helper) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S6), docs/plans/M3b-apo.md and docs/plans/M7-installer.md. Work in the worktree C:\Users\stern\Documents\Code\relay-elevation on branch feat/elevated-install.
 
-Check first that session S5 has finished — if per-user camera registration worked, this session covers the APO only.
+S5 has finished: per-user camera registration does not work (docs/dev/vcam-live.md), so this session covers the camera as well as the APO.
 
 The core runs unelevated by design, so the Settings cards for the APO and camera cannot actually install anything. Build the elevated helper that can.
 
@@ -317,14 +403,18 @@ previous session's stray clicks landed in the user's browser.
 ### Definition of Ready
 - [x] `pnpm build` runs `tsc --noEmit` and catches type drift already.
 - [x] IPC wire shapes are covered by Rust tests on both sides.
-- [ ] Pick the approach: component tests against a mocked `api` (safe, fast, no window) versus WebDriver against a real Tauri window (higher fidelity, moves a real cursor). Default to the former unless there is a reason.
+- [x] Pick the approach: component tests against a mocked `api` (safe, fast, no window) versus WebDriver against a real Tauri window (higher fidelity, moves a real cursor). Default to the former unless there is a reason. **Component tests chosen** (2026-09-14) — Vitest + jsdom + Testing Library; rationale and the fidelity gap are written up in `ui/src/test/README.md`.
 
 ### Definition of Done
-- [ ] Every screen renders against both mock data and an offline core without throwing.
-- [ ] The paths that were mocks and got wired this month have regression tests: share preset start/stop, catalogue search and import, uninstall plan rendering, consent flow.
-- [ ] The suite runs in CI on `windows-latest` alongside `pnpm build`.
-- [ ] No test moves the real mouse or sends synthetic keystrokes to the desktop.
-- [ ] `docs/plans/M0-foundation.md:59` updated.
+- [x] Every screen renders against both mock data and an offline core without throwing. (`ui/src/screens/screens.smoke.test.tsx`, plus a third mode: a scripted live core.)
+- [x] The paths that were mocks and got wired this month have regression tests: share preset start/stop, catalogue search and import, uninstall plan rendering, consent flow.
+- [x] The suite runs in CI on `windows-latest` alongside `pnpm build`.
+- [x] No test moves the real mouse or sends synthetic keystrokes to the desktop. Enforced by `ui/src/test/safety.test.ts`, not just by convention.
+- [x] `docs/plans/M0-foundation.md` updated (deferred item closed; new "UI test harness" section).
+
+**Done 2026-09-14** on `feat/ui-test-harness`. 158 tests, 9 files, ~12 s. Found
+and fixed one real bug: the Share preset editor's encode-size field could not
+be typed into.
 
 ### Kickoff prompt
 ```
@@ -442,13 +532,14 @@ Three deferred measurements need wall-clock time rather than new hardware: the o
 Each of these is written and ready; each waits on one external thing.
 
 ## S12 — Live virtual-camera pass
-**Branch** `chore/vcam-live` · **Worktree** main tree · **Blocked on: one elevated shell** (~20 min)
+**Branch** `chore/vcam-live` · **Worktree** main tree · **Unblocked** (~20 min, one UAC prompt)
 
-Run **S5 first** — if per-user registration works, this session loses its blocker entirely.
+S5 has run (2026-09-14): per-user registration does **not** work, so the HKLM write is still required — but S6 built the thing that performs it, and the camera has already been registered and removed live through it (`docs/dev/elevation-live.md`). So this session no longer needs a hand-rolled elevated shell: `relay-core elevate run install-camera`, or the Settings card, does it. What is left is the part S6 did not do — pointing a real call at the registered camera. Start with the two-minute positive control at the end of `docs/dev/vcam-live.md`: run `vcam_reg_probe` once the key is in HKLM and confirm `Start` returns `S_OK`.
 
 ### Definition of Ready
-- [ ] S5 resolved (HKCU works → no elevation needed; or it does not → elevation required).
-- [ ] If elevation is still required: you are present to approve one UAC prompt for a write to `HKLM\SOFTWARE\Classes\CLSID`.
+- [x] S5 resolved 2026-09-14: HKCU does not work → elevation required.
+- [x] S6 landed 2026-09-14: registration is one approved UAC prompt away, and the removal path is proven.
+- [ ] You are present to approve the prompt.
 - [x] Runbook written: `docs/dev/vcam-live.md` (~20 min, includes the removal check).
 
 ### Definition of Done
@@ -462,9 +553,9 @@ Run **S5 first** — if per-user registration works, this session loses its bloc
 ```
 You are starting session S12 (live virtual-camera pass) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S12), docs/plans/M5-vdevices.md and docs/dev/vcam-live.md. Work in the main tree on branch chore/vcam-live.
 
-Check session S5 first: if per-user HKCU registration worked, this needs no elevation at all.
+S5 answered the hive question (HKCU does not work) and S6 built the elevated helper, which has already registered and removed the camera live. Register it with `relay-core elevate run install-camera` or the Settings card — one UAC prompt, which I approve — then run the positive-control probe in the runbook.
 
-1. Verify the Definition of Ready. If elevation is still required, tell me exactly what needs approving and wait — never write HKLM yourself.
+1. Verify the Definition of Ready. Never write HKLM by hand; go through the helper and tell me when the prompt is coming.
 2. Follow docs/dev/vcam-live.md and fill in the results table in docs/plans/M5-vdevices.md with what actually happened in Discord, Zoom and Meet at 1080p60 and 4K30. Do not fill a cell you did not observe.
 3. Run the clap test for A/V alignment and the removal check with the snapshot harness.
 4. Finish only when the Definition of Done is met. Update docs/plans/M5-vdevices.md and docs/ROADMAP.md, then summarise.
@@ -629,6 +720,47 @@ Four deliverables wait on this one certificate: the signed installer, the signed
 
 ---
 
+## S22 — Firewall rules in the installer
+**Branch** `feat/firewall-rules` · **Worktree** create when started
+
+Found 2026-09-14 on the dev machine: ten accumulated Block rules for
+`relay-share.exe` and not one Allow rule. Windows prompts the first time a
+given *path* listens, and dismissing that prompt writes a Block rule that never
+goes away.
+
+This is not a dev-only annoyance. **"Zero network config for the user" is a
+non-negotiable in `CLAUDE.md`**, and today a real user installs Relay, starts a
+share, gets a Windows firewall prompt they do not understand, clicks the wrong
+button once, and Relay is permanently broken for them with no visible cause.
+`scripts/firewall-rules.ps1` cleans it up after the fact; the installer should
+mean nobody needs it.
+
+### Definition of Ready
+- [x] Only `relay-share.exe` listens on the network (WebRTC + mDNS); `relay-core` is named-pipe only.
+- [x] `scripts/firewall-rules.ps1` exists and can list, clean and allow.
+- [ ] Decide the scope: Private profile only (Relay is LAN-only by design) versus Private + Domain. Public should stay blocked.
+
+### Definition of Done
+- [ ] The NSIS installer adds an inbound Allow rule for the installed `relay-share.exe` on the agreed profiles, and the **uninstaller removes it** — a leftover firewall rule would fail the clean-VM diff, so this must be in the uninstall plan like everything else.
+- [ ] Rules are added by the existing elevated path, not by a silent elevation grab; a user who declines still gets a working app on an already-permissive network, with an explanation.
+- [ ] The app detects the "blocked by firewall" state and says so plainly, rather than looking like a network fault — the same warn-before-you-fail shape as the HEVC capability banner.
+- [ ] Verified in the clean-VM cycle (S13): install, share, uninstall, empty diff.
+
+### Kickoff prompt
+```
+You are starting session S22 (firewall rules in the installer) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S22), docs/plans/M7-installer.md and scripts/firewall-rules.ps1. Create the worktree first: git worktree add -b feat/firewall-rules ..\relay-firewall main, then cd into it and run pnpm install in ui/.
+
+Zero network config for the user is a non-negotiable, and right now a user who dismisses one Windows firewall prompt breaks Relay permanently with no visible cause. On this dev machine that produced ten Block rules and zero Allow rules.
+
+1. Only relay-share.exe listens; relay-core is named-pipe only. Do not add rules for anything else.
+2. The installer adds the rule and the uninstaller removes it. A leftover firewall rule would fail the clean-VM diff, so it belongs in the uninstall plan like every other change.
+3. Never grab elevation silently. If the user declines, the app must still work where it can and explain where it cannot.
+4. Add detection so the blocked state is reported as what it is, not as a network fault — copy the shape of the HEVC capability banner we added on the Share and Receive screens.
+5. Finish only when the Definition of Done is met. Update docs/plans/M7-installer.md and docs/ROADMAP.md, then summarise.
+```
+
+---
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
@@ -641,9 +773,13 @@ audio to Relay over shared memory — the only way to capture DAW audio under
 ASIO exclusive mode. **First task of that session: write `docs/plans/v11-vst3.md`
 with a real DoR and DoD.**
 
-## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · depends on S2
+## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · **S2 landed, so unblocked**
 Audio back from the call to the sending PC, minus your own voice. S2's second
 Opus track is the foundation; this is the feature it was always heading toward.
+The seam S2 left for it: the two sources stay separate through decode and are
+summed only in `playback.rs`, one op before the WASAPI render buffer
+(`mix_sum`). Splitting them to different destinations, or ducking one against
+the other, means changing that last step and nothing upstream of it.
 
 ## S20 — Stream Deck plugin and NDI output · `feat/streamdeck-ndi`
 Two separate integrations sharing one session only because both are outbound
@@ -664,7 +800,8 @@ this session's to keep or remove.
    of lead time. Everything else can proceed meanwhile.
 2. **S5** (per-user camera registration) — may delete S12 and shrink S6.
 3. **S9** (docs truth pass) — cheap, and every later session reads those files.
-4. **S1, S2, S3** in parallel — the three highest-value code sessions.
+4. **S1, S2, S3** in parallel — the three highest-value code sessions. (S2 done
+   2026-09-14; S4 landed alongside it and was merged into S2's tree.)
 5. **S10 + S11** — closes most of the "deferred to MVP validation" backlog
    without new hardware.
 6. **S6, S7, S8** as capacity allows.

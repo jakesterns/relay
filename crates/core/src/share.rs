@@ -32,7 +32,9 @@ pub struct ShareRequest {
     /// Capture just this process's audio (game-only) instead of the desktop mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_pid: Option<u32>,
-    /// Send the default microphone instead of the desktop mix.
+    /// Also send the default microphone, as a second Opus track alongside
+    /// the desktop/game mix rather than instead of it. Mic-only is `audio:
+    /// false` with `mic: true`.
     #[serde(default)]
     pub mic: bool,
     #[serde(default = "default_true")]
@@ -53,6 +55,33 @@ pub struct ShareRequest {
     /// Recording folder; `None` disables recording and the replay ring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_dir: Option<String>,
+    /// Container for recordings and replay saves.
+    #[serde(default)]
+    pub container: RecordingContainer,
+}
+
+/// Container the recorder muxes into. Both carry the identical HEVC + Opus
+/// bitstream teed off the share — the choice never re-encodes anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordingContainer {
+    /// Fragmented MP4. The default: widest tool support.
+    #[default]
+    Mp4,
+    /// Matroska. Survives a crash mid-file — a recording cut off without a
+    /// clean stop still imports into editors, where an fMP4 does not. See
+    /// `docs/dev/container-compat.md`.
+    Mkv,
+}
+
+impl RecordingContainer {
+    /// File extension, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+        }
+    }
 }
 
 /// Mirror of `relay_capture::command::SourceTarget` (the core does not link
@@ -338,7 +367,9 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     } else if let Some(pid) = req.audio_pid {
         args.push("--audio-pid".into());
         args.push(pid.to_string());
-    } else if req.mic {
+    }
+    // Independent of the program source: `--audio-mic` adds a track.
+    if req.mic {
         args.push("--audio-mic".into());
     }
     if !req.cursor {
@@ -353,6 +384,10 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
         if req.replay_secs > 0 {
             args.push("--replay-secs".into());
             args.push(req.replay_secs.to_string());
+        }
+        if req.container != RecordingContainer::Mp4 {
+            args.push("--container".into());
+            args.push(req.container.extension().into());
         }
     }
     if req.preview_fps > 0 {
@@ -534,12 +569,31 @@ mod tests {
         let args = send_args(&req);
         assert!(!args.iter().any(|a| a.starts_with("--record") || a == "--replay-secs"));
 
-        // Game-only audio beats the mic toggle (single-track contract).
+        // Game-only audio and the mic now travel together: two tracks.
         let req: ShareRequest =
             serde_json::from_str(r#"{"code":"1","mic":true,"audio_pid":42}"#).unwrap();
         let args = send_args(&req);
         assert!(args.contains(&"--audio-pid".to_string()));
-        assert!(!args.contains(&"--audio-mic".to_string()));
+        assert!(args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// Mic-only: the engine gets `--no-audio --audio-mic`, which is what it
+    /// used to get from a legacy `mic` preset, so nothing changes for one.
+    #[test]
+    fn send_args_mic_without_program_audio() {
+        let req: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","audio":false,"mic":true}"#).unwrap();
+        let args = send_args(&req);
+        assert!(args.contains(&"--no-audio".to_string()));
+        assert!(args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// And no mic asked for means no mic flag: single-track peers and
+    /// presets are untouched.
+    #[test]
+    fn send_args_without_mic_are_unchanged() {
+        let req: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert!(!send_args(&req).contains(&"--audio-mic".to_string()));
     }
 
     /// Shape copied from a real `relay-share probe` run on this dev machine.

@@ -20,12 +20,18 @@ M0 (crash-restore harness), M1 (monitor ids and HMONITOR mapping, DDC/CI capabil
 ### DDC/CI
 - [x] `relay-display::ddc`: physical monitor handle from the probe's `HMONITOR` (`GetPhysicalMonitorsFromHMONITOR`), `GetVCPFeatureAndVCPFeatureReply` / `SetVCPFeature`, 3 retries with 50 ms pauses per call and a per-model write-settle delay (60 ms on LG). Handles are opened per transaction group and never cached (they go stale on display changes).
 - [x] Capture reads every code the profile will touch (`DisplayAdapter::capture`) and stores `(code, value)` pairs in the snapshot; restore writes them back in reverse order (unit test `restore_writes_vcp_in_reverse_capture_order`). Failing to *read* an original aborts the apply — never write what you cannot put back.
-- [x] Model quirks table `relay_display::vcp::quirks_for` keyed on the PNP prefix of the monitor id (write delays; slots for verified vendor opcodes). **No vendor opcode is listed yet** — black equaliser / response candidates exist in the LG capability string (0xF4–0xFF region) but writing an unverified opcode is worse than skipping: `plan_writes` skips the field and reports it in `DisplayVia::unsupported` (→ Deferred).
+- [x] Model quirks table `relay_display::vcp::QUIRKS` keyed on the EDID manufacturer id **plus product code** (`GSM` + `5C7C`), which together name one model; a `product: None` row is a manufacturer-wide fallback carrying write timing only. Each vendor opcode is a `Candidate` = code + `Evidence` (`VendorDoc { url }` / `Osd { observer, date, monitor }` / `Unverified { note }`). **Guessing is structurally impossible** (S3, 2026-09-14): `quirks_for_key` turns a candidate into a `VerifiedCode` via `attest()`, which returns `None` for `Unverified`; `VerifiedCode`'s `u8` is private to its module and `attest` is its only constructor; `plan_writes` and `vendor_controls` take `VerifiedCode`, not `u8`. `unverified_table_entry_does_not_enable_the_slider` proves the LG case end to end — the panel advertises both candidates, the profile asks for both, and still nothing is written and neither slider is enabled. Runbook and the evidence rules: `docs/dev/vcp-verification.md`.
 
 ### GPU colour
 - [x] `relay-display::nvapi`: `nvapi64.dll` loaded per operation via `nvapi_QueryInterface` (no link-time dep, nothing resident between applies — footprint), display handles matched to the probe by GDI name, digital vibrance (`GetDVCInfo`/`SetDVCLevel`, raw levels in the snapshot, profile-percent mapping unit-tested) and hue (`GetHUEInfo`/`SetHUEAngle`). Live verification pending (see Deferred).
 - [x] `relay-display::gamma`: pure ramp maths (gamma 0.5–2.0, contrast ±50 % effect, cubic-falloff shadow lift; monotonicity and pivot unit-tested against corner cases) + `Get/SetDeviceGammaRamp` on the monitor's own DC. The *original* ramp is captured raw and restored raw, so f.lux / Night Light curves come back exactly.
-- [ ] ADLX (AMD) — deferred until NVIDIA is live-verified; the `DisplayIo` trait is the seam it plugs into.
+- [x] AMD — `relay-display::amd`: saturation + hue over the AMD Display
+  Library (`atiadlxx.dll`, dynamically loaded per operation like NvAPI),
+  behind the same `DisplayIo` seam, selected at runtime by which vendor owns
+  the target monitor. Profile → raw-unit curve recorded below; the NVIDIA
+  path is unchanged. **Transport note:** ADL rather than the ADLX vtables,
+  for a reason recorded in the session log below. Fixture-level only for the
+  colour writes — no AMD GPU drives a display on this PC.
 
 ### Core integration
 - [x] `DisplayControl` trait now takes a target (`Option<&MonitorProbe>`); `crates/core/src/display_backend.rs` implements capture/apply/restore behind a `DisplayIo` primitive trait (fake in tests, `RealIo` in production). Only the target monitor is read or written — proven by unit tests with a two-monitor fake (`apply_touches_only_the_target_monitor_and_restore_reverts_it`, plus untouched-B assertions on every failure path). Restore re-resolves handles by stable `MonitorId` (crash/reboot path, `restore_re_resolves_stale_handles_by_stable_id`); a monitor that is gone fails the restore so the snapshot stays pending for the next start.
@@ -36,7 +42,7 @@ M0 (crash-restore harness), M1 (monitor ids and HMONITOR mapping, DDC/CI capabil
 - [x] Apply-on-focus / restore-on-focus-loss on real hardware — `crates/core/tests/focus_apply_restore_live.rs` (new, ignored). Launches Notepad, lets the focus hook apply the profile with no IPC nudge, closes it, and asserts the hardware is back. Measures restore latency from the core's own log rather than from DDC reads, which would swamp it.
 
 ### UI
-- [x] Display section on the Games screen reads/writes the subject profile's real `DisplaySettings` (draft loaded via `get_profile`, saved via `save_profile`); sliders for unadvertised VCP codes are disabled from the library's `ddcci` list; black equaliser / response are disabled until a verified vendor opcode exists. "Applied via" renders `CoreState.display_via` (NvAPI / gamma ramp / DDC/CI actually used, plus fields the hardware could not honour). `pnpm build` (tsc + vite) green.
+- [x] Display section on the Games screen reads/writes the subject profile's real `DisplaySettings` (draft loaded via `get_profile`, saved via `save_profile`); sliders for unadvertised VCP codes are disabled from the library's `ddcci` list. Black equaliser / response are driven by `Reply::Hardware.vendor_controls`, which the **core** computes from `vcp::QUIRKS` and the advertised list — the client is told, never asked, because a UI that inferred a control from the advertised opcode list would defeat the type guarantee. Response levels come from the verified value map rather than a constant the UI keeps in sync. "Applied via" renders `CoreState.display_via` (NvAPI / gamma ramp / DDC/CI actually used, plus fields the hardware could not honour). `pnpm build` (tsc + vite) green.
 - [x] Hardware library monitor entry shows which controls are available ("controls: brightness, contrast" from the advertised codes).
 
 ### Gates
@@ -116,6 +122,169 @@ is an unplanned second confirmation that crash-restore works. The test now
 kills by image name and carries a `RestoreGuard` that runs that same recovery
 on unwind.
 
+## S1 session — AMD (ADLX) backend, 2026-09-14
+
+### Definition of Ready: no AMD-driven display on this PC
+
+`AMD Radeon(TM) Graphics` (Raphael iGPU, `PCI\VEN_1002&DEV_164E`) is present
+with a driver loaded, but `Win32_VideoController` reports no current
+resolution for it — nothing is plugged into it. The only monitor, the LG
+ULTRAGEAR+ (`GSM5C7C`), hangs off the RTX 3090. So the colour **writes** are
+fixture-tested, as the DoR allows. What *is* live-verified is everything
+below the colour call: the library loads, the entry points resolve, the
+structs match, and adapters enumerate.
+
+### Live read-only probe
+
+`cargo test -p relay-display --test live_read live_read_amd_state -- --ignored --nocapture`
+
+```
+adapter 0 vendor=1002 present=1 exist=1 "AMD Radeon(TM) Graphics" on "\\.\DISPLAY5"
+adapter 1 vendor=1002 present=1 exist=1 "AMD Radeon(TM) Graphics" on "\\.\DISPLAY6"
+adapter 2 vendor=1002 present=1 exist=1 "AMD Radeon(TM) Graphics" on "\\.\DISPLAY7"
+adapter 3 vendor=1002 present=1 exist=1 "AMD Radeon(TM) Graphics" on "\\.\DISPLAY8"
+adapter 4 vendor=1002 present=1 exist=1 "AMD Radeon(TM) Graphics" on "\\.\DISPLAY9"
+adapter 5 vendor=10   present=1 exist=1 "NVIDIA GeForce RTX 3090"  on "\\.\DISPLAY1"
+adapter 6 vendor=10   present=1 exist=1 "NVIDIA GeForce RTX 3090"  on "\\.\DISPLAY2"
+adapter 7 vendor=10   present=1 exist=1 "NVIDIA GeForce RTX 3090"  on "\\.\DISPLAY3"
+adapter 8 vendor=10   present=1 exist=1 "NVIDIA GeForce RTX 3090"  on "\\.\DISPLAY4"
+== ADL loaded; 0 AMD-driven display(s)
+```
+
+Three things only knowable by running it, which fixtures could not have told
+us:
+
+1. **The `AdapterInfo` layout is right.** Adapter names and GDI display names
+   come back as clean strings, which they would not if the struct were off by
+   a field.
+2. **ADL enumerates every adapter the OS has, not only AMD's** — the RTX 3090
+   is in that list four times. Colour calls are addressed by *adapter index*,
+   so without a vendor check the AMD backend would happily aim an
+   `ADL2_Display_Color_Set` at an NVIDIA adapter. There is now a filter on
+   `iVendorID`, and a test pinning the constant.
+3. **`ADL_VENDOR_ID` is decimal 1002, not hex `0x1002`.** Writing the natural
+   `0x1002` would have filtered out every real AMD adapter and silently
+   disabled the whole backend on exactly the machines it exists for.
+
+The correct AMD answer on this PC is "0 AMD-driven displays", which is what
+it reports — so an AMD-with-nothing-attached machine falls through to the
+gamma-ramp path rather than claiming a display it cannot drive.
+
+### Why ADL and not the ADLX vtables
+
+AMD ships two interfaces to the same driver feature (the "Custom Color" block
+in Radeon Software): ADLX (`amdadlx64.dll` 1.4.0.121 here), whose C binding is
+COM-like and **vtable-indexed**, and ADL (`atiadlxx.dll` 7.25.10.1590 here), a
+flat C API resolved by `GetProcAddress`.
+
+With no AMD display to test against, a wrong or shifted vtable slot would not
+fail — it would call *a different method*, on a stranger's monitor, in the
+field. A missing flat export fails at load and degrades to "unavailable".
+That is the rule the VCP quirks table already follows: never issue a command
+whose meaning you cannot prove. `ADL2_Display_Color_Set` is the call Radeon
+Software's own slider makes. If ADLX ever becomes the only transport it
+replaces the inside of `relay-display::amd`; the `DisplayIo::gpu_*` seam above
+it does not move.
+
+### The curve, and why it is not NvAPI's
+
+The two drivers do not expose the same control, so one mapping cannot serve
+both:
+
+| | NvAPI DVC | ADL saturation |
+|---|---|---|
+| range | 0..63 | 0..200 |
+| neutral | `min` (0) | driver `default` (100) |
+| below neutral | **impossible** | available |
+
+**Vibrance** (profile 0..100, 50 = neutral) maps piecewise-linearly with the
+knee at the driver's own default, not at the midpoint of the range:
+
+```
+profile   0 ──────────── 50 ──────────── 100
+ADL      min ─────── default ───────── max
+```
+
+Two segments rather than one line across `[min, max]`, because 50 has to mean
+"leave the colour exactly alone" — anything else and every game would nudge
+the desktop's colour. Each side then scales to its own span, so an off-centre
+default still behaves.
+
+The deliberate divergence: **AMD honours desaturation, NVIDIA cannot.** The
+bottom half of the slider has nowhere to go on a DVC range whose neutral is
+its minimum, so NVIDIA clamps to neutral and now *says so* in the UI's "Not on
+this hardware" line. Pinning AMD to neutral to match would throw away a
+control the hardware has; the point of the vendor seam is that each GPU does
+the best it can with the same profile, not that both do the worst. Pinned by
+`amd_honours_desaturation_where_nvidia_clamps` and, at the seam, by
+`a_desaturating_profile_moves_amd_and_is_reported_on_nvidia`.
+
+**Hue** stays in degrees. NvAPI takes a full 0..359 rotation; ADL's hue is a
+narrow signed trim (commonly ±30°). The profile angle is folded into
+(−180°, 180°] — +350° and −10° are the same rotation — and then **clamped,
+not rescaled**. Rescaling would make "10°" mean one thing on NVIDIA and
+another on AMD for the same profile. A clamp is reported up to the UI
+("hue (AMD trims to -30..30°, asked for 90°)") rather than silently
+under-delivering.
+
+**Gamma, contrast and shadow lift need no AMD code at all** — they ride the
+vendor-neutral `SetDeviceGammaRamp` path, which was already the fallback and
+is unchanged.
+
+Every branch of both mappings is unit-tested, including step-grid snapping,
+degenerate ranges (`min == max`), and every hue angle from −720° to +720°.
+
+### Crash-restore against the AMD backend
+
+`crates/core/tests/crash_restore_amd.rs`. The existing `crash_restore.rs`
+proves *which calls* happened; this proves *which values* came back, by
+swapping the display backend for a file-backed simulated rig
+(`RELAY_DISPLAY_SIM`, the sibling of `RELAY_RECORDING_BACKEND`) that outlives
+a `taskkill /F`. Everything above `DisplayIo` is production code — planning,
+backup-before-apply, snapshot format, vendor dispatch, and the recovery that
+runs before the pipe opens.
+
+One profile (brightness 95 over DDC/CI + gamma 1.2 on the ramp + vibrance 75
+on the vendor API), run through both vendors. Values are
+`(brightness, ramp[128], raw colour)`:
+
+```
+[amd]    before (100, 32896, 100)  applied (95, 36900, 150)  killed (95, 36900, 150)  restored (100, 32896, 100)  <= 116.3 ms
+[nvidia] before (100, 32896,   0)  applied (95, 36900,  32)  killed (95, 36900,  32)  restored (100, 32896,   0)  <= 111.1 ms
+```
+
+Identical behaviour, different raw units — which is the point, and is itself
+asserted (`the_two_vendors_write_different_raw_values_for_the_same_profile`:
+75 % vibrance is 150 of 0..200 on AMD and 32 of 0..63 on NVIDIA, while
+brightness and the ramp are vendor-neutral and match exactly). The timing is
+an upper bound on *recovery* — launch to a connectable core — not the alt-tab
+number; the alt-tab budget is still the 144 ms measured live on NVIDIA above,
+and it is dominated by the DDC/CI write, not the GPU path.
+
+The pre-existing harness is unchanged and still green:
+`cargo test -p relay-core --test crash_restore` → 2 passed.
+
+### Snapshot compatibility
+
+`MonitorStateSnapshot.nvapi` became `gpu`, now vendor-tagged, but **the wire
+name stays `nvapi`** with `vendor` defaulting to NVIDIA. This is the one
+back-compat case that actually matters: upgrade while a profile is applied,
+and a snapshot that failed to load would leave someone's monitor dimmed with
+no way back. Pinned by
+`a_pre_adl_snapshot_still_loads_and_restores_through_nvapi`.
+
+### Gates
+
+`cargo fmt --all --check`, `cargo clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (38 suites green), `pnpm build`, and the footprint
+gate: **PASS — 7.01 MB peak RSS, 0.92 MB private WS, 0 % idle CPU, exe
+1.45 MB.**
+
+One environment note for the next session: `cmake` is not on `PATH`, so
+anything that builds `opusic-sys` (i.e. `--workspace`) fails until you add
+`C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin`.
+Nothing to do with this change.
+
 ## Out of scope
 LUT / ICC profiles, HDR.
 
@@ -129,5 +298,23 @@ LUT / ICC profiles, HDR.
   All three need the monitor awake; the last two change real settings briefly and restore them.
 - **Session lock / unlock (Win+L)** — the one live step still outstanding. Not automated because locking the machine mid-session is disruptive and the unlock needs a human. *Runbook:* with a profile applied, press Win+L, and on returning check `logs/core.log` for `session lock change locked=true` followed by `original state restored`, then a re-apply on unlock. The code path (`WTSRegisterSessionNotification` → `CoreEvent::SessionLock`) is unit-tested; what is unverified is that Windows delivers the notification to the hidden winloop window on this machine.
 - **Second-monitor live proof + LG C2 manual test log** — one physical monitor on this PC (same deferral as M1). *Runbook:* attach the C2, give it a profile row, confirm (a) only the game's monitor changes brightness/ramp, (b) dragging the game across restores the first panel within a tick, (c) per-model VCP codes that work go into the hardware library / quirks table.
-- **Vendor opcodes (black equaliser, response time)** — need eyes on the OSD to verify which candidate code (LG 0xF4–0xFF) drives which OSD setting; set-and-readback alone cannot prove the on-screen meaning. Until then the fields are skipped and surfaced as unsupported in the UI.
-- **ADLX (AMD)** — after NVIDIA is live-verified; plugs into `DisplayIo`.
+- **Vendor opcodes (black equaliser, response time)** — the *machinery* is done (S3, 2026-09-14): evidence-typed table, the `VerifiedCode` guarantee, the `vendor_probe` OSD harness, core→UI plumbing and the shrunken UI note. What is still outstanding is the **observation itself**: no candidate on the LG 32GS95UE has been watched on the OSD, so both entries remain `Evidence::Unverified` and both sliders ship disabled.
+
+  *Runbook* (`docs/dev/vcp-verification.md`): open the OSD on the page to watch, keep off the joystick, then one code at a time —
+  ```powershell
+  $env:RELAY_VCP_PROBE = "F5:1|2|3|4"
+  cargo test -p relay-display --test vendor_probe -- --ignored --nocapture
+  ```
+  Candidates on this panel, from the 47-code capability dump: `F5(01 02 03 04)`, `F6(00 01 02)`, `F7(00 01 02 03)`, `F8(00 01)`, `FA(00 01)`, `FE(00 01 02)`, plus the value-less `F4`, `F9`, `FD`, `FF`. Record which OSD label moved *and* which written value maps to which level — the code alone is not enough. A code whose effect nobody could see stays `Unverified`; that is the honest answer, not a failed run.
+- ~~**ADLX (AMD)**~~ — **built 2026-09-14** (session S1, above), behind the
+  `DisplayIo` seam and fixture-tested. What remains is **an AMD live pass**,
+  which needs a monitor plugged into a Radeon — the iGPU on this PC drives
+  nothing. *Runbook:* attach a display to the AMD adapter, then
+  ```
+  cargo test -p relay-display --test live_read live_read_amd_state -- --ignored --nocapture
+  ```
+  which should list that display instead of reporting 0. Then give it a
+  profile with vibrance ≠ 50 and confirm (a) `Applied via` reads "AMD ADL",
+  (b) Radeon Software's Custom Color saturation slider moves with it, (c) it
+  comes back on blur, and (d) `crash_restore_display.rs` passes against it.
+  Until then the AMD colour *writes* have never touched a real driver.

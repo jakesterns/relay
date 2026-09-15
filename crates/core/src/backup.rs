@@ -30,7 +30,7 @@ pub struct DisplayStateSnapshot {
     pub monitors: Vec<(MonitorId, MonitorSettings)>,
     /// Raw pre-apply state per touched monitor (the real backend's format).
     /// Everything needed to put the monitor back without consulting the
-    /// profile: exact VCP values, the exact gamma ramp, raw NvAPI levels.
+    /// profile: exact VCP values, the exact gamma ramp, raw vendor levels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub targets: Vec<MonitorStateSnapshot>,
 }
@@ -51,18 +51,53 @@ pub struct MonitorStateSnapshot {
     /// Exact pre-apply gamma ramp (preserves f.lux / Night Light curves).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gamma: Option<relay_display::gamma::Ramp>,
-    /// Raw NvAPI state, when the NVIDIA path was going to be touched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nvapi: Option<NvApiSnapshot>,
+    /// Raw GPU-colour state, when a vendor colour path was going to be
+    /// touched. The serde name stays `nvapi` so a snapshot written by an
+    /// older build — the one case where getting this wrong means *not*
+    /// restoring someone's monitor after an upgrade — still loads.
+    #[serde(default, rename = "nvapi", alias = "gpu", skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuColorSnapshot>,
 }
 
-/// Raw NvAPI digital-vibrance + hue state (vendor units, not profile units).
+/// Which vendor's colour API produced a snapshot. Restore must go back
+/// through the same one: on a two-GPU machine the raw units are not
+/// comparable, and a snapshot taken through NvAPI means nothing to ADL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuVendor {
+    /// Also the default, so a pre-ADL snapshot (no `vendor` field) restores
+    /// through NvAPI exactly as the build that wrote it would have.
+    #[default]
+    Nvidia,
+    Amd,
+}
+
+/// Raw per-display vibrance/saturation + hue, in the vendor's own units.
+///
+/// One shape for both vendors because the *restore* contract is identical:
+/// put these exact numbers back. The profile-unit mapping that produced them
+/// is per-vendor and lives in `relay_display::{nvapi, amd}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NvApiSnapshot {
+pub struct GpuColorSnapshot {
+    #[serde(default)]
+    pub vendor: GpuVendor,
+    /// NVIDIA: DVC level. AMD: saturation.
     pub dvc: i32,
     pub dvc_min: i32,
     pub dvc_max: i32,
+    /// NVIDIA: hue angle 0..359. AMD: signed hue trim.
     pub hue_deg: i32,
+    /// AMD only: the driver-reported hue range, needed because ADL rejects
+    /// an out-of-range write — including, on restore, the original value if
+    /// the range were assumed instead of recorded.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hue_min: i32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub hue_max: i32,
+}
+
+fn is_zero(v: &i32) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +188,53 @@ mod tests {
         (dir.clone(), BackupFile::at(dir.join("original-state.json")))
     }
 
+    /// A snapshot written by a pre-ADL build must still restore. This is the
+    /// one back-compat case that matters: get it wrong and someone upgrades
+    /// mid-apply, the old snapshot fails to load, and their monitor stays
+    /// dimmed with no way back.
+    #[test]
+    fn a_pre_adl_snapshot_still_loads_and_restores_through_nvapi() {
+        let old = serde_json::json!({
+            "monitor": "mon:GSM5C7C:402NTCZ9E219",
+            "gdi_name": r"\\.\DISPLAY1",
+            "hmonitor": 65537,
+            "vcp": [[16, 100]],
+            "nvapi": { "dvc": 13, "dvc_min": 0, "dvc_max": 63, "hue_deg": 0 }
+        });
+        let ms: MonitorStateSnapshot = serde_json::from_value(old).expect("old snapshot loads");
+        let gpu = ms.gpu.expect("colour state survived the rename");
+        assert_eq!(gpu.vendor, GpuVendor::Nvidia, "no vendor field means the NVIDIA path");
+        assert_eq!(gpu.dvc, 13);
+        assert_eq!((gpu.hue_min, gpu.hue_max), (0, 0));
+    }
+
+    /// And the round trip both ways for a current one.
+    #[test]
+    fn a_vendor_tagged_snapshot_round_trips() {
+        for vendor in [GpuVendor::Nvidia, GpuVendor::Amd] {
+            let ms = MonitorStateSnapshot {
+                monitor: MonitorId("mon:X".into()),
+                gdi_name: r"\\.\DISPLAY1".into(),
+                hmonitor: 1,
+                vcp: vec![(0x10, 40)],
+                gamma: None,
+                gpu: Some(GpuColorSnapshot {
+                    vendor,
+                    dvc: 120,
+                    dvc_min: 0,
+                    dvc_max: 200,
+                    hue_deg: -5,
+                    hue_min: -30,
+                    hue_max: 30,
+                }),
+            };
+            let text = serde_json::to_string(&ms).unwrap();
+            assert!(text.contains("\"nvapi\""), "wire name is unchanged: {text}");
+            let back: MonitorStateSnapshot = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, ms, "{vendor:?}");
+        }
+    }
+
     #[test]
     fn no_file_means_nothing_pending() {
         let (dir, b) = temp();
@@ -175,7 +257,15 @@ mod tests {
                     hmonitor: 0x10001,
                     vcp: vec![(0x10, 40), (0x12, 70)],
                     gamma: Some(relay_display::gamma::Ramp::identity()),
-                    nvapi: Some(NvApiSnapshot { dvc: 0, dvc_min: 0, dvc_max: 63, hue_deg: 0 }),
+                    gpu: Some(GpuColorSnapshot {
+                        vendor: GpuVendor::Nvidia,
+                        dvc: 0,
+                        dvc_min: 0,
+                        dvc_max: 63,
+                        hue_deg: 0,
+                        hue_min: 0,
+                        hue_max: 0,
+                    }),
                 }],
             },
         );

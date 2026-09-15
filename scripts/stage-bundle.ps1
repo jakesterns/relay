@@ -4,18 +4,19 @@
   bundler expects to find it.
 
 .DESCRIPTION
-  Relay installs seven files into one folder:
+  Relay installs eight files into one folder:
 
     relay-ui.exe        the Tauri shell (the bundle's main binary)
     relay-core.exe      the always-on service
     relay-svc.exe       windowless launcher for the core (Run key, installer)
+    relay-elevate.exe   the elevated install helper (the only HKLM writer)
     relay-share.exe     the share engine, spawned per share
     relay-preview.exe   the offline A/B renderer, spawned on demand
     relay_apo.dll       the endpoint APO (only registered if opted in)
     relay_vdevice.dll   the camera media source (only registered if opted in)
     uninstall.exe       written by NSIS
 
-  The four helper exes ride along as Tauri "externalBin" sidecars, which is
+  The five helper exes ride along as Tauri "externalBin" sidecars, which is
   why they need the target triple in the staged filename -- the bundler strips
   it again on install. The two DLLs go through "resources", which drops them
   straight into the install directory; they are cdylibs, not sidecars, and
@@ -83,6 +84,7 @@ New-Item -ItemType Directory -Force -Path $staging | Out-Null
 $sidecars = @{
     'relay-core.exe'    = "relay-core-$triple.exe"
     'relay-svc.exe'     = "relay-svc-$triple.exe"
+    'relay-elevate.exe' = "relay-elevate-$triple.exe"
     'relay-share.exe'   = "relay-share-$triple.exe"
     'relay-preview.exe' = "relay-preview-$triple.exe"
 }

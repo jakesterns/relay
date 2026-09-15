@@ -3,7 +3,7 @@ import { Card, Chips, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import {
-  api, isTauri,
+  api, isTauri, presetAudioLabel,
   type ApoStatus, type ColorInfo, type Limiter, type Preview, type Profile, type SharePreset,
   type SharePresetDef,
 } from "../lib/ipc";
@@ -381,7 +381,11 @@ function AudioSide({ draft, update, save, dirty }: {
 
 /* ---------- Display ---------- */
 
-const RESPONSE_LEVELS = ["off", "normal", "fast", "faster"];
+/** Title-case a level name from the core's verified value map. The names come
+ *  from `vcp::ResponseQuirk::levels`, not from a list the UI keeps in sync. */
+function levelLabel(level: string | undefined): string {
+  return level ? level.charAt(0).toUpperCase() + level.slice(1) : "";
+}
 
 /** Advertised-VCP check. Unknown capabilities (never probed) allow the
  *  standard codes, matching the core's `plan_writes` behaviour. */
@@ -418,17 +422,21 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
   const off = !draft;
 
   // The profile's monitor (or the main connected one) decides which DDC/CI
-  // controls exist. Vendor codes (black eq, response) stay disabled until a
-  // verified opcode for the model lands in the quirks table.
+  // controls exist. Standard codes come from the panel's advertised list;
+  // vendor codes (black eq, response) come only from the core, which enables
+  // one only when the quirks table holds verified evidence for this model.
   const mainId = hardware.connected.monitors.find((m) => m.primary)?.id ?? null;
-  const libMonitor = hardware.monitors.find((m) => m.id === (draft?.monitor ?? mainId));
+  const monId = draft?.monitor ?? mainId;
+  const libMonitor = hardware.monitors.find((m) => m.id === monId);
   const codes = libMonitor?.ddcci;
+  const vendor = hardware.vendor_controls?.find((v) => v.monitor === monId);
+  const responseLevels = vendor?.response ?? [];
   // Prefer what the panel is reporting right now over whatever the library
   // recorded when it was first added.
-  const panelColor = hardware.connected.monitors.find((m) => m.id === (draft?.monitor ?? mainId))?.color
+  const panelColor = hardware.connected.monitors.find((m) => m.id === monId)?.color
     ?? libMonitor?.color;
   const hue = ((gpu.hue_deg + 180) % 360) - 180;
-  const responseIx = Math.max(0, RESPONSE_LEVELS.indexOf(mon.response ?? "off"));
+  const responseIx = Math.max(0, responseLevels.indexOf(mon.response ?? responseLevels[0] ?? ""));
   return (
     <>
       <div className="cmp">
@@ -456,14 +464,20 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
             onChange={(v) => update((p) => { p.display.monitor.brightness = v; })} />
           <Slider label="Contrast" value={mon.contrast ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x12)}
             onChange={(v) => update((p) => { p.display.monitor.contrast = v; })} />
-          <Slider label="Black equalizer" value={mon.black_equalizer ?? 10} min={0} max={20} disabled
+          <Slider label="Black equalizer" value={mon.black_equalizer ?? 10} min={0} max={20}
+            disabled={off || !vendor?.black_equalizer}
             onChange={(v) => update((p) => { p.display.monitor.black_equalizer = v; })} />
-          <Slider label="Response" value={responseIx} min={0} max={3}
-            format={(v) => ["Off", "Normal", "Fast", "Faster"][v] ?? ""} disabled
-            onChange={(v) => update((p) => { p.display.monitor.response = v === 0 ? undefined : RESPONSE_LEVELS[v]; })} />
+          <Slider label="Response" value={responseIx} min={0} max={Math.max(0, responseLevels.length - 1)}
+            format={(v) => levelLabel(responseLevels[v])} disabled={off || responseLevels.length < 2}
+            onChange={(v) => update((p) => {
+              const level = responseLevels[v];
+              if (!level || v === 0) delete p.display.monitor.response; else p.display.monitor.response = level;
+            })} />
           <Slider label="Sharpness" value={mon.sharpness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x87)}
             onChange={(v) => update((p) => { p.display.monitor.sharpness = v; })} />
-          <p className="note">Black equalizer and Response live on vendor-private DDC/CI codes that differ per model and are not published. Relay will not guess at one — writing the wrong code changes a setting you did not ask for. They stay off until a verified opcode for your panel is added.</p>
+          {(!vendor?.black_equalizer || responseLevels.length < 2) && (
+            <p className="note">Black equalizer and Response sit on vendor-private codes Relay has not verified on this panel, so they stay off. Nothing on your monitor was changed.</p>
+          )}
         </Card>
       </div>
     </>
@@ -481,11 +495,13 @@ function Scene() {
   );
 }
 
-/** "NvAPI + gamma ramp + DDC/CI", from the live apply. */
+/** "NvAPI + gamma ramp + DDC/CI", from the live apply. AMD machines read
+ * "AMD ADL" in the same slot -- whichever vendor drives the target monitor. */
 function appliedViaText(state: ReturnType<typeof useCore>["state"]): string {
   if (state.display_state !== "applied") return "—";
   const parts = [
     state.display_via.nvapi && "NvAPI",
+    state.display_via.amd && "AMD ADL",
     state.display_via.gamma && "gamma ramp",
     state.display_via.ddcci && "DDC/CI",
   ].filter(Boolean) as string[];
@@ -582,9 +598,6 @@ function SharingSide({ draft, save, dirty }: {
 
   const chosen = draft?.share ?? "off";
   const def = presets.find((p) => p.id === chosen);
-  const audio: Record<SharePresetDef["audio"], string> = {
-    system: "System mix", game: "Game only", mic: "Microphone", off: "None",
-  };
 
   return (
     <aside className="side">
@@ -597,9 +610,10 @@ function SharingSide({ draft, save, dirty }: {
             <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
             <Kv k="Frame rate" v={`${def.fps} fps`} mono />
             <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
-            <Kv k="Audio" v={audio[def.audio]} />
+            <Kv k="Audio" v={presetAudioLabel(def.audio)} />
             <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
             <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
+            <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
           </>
         ) : (
           <p className="note">Reading presets…</p>

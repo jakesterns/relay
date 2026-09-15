@@ -45,6 +45,24 @@ impl Backends {
     /// when `RELAY_RECORDING_BACKEND=<path>` is set (integration tests only —
     /// the probe stays no-op there so tests never depend on host hardware).
     pub fn from_env() -> Self {
+        // The simulated display rig wins when both are set: it is the more
+        // specific of the two test backends, and the crash-restore harness
+        // wants the recorder for audio and the rig for display.
+        if let Ok(path) = std::env::var(crate::display_sim::SIM_ENV) {
+            if !path.is_empty() {
+                let audio: Arc<dyn AudioControl> = match std::env::var(RECORDING_ENV) {
+                    Ok(rec) if !rec.is_empty() => Arc::new(FileRecorder::at(rec)),
+                    _ => Arc::new(Noop),
+                };
+                return Self {
+                    audio,
+                    display: Arc::new(crate::display_backend::DisplayAdapter::with_io(
+                        crate::display_sim::SimIo::from_env(path),
+                    )),
+                    hardware: Arc::new(crate::display_sim::SimHardwareProbe),
+                };
+            }
+        }
         match std::env::var(RECORDING_ENV) {
             Ok(path) if !path.is_empty() => {
                 let rec = Arc::new(FileRecorder::at(path));
@@ -958,6 +976,10 @@ impl IpcHandler {
                 headsets: g.library.headsets.clone(),
                 monitors: g.library.monitors.clone(),
                 interfaces: g.library.interfaces.clone(),
+                vendor_controls: crate::hardware::vendor_controls(
+                    &g.library.monitors,
+                    &g.state.hardware.monitors,
+                ),
                 connected: Box::new(g.state.hardware.clone()),
             },
             Method::SaveHardware { item } => {
@@ -1223,6 +1245,23 @@ impl IpcHandler {
             Method::InstallVcam | Method::UninstallVcam => {
                 Reply::Error { message: "Windows only".into() }
             }
+            Method::ElevationPlan { op } => {
+                let paths = g.paths.clone();
+                drop(g);
+                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, op) }
+            }
+            // Handled ahead of this match (it blocks on a UAC prompt), and
+            // only reachable if that dispatch is ever removed.
+            #[cfg(windows)]
+            Method::RunElevated { op } => {
+                let paths = g.paths.clone();
+                drop(g);
+                self.run_elevated(&paths, op)
+            }
+            #[cfg(not(windows))]
+            Method::RunElevated { .. } => {
+                Reply::Error { message: "Elevated installs are Windows-only".into() }
+            }
             Method::UninstallPlan { keep_data } => {
                 let paths = g.paths.clone();
                 drop(g);
@@ -1252,8 +1291,54 @@ impl IpcHandler {
 }
 
 #[cfg(windows)]
+impl IpcHandler {
+    /// Ask for administrator rights and run one op in the helper.
+    ///
+    /// Declining is not an error: the reply carries `declined: true` and the
+    /// plainest sentence we have, because the whole point of the prompt is
+    /// that saying no must be safe and legible.
+    fn run_elevated(&self, paths: &crate::config::Paths, op: crate::elevate::ElevatedOp) -> Reply {
+        match crate::elevate::run(paths, &[op]) {
+            Ok(response) => {
+                let lines = response.lines();
+                for line in &lines {
+                    let _ = self.events.send(Event::Notice { text: line.clone() });
+                }
+                Reply::Elevation { declined: false, ok: response.ok(), lines }
+            }
+            Err(crate::elevate::LaunchError::Declined) => Reply::Elevation {
+                declined: true,
+                ok: false,
+                lines: vec![
+                    "Nothing on this PC was changed. You declined the Windows permission prompt."
+                        .into(),
+                ],
+            },
+            Err(crate::elevate::LaunchError::Other(e)) => {
+                Reply::Error { message: format!("{e:#}") }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 impl crate::ipc::server::Handler for IpcHandler {
     async fn handle(&self, method: Method) -> Reply {
+        // The elevated helper blocks on a UAC prompt the user may leave on
+        // screen for a minute. The core is a single-threaded runtime, so that
+        // wait goes to the blocking pool instead of stopping focus applies,
+        // share stats and every other client.
+        if let Method::RunElevated { op } = method {
+            let paths = self.inner.lock().paths.clone();
+            let handler = IpcHandler {
+                inner: self.inner.clone(),
+                shutdown: self.shutdown.clone(),
+                events: self.events.clone(),
+            };
+            return tokio::task::spawn_blocking(move || handler.run_elevated(&paths, op))
+                .await
+                .unwrap_or_else(|e| Reply::Error { message: format!("elevation task: {e}") });
+        }
         self.handle_sync(method)
     }
 }

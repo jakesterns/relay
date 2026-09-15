@@ -22,6 +22,13 @@ path = "src/main.rs"
 name = "relay-svc"
 path = "src/bin/relay-svc.rs"
 
+# The elevated install helper. GUI subsystem (no console flash behind the UAC
+# prompt), launched on demand by the core through ShellExecute's `runas`
+# verb, and the only Relay binary that ever writes HKLM. See src/elevate.rs.
+[[bin]]
+name = "relay-elevate"
+path = "src/bin/relay-elevate.rs"
+
 [dependencies]
 # params + sessions only: the DSP (FFT) must not live in the always-on core.
 relay-audio.workspace = true
