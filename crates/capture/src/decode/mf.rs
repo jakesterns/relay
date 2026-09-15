@@ -63,8 +63,30 @@ impl MfHevcDecoder {
 
             select_nv12_output(&transform, out_id)?;
 
+            // The receive path only knows how to read a DXVA-backed sample the
+            // decoder supplies itself: `frame_from_sample` casts the buffer to
+            // IMFDXGIBuffer and hands the texture straight to the presenter,
+            // with no system-memory copy anywhere. A decoder that wants the
+            // caller to allocate cannot be doing DXVA, so say that here rather
+            // than let it surface as "decoder gave no sample" on frame one.
+            let info = transform.GetOutputStreamInfo(out_id)?;
+            if info.dwFlags
+                & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
+                    | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32)
+                == 0
+            {
+                bail!(
+                    "the HEVC decoder \"{name}\" wants caller-allocated output, which means \
+                     it is decoding on the CPU rather than through DXVA. Relay only presents \
+                     GPU-decoded frames. Install \"HEVC Video Extensions from Device \
+                     Manufacturer\" from the Microsoft Store and update the graphics driver, \
+                     then receive again"
+                );
+            }
+
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
+            tracing::info!(decoder = %name, "HEVC DXVA decoder ready");
 
             Ok(Self { transform, in_id, out_id, width, height, name, _dev_manager: manager })
         }
@@ -206,8 +228,12 @@ fn activate_hevc_decoder() -> Result<(IMFTransform, String)> {
         .context("MFTEnumEx(HEVC decoder)")?;
         if activates.is_null() || count == 0 {
             bail!(
-                "no HEVC decoder on this PC — install \"HEVC Video Extensions\" \
-                 (Microsoft Store) on the receiver"
+                "no HEVC decoder is registered on this PC, so it cannot receive a share. \
+                 Media Foundation gets HEVC decode from the Microsoft \"HEVC Video \
+                 Extensions from Device Manufacturer\" package — GPU drivers register only \
+                 encoders. Install it from the Microsoft Store (search for \"HEVC Video \
+                 Extensions\"), then start receiving again. Relay cannot bundle it: \
+                 Microsoft licenses it per-device to OEMs, not for redistribution by apps"
             );
         }
         let slice = std::slice::from_raw_parts(activates, count as usize);

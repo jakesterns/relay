@@ -940,6 +940,16 @@ fn audio_pipeline(
         AudioTrack::Mic => OpusProfile::voice(),
     };
     let mut stream = OpusStream::new(source, profile)?;
+    // Per track, not per share: the program mix and the microphone are
+    // different endpoints and can run at different rates, so each one reports
+    // its own conversion.
+    tracing::info!(
+        track = ?which,
+        rate = stream.endpoint_rate(),
+        channels = stream.endpoint_channels(),
+        conversion = stream.conversion.as_deref().unwrap_or("none"),
+        "audio pipeline up"
+    );
     let (packets, peak) = match which {
         AudioTrack::Program => (&stats.audio_packets, &stats.audio_peak_milli),
         AudioTrack::Mic => (&stats.mic_packets, &stats.mic_peak_milli),

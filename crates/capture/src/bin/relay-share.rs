@@ -257,6 +257,12 @@ struct AudioRun {
     peak: f32,
     elapsed: f64,
     lat: relay_capture::Percentiles,
+    /// The endpoint's own format, before folding and rate conversion. Per
+    /// track, because the program mix and the microphone are different
+    /// endpoints and are routinely at different rates.
+    endpoint_rate: u32,
+    endpoint_channels: u16,
+    conversion: Option<String>,
 }
 
 #[cfg(windows)]
@@ -264,6 +270,9 @@ impl AudioRun {
     fn report(&self) -> serde_json::Value {
         let (p50, p99, max) = self.lat.summary().unwrap_or((0.0, 0.0, 0.0));
         serde_json::json!({
+            "endpoint_rate": self.endpoint_rate,
+            "endpoint_channels": self.endpoint_channels,
+            "conversion": self.conversion,
             "packets": self.packets,
             "expected_packets": (self.elapsed * 100.0) as u64,
             "kbps": self.bytes as f64 * 8.0 / self.elapsed / 1e3,
@@ -286,8 +295,16 @@ fn run_audio_source(source: relay_capture::audio::AudioSource, secs: u64) -> Res
         _ => OpusProfile::program(),
     };
     let mut stream = OpusStream::new(source, profile)?;
-    let mut run =
-        AudioRun { packets: 0, bytes: 0, peak: 0.0, elapsed: 0.0, lat: Percentiles::default() };
+    let mut run = AudioRun {
+        packets: 0,
+        bytes: 0,
+        peak: 0.0,
+        elapsed: 0.0,
+        lat: Percentiles::default(),
+        endpoint_rate: stream.endpoint_rate(),
+        endpoint_channels: stream.endpoint_channels(),
+        conversion: stream.conversion.clone(),
+    };
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(secs) {
         if let Some(p) = stream.next(Duration::from_millis(200))? {
@@ -431,6 +448,7 @@ const USAGE: &str = "\
 relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
 
   probe          print the capability report (hardware HEVC MFTs, WGC) as JSON
+  bench-audio    capture audio (desktop | mic | pid N), Opus-encode, report packet flow
   bench-capture  measure capture latency on the primary monitor
   bench-encode   measure capture -> NV12 -> HEVC hardware encode latency
   bench-audio    measure Opus packetization latency for one source, or for

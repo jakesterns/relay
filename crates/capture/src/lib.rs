@@ -5,6 +5,7 @@
 //! - `probe`     MFTEnumEx / WGC capability checks (`relay-share probe`).
 //! - `source/`   Windows.Graphics.Capture (primary), DXGI Desktop Duplication (fallback).
 //! - `encode/`   Media Foundation HEVC hardware MFT (NVENC/QSV/AMF). No CPU path.
+//! - `resample` endpoint audio (any rate, any channel count) → Opus 48 kHz stereo.
 //! - `transport/` webrtc-rs, mDNS discovery, pairing, DTLS-SRTP. LAN only.
 //! - `stats`     the instrument-strip feed: bitrate, latency, drops, load, audio level.
 //!
@@ -29,6 +30,7 @@ pub mod probe;
 pub mod record;
 #[cfg(windows)]
 pub mod render;
+pub mod resample;
 #[cfg(windows)]
 pub mod source;
 #[cfg(windows)]

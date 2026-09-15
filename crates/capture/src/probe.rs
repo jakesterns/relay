@@ -20,6 +20,9 @@ pub struct EncoderMft {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProbeReport {
+    /// GPUs with a display attached, best-guess order (DXGI adapter order).
+    /// Only so the "this PC cannot share" message can name the GPU it means.
+    pub adapters: Vec<String>,
     pub hevc_hardware_encoders: Vec<EncoderMft>,
     pub hevc_hardware_decoders: Vec<EncoderMft>,
     pub hevc_any_decoders: Vec<EncoderMft>,
@@ -151,6 +154,33 @@ pub fn hevc_decoders(hardware_only: bool) -> Result<Vec<EncoderMft>> {
     }
 }
 
+/// Names of the DXGI adapters that drive a display. Creates no D3D device —
+/// this runs in the short-lived `relay-share probe` child.
+pub fn display_adapters() -> Vec<String> {
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+    let mut names = Vec::new();
+    // SAFETY: plain DXGI enumeration; every interface is ref-counted.
+    unsafe {
+        let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() else {
+            return names;
+        };
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            i += 1;
+            // Skip adapters with no output: the Microsoft Basic Render Driver
+            // and headless compute cards are never what we capture from.
+            if adapter.EnumOutputs(0).is_err() {
+                continue;
+            }
+            if let Ok(desc) = adapter.GetDesc1() {
+                let end = desc.Description.iter().position(|c| *c == 0).unwrap_or(0);
+                names.push(String::from_utf16_lossy(&desc.Description[..end]));
+            }
+        }
+    }
+    names
+}
+
 pub fn wgc_supported() -> bool {
     GraphicsCaptureSession::IsSupported().unwrap_or(false)
 }
@@ -158,6 +188,7 @@ pub fn wgc_supported() -> bool {
 /// Full report; requires MF started (see [`MediaFoundation::start`]).
 pub fn report() -> Result<ProbeReport> {
     Ok(ProbeReport {
+        adapters: display_adapters(),
         hevc_hardware_encoders: hevc_hardware_encoders()?,
         hevc_hardware_decoders: hevc_decoders(true).unwrap_or_default(),
         hevc_any_decoders: hevc_decoders(false).unwrap_or_default(),

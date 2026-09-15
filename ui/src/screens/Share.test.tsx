@@ -284,10 +284,10 @@ describe("the preset editor", () => {
 
 describe("codec capability", () => {
   it("says this PC cannot send before the user tries", async () => {
-    core.capabilities = { can_share: false, can_receive: true, encoders: [], decoders: ["x"] };
+    core.capabilities = { can_share: false, can_receive: true, adapters: ["Intel(R) UHD Graphics 630"], encoders: [], decoders: ["x"] };
     tauri.useFakeCore(core.handler);
     await mount();
-    expect(screen.getByText(/No hardware HEVC encoder on this GPU/)).toBeInTheDocument();
+    expect(screen.getByText(/No hardware HEVC encoder on Intel\(R\) UHD Graphics 630/)).toBeInTheDocument();
   });
 
   it("stays quiet when the PC can send", async () => {

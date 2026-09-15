@@ -169,4 +169,118 @@ end-to-end — exercised by the bench commands and the loopback run instead.
 - **Live integration testing: two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Moved to the future MVP validation pass (decision 2026-09-10: dual-PC testing not currently possible; unit coverage above stands in). Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
 - ~~**Simultaneous microphone track.**~~ **Done 2026-09-14 (session S2).** The sender opens up to two Opus tracks — `relay-audio` (desktop endpoint loopback or one process tree) and `relay-audio-mic` — and the receiver decodes both and sums them one op before the WASAPI render buffer, so a plain call still hears a single stream while the two sources stay separable for the virtual mic and for S19's mix-minus. Decision record: `docs/dev/dual-audio-decision.md`. Presets carry an audio *source set* (`{desktop, mic}`), the pre-S2 four-way string still deserializes to the same meaning, and a peer sending one unnamed audio track still lands on the program mix (`transport::audio_role`, arrival-order fallback). Measured cost in Measurements below: +0.05 ms p50 / +0.6 ms p99 on capture→arrival, no change to encode. Harness: `scripts/dual-audio-check.ps1`.
 - ~~**In-webview preview surface.**~~ **Done 2026-09-14.** No second capture path: the video pipeline taps the frame it already has, the existing NV12 video processor scales it to 480×270 on the GPU (~200 KB readback), and WIC encodes a 24bppBGR JPEG that rides the engine's NDJSON to the Share screen. Ctrl+Alt+P sends a `preview` command all the way into the engine, so switching it off stops the readback rather than just hiding the picture. Measured on loopback (`scripts/preview-check.ps1 -Toggle`): 0 frames while off, 2 fps once on, ~21 KB per frame, ~41 KB/s.
-- **HEVC Video Extension dependency on the receiver.** Hardware HEVC *decode* uses the Microsoft HEVC Video Extension MFT (DXVA); vendor GPUs register only encode MFTs. A DXVA-direct decoder (no MFT) or bundling the OEM extension is still an installer-time concern (M7). **Partly closed 2026-09-14:** `Method::ShareCapabilities` runs `relay-share probe` and the Receive and Share screens warn before you try rather than failing on the first frame. Verified on the dev machine: `{"can_share":true,"can_receive":true,"encoders":["AMDh265Encoder","NVIDIA HEVC Encoder MFT","AMDh265Encoder"],"decoders":["HEVCVideoExtension"]}`.
+- ~~**HEVC Video Extension dependency on the receiver.**~~ **Closed 2026-09-14 (S7) — decision: keep detect-and-warn; do not bundle, do not build a DXVA-direct decoder.** Three options were on the table and only one survives.
+  - *Bundle the extension.* Not available to us. The free "HEVC Video Extensions from Device Manufacturer" is licensed by Microsoft per-device to PC makers; the generally available "HEVC Video Extensions" is a paid Store item. Neither may be redistributed inside a third-party installer, so this is a licensing wall, not an engineering one.
+  - *Write a DXVA-direct decoder.* Rejected on cost against benefit. Skipping the MFT means owning HEVC bring-up: VPS/SPS/PPS and slice-header parsing, reference-picture-set management, and hand-filled DXVA2 picture/slice/quantisation buffers, with per-vendor quirks to chase on hardware we do not have. Weeks of work, and the failure mode of getting it subtly wrong is corrupt video rather than a clean error — strictly worse than the message we can print today. It buys nothing for a receiver that is one free Store install away from working.
+  - *Detect and warn.* Kept and sharpened. `Method::ShareCapabilities` runs `relay-share probe` when the Receive or Share screen opens; the banner now links straight into the Store (`ms-windows-store://search/?query=HEVC Video Extensions` — the search rather than a product deep link, because the free package's product ID is not something we can verify from here) and says plainly why Relay cannot ship it for you. The decoder's own `bail!` carries the same explanation for anyone running the engine directly.
+  - Verified on the dev machine: `{"adapters":["NVIDIA GeForce RTX 3090"],"can_share":true,"can_receive":true,"encoders":["AMDh265Encoder","NVIDIA HEVC Encoder MFT"],"decoders":["HEVCVideoExtension"]}`.
+
+## S7 — codec and capture robustness (2026-09-14)
+
+Three documented edges that all failed the same way: a machine unlike this dev PC
+hit a `bail!` instead of a graceful path. The question S7 had to answer first was
+which of them deserve code. Two did; one is an honest permanent limit.
+
+- **MFT allocator path (`encode/mf.rs`) — fixed with code.** The old branch bailed
+  with "allocator path not implemented" on the *first encoded frame*, i.e. after
+  the share had already started. It is now implemented: `alloc_output_sample`
+  hands `ProcessOutput` an aligned memory buffer sized from
+  `MFT_OUTPUT_STREAM_INFO::cbSize`. The MFT contract has three states, and the
+  code now distinguishes them — `PROVIDES_SAMPLES` (the MFT insists),
+  `CAN_PROVIDE_SAMPLES` (either), neither (the caller must allocate). Both
+  encoders on this PC set `PROVIDES`, so the new branch **cannot be exercised
+  end-to-end here**; `RELAY_FORCE_MFT_ALLOCATOR=1` takes it on an MFT that reports
+  `CAN_PROVIDE` only, and logs that it was ignored otherwise (confirmed against
+  NVENC). What *is* covered here is the part most likely to be wrong: a unit test
+  allocates at four alignments, writes into the buffer as an MFT would, and reads
+  it back through exactly the `take_output` sequence. A failed `ProcessOutput` no
+  longer leaks the sample we allocated.
+- **No software HEVC encode (`encode/mf.rs`) — a real limit, not a gap.** Left
+  unimplemented deliberately: CPU HEVC cannot hold 4K60 inside the <50 ms budget,
+  and CLAUDE.md pins the share to NVENC / Quick Sync / AMF. What changed is the
+  message. It now names the adapter it actually looked at, and — the case that
+  matters most, a laptop whose display hangs off the iGPU while the encoder lives
+  on the dGPU — enumerates HEVC encoders on *every* adapter and tells the user to
+  move the capture to that GPU or set Relay to "High performance". With no encoder
+  anywhere it says so and points at the graphics driver. The Share screen's banner
+  (added S1) covers the same ground before anything is attempted, and now names
+  the GPU: `ProbeReport` gained `adapters`, plumbed through `Capabilities` →
+  `Reply::Capabilities` → `ipc.ts`.
+- **48 kHz stereo only (`audio.rs`) — fixed with code.** This was the wrong thing
+  to call a limit. A 44.1 kHz USB interface and a mono headset microphone are the
+  common case, not the exotic one, and the mic path in particular would have
+  failed outright on most machines. New pure module `capture/src/resample.rs`
+  folds any channel count to stereo (mono duplicated; >2 downmixed per ITU-R
+  BS.775 over the WASAPI channel order, LFE dropped, clamped so Opus never sees
+  a value above 1.0) and converts any rate to 48 kHz (Catmull-Rom over a
+  fractional read position, with three cascaded low-pass sections at 20 kHz ahead
+  of any downsample). State carries across blocks, so 10 ms WASAPI packets stitch
+  without a click. This is the network path, not the APO path — CLAUDE.md's "never
+  resample" rule is about matching the endpoint chain and is untouched.
+  - Covered by tests: output length tracks the rate ratio within 8 frames over a
+    second at seven rates (this is what stops audio drifting from video on a long
+    share); a 1 kHz sine survives 44.1→48 kHz with its peak intact and no
+    block-boundary discontinuity; a 40 kHz tone at 192 kHz is attenuated below
+    0.05 instead of aliasing into the passband; and — closest to the real thing
+    available here — a simulated 44.1 kHz *mono* endpoint drives the real Opus
+    encoder and decoder for a second, 480 frames per packet.
+  - **Not exercisable live on this PC:** every endpoint here reports 48 kHz
+    stereo, and changing a Windows endpoint's default format to test it is exactly
+    the global config Relay is not allowed to touch. `relay-share bench-audio` now
+    prints `endpoint_rate` / `endpoint_channels` / `conversion`, and the sender
+    logs `audio pipeline up rate=… channels=… conversion=…`, so the first run on
+    an unusual device says what happened without a debugger. Measured here:
+    desktop and microphone both `48000 / 2 / conversion: none` (passthrough).
+- **Two smaller edges found and closed while in there.**
+  - The capture loop reads the WASAPI shared buffer as `f32` with no check.
+    Shared-mode always mixes in 32-bit float, so this is a guard rather than an
+    expected path — but a mismatch would have reinterpreted integers as floats.
+    It now verifies the mix format (including the `WAVEFORMATEXTENSIBLE` subtype)
+    and names the bit depth and format tag it found.
+  - The decoder assumed MFT-provided samples, so a decoder wanting
+    caller-allocated output would have surfaced as "decoder gave no sample" on
+    frame one. Because the receive path is DXVA-only by construction
+    (`frame_from_sample` casts to `IMFDXGIBuffer` and presents the texture with no
+    system-memory copy), that condition means "this decoder is running on the
+    CPU" — so it is now checked at construction and says that.
+
+### Merging with S2 (dual audio): the A/V sync unit trap
+
+S2 landed per-block capture stamps (`VecDeque<(qpc, sample_count)>`) so the
+receiver can rebase A/V sync, and S7 put a resampler in front of the buffer those
+counts describe. The two are only compatible if the stamp counts **post-conversion
+samples**, because that is the unit the drain spends. Counting the WASAPI block's
+own length instead leaves the deque permanently starved at 441 fed against 960
+spent, so instead of naming the block the oldest queued sample came from it names
+whichever block arrived most recently — capture time biased new, latency
+under-reported, audio that will not line up with video. It compiles, it is silent,
+and it only misbehaves on endpoints that are not already 48 kHz stereo.
+
+Resolved by stamping `converted.len()`. The arithmetic is now a pure
+`take_capture_stamp()` so it can be tested without WASAPI, and
+`stamps_counted_in_source_samples_lose_the_capture_time` drives the real converter
+through ten seconds of a 44.1 kHz mono mic and asserts both halves: converted
+counts keep the deque exactly in step with the buffer, source counts disagree on
+>90 % of packets and skew new. (Honest limit: that test locks the contract and
+proves the two unit systems diverge, but it does not execute `OpusStream::next`,
+which needs WASAPI — the line itself is kept correct structurally, by binding
+`converted` once and feeding both the stamp and the buffer from it.)
+
+This is per track by construction: each `OpusStream` owns its own converter and
+its own stamps, so a 44.1 kHz mono mic alongside a 48 kHz desktop endpoint
+converts at two different ratios without them interacting. The bench and the
+sender log report `endpoint_rate` / `endpoint_channels` / `conversion` per track
+for the same reason. The muxers' hardcoded 48 kHz stereo `AudioConfig` is also now
+true by construction rather than by a `bail!`.
+
+Loopback regression after the changes (`scripts/m6-loopback.ps1`, 25 s): 1446 AUs,
+zero drops, capture→arrival p50 3.34 ms / p99 7.51 ms — unchanged. Footprint gate
+still green (6.82 MB / 0 %). After merging S1–S6 and S8, re-measured with
+`scripts/dual-audio-check.ps1` (12 s, tone playing): single-track arrival p50
+3.87 ms / p99 6.01 ms against dual-track 3.85 / 6.02, and 424 workspace tests
+green.
+
+Note, not a defect: WASAPI desktop loopback delivers no packets at all while
+nothing is rendering, so `audio_packets` can sit at 0 or freeze on an idle
+machine. That is documented Windows behaviour and the receiver simply has no
+audio to play.
