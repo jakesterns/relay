@@ -3,7 +3,18 @@
 Everything below is what could not run in the M5 session: the dev session
 had no elevation (UAC declined / no admin shell) and registry writes are
 required once, so the frame-server hosting and the in-app checks are
-unverified. All other links in the chain are proven by tests:
+unverified.
+
+> **Updated 2026-09-14 (S6).** The elevated write is no longer a blocker.
+> `relay-elevate.exe` performs it behind one approved UAC prompt —
+> `relay-core elevate run install-camera`, or the Settings card — and the
+> camera has already been registered and removed that way on this dev
+> machine (`docs/dev/elevation-live.md`). Skip the hand-rolled elevated
+> prompt in "One-time setup" below unless you want the raw commands. What
+> remains genuinely unverified is unchanged: the Frame Server loading the
+> DLL, and the apps.
+
+All other links in the chain are proven by tests:
 
 - ring seqlock + cross-mapping: `relay-vdevice` unit tests
 - media source serves ring frames byte-for-byte: `crates/vdevice/tests/source_inproc.rs`

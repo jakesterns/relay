@@ -66,10 +66,15 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 - [x] Hotkeys Ctrl+Alt+S (toggle share, re-runs the last request) and Ctrl+Alt+P (preview) wired in the core.
 
 ## Definition of Done
-- Every checklist item checked or moved to Deferred with a reason; Measurements table filled.
-- 4K60 HEVC wired LAN share to a second PC, glass-to-glass < 50 ms measured, sender CPU ≤ 2 %, zero dropped frames over 10 minutes.
-- Stopping the share leaves no `relay-share` process and no change in core RSS.
-- Works with no network configuration on either PC.
+> These are the milestone's acceptance criteria. Two of the four are **still
+> aspirational** — they name a two-PC run that has never happened (decision
+> 2026-09-10; see Deferred). They are kept unchecked rather than reworded,
+> because the target is right even though it is unmet.
+
+- [x] Every checklist item checked or moved to Deferred with a reason; Measurements table filled.
+- [ ] **Aspirational — not yet run.** 4K60 HEVC wired LAN share to a second PC, glass-to-glass < 50 ms measured, sender CPU ≤ 2 %, zero dropped frames over 10 minutes. What *is* measured is the loopback equivalent (capture→present p50 5.6 ms, 4K60 MF HEVC encode p99 10.8 ms, zero AU loss) plus thorough unit coverage of the transport logic; no glass-to-glass number exists. Deferred to the MVP validation pass with a runbook.
+- [x] Stopping the share leaves no `relay-share` process and no change in core RSS. ✔ on loopback.
+- [ ] **Aspirational — not yet run.** Works with no network configuration on either PC. Code pairing, DTLS and host-only candidates do run end to end on this machine — `scripts/m6-loopback.ps1` pairs a real sender and receiver over `127.0.0.1` with a fixed code. But it passes `--peer` explicitly, so **mDNS discovery is bypassed**, and that is precisely the part this criterion is about: two machines on a real LAN finding each other with nothing configured has never been run. Same deferred run.
 
 ## Measurements
 `relay-share probe` (MFTEnumEx, video encoder category, HEVC, `MFT_ENUM_FLAG_HARDWARE`), 2026-09-09:

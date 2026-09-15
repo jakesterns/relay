@@ -5,6 +5,11 @@
 > still outstanding, use **`docs/plans/SESSIONS.md`** — it carries every
 > remaining task as a session with its own branch, worktree, DoR, DoD and
 > kickoff prompt.
+>
+> For *what is actually done*, the catalogue is **`docs/ROADMAP.md`** — its
+> "Plan files" status table plus each milestone's Deferred section. Read a
+> status row together with the matching plan's Deferred section before
+> assuming a capability exists. `docs/plans/README.md` explains the split.
 
 
 Copy the block for the milestone into a new Claude Code chat in the Stream

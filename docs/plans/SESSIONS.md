@@ -87,7 +87,7 @@ sessions beat eight neglected ones.
 | S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | **done 2026-09-14** (was required, not optional: S5 said no) |
 | S7 | Codec robustness | `feat/codec-robustness` | `relay-codec` | — |
 | S8 | WebView UI test harness | `feat/ui-test-harness` | `relay-uitest` | — |
-| S9 | Documentation truth pass | `chore/docs-truth` | main tree | — |
+| S9 | Documentation truth pass | `chore/docs-truth` | main tree | **done 2026-09-15** |
 | S10 | Human verification pass | `chore/human-pass` | main tree | you, 45 min |
 | S11 | Soak and measurement pass | `chore/soak-pass` | main tree | ~2 h wall clock |
 | S12 | Live virtual-camera pass | `chore/vcam-live` | main tree | — (S6 unblocked it) |
@@ -446,12 +446,22 @@ wrong decision.
 ### Definition of Ready
 - [x] The specific drifts are known (listed in the DoD below).
 
-### Definition of Done
-- [ ] `docs/plans/M3-audio-dsp.md:65` — "headset-correction curves waits on M1's hardware library" is stale; M1 landed and the correction path was built (`crates/audio/src/fit.rs`, `audio_bridge::chain_params_with`, the Games correction card). Verify against the code, then strike it.
-- [ ] `docs/plans/M1-hardware.md:36-37` — "Out of scope: online curve download" is stale; `crates/core/src/hardware/catalog.rs` fetches measurements over WinHTTP with attribution. Correct it and state the licensing position (AutoEQ data is CC BY-NC-SA: index ships, measurements fetch on demand, never redistributed).
-- [ ] `docs/ROADMAP.md` — M7 is dated 2026-09-12 in the status table and 2026-09-13 in its section. Pick one.
-- [ ] Every ROADMAP status-table row re-read against its plan's Deferred section, and this catalogue cross-linked from `docs/plans/README.md` and `KICKOFF-PROMPTS.md`.
-- [ ] No claim in any plan file asserts something the code does not do.
+### Definition of Done — **all met 2026-09-15** (branch `chore/docs-truth`)
+- [x] `docs/plans/M3-audio-dsp.md:65` — "headset-correction curves waits on M1's hardware library" is stale; M1 landed and the correction path was built (`crates/audio/src/fit.rs`, `audio_bridge::chain_params_with`, the Games correction card). Verify against the code, then strike it.
+- [x] `docs/plans/M1-hardware.md:36-37` — "Out of scope: online curve download" is stale; `crates/core/src/hardware/catalog.rs` fetches measurements over WinHTTP with attribution. Correct it and state the licensing position (AutoEQ data is CC BY-NC-SA: index ships, measurements fetch on demand, never redistributed).
+- [x] `docs/ROADMAP.md` — M7 is dated 2026-09-12 in the status table and 2026-09-13 in its section. Pick one.
+- [x] Every ROADMAP status-table row re-read against its plan's Deferred section, and this catalogue cross-linked from `docs/plans/README.md` and `KICKOFF-PROMPTS.md`.
+- [x] No claim in any plan file asserts something the code does not do.
+
+### What was stale (2026-09-15)
+All three listed drifts were real. Beyond them:
+- **M4's Definition of Done** listed four acceptance criteria as plain bullets with no markers, two of which (the two-PC 4K60 glass-to-glass run and "works with no network configuration on either PC") have never been run. Both are now `[ ]` and labelled **Aspirational**; the discovery one is sharpened, because `scripts/m6-loopback.ps1` passes `--peer` explicitly and so bypasses the mDNS discovery that criterion is actually about.
+- **M5's Deferred item 1, the ROADMAP M5 section, and `docs/dev/vcam-live.md`** all still said the elevated registry write was the blocker. S6 removed that blocker on 2026-09-14 and registered and removed the camera live. What is genuinely left is `IMFVirtualCamera::Start` returning `S_OK` and a real call — S12's scope, which SESSIONS.md already had right.
+- **M7's DoD item 2** said the APO *restore* path was not live-proven and was "the first thing the VM pass has to check". S6 proved it byte-identical on 2026-09-14. The ROADMAP's M7 section listed the same closed item as deferred.
+- **M0's Deferred console-flash item** was never struck through, though M7 closed it with `relay-svc.exe`.
+- **The catalogue and the headset-correction chain were not recorded anywhere** outside their commits — no plan file and no ROADMAP row mentioned either, so a session reading the plans would not have known they existed.
+- **`CLAUDE.md` called `crates/capture/` and `crates/display/` placeholders.** Both have been complete for days. Its core crate map also had no `hardware/` entry.
+- Unqualified `[x]` checklist items in the ROADMAP for the virtual camera and the interim mic now say which half is live-proven and which is test-proven only.
 
 ### Kickoff prompt
 ```
@@ -817,7 +827,7 @@ Autostart is off by default, the UI never starts the core, and ui/src/components
 ---
 
 ## S24 — Stop the UI lying
-**Branch** `feat/honest-ui` · **Worktree** `C:\Users\stern\Documents\Code\relay-honest-ui` · **Not concurrent with S23**
+**Branch** `feat/honest-ui` · **Worktree** main tree · **Not concurrent with S23**
 
 Three places render invented content as if it were measured. These are worse
 than blank space because a user tests them early and believes them.
@@ -848,7 +858,7 @@ Three parts of the UI render invented content as if it were measured: the Displa
 ---
 
 ## S25 — Keyboard, focus and destructive actions
-**Branch** `feat/ui-safety` · **Worktree** `C:\Users\stern\Documents\Code\relay-ui-safety`
+**Branch** `feat/ui-safety` · **Worktree** main tree
 
 The app is mouse-only, and the same class of destructive action is handled four
 different ways.
@@ -885,7 +895,7 @@ Separately, four different patterns exist for destructive actions: preset delete
 ---
 
 ## S26 — Shell polish
-**Branch** `feat/shell-polish` · **Worktree** `C:\Users\stern\Documents\Code\relay-shell-polish`
+**Branch** `feat/shell-polish` · **Worktree** main tree
 
 Small Windows-integration details, none hard, all noticed.
 

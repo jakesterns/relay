@@ -55,7 +55,7 @@ Notes:
 - Before that change the gate correctly **failed** at 11.0 MB, which is the first proof the gate bites.
 
 ## Deferred
-- **Console window flash on autostart.** `relay-core` is a console-subsystem binary so the CLI (`status`, `autostart`, ...) behaves like a normal tool. When Explorer or the Run key launches it, Windows allocates a console that `run` hides immediately, but with Windows Terminal as the default host that can still flash for a frame. The proper fix is a tiny GUI-subsystem launcher or `conhost --headless` in the Run value; it belongs with the installer work in M7.
+- ~~**Console window flash on autostart.**~~ **Closed 2026-09-12 in M7** by `relay-svc.exe` (`crates/core/src/bin/relay-svc.rs`), a GUI-subsystem launcher that starts the core with `CREATE_NO_WINDOW` and exits; the Run value points at it. Original reasoning: `relay-core` is a console-subsystem binary so the CLI (`status`, `autostart`, ...) behaves like a normal tool. When Explorer or the Run key launches it, Windows allocates a console that `run` hides immediately, but with Windows Terminal as the default host that can still flash for a frame. The proper fix is a tiny GUI-subsystem launcher or `conhost --headless` in the Run value; it belongs with the installer work in M7.
 - ~~**Driving the Tauri UI automatically.**~~ **Closed 2026-09-14** by session S8 (`feat/ui-test-harness`). See "UI test harness" below.
 
 ## UI test harness (added 2026-09-14, session S8)
