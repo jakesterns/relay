@@ -103,6 +103,7 @@ export interface ShareRequest {
   size?: [number, number];
   audio: boolean; audio_pid?: number; mic?: boolean; cursor: boolean;
   preset?: string; record?: boolean; replay_secs?: number; record_dir?: string;
+  container?: RecordingContainer;
   /** Thumbnails per second for the in-app preview; 0 = off. */
   preview_fps?: number;
 }
@@ -112,11 +113,33 @@ export type SourceTarget =
   | { kind: "window"; hwnd: number }
   | { kind: "region"; display: number; x: number; y: number; w: number; h: number };
 /** Mirror of `crates/core/src/presets.rs`. */
-export type PresetAudio = "system" | "game" | "mic" | "off";
+export type DesktopAudio = "system" | "game" | "off";
+/**
+ * The share's audio *source set*. The sender carries two Opus tracks, so the
+ * microphone is independent of the desktop source rather than one of four
+ * exclusive choices. See `docs/dev/dual-audio-decision.md`.
+ *
+ * The core still reads the pre-S2 four-way string from disk, but everything
+ * it hands out and takes back on the wire is this object.
+ */
+export interface PresetAudio { desktop: DesktopAudio; mic: boolean }
+
+/** Human summary of an audio source set, e.g. "Game only + microphone". */
+export function presetAudioLabel(a: PresetAudio): string {
+  const desktop = { system: "System mix", game: "Game only", off: "" }[a.desktop];
+  if (desktop && a.mic) return `${desktop} + microphone`;
+  if (desktop) return desktop;
+  return a.mic ? "Microphone" : "None";
+}
+/**
+ * Recording container. Same HEVC + Opus bitstream either way — the choice
+ * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
+ */
+export type RecordingContainer = "mp4" | "mkv";
 export interface SharePresetDef {
   id: string; name: string; bitrate_mbps: number; fps: number;
   size?: [number, number]; audio: PresetAudio; cursor: boolean;
-  record: boolean; replay_secs: number;
+  record: boolean; replay_secs: number; container: RecordingContainer;
 }
 export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb: number }
 export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
@@ -128,6 +151,8 @@ export interface ShareStats {
   bitrate_mbps?: number; fps?: number; frames?: number; keyframes?: number;
   dropped?: number; encode_ms?: number; capture_to_send_ms?: number;
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
+  /** Second audio track (microphone); absent when only one track is sent. */
+  mic_packets?: number; mic_peak?: number;
   cpu_percent?: number; rss_mb?: number;
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;
@@ -288,9 +313,9 @@ const mockVdevice: VdeviceStatus = {
 
 /** The three built-ins, mirroring `presets.rs::builtins()`. */
 const mockPresets: SharePresetDef[] = [
-  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: "game", cursor: false, record: false, replay_secs: 60 },
-  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: "system", cursor: true, record: false, replay_secs: 0 },
-  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: "system", cursor: true, record: false, replay_secs: 0 },
+  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
+  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 

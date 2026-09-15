@@ -6,6 +6,7 @@
 //! Shared-mode WASAPI only — nothing here touches the endpoint's
 //! configuration, volume, or default-device selection.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
@@ -261,6 +262,10 @@ pub struct OpusStream {
     capture: AudioCapture,
     encoder: opus::Encoder,
     pending: Vec<f32>,
+    /// Arrival stamps for the samples in `pending`: `(qpc, samples left from
+    /// that block)`, oldest first. Lets a packet report when its first sample
+    /// reached us, which is the packetization latency the bench reports.
+    stamps: VecDeque<(i64, usize)>,
     frame_samples: usize,
     /// Peak of the last encoded frame, 0..=1 (for the instrument strip).
     pub peak: f32,
@@ -268,12 +273,42 @@ pub struct OpusStream {
 
 pub struct OpusPacket {
     pub data: Vec<u8>,
+    /// QPC when the packet finished encoding.
     pub qpc_100ns: i64,
+    /// QPC when WASAPI delivered the block this packet starts in.
+    pub captured_qpc_100ns: i64,
     pub duration: Duration,
 }
 
+/// Encoder tuning for one track.
+///
+/// The program mix is music-grade and keeps exactly the settings it has always
+/// had. A microphone is speech: it does not need 160 kb/s stereo at libopus's
+/// default complexity, and since the second encoder's CPU is the whole cost of
+/// the mic track on the share hot path, it gets a cheaper one.
+#[derive(Debug, Clone, Copy)]
+pub struct OpusProfile {
+    pub bitrate_bps: i32,
+    pub application: opus::Application,
+    /// `None` leaves libopus's default, which is what the program mix has
+    /// always encoded at — this keeps the single-track path unchanged.
+    pub complexity: Option<i32>,
+}
+
+impl OpusProfile {
+    /// The desktop mix or a game: music-grade, unchanged since M4.
+    pub fn program() -> Self {
+        Self { bitrate_bps: 160_000, application: opus::Application::Audio, complexity: None }
+    }
+
+    /// A microphone: speech at a sane rate and a cheaper search.
+    pub fn voice() -> Self {
+        Self { bitrate_bps: 64_000, application: opus::Application::Voip, complexity: Some(5) }
+    }
+}
+
 impl OpusStream {
-    pub fn new(source: AudioSource, bitrate: i32) -> Result<Self> {
+    pub fn new(source: AudioSource, profile: OpusProfile) -> Result<Self> {
         let capture = AudioCapture::start(source)?;
         if capture.sample_rate != 48_000 {
             bail!(
@@ -284,14 +319,17 @@ impl OpusStream {
         if capture.channels != 2 {
             bail!("{}-channel endpoint; only stereo is supported this milestone", capture.channels);
         }
-        let mut encoder =
-            opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio)?;
-        encoder.set_bitrate(opus::Bitrate::Bits(bitrate))?;
+        let mut encoder = opus::Encoder::new(48_000, opus::Channels::Stereo, profile.application)?;
+        encoder.set_bitrate(opus::Bitrate::Bits(profile.bitrate_bps))?;
+        if let Some(c) = profile.complexity {
+            encoder.set_complexity(c)?;
+        }
         let frame_samples = 480 * 2; // 10 ms stereo
         Ok(Self {
             capture,
             encoder,
             pending: Vec::with_capacity(frame_samples * 4),
+            stamps: VecDeque::new(),
             frame_samples,
             peak: 0.0,
         })
@@ -306,8 +344,22 @@ impl OpusStream {
                 return Ok(None);
             }
             match self.capture.next(deadline - now) {
-                Some(block) => self.pending.extend_from_slice(&block.samples),
+                Some(block) => {
+                    self.stamps.push_back((block.qpc_100ns, block.samples.len()));
+                    self.pending.extend_from_slice(&block.samples);
+                }
                 None => return Ok(None),
+            }
+        }
+        let captured_qpc_100ns = self.stamps.front().map(|(q, _)| *q).unwrap_or(0);
+        let mut left = self.frame_samples;
+        while left > 0 {
+            let Some((_, n)) = self.stamps.front_mut() else { break };
+            let take = left.min(*n);
+            *n -= take;
+            left -= take;
+            if *n == 0 {
+                self.stamps.pop_front();
             }
         }
         let frame: Vec<f32> = self.pending.drain(..self.frame_samples).collect();
@@ -316,6 +368,7 @@ impl OpusStream {
         Ok(Some(OpusPacket {
             data,
             qpc_100ns: qpc_now_100ns(),
+            captured_qpc_100ns,
             duration: Duration::from_millis(10),
         }))
     }

@@ -77,9 +77,9 @@ sessions beat eight neglected ones.
 | # | Session | Branch | Worktree | Blocked on |
 |---|---|---|---|---|
 | S1 | ADLX display backend | `feat/adlx-display` | `relay-adlx` | — |
-| S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | — |
+| S2 | Second Opus track | `feat/dual-audio` | `relay-dual-audio` | **done 2026-09-14** |
 | S3 | Vendor VCP opcodes | `feat/monitor-vcp` | `relay-monitor-vcp` | partly: OSD eyes |
-| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | — |
+| S4 | MKV container | `feat/mkv-container` | `relay-mkv` | done 2026-09-14 |
 | S5 | Per-user vcam registration | `feat/hkcu-vcam` | `relay-hkcu-vcam` | — |
 | S6 | Elevated install helper | `feat/elevated-install` | `relay-elevation` | — |
 | S7 | Codec robustness | `feat/codec-robustness` | `relay-codec` | — |
@@ -95,7 +95,7 @@ sessions beat eight neglected ones.
 | S17 | EV certificate and signing | `chore/signing` | main tree | the certificate |
 | S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
-| S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 (v1.1) |
+| S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 done, so unblocked (v1.1) |
 | S20 | Stream Deck and NDI output | `feat/streamdeck-ndi` | create when started | — (v1.1) |
 | S21 | AI tuning loop | `feat/ai-tuning` | create when started | — (v1.1) |
 
@@ -140,24 +140,42 @@ The display path is NVIDIA-only today. Add the AMD equivalent behind the existin
 
 ---
 
-## S2 — Second Opus track (mic *and* desktop audio)
+## S2 — Second Opus track (mic *and* desktop audio) — **DONE 2026-09-14**
 **Branch** `feat/dual-audio` · **Worktree** `C:\Users\stern\Documents\Code\relay-dual-audio`
 
-The sender ships one audio track, so choosing Microphone *replaces* the desktop
-mix. This is the deferred item most likely to embarrass someone mid-call.
+The sender shipped one audio track, so choosing Microphone *replaced* the
+desktop mix. This was the deferred item most likely to embarrass someone
+mid-call.
+
+**Outcome.** Two Opus tracks on the wire, summed on the receiver one op before
+the render buffer — decision and rationale in `docs/dev/dual-audio-decision.md`,
+written before the code as the DoR required. Cost measured against M4's
+baseline: **+0.05 ms p50 / +0.57 ms p99** on capture→arrival, encode mean
+unchanged, 60 fps and zero drops (4 alternating reps,
+`scripts/dual-audio-check.ps1`). Merged S4's MKV work into this tree so both
+containers carry both tracks rather than leaving MKV silently single-track.
+
+Two findings worth carrying forward:
+- **The mic's encoder profile is load-bearing.** Giving the mic the program
+  mix's music-grade encoder cost the *video* path a repeatable regression
+  (encode mean 5.12 → 5.86 ms, arrival p99 3.3 → 7.6 ms) through CPU
+  contention alone. `OpusProfile::voice()` removed it entirely.
+- **WASAPI loopback of a silent endpoint delivers no packets at all**, so a
+  quiet desktop makes an audio comparison measure nothing while looking fine.
+  Two passes were thrown away before this was caught.
 
 ### Definition of Ready
 - [x] Mic path built and benchmarked (`AudioSource::Microphone`).
 - [x] M4 measurements table is the latency baseline to beat.
-- [ ] Decide where mixing happens: receiver-side mix, or two tracks the receiver routes separately (the virtual mic wants them separate; a plain call wants them mixed). Record the decision before writing code.
+- [x] Decide where mixing happens: receiver-side mix, or two tracks the receiver routes separately (the virtual mic wants them separate; a plain call wants them mixed). Record the decision before writing code. → **Two tracks, receiver mixes, mixing is the default** (`docs/dev/dual-audio-decision.md`).
 
 ### Definition of Done
-- [ ] Sender can carry desktop mix **and** microphone simultaneously as two Opus tracks; existing single-track presets are unchanged.
-- [ ] Receiver handles one track or two, and an older peer sending one track still works.
-- [ ] Added latency measured against M4's baseline and recorded; still inside the budget.
-- [ ] The warning note under the Audio chips in `ui/src/screens/Share.tsx` is removed, and the chips become a source *set* rather than a single choice.
-- [ ] Recording carries both tracks (closes `docs/plans/M6-recording-presets.md:53`).
-- [ ] M4 and M6 Deferred entries struck; ROADMAP rows updated.
+- [x] Sender can carry desktop mix **and** microphone simultaneously as two Opus tracks; existing single-track presets are unchanged. (`relay-audio` + `relay-audio-mic`; `--audio-mic` is additive, and a legacy `mic` preset still resolves to `--no-audio --audio-mic`, byte-identical to before.)
+- [x] Receiver handles one track or two, and an older peer sending one track still works. (`transport::audio_role` classifies by msid track id with arrival order as the fallback; unit-tested for unnamed and unrecognised ids.)
+- [x] Added latency measured against M4's baseline and recorded; still inside the budget. (+0.05 ms p50 / +0.57 ms p99, versus a 50 ms glass-to-glass budget — table in `docs/plans/M4-share.md`.)
+- [x] The warning note under the Audio chips in `ui/src/screens/Share.tsx` is removed, and the chips become a source *set* rather than a single choice. (New `ChipSet` component; the two desktop sources exclude each other, the mic toggles independently. The instrument strip grows a Mic meter when a second track arrives.)
+- [x] Recording carries both tracks. (Both containers: program on track 2, mic on track 3, named, unmixed. ffprobe-verified on real loopback recordings.)
+- [x] M4 and M6 Deferred entries struck; ROADMAP rows updated.
 
 ### Kickoff prompt
 ```
@@ -218,14 +236,15 @@ priority in Group 1 — start it only if a real compatibility gap appears.
 
 ### Definition of Ready
 - [x] fMP4 muxer with golden-fixture tests is the pattern to follow.
-- [ ] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. Record it, or leave this session unstarted.
+- [x] A named reason to do it now: a player or editor that rejects the current Opus-in-fMP4 output. **Found and recorded 2026-09-14**: `Windows.Media.Editing.MediaClip` — the Windows video-editing import API — rejects every Relay fMP4 recording with "The parameter is incorrect." The cause is *not* Opus (Media Foundation reports `OPUS … FullySupported`) but the missing `mfra` index. Full probe matrix: `docs/dev/container-compat.md`.
 
 ### Definition of Done
-- [ ] MKV selectable per preset; fMP4 remains the default.
-- [ ] Golden-fixture byte tests to the same standard as the fMP4 muxer.
-- [ ] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measure and record.
-- [ ] Replay save works in both containers.
-- [ ] `docs/plans/M6-recording-presets.md:50` updated; ROADMAP M6 row updated.
+- [x] MKV selectable per preset; fMP4 remains the default.
+- [x] Golden-fixture byte tests to the same standard as the fMP4 muxer (`tests/fixtures/golden-recording.mkv`, `UPDATE_GOLDEN=1` to regenerate).
+- [x] Still a tee of the share's existing bitstream — no second encode, no added latency; re-measured (MKV vs MP4: arrival p50 2.41 vs 2.32 ms, CPU median 6.22 % vs 6.23 %).
+- [x] Replay save works in both containers (73 ms MKV / 59 ms MP4 on loopback; unit test runs for both).
+- [x] `docs/plans/M6-recording-presets.md` updated (decision 5 + S4 measurements); ROADMAP M6 row updated.
+- [x] Bonus, out of the DoR investigation: `Mp4Muxer` now writes `mfra`, which fixes editor import for *existing* fMP4 recordings too.
 
 ### Kickoff prompt
 ```
@@ -724,9 +743,13 @@ audio to Relay over shared memory — the only way to capture DAW audio under
 ASIO exclusive mode. **First task of that session: write `docs/plans/v11-vst3.md`
 with a real DoR and DoD.**
 
-## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · depends on S2
+## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · **S2 landed, so unblocked**
 Audio back from the call to the sending PC, minus your own voice. S2's second
 Opus track is the foundation; this is the feature it was always heading toward.
+The seam S2 left for it: the two sources stay separate through decode and are
+summed only in `playback.rs`, one op before the WASAPI render buffer
+(`mix_sum`). Splitting them to different destinations, or ducking one against
+the other, means changing that last step and nothing upstream of it.
 
 ## S20 — Stream Deck plugin and NDI output · `feat/streamdeck-ndi`
 Two separate integrations sharing one session only because both are outbound
@@ -747,7 +770,8 @@ this session's to keep or remove.
    of lead time. Everything else can proceed meanwhile.
 2. **S5** (per-user camera registration) — may delete S12 and shrink S6.
 3. **S9** (docs truth pass) — cheap, and every later session reads those files.
-4. **S1, S2, S3** in parallel — the three highest-value code sessions.
+4. **S1, S2, S3** in parallel — the three highest-value code sessions. (S2 done
+   2026-09-14; S4 landed alongside it and was merged into S2's tree.)
 5. **S10 + S11** — closes most of the "deferred to MVP validation" backlog
    without new hardware.
 6. **S6, S7, S8** as capacity allows.

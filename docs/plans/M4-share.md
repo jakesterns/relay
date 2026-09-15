@@ -48,10 +48,10 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 
 ### Audio
 - [x] WASAPI loopback of the default render endpoint; process-loopback (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) for game-only capture; Opus 48 kHz stereo 160 kb/s default, 10 ms frames. All three paths (desktop / process / mic) verified with `relay-share bench-audio`.
-- [x] Optional microphone track. (`AudioSource::Microphone`; sender takes `--audio-pid` for game-only or default desktop mix. A separate simultaneous mic track is deferred — see Deferred.)
+- [x] Optional microphone track. **Simultaneous since S2 (2026-09-14):** the sender carries the program mix *and* the microphone as two Opus tracks; `--audio-mic` adds the second track rather than replacing the first.
 
 ### Transport
-- [x] webrtc-rs sender: one video track (HEVC RTP), one audio track, DTLS-SRTP, ICE host candidates only (LAN), STUN off by default. (webrtc-rs 0.20; `build_pc` registers HEVC pt98 + Opus pt120, no ICE servers.)
+- [x] webrtc-rs sender: one video track (HEVC RTP), one or two audio tracks, DTLS-SRTP, ICE host candidates only (LAN), STUN off by default. (webrtc-rs 0.20; `build_pc` registers HEVC pt98 + Opus pt120, no ICE servers.)
 - [x] Discovery: mDNS `_relay._udp.local` with instance name = hostname; pairing by six-digit code. The code seeds an HMAC over each side's SDP; the SDP carries the DTLS fingerprint and DTLS verifies the cert against it, so a good MAC transitively pins the peer. Paired peers persist in `%LOCALAPPDATA%\Relay\data\peers.json`.
 - [x] Wi-Fi detection (adapter type of the route to the peer, `GetAdaptersAddresses` → `IF_TYPE_IEEE80211`) → `link` event with a "wired or 6 GHz" recommendation; AIMD bitrate step-down driven by receiver RTP-sequence loss feedback (`SigMsg::Loss`), applied live via `ICodecAPI` mean-bitrate. Verified: link=wired on the test LAN.
 
@@ -82,6 +82,53 @@ Windows.Graphics.Capture supported = true. No software MFT is ever requested.
 | encode | 10.2 ms | 10.8 ms | MF (NVIDIA HEVC Encoder MFT, RTX 3090), 4K60 CBR 60 Mb/s, 60 s, 3601 frames, 0 drops, max 12.0 ms. 1440p60 native: p50 4.9 / p99 5.1 ms. |
 | network + decode + present | ~1 ms | ~3 ms | Loopback delta: capture→present p50 5.6 ms minus capture→arrival 4.6 ms ≈ decode + video-processor + swapchain present. DXVA decode via HEVCVideoExtension MFT, D3D11 flip-discard swapchain, RTX 3090. |
 | glass-to-glass (loopback) | 5.6 ms | 7–9 ms | Full pipeline capture→present, single machine (no LAN transit, no monitor scan-out). 1200+ AUs, 0 decode errors, 1440p60. Real two-PC wired glass-to-glass (camera+stopwatch) is the user's final DoD run — see Deferred. |
+
+### Second audio track (session S2, 2026-09-14)
+
+`scripts/dual-audio-check.ps1 -Secs 25 -Reps 4`: the same loopback share run
+alternately with one audio track and with the microphone alongside it, four
+times each, 1440p60. A generated 440 Hz tone plays through the default
+endpoint for the whole run and every run asserts it carried ~2 500 program
+packets — **WASAPI loopback of a silent endpoint delivers no packets at all**,
+so without the tone the program track reads zero and the comparison is void
+(two earlier passes were thrown away for exactly this).
+
+| Stage | one track | + mic track | delta |
+|---|---|---|---|
+| capture → arrival p50 | 2.35 ms | 2.40 ms | **+0.05 ms** |
+| capture → arrival p99 | 3.52 ms | 4.09 ms | **+0.57 ms** |
+| encode mean | 4.99 ms | 5.00 ms | +0.01 ms |
+| encode max | 5.11 ms | 5.15 ms | +0.04 ms |
+| capture → send mean | 2.22 ms | 2.31 ms | +0.09 ms |
+| capture → send max | 2.91 ms | 3.37 ms | +0.46 ms |
+| sender CPU (median of 4) | 5.8 % | 9.8 % | +4.0 pt, but the per-rep ranges overlap (3.5–6.5 % vs 5.1–11.1 %) — too noisy at this granularity to quote as a figure |
+| fps / dropped | 60.0 / 0 | 60.0 / 0 | — |
+
+Medians of four reps. Every delta except CPU is inside run-to-run noise, and
+glass-to-glass stays far inside the 50 ms budget (loopback baseline 5.6 ms p50
+plus ~0.6 ms of tail). Loopback runs sender *and* receiver on one machine, so
+the tail figures are pessimistic relative to a real two-PC share.
+
+Opus packetization latency (WASAPI block arrival → packet encoded,
+`relay-share bench-audio 10 [mic|dual]`), which is the only latency the audio
+path itself adds:
+
+| Track | alone | both running | bitrate |
+|---|---|---|---|
+| program mix | p50 0.229 ms / p99 0.344 ms | p50 0.222 ms / p99 0.347 ms | 161 kb/s |
+| microphone | p50 0.235 ms / p99 0.420 ms | p50 0.243 ms / p99 0.422 ms | 50 kb/s |
+
+**The mic encoder profile is load-bearing, not a nicety.** The first
+implementation gave the mic the same music-grade encoder as the program mix
+(160 kb/s stereo, libopus default complexity). Across three reps that cost the
+*video* path a clean, repeatable regression — encode mean 5.12 → 5.86 ms and
+capture→arrival p99 3.3 → 7.6 ms — with no separation in the audio numbers at
+all: the cost was CPU contention, not the audio pipeline. Giving the mic a
+speech profile (`OpusProfile::voice()`: 64 kb/s target, `Application::Voip`,
+complexity 5) removed it entirely — encode mean became identical to the
+single-track case. The program mix keeps libopus's default complexity
+explicitly (`complexity: None`), so the single-track path is byte-for-byte
+what M4 measured.
 
 ## Out of scope (this milestone)
 Virtual camera/mic on the receiver (M5), recording and replay (M6), DAW/Desktop presets (M6), WAN.
@@ -120,6 +167,6 @@ end-to-end — exercised by the bench commands and the loopback run instead.
 
 ## Deferred
 - **Live integration testing: two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Moved to the future MVP validation pass (decision 2026-09-10: dual-PC testing not currently possible; unit coverage above stands in). Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
-- **Simultaneous microphone track.** The mic path is built and benchmarked (`AudioSource::Microphone`), but the sender currently sends one audio track (desktop mix *or* a chosen process, not desktop + mic together). A second Opus track is a small addition; folded into the call-audio/mix-minus work in v1.1. The Share screen's Microphone toggle is present but wired to the single-track selection.
+- ~~**Simultaneous microphone track.**~~ **Done 2026-09-14 (session S2).** The sender opens up to two Opus tracks — `relay-audio` (desktop endpoint loopback or one process tree) and `relay-audio-mic` — and the receiver decodes both and sums them one op before the WASAPI render buffer, so a plain call still hears a single stream while the two sources stay separable for the virtual mic and for S19's mix-minus. Decision record: `docs/dev/dual-audio-decision.md`. Presets carry an audio *source set* (`{desktop, mic}`), the pre-S2 four-way string still deserializes to the same meaning, and a peer sending one unnamed audio track still lands on the program mix (`transport::audio_role`, arrival-order fallback). Measured cost in Measurements below: +0.05 ms p50 / +0.6 ms p99 on capture→arrival, no change to encode. Harness: `scripts/dual-audio-check.ps1`.
 - ~~**In-webview preview surface.**~~ **Done 2026-09-14.** No second capture path: the video pipeline taps the frame it already has, the existing NV12 video processor scales it to 480×270 on the GPU (~200 KB readback), and WIC encodes a 24bppBGR JPEG that rides the engine's NDJSON to the Share screen. Ctrl+Alt+P sends a `preview` command all the way into the engine, so switching it off stops the readback rather than just hiding the picture. Measured on loopback (`scripts/preview-check.ps1 -Toggle`): 0 frames while off, 2 fps once on, ~21 KB per frame, ~41 KB/s.
 - **HEVC Video Extension dependency on the receiver.** Hardware HEVC *decode* uses the Microsoft HEVC Video Extension MFT (DXVA); vendor GPUs register only encode MFTs. A DXVA-direct decoder (no MFT) or bundling the OEM extension is still an installer-time concern (M7). **Partly closed 2026-09-14:** `Method::ShareCapabilities` runs `relay-share probe` and the Receive and Share screens warn before you try rather than failing on the first frame. Verified on the dev machine: `{"can_share":true,"can_receive":true,"encoders":["AMDh265Encoder","NVIDIA HEVC Encoder MFT","AMDh265Encoder"],"decoders":["HEVCVideoExtension"]}`.

@@ -64,6 +64,31 @@ export function Chips<T extends string>({ label, value, options, onChange }: {
   );
 }
 
+/**
+ * Chips as a *set*: any number can be lit at once and each one toggles on its
+ * own. The caller owns the rules between them (e.g. two desktop sources that
+ * exclude each other), so this component only reports which chip was hit.
+ */
+export function ChipSet<T extends string>({ label, values, options, onToggle }: {
+  label: string; values: readonly T[]; options: { key: T; label: string }[];
+  onToggle?: (key: T) => void;
+}) {
+  return (
+    <div className="chips">
+      <span>{label}</span>
+      {options.map((o) => {
+        const on = values.includes(o.key);
+        return (
+          <button key={o.key} className={"chip" + (on ? " on" : "")} aria-pressed={on}
+            onClick={() => onToggle?.(o.key)}>
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function Live({ on, text }: { on: boolean; text: string }) {
   return <div className={"live" + (on ? "" : " off")}><i />{text}</div>;
 }

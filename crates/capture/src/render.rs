@@ -40,6 +40,7 @@ pub struct RenderOpts {
 pub async fn run(
     aus: mpsc::Receiver<AccessUnit>,
     opus: mpsc::Receiver<Vec<u8>>,
+    mic: mpsc::Receiver<Vec<u8>>,
     stats: Arc<RecvStats>,
     mut closed: mpsc::Receiver<()>,
     pc: impl webrtc::peer_connection::PeerConnection,
@@ -50,7 +51,7 @@ pub async fn run(
     let mic_route = opts.mic_route.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
-            if let Err(e) = crate::playback::run(opus, audio_stop_rx, mic_route) {
+            if let Err(e) = crate::playback::run(opus, mic, audio_stop_rx, mic_route) {
                 warn!(error = %e, "audio playback stopped");
             }
         })?;
@@ -80,6 +81,7 @@ pub async fn run(
                     "event": "stats",
                     "aus": stats.video_aus.load(Ordering::Relaxed),
                     "audio_packets": stats.audio_packets.load(Ordering::Relaxed),
+                    "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
                     "capture_to_present_ms": present_latency.load(Ordering::Relaxed) as f64 / 1e3,
                 }));
             }

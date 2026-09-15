@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Video { keyframe: bool },
-    Audio { dur_100ns: i64 },
+    Audio { track: usize, dur_100ns: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -158,7 +158,7 @@ mod tests {
 
     fn audio(pts_s: f64) -> RingItem {
         RingItem {
-            kind: ItemKind::Audio { dur_100ns: 100_000 },
+            kind: ItemKind::Audio { track: 0, dur_100ns: 100_000 },
             pts_100ns: (pts_s * S as f64) as i64,
             data: vec![0; 40],
         }

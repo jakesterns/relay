@@ -4,11 +4,17 @@
 //! ring buffer, the muxer, file rolling and the disk budget.
 //!
 //! Submodules are pure and unit-tested: `annexb` (bitstream forms), `mux`
-//! (fragmented MP4, golden fixtures), `ring` (replay accounting), `budget`
-//! (prune/stop planning).
+//! (fragmented MP4, golden fixtures), `mkv` (Matroska, golden fixtures),
+//! `ring` (replay accounting), `budget` (prune/stop planning).
+//!
+//! The container is a per-preset choice and never changes what is recorded:
+//! both muxers take the same teed access units. fMP4 is the default; MKV is
+//! there because a recording cut off by a crash still imports into an editor,
+//! where a fragmented MP4 does not (`docs/dev/container-compat.md`).
 
 pub mod annexb;
 pub mod budget;
+pub mod mkv;
 pub mod mux;
 pub mod ring;
 
@@ -24,13 +30,65 @@ use anyhow::{Context, Result};
 use tracing::{info, warn};
 
 use budget::DiskBudget;
+use mkv::MkvMuxer;
 use mux::{Mp4Muxer, MuxConfig};
+use relay_core::share::RecordingContainer;
 use ring::{ItemKind, ReplayRing, RingItem};
+
+/// The open output file, in whichever container the preset asked for. Both
+/// arms take the identical teed bitstream; only the framing differs.
+enum AnyMuxer {
+    Mp4(Mp4Muxer<BufWriter<File>>),
+    Mkv(MkvMuxer<BufWriter<File>>),
+}
+
+impl AnyMuxer {
+    fn new(container: RecordingContainer, w: BufWriter<File>, cfg: MuxConfig) -> Self {
+        match container {
+            RecordingContainer::Mp4 => Self::Mp4(Mp4Muxer::new(w, cfg)),
+            RecordingContainer::Mkv => Self::Mkv(MkvMuxer::new(w, cfg)),
+        }
+    }
+
+    fn push_video(&mut self, au: &[u8], pts_100ns: i64, keyframe: bool) -> Result<()> {
+        match self {
+            Self::Mp4(m) => m.push_video(au, pts_100ns, keyframe),
+            Self::Mkv(m) => m.push_video(au, pts_100ns, keyframe),
+        }
+    }
+
+    fn push_audio(
+        &mut self,
+        track: usize,
+        packet: &[u8],
+        pts_100ns: i64,
+        dur_100ns: i64,
+    ) -> Result<()> {
+        match self {
+            Self::Mp4(m) => m.push_audio(track, packet, pts_100ns, dur_100ns),
+            Self::Mkv(m) => m.push_audio(track, packet, pts_100ns, dur_100ns),
+        }
+    }
+
+    fn bytes_written(&self) -> u64 {
+        match self {
+            Self::Mp4(m) => m.bytes_written(),
+            Self::Mkv(m) => m.bytes_written(),
+        }
+    }
+
+    fn finalize(self) -> Result<()> {
+        match self {
+            Self::Mp4(m) => m.finalize().map(|_| ()),
+            Self::Mkv(m) => m.finalize().map(|_| ()),
+        }
+    }
+}
 
 /// Everything the writer thread receives.
 pub enum RecordMsg {
     Video { data: Vec<u8>, pts_100ns: i64, keyframe: bool },
-    Audio { data: Vec<u8>, pts_100ns: i64, dur_100ns: i64 },
+    Audio { track: usize, data: Vec<u8>, pts_100ns: i64, dur_100ns: i64 },
     SetRecording(bool),
     SaveReplay,
 }
@@ -57,8 +115,12 @@ pub struct RecordConfig {
     pub dir: PathBuf,
     pub width: u32,
     pub height: u32,
-    /// Mux the Opus track too.
+    /// Mux the program-mix Opus track too.
     pub audio: bool,
+    /// Mux a second Opus track for the microphone. Ignored without `audio`:
+    /// a file whose only audio is the mic still puts it on track 0, so a
+    /// player finds it where it looks.
+    pub mic: bool,
     /// Replay window; 0 disables the ring.
     pub replay_secs: u32,
     /// RAM cap for the ring (bitrate-aware, chosen by the caller).
@@ -68,6 +130,8 @@ pub struct RecordConfig {
     pub roll_secs: u64,
     /// Start with continuous recording on.
     pub record_on_start: bool,
+    /// Container to mux into.
+    pub container: RecordingContainer,
 }
 
 /// Handle owned by the sender; all pushes are non-blocking.
@@ -102,9 +166,10 @@ impl Recorder {
         self.try_send(RecordMsg::Video { data: data.to_vec(), pts_100ns, keyframe });
     }
 
-    /// Tee one Opus packet. Never blocks.
-    pub fn push_audio(&self, data: &[u8], pts_100ns: i64, dur_100ns: i64) {
-        self.try_send(RecordMsg::Audio { data: data.to_vec(), pts_100ns, dur_100ns });
+    /// Tee one Opus packet onto audio track `track` (0 = program mix,
+    /// 1 = microphone). Never blocks.
+    pub fn push_audio(&self, track: usize, data: &[u8], pts_100ns: i64, dur_100ns: i64) {
+        self.try_send(RecordMsg::Audio { track, data: data.to_vec(), pts_100ns, dur_100ns });
     }
 
     fn try_send(&self, msg: RecordMsg) {
@@ -139,7 +204,7 @@ impl Drop for Recorder {
 }
 
 struct ActiveFile {
-    muxer: Mp4Muxer<BufWriter<File>>,
+    muxer: AnyMuxer,
     path: PathBuf,
     opened: Instant,
     /// Bytes written at the last budget check.
@@ -229,12 +294,16 @@ fn writer_thread(
                     stats.ring_fill_milli.store((r.fill() * 1000.0) as u32, Ordering::Relaxed);
                 }
             }
-            RecordMsg::Audio { data, pts_100ns, dur_100ns } => {
+            RecordMsg::Audio { track, data, pts_100ns, dur_100ns } => {
                 if let Some(a) = &mut active {
-                    a.muxer.push_audio(&data, pts_100ns, dur_100ns)?;
+                    a.muxer.push_audio(track, &data, pts_100ns, dur_100ns)?;
                 }
                 if let Some(r) = &mut ring {
-                    r.push(RingItem { kind: ItemKind::Audio { dur_100ns }, pts_100ns, data });
+                    r.push(RingItem {
+                        kind: ItemKind::Audio { track, dur_100ns },
+                        pts_100ns,
+                        data,
+                    });
                 }
             }
         }
@@ -258,9 +327,10 @@ fn open_recording(cfg: &RecordConfig, stats: &RecordStats) -> Result<ActiveFile>
         stats.stopped_for_disk.store(true, Ordering::Relaxed);
         anyhow::bail!("free space below the floor even after pruning");
     }
-    let path = unique_path(&cfg.dir, &file_name("Relay", local_time_parts()));
+    let path = unique_path(&cfg.dir, &file_name("Relay", local_time_parts(), cfg.container));
     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-    let muxer = Mp4Muxer::new(BufWriter::with_capacity(1 << 20, file), mux_config(cfg));
+    let muxer =
+        AnyMuxer::new(cfg.container, BufWriter::with_capacity(1 << 20, file), mux_config(cfg));
     stats.recording.store(true, Ordering::Relaxed);
     stats.stopped_for_disk.store(false, Ordering::Relaxed);
     info!(path = %path.display(), "recording started");
@@ -272,26 +342,27 @@ fn open_recording(cfg: &RecordConfig, stats: &RecordStats) -> Result<ActiveFile>
 }
 
 fn mux_config(cfg: &RecordConfig) -> MuxConfig {
-    if cfg.audio {
-        MuxConfig::with_opus(cfg.width, cfg.height)
-    } else {
-        MuxConfig::video_only(cfg.width, cfg.height)
+    match (cfg.audio, cfg.mic) {
+        (true, true) => MuxConfig::with_opus_and_mic(cfg.width, cfg.height),
+        (true, false) => MuxConfig::with_opus(cfg.width, cfg.height),
+        (false, _) => MuxConfig::video_only(cfg.width, cfg.height),
     }
 }
 
 fn save_replay(cfg: &RecordConfig, ring: &ReplayRing) -> Result<PathBuf> {
     anyhow::ensure!(!ring.is_empty(), "replay buffer is empty");
     anyhow::ensure!(enforce_budget(cfg, None), "free space below the floor");
-    let path = unique_path(&cfg.dir, &file_name("Relay Replay", local_time_parts()));
+    let path = unique_path(&cfg.dir, &file_name("Relay Replay", local_time_parts(), cfg.container));
     let file = File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-    let mut muxer = Mp4Muxer::new(BufWriter::with_capacity(1 << 20, file), mux_config(cfg));
+    let mut muxer =
+        AnyMuxer::new(cfg.container, BufWriter::with_capacity(1 << 20, file), mux_config(cfg));
     for item in ring.save_slice(cfg.replay_secs) {
         match item.kind {
             ItemKind::Video { keyframe } => {
                 muxer.push_video(&item.data, item.pts_100ns, keyframe)?
             }
-            ItemKind::Audio { dur_100ns } => {
-                muxer.push_audio(&item.data, item.pts_100ns, dur_100ns)?
+            ItemKind::Audio { track, dur_100ns } => {
+                muxer.push_audio(track, &item.data, item.pts_100ns, dur_100ns)?
             }
         }
     }
@@ -319,7 +390,9 @@ fn list_recordings(dir: &Path, exclude: Option<&Path>) -> Vec<budget::RecordingF
     rd.flatten()
         .filter_map(|e| {
             let path = e.path();
-            if path.extension().and_then(|x| x.to_str()) != Some("mp4") {
+            // Both containers count against the disk budget, whatever the
+            // preset in force today wrote: a folder can hold a mix of them.
+            if !matches!(path.extension().and_then(|x| x.to_str()), Some("mp4") | Some("mkv")) {
                 return None;
             }
             if exclude.is_some_and(|x| x == path) {
@@ -334,8 +407,21 @@ fn list_recordings(dir: &Path, exclude: Option<&Path>) -> Vec<budget::RecordingF
 }
 
 /// `Relay 2026-09-10 21-15-03.mp4` from (y, mo, d, h, mi, s).
-pub fn file_name(prefix: &str, t: (u16, u8, u8, u8, u8, u8)) -> String {
-    format!("{prefix} {:04}-{:02}-{:02} {:02}-{:02}-{:02}.mp4", t.0, t.1, t.2, t.3, t.4, t.5)
+pub fn file_name(
+    prefix: &str,
+    t: (u16, u8, u8, u8, u8, u8),
+    container: RecordingContainer,
+) -> String {
+    format!(
+        "{prefix} {:04}-{:02}-{:02} {:02}-{:02}-{:02}.{}",
+        t.0,
+        t.1,
+        t.2,
+        t.3,
+        t.4,
+        t.5,
+        container.extension()
+    )
 }
 
 /// Avoid clobbering when two saves land in the same second.
@@ -345,7 +431,8 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
         return candidate;
     }
     for i in 2..100 {
-        let alt = dir.join(format!("{} ({i}).mp4", name.trim_end_matches(".mp4")));
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, "mp4"));
+        let alt = dir.join(format!("{stem} ({i}).{ext}"));
         if !alt.exists() {
             return alt;
         }
@@ -388,9 +475,9 @@ mod tests {
 
     #[test]
     fn file_names_are_sortable_and_explorer_safe() {
-        let n = file_name("Relay", (2026, 9, 10, 21, 5, 3));
+        let n = file_name("Relay", (2026, 9, 10, 21, 5, 3), RecordingContainer::Mp4);
         assert_eq!(n, "Relay 2026-09-10 21-05-03.mp4");
-        let later = file_name("Relay", (2026, 9, 10, 21, 5, 4));
+        let later = file_name("Relay", (2026, 9, 10, 21, 5, 4), RecordingContainer::Mp4);
         assert!(later > n, "lexicographic order follows time");
         assert!(!n.contains(':'), "no characters Windows rejects");
     }
@@ -408,27 +495,35 @@ mod tests {
 
     /// End-to-end through the writer thread with a real temp dir: record two
     /// GOPs, save a replay, verify both files exist and are non-trivial.
-    #[test]
-    fn writer_thread_records_and_saves_replay() {
-        let dir = std::env::temp_dir().join(format!("relay-rec-{}", std::process::id()));
+    /// Run for each container: rolling recording and replay save must both
+    /// work whichever one the preset selected.
+    fn records_and_saves_replay_in(container: RecordingContainer) {
+        let dir = std::env::temp_dir().join(format!(
+            "relay-rec-{}-{}",
+            std::process::id(),
+            container.extension()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = RecordConfig {
             dir: dir.clone(),
             width: 640,
             height: 480,
             audio: true,
+            mic: true,
             replay_secs: 60,
             ring_max_bytes: 10 << 20,
             budget: DiskBudget { cap_bytes: 0, free_floor_bytes: 0 },
             roll_secs: 3600,
             record_on_start: true,
+            container,
         };
         let rec = Recorder::start(cfg).unwrap();
         let f = 166_667i64;
         for i in 0..120i64 {
             rec.push_video(&mux::tests::key_or_p(i % 60 == 0, i as u8), i * f, i % 60 == 0);
             if i % 2 == 0 {
-                rec.push_audio(&[0xAA, i as u8], i * f, 100_000);
+                rec.push_audio(0, &[0xAA, i as u8], i * f, 100_000);
+                rec.push_audio(1, &[0xBB, i as u8], i * f, 100_000);
             }
         }
         rec.save_replay();
@@ -439,11 +534,27 @@ mod tests {
             entries.iter().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(entries.len(), 2, "one recording + one replay: {names:?}");
         assert!(names.iter().any(|n| n.starts_with("Relay Replay ")), "{names:?}");
+        let ext = format!(".{}", container.extension());
+        assert!(names.iter().all(|n| n.ends_with(&ext)), "{names:?} should all end {ext}");
         for e in &entries {
             let data = std::fs::read(e.path()).unwrap();
             assert!(data.len() > 500, "{:?} only {} bytes", e.file_name(), data.len());
-            assert_eq!(&data[4..8], b"ftyp");
+            match container {
+                RecordingContainer::Mp4 => assert_eq!(&data[4..8], b"ftyp"),
+                // EBML magic: every Matroska file starts with it.
+                RecordingContainer::Mkv => assert_eq!(&data[..4], &[0x1A, 0x45, 0xDF, 0xA3]),
+            }
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn writer_thread_records_and_saves_replay_mp4() {
+        records_and_saves_replay_in(RecordingContainer::Mp4);
+    }
+
+    #[test]
+    fn writer_thread_records_and_saves_replay_mkv() {
+        records_and_saves_replay_in(RecordingContainer::Mkv);
     }
 }
