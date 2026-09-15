@@ -137,7 +137,7 @@ describe("whether a call will see the stream", () => {
 
 describe("codec capability", () => {
   it("names the Store download needed to decode, before the first frame fails", async () => {
-    core.capabilities = { can_share: true, can_receive: false, encoders: ["x"], decoders: [] };
+    core.capabilities = { can_share: true, can_receive: false, adapters: ["NVIDIA GeForce RTX 3090"], encoders: ["x"], decoders: [] };
     tauri.useFakeCore(core.handler);
     await mount();
     expect(screen.getByText(/HEVC Video Extensions from Device Manufacturer/)).toBeInTheDocument();

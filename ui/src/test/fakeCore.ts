@@ -118,7 +118,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       elevated: false,
     },
     capabilities: {
-      can_share: true, can_receive: true,
+      can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 3090"],
       encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
     },
     autostart: false,
