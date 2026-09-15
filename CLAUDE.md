@@ -105,6 +105,9 @@ cargo run -p relay-core -- autostart on|off
 cargo test -p relay-core --test crash_restore   # spawns a real core, taskkill /F, checks restore
 pwsh scripts/footprint.ps1          # release footprint gate (<=10 MB WS, <=0.5 % CPU); also in CI
 cd ui && pnpm install && pnpm tauri dev   # UI (needs the service running for live data; falls back to mock data otherwise)
+cd ui && pnpm test                  # UI component tests (Vitest + jsdom); also in CI
 ```
+UI tests never drive a real window — component tests in jsdom only, so nothing
+can move the user's cursor. `ui/src/test/README.md` has the harness notes.
 IPC contract lives in `crates/core/src/ipc.rs`; the TypeScript mirror is `ui/src/lib/ipc.ts`. Keep them in sync.
 CI (`.github/workflows/ci.yml`, windows-latest) builds the UI first because `tauri::generate_context!` embeds `ui/dist` at compile time. Test backend: `RELAY_RECORDING_BACKEND=<file>` swaps in `apply::FileRecorder`.

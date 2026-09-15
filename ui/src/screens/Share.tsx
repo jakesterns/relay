@@ -316,6 +316,11 @@ function PresetCard({ def, locked, onSaved }: {
   onSaved: (select?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<SharePresetDef | null>(null);
+  // Encode size is typed, not picked, and "2560x" is not a valid size — so
+  // the text has to live outside the draft. Deriving the field's value from
+  // `draft.size` alone makes React reset the box on every keystroke that does
+  // not yet parse, which means it can never be typed into at all.
+  const [sizeText, setSizeText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const isNew = !!draft && !!def && draft.id !== def.id;
@@ -323,6 +328,12 @@ function PresetCard({ def, locked, onSaved }: {
 
   const edit = (patch: Partial<SharePresetDef>) =>
     setDraft((d) => (d ? { ...d, ...patch } : d));
+
+  const open = (d: SharePresetDef) => {
+    setDraft(d);
+    setSizeText(d.size ? `${d.size[0]}x${d.size[1]}` : "");
+    setError(null);
+  };
 
   const run = async (action: () => Promise<string | undefined>) => {
     setBusy(true);
@@ -343,7 +354,7 @@ function PresetCard({ def, locked, onSaved }: {
   if (!draft) {
     return (
       <Card title={`${def.name} preset`} action={locked ? undefined : "Edit"}
-        onAction={locked ? undefined : () => { setDraft({ ...def }); setError(null); }}>
+        onAction={locked ? undefined : () => open({ ...def })}>
         <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
         <Kv k="Frame rate" v={`${def.fps} fps`} mono />
         <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />
@@ -378,10 +389,12 @@ function PresetCard({ def, locked, onSaved }: {
         <div className="field">
           <span>Encode size</span>
           <input className="mono" placeholder="Native — or 2560x1440"
-            value={draft.size ? `${draft.size[0]}x${draft.size[1]}` : ""}
+            value={sizeText}
             onChange={(e) => {
               // Blank means "capture at the monitor's native size"; the
-              // engine only scales when a cap is given.
+              // engine only scales when a cap is given. Anything half-typed
+              // reads as blank until it parses.
+              setSizeText(e.target.value);
               const m = /^\s*(\d+)\s*[x×]\s*(\d+)\s*$/.exec(e.target.value);
               edit({ size: m ? [Number(m[1]), Number(m[2])] : undefined });
             }} />
@@ -433,7 +446,7 @@ function PresetCard({ def, locked, onSaved }: {
               // Duplicate-as-new: the fastest way to a custom preset is to
               // start from one that already works.
               const id = `custom-${Date.now().toString(36)}`;
-              setDraft({ ...draft, id, name: `${draft.name} copy` });
+              open({ ...draft, id, name: `${draft.name} copy` });
             }}>Duplicate</button>
         </div>
         {!builtin && !isNew && (

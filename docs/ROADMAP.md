@@ -25,7 +25,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ---
 
 ## M0 — Foundation hardening
-Small items that unblock everything else. **Done 2026-09-09** (session log in `docs/plans/M0-foundation.md`; CI green on the first run). The autostart console flash deferred from here was closed in M7 by `relay-svc.exe`, a GUI-subsystem launcher that starts the core with `CREATE_NO_WINDOW` and exits.
+Small items that unblock everything else. **Done 2026-09-09** (session log in `docs/plans/M0-foundation.md`; CI green on the first run). The autostart console flash deferred from here was closed in M7 by `relay-svc.exe`, a GUI-subsystem launcher that starts the core with `CREATE_NO_WINDOW` and exits. The other deferred item — no automated test ever clicked through the WebView — was closed 2026-09-14 by session S8: `pnpm test` in `ui/`, 158 component tests in jsdom covering every screen against mock data, an offline core and a scripted fake core, now a CI step next to `pnpm build`. Deliberately not WebDriver, so no test can move the real cursor; `ui/src/test/safety.test.ts` enforces that.
 
 - [x] Initial commit; GitHub Actions on `windows-latest`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `pnpm build`.
 - [x] Release-footprint gate: script that builds `relay-core` in release, runs it for 30 s idle, asserts RSS ≤ 10 MB and CPU ≈ 0. Runs in CI.
@@ -126,7 +126,7 @@ weeks of identity-verification lead time. It is still not ordered.
 ## Plan files
 | Milestone | Plan | Session status |
 |---|---|---|
-| M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green |
+| M0 Foundation hardening | `docs/plans/M0-foundation.md` | done 2026-09-09, CI green; UI test harness added 2026-09-14 (S8) |
 | M4 Share MVP | `docs/plans/M4-share.md` | done 2026-09-10; pipeline complete, measured on loopback, logic unit-tested; live two-PC run → MVP validation pass. Simultaneous mic + desktop audio closed 2026-09-14 (S2) |
 | M1 Hardware library & probe | `docs/plans/M1-hardware.md` | done 2026-09-10; re-selection measured at 26–41 ms live; 2nd-monitor + physical-unplug passes deferred (runbooks in plan) |
 | M2 Display profiles | `docs/plans/M2-display.md` | done 2026-09-13; live pass complete on the LG ULTRAGEAR+ (crash-restore + focus restore at 144 ms mean); 2nd monitor / C2 / vendor opcodes / ADLX / Win+L deferred |
