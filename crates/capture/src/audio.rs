@@ -280,8 +280,35 @@ pub struct OpusPacket {
     pub duration: Duration,
 }
 
+/// Encoder tuning for one track.
+///
+/// The program mix is music-grade and keeps exactly the settings it has always
+/// had. A microphone is speech: it does not need 160 kb/s stereo at libopus's
+/// default complexity, and since the second encoder's CPU is the whole cost of
+/// the mic track on the share hot path, it gets a cheaper one.
+#[derive(Debug, Clone, Copy)]
+pub struct OpusProfile {
+    pub bitrate_bps: i32,
+    pub application: opus::Application,
+    /// `None` leaves libopus's default, which is what the program mix has
+    /// always encoded at — this keeps the single-track path unchanged.
+    pub complexity: Option<i32>,
+}
+
+impl OpusProfile {
+    /// The desktop mix or a game: music-grade, unchanged since M4.
+    pub fn program() -> Self {
+        Self { bitrate_bps: 160_000, application: opus::Application::Audio, complexity: None }
+    }
+
+    /// A microphone: speech at a sane rate and a cheaper search.
+    pub fn voice() -> Self {
+        Self { bitrate_bps: 64_000, application: opus::Application::Voip, complexity: Some(5) }
+    }
+}
+
 impl OpusStream {
-    pub fn new(source: AudioSource, bitrate: i32) -> Result<Self> {
+    pub fn new(source: AudioSource, profile: OpusProfile) -> Result<Self> {
         let capture = AudioCapture::start(source)?;
         if capture.sample_rate != 48_000 {
             bail!(
@@ -292,9 +319,11 @@ impl OpusStream {
         if capture.channels != 2 {
             bail!("{}-channel endpoint; only stereo is supported this milestone", capture.channels);
         }
-        let mut encoder =
-            opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio)?;
-        encoder.set_bitrate(opus::Bitrate::Bits(bitrate))?;
+        let mut encoder = opus::Encoder::new(48_000, opus::Channels::Stereo, profile.application)?;
+        encoder.set_bitrate(opus::Bitrate::Bits(profile.bitrate_bps))?;
+        if let Some(c) = profile.complexity {
+            encoder.set_complexity(c)?;
+        }
         let frame_samples = 480 * 2; // 10 ms stereo
         Ok(Self {
             capture,

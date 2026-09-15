@@ -23,7 +23,7 @@ use webrtc::media_stream::Track;
 use webrtc::peer_connection::PeerConnection;
 
 use super::{audio_codec, build_pc, discovery, sei, signal, video_codec};
-use crate::audio::{AudioSource, OpusStream};
+use crate::audio::{AudioSource, OpusProfile, OpusStream};
 use crate::command::{self, EngineCmd, SourceTarget};
 use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
 use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
@@ -930,7 +930,11 @@ fn audio_pipeline(
     stop: Arc<AtomicBool>,
     recorder: Arc<OnceLock<Recorder>>,
 ) -> Result<()> {
-    let mut stream = OpusStream::new(source, 160_000)?;
+    let profile = match which {
+        AudioTrack::Program => OpusProfile::program(),
+        AudioTrack::Mic => OpusProfile::voice(),
+    };
+    let mut stream = OpusStream::new(source, profile)?;
     let (packets, peak) = match which {
         AudioTrack::Program => (&stats.audio_packets, &stats.audio_peak_milli),
         AudioTrack::Mic => (&stats.mic_packets, &stats.mic_peak_milli),

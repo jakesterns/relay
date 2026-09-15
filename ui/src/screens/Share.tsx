@@ -13,12 +13,15 @@ import {
 interface Strip {
   mbps: number; latencyMs: number; dropped: number; sent: number;
   gpuPct: number; cpuPct: number; audioDb: number; history: number[];
+  /** Mic track level, and whether a second audio track is arriving at all. */
+  micDb: number; micLive: boolean;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
 }
 const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
+  micDb: -Infinity, micLive: false,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
 };
 
@@ -82,6 +85,10 @@ export function Share() {
           gpuPct: Math.round(s.encode_ms ? (s.encode_ms / (1000 / 60)) * 100 : 0),
           cpuPct: Math.round((s.cpu_percent ?? 0) * 10) / 10,
           audioDb: s.audio_peak ? 20 * Math.log10(Math.max(1e-4, s.audio_peak)) : -Infinity,
+          micDb: s.mic_peak ? 20 * Math.log10(Math.max(1e-4, s.mic_peak)) : -Infinity,
+          // Packets, not level: a muted mic is still a live track, and the
+          // meter should say so rather than vanish.
+          micLive: (s.mic_packets ?? 0) > 0,
           history: h,
           recording: s.recording ?? false,
           recMb: s.rec_mb ?? 0,
@@ -445,7 +452,10 @@ function errText(e: unknown): string {
 
 function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {
   const audioSegs = 12;
-  const lit = live && isFinite(s.audioDb) ? Math.round(((s.audioDb + 40) / 40) * audioSegs) : 0;
+  const segsFor = (db: number) =>
+    live && isFinite(db) ? Math.round(((db + 40) / 40) * audioSegs) : 0;
+  const lit = segsFor(s.audioDb);
+  const micLit = segsFor(s.micDb);
   const recording = live && (s.recording || recOn);
   const recWarn = live && (s.recDropped > 0 || s.recStoppedDisk);
   return (
@@ -475,10 +485,17 @@ function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: b
         <div className="hint">{live ? `NVENC · CPU ${s.cpuPct}%` : "Encoder not loaded"}</div>
       </div>
       <div>
-        <label>Audio</label>
+        <label>{s.micLive ? "Desktop audio" : "Audio"}</label>
         <div className="v">{live && isFinite(s.audioDb) ? s.audioDb.toFixed(1) : "—"}<u>dB</u></div>
         <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < lit ? "" : "off"} />)}</div>
       </div>
+      {s.micLive && (
+        <div>
+          <label>Mic</label>
+          <div className="v">{isFinite(s.micDb) ? s.micDb.toFixed(1) : "—"}<u>dB</u></div>
+          <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < micLit ? "" : "off"} />)}</div>
+        </div>
+      )}
       <div className={recWarn ? "warn" : ""}>
         <label><i className={"recdot" + (recording ? " on" : "")} />Rec</label>
         <div className="v">{recording ? s.recMb.toFixed(0) : "—"}<u>MB</u></div>

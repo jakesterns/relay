@@ -267,11 +267,17 @@ impl AudioRun {
 
 #[cfg(windows)]
 fn run_audio_source(source: relay_capture::audio::AudioSource, secs: u64) -> Result<AudioRun> {
-    use relay_capture::audio::OpusStream;
+    use relay_capture::audio::{AudioSource, OpusProfile, OpusStream};
     use relay_capture::{time, Percentiles};
     use std::time::{Duration, Instant};
 
-    let mut stream = OpusStream::new(source, 160_000)?;
+    // Match what a real share uses for this source, or the bench is measuring
+    // an encoder nobody runs.
+    let profile = match source {
+        AudioSource::Microphone => OpusProfile::voice(),
+        _ => OpusProfile::program(),
+    };
+    let mut stream = OpusStream::new(source, profile)?;
     let mut run =
         AudioRun { packets: 0, bytes: 0, peak: 0.0, elapsed: 0.0, lat: Percentiles::default() };
     let start = Instant::now();
