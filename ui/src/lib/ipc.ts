@@ -103,6 +103,7 @@ export interface ShareRequest {
   size?: [number, number];
   audio: boolean; audio_pid?: number; mic?: boolean; cursor: boolean;
   preset?: string; record?: boolean; replay_secs?: number; record_dir?: string;
+  container?: RecordingContainer;
   /** Thumbnails per second for the in-app preview; 0 = off. */
   preview_fps?: number;
 }
@@ -130,10 +131,15 @@ export function presetAudioLabel(a: PresetAudio): string {
   if (desktop) return desktop;
   return a.mic ? "Microphone" : "None";
 }
+/**
+ * Recording container. Same HEVC + Opus bitstream either way — the choice
+ * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
+ */
+export type RecordingContainer = "mp4" | "mkv";
 export interface SharePresetDef {
   id: string; name: string; bitrate_mbps: number; fps: number;
   size?: [number, number]; audio: PresetAudio; cursor: boolean;
-  record: boolean; replay_secs: number;
+  record: boolean; replay_secs: number; container: RecordingContainer;
 }
 export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb: number }
 export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
@@ -307,9 +313,9 @@ const mockVdevice: VdeviceStatus = {
 
 /** The three built-ins, mirroring `presets.rs::builtins()`. */
 const mockPresets: SharePresetDef[] = [
-  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60 },
-  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0 },
-  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0 },
+  { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
+  { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 

@@ -124,6 +124,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         record: false,
         replay_secs: 0,
         preview_fps: 0,
+        container: relay_core::share::RecordingContainer::Mp4,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -155,6 +156,13 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
                 opts.record_dir = Some(it.next().context("--record-dir PATH")?.into())
             }
             "--record" => opts.record = true,
+            "--container" => {
+                opts.container = match it.next().context("--container mp4|mkv")?.as_str() {
+                    "mp4" => relay_core::share::RecordingContainer::Mp4,
+                    "mkv" => relay_core::share::RecordingContainer::Mkv,
+                    other => bail!("unknown container `{other}` (expected mp4 or mkv)"),
+                }
+            }
             "--replay-secs" => opts.replay_secs = it.next().context("--replay-secs N")?.parse()?,
             other => bail!("unknown send flag `{other}`"),
         }

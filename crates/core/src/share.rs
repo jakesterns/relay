@@ -55,6 +55,33 @@ pub struct ShareRequest {
     /// Recording folder; `None` disables recording and the replay ring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub record_dir: Option<String>,
+    /// Container for recordings and replay saves.
+    #[serde(default)]
+    pub container: RecordingContainer,
+}
+
+/// Container the recorder muxes into. Both carry the identical HEVC + Opus
+/// bitstream teed off the share — the choice never re-encodes anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RecordingContainer {
+    /// Fragmented MP4. The default: widest tool support.
+    #[default]
+    Mp4,
+    /// Matroska. Survives a crash mid-file — a recording cut off without a
+    /// clean stop still imports into editors, where an fMP4 does not. See
+    /// `docs/dev/container-compat.md`.
+    Mkv,
+}
+
+impl RecordingContainer {
+    /// File extension, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mp4 => "mp4",
+            Self::Mkv => "mkv",
+        }
+    }
 }
 
 /// Mirror of `relay_capture::command::SourceTarget` (the core does not link
@@ -349,6 +376,10 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
         if req.replay_secs > 0 {
             args.push("--replay-secs".into());
             args.push(req.replay_secs.to_string());
+        }
+        if req.container != RecordingContainer::Mp4 {
+            args.push("--container".into());
+            args.push(req.container.extension().into());
         }
     }
     if req.preview_fps > 0 {

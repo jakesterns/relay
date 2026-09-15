@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::profiles::write_atomic;
-use crate::share::{ShareRequest, DEFAULT_PREVIEW_FPS};
+use crate::share::{RecordingContainer, ShareRequest, DEFAULT_PREVIEW_FPS};
 
 const FILE_VERSION: u32 = 1;
 
@@ -133,6 +133,9 @@ pub struct SharePresetDef {
     /// Replay ring window in seconds; 0 = off.
     #[serde(default = "default_replay")]
     pub replay_secs: u32,
+    /// Container for recordings and replay saves made under this preset.
+    #[serde(default)]
+    pub container: RecordingContainer,
 }
 
 fn default_true() -> bool {
@@ -197,6 +200,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             cursor: false,
             record: false,
             replay_secs: 60,
+            container: RecordingContainer::Mp4,
         },
         SharePresetDef {
             id: "daw".into(),
@@ -208,6 +212,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             cursor: true,
             record: false,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         },
         SharePresetDef {
             id: "desktop".into(),
@@ -219,6 +224,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             cursor: true,
             record: false,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         },
     ]
 }
@@ -326,6 +332,7 @@ pub fn to_share_request(
         record: preset.record,
         replay_secs: preset.replay_secs,
         record_dir: Some(recording.resolved_dir()),
+        container: preset.container,
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,
@@ -390,6 +397,7 @@ mod tests {
             cursor: true,
             record: true,
             replay_secs: 0,
+            container: RecordingContainer::Mp4,
         });
         store.save().unwrap();
 
