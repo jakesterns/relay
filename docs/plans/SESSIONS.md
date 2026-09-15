@@ -827,7 +827,7 @@ Autostart is off by default, the UI never starts the core, and ui/src/components
 ---
 
 ## S24 — Stop the UI lying
-**Branch** `feat/honest-ui` · **Worktree** `C:\Users\stern\Documents\Code\relay-honest-ui` · **Not concurrent with S23**
+**Branch** `feat/honest-ui` · **Worktree** main tree · **Not concurrent with S23**
 
 Three places render invented content as if it were measured. These are worse
 than blank space because a user tests them early and believes them.
@@ -858,7 +858,7 @@ Three parts of the UI render invented content as if it were measured: the Displa
 ---
 
 ## S25 — Keyboard, focus and destructive actions
-**Branch** `feat/ui-safety` · **Worktree** `C:\Users\stern\Documents\Code\relay-ui-safety`
+**Branch** `feat/ui-safety` · **Worktree** main tree
 
 The app is mouse-only, and the same class of destructive action is handled four
 different ways.
@@ -895,7 +895,7 @@ Separately, four different patterns exist for destructive actions: preset delete
 ---
 
 ## S26 — Shell polish
-**Branch** `feat/shell-polish` · **Worktree** `C:\Users\stern\Documents\Code\relay-shell-polish`
+**Branch** `feat/shell-polish` · **Worktree** main tree
 
 Small Windows-integration details, none hard, all noticed.
 
