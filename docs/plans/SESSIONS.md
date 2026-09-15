@@ -317,14 +317,18 @@ previous session's stray clicks landed in the user's browser.
 ### Definition of Ready
 - [x] `pnpm build` runs `tsc --noEmit` and catches type drift already.
 - [x] IPC wire shapes are covered by Rust tests on both sides.
-- [ ] Pick the approach: component tests against a mocked `api` (safe, fast, no window) versus WebDriver against a real Tauri window (higher fidelity, moves a real cursor). Default to the former unless there is a reason.
+- [x] Pick the approach: component tests against a mocked `api` (safe, fast, no window) versus WebDriver against a real Tauri window (higher fidelity, moves a real cursor). Default to the former unless there is a reason. **Component tests chosen** (2026-09-14) — Vitest + jsdom + Testing Library; rationale and the fidelity gap are written up in `ui/src/test/README.md`.
 
 ### Definition of Done
-- [ ] Every screen renders against both mock data and an offline core without throwing.
-- [ ] The paths that were mocks and got wired this month have regression tests: share preset start/stop, catalogue search and import, uninstall plan rendering, consent flow.
-- [ ] The suite runs in CI on `windows-latest` alongside `pnpm build`.
-- [ ] No test moves the real mouse or sends synthetic keystrokes to the desktop.
-- [ ] `docs/plans/M0-foundation.md:59` updated.
+- [x] Every screen renders against both mock data and an offline core without throwing. (`ui/src/screens/screens.smoke.test.tsx`, plus a third mode: a scripted live core.)
+- [x] The paths that were mocks and got wired this month have regression tests: share preset start/stop, catalogue search and import, uninstall plan rendering, consent flow.
+- [x] The suite runs in CI on `windows-latest` alongside `pnpm build`.
+- [x] No test moves the real mouse or sends synthetic keystrokes to the desktop. Enforced by `ui/src/test/safety.test.ts`, not just by convention.
+- [x] `docs/plans/M0-foundation.md` updated (deferred item closed; new "UI test harness" section).
+
+**Done 2026-09-14** on `feat/ui-test-harness`. 158 tests, 9 files, ~12 s. Found
+and fixed one real bug: the Share preset editor's encode-size field could not
+be typed into.
 
 ### Kickoff prompt
 ```

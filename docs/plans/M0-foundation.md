@@ -56,7 +56,46 @@ Notes:
 
 ## Deferred
 - **Console window flash on autostart.** `relay-core` is a console-subsystem binary so the CLI (`status`, `autostart`, ...) behaves like a normal tool. When Explorer or the Run key launches it, Windows allocates a console that `run` hides immediately, but with Windows Terminal as the default host that can still flash for a frame. The proper fix is a tiny GUI-subsystem launcher or `conhost --headless` in the Run value; it belongs with the installer work in M7.
-- **Driving the Tauri UI automatically.** New / Edit / Delete are implemented and type-checked, the window renders, and the create -> kill -> restart -> still-listed path is proven over IPC by `crash_restore.rs`, but no automated test clicks through the WebView. Manual UI testing stays with each milestone smoke check.
+- ~~**Driving the Tauri UI automatically.**~~ **Closed 2026-09-14** by session S8 (`feat/ui-test-harness`). See "UI test harness" below.
+
+## UI test harness (added 2026-09-14, session S8)
+`pnpm test` in `ui/` — Vitest + jsdom + Testing Library, 158 tests across 9
+files, ~12 s. Wired into CI as its own step next to `pnpm build`. Full notes in
+`ui/src/test/README.md`.
+
+**Component tests, not WebDriver.** The standing rule is that no test may move
+the real mouse or send synthetic keystrokes to the desktop — an earlier attempt
+drove a real Tauri window and its clicks landed in the user's browser. Testing
+Library dispatches DOM events inside a jsdom document in-process, so there is
+no host cursor to move and no window to steal focus. `ui/src/test/safety.test.ts`
+enforces this mechanically: it fails if a WebDriver or input-synthesis package
+(`tauri-driver`, `playwright`, `robotjs`, …) appears in `package.json`, or if
+the Tauri module aliases stop pointing at the in-process fake.
+
+What this does not cover, and where that coverage lives instead: the Tauri
+shell booting and `ui/dist` being embedded (`cargo build -p relay-ui`), the IPC
+wire shapes (Rust tests on both sides of `ipc.rs`), and a real core over the
+real pipe (`crash_restore.rs`). What had no coverage at all was the screens.
+
+**How it is wired.** `ui/src/lib/ipc.ts` reaches the desktop in exactly three
+places — dynamic imports of `@tauri-apps/api/{core,event,window}`.
+`vitest.config.ts` aliases all three to `ui/src/test/tauriMock.ts`, which gives
+each test one of three situations: browser mock data (`ipc.ts` serves its own
+fixtures), an offline core (every `invoke` rejects), or `makeFakeCore()` — a
+scripted core implementing every command in `ipc.ts` over mutable state, so a
+test can click Save and then assert the core holds the new value.
+
+**Coverage.** Every screen renders under all three modes (`screens.smoke`),
+plus the regression suites this session was asked for: share preset start/stop
+with its arguments, catalogue search and import, uninstall plan rendering, and
+the consent flow. Also the shell (first-run gate, rail, title bar), the Games
+audio/display serialisation, and Receive.
+
+One real bug fell out on the first run: the Share preset editor's **encode size
+field could not be typed into**. Its value was derived from `draft.size`, which
+stays `undefined` until the whole `WxH` string parses, so React reset the box
+on every keystroke. Fixed by holding the typed text in its own state
+(`crates`-side unaffected; `ui/src/screens/Share.tsx`).
 
 ## Verification log (2026-09-09)
 - `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings`: clean.
