@@ -976,6 +976,10 @@ impl IpcHandler {
                 headsets: g.library.headsets.clone(),
                 monitors: g.library.monitors.clone(),
                 interfaces: g.library.interfaces.clone(),
+                vendor_controls: crate::hardware::vendor_controls(
+                    &g.library.monitors,
+                    &g.state.hardware.monitors,
+                ),
                 connected: Box::new(g.state.hardware.clone()),
             },
             Method::SaveHardware { item } => {
