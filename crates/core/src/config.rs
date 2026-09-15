@@ -116,6 +116,14 @@ impl Paths {
         self.root.join("installed.json")
     }
 
+    /// The record of the Windows Firewall rule Relay added for
+    /// `relay-share.exe`, plus any Block rules the install removed. Written
+    /// before the rule goes in; the uninstaller plans from it rather than
+    /// guessing, so a leftover rule cannot survive a clean-VM diff.
+    pub fn firewall_file(&self) -> PathBuf {
+        self.root.join("firewall.json")
+    }
+
     /// Snapshot of the machine's original state. Presence of this file with
     /// `applied = true` on start means we did not get to restore last time.
     pub fn backup_file(&self) -> PathBuf {
@@ -148,6 +156,7 @@ impl Paths {
             self.previews_dir(),
             self.apo_backup_dir(),
             self.installed_file(),
+            self.firewall_file(),
         ]
     }
 }

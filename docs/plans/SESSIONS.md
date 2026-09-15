@@ -725,7 +725,14 @@ Four deliverables wait on this one certificate: the signed installer, the signed
 ---
 
 ## S22 — Firewall rules in the installer
-**Branch** `feat/firewall-rules` · **Worktree** create when started
+**Branch** `feat/firewall-rules` · **Worktree** `..\relay-firewall`
+**Done 2026-09-15.** `crates/core/src/firewall.rs` is the whole feature: a
+pure parser and verdict over the firewall policy store (reads), `INetFwPolicy2`
+in the elevated helper (writes), `firewall.json` as the record, a new
+`StepKind::RemoveFirewallRule` in the uninstall plan, a `FirewallBanner` on the
+Share and Receive screens, and firewall capture + diff in the snapshot harness
+(verified to FAIL on a planted leftover rule). Scope decided: **private +
+domain, never public**. Details in `docs/plans/M7-installer.md`.
 
 Found 2026-09-14 on the dev machine: ten accumulated Block rules for
 `relay-share.exe` and not one Allow rule. Windows prompts the first time a
@@ -742,13 +749,35 @@ mean nobody needs it.
 ### Definition of Ready
 - [x] Only `relay-share.exe` listens on the network (WebRTC + mDNS); `relay-core` is named-pipe only.
 - [x] `scripts/firewall-rules.ps1` exists and can list, clean and allow.
-- [ ] Decide the scope: Private profile only (Relay is LAN-only by design) versus Private + Domain. Public should stay blocked.
+- [x] Decide the scope: Private profile only (Relay is LAN-only by design) versus Private + Domain. Public should stay blocked.
+      **Private + Domain** (`firewall::RULE_PROFILES`). A managed work machine
+      reports its network as Domain rather than Private, so a private-only
+      rule would leave exactly the silent failure this session exists to
+      remove. Public stays blocked: Windows classifies unknown networks as
+      Public by default, and the banner names that case instead of offering a
+      fix Relay will not apply.
 
 ### Definition of Done
-- [ ] The NSIS installer adds an inbound Allow rule for the installed `relay-share.exe` on the agreed profiles, and the **uninstaller removes it** — a leftover firewall rule would fail the clean-VM diff, so this must be in the uninstall plan like everything else.
-- [ ] Rules are added by the existing elevated path, not by a silent elevation grab; a user who declines still gets a working app on an already-permissive network, with an explanation.
-- [ ] The app detects the "blocked by firewall" state and says so plainly, rather than looking like a network fault — the same warn-before-you-fail shape as the HEVC capability banner.
-- [ ] Verified in the clean-VM cycle (S13): install, share, uninstall, empty diff.
+- [x] The NSIS installer adds an inbound Allow rule for the installed `relay-share.exe` on the agreed profiles, and the **uninstaller removes it** — a leftover firewall rule would fail the clean-VM diff, so this must be in the uninstall plan like everything else.
+- [x] Rules are added by the existing elevated path, not by a silent elevation grab; a user who declines still gets a working app on an already-permissive network, with an explanation.
+      Two new `ElevatedOp` variants (`allow-firewall`, `remove-firewall`); the
+      helper re-derives the exe path from its own directory, so the request
+      carries no path. Declining is reported as `declined`, not an error, and
+      the banner says what still works. `Verdict::Permissive` is the
+      already-permissive case and shows no banner at all.
+- [x] The app detects the "blocked by firewall" state and says so plainly, rather than looking like a network fault — the same warn-before-you-fail shape as the HEVC capability banner.
+      `FirewallBanner` in `ui/src/screens/Receive.tsx`, rendered on Share and
+      Receive next to `CodecBanner`. 8 UI tests cover blocked, will-prompt,
+      declined UAC, public network, unreadable probe and permissive.
+- [~] Verified in the clean-VM cycle (S13): install, share, uninstall, empty diff.
+      **As far as the missing hypervisor allows.** `machine-snapshot.ps1` now
+      captures firewall rules, `snapshot-diff.ps1` diffs them as its own
+      section, and a planted leftover rule was confirmed to FAIL the diff with
+      exit 1 while identical snapshots still PASS. `vm-cycle.ps1`'s opt-in
+      phase adds the rule and asserts both the rule and `firewall.json`. The
+      checkpoint run itself stays blocked on the same missing hypervisor as
+      M7's Deferred item 1 — it is the only part of this DoD not met, and it
+      is not blocked on anything in this session.
 
 ### Kickoff prompt
 ```

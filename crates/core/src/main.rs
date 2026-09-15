@@ -139,6 +139,57 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        // Read-only by default. `allow` / `remove` change firewall policy and
+        // so are gated exactly like `apo` and `vdevice`: the elevated helper
+        // is the sanctioned caller, and these exist for the VM runbook.
+        #[cfg(windows)]
+        "firewall" => {
+            logging::init_console(args.verbose);
+            use relay_core::firewall;
+            let program = firewall::share_program()?;
+            match args.arg.as_deref() {
+                None | Some("status") => {
+                    let s = firewall::status(&program);
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&s)?);
+                    } else {
+                        println!("program:  {}", s.program);
+                        println!("verdict:  {}", s.verdict.summary());
+                        println!("our rule: {}", if s.rule_present { "present" } else { "absent" });
+                        println!("blocking: {} rule(s)", s.blocking_rules);
+                        println!("stale:    {} rule(s) for another copy of the exe", s.stale_rules);
+                        println!(
+                            "policy:   active profiles {:#x}, firewall {}, inbound {}",
+                            s.policy.active_profiles,
+                            if s.policy.enabled { "on" } else { "off" },
+                            if s.policy.default_inbound_block { "blocked" } else { "allowed" },
+                        );
+                        if s.unknown {
+                            println!(
+                                "(firewall state could not be read; values above are defaults)"
+                            );
+                        }
+                    }
+                }
+                Some("dry-run") => {
+                    for line in firewall::install_dry_run(&program) {
+                        println!("{line}");
+                    }
+                }
+                Some("allow") => {
+                    let s = firewall::install_live(&args.paths, &program)?;
+                    println!("{}", s.verdict.summary());
+                }
+                Some("remove") => {
+                    let n = firewall::uninstall_live(&args.paths)?;
+                    println!("removed {n} rule(s) named \"{}\"", firewall::RULE_NAME);
+                }
+                Some(other) => anyhow::bail!(
+                    "firewall takes `status`, `dry-run`, `allow` or `remove`, not `{other}`"
+                ),
+            }
+            Ok(())
+        }
         // Direct as well: registration wants an elevated prompt, and the
         // consent screen may not exist yet on a fresh machine. Same gates.
         #[cfg(windows)]
@@ -412,8 +463,13 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   vdevice [status|dry-run|consent-camera|install|uninstall]  virtual-camera
              registration (install/uninstall refuse without
              RELAY_VDEVICE_ALLOW_LIVE_WRITE=1 and an elevated prompt)
+  firewall [status|dry-run|allow|remove]  the inbound rule for relay-share.exe
+             (the only Relay binary that listens). `status` and `dry-run` are
+             read-only; `allow`/`remove` refuse without
+             RELAY_FIREWALL_ALLOW_LIVE_WRITE=1 and an elevated prompt
   elevate [plan|run] <op>   the elevated install helper. <op> is one of
-             install-apo, uninstall-apo, install-camera, uninstall-camera.
+             install-apo, uninstall-apo, install-camera, uninstall-camera,
+             allow-firewall, remove-firewall.
              `plan` prints what would change and touches nothing; `run` raises
              one UAC prompt and runs relay-elevate.exe. Declining changes
              nothing.

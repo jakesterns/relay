@@ -76,7 +76,7 @@ here) and the two HKLM components. Runbook: `docs/dev/uninstall-vm.md`.
       user whose profiles it manages. The consent screen already gates on
       `installed.json` having no recorded decision (M5), so a fresh install
       lands there.
-- [x] Uninstaller order: stop UI → `relay-core shutdown` (restores state) → APO uninstall → virtual device unregister / driver removal → Run key → files; asks whether to keep `%LOCALAPPDATA%\Relay` (profiles, hardware library).
+- [x] Uninstaller order: stop UI → `relay-core shutdown` (restores state) → APO uninstall → virtual device unregister / driver removal → firewall rule → Run key → files; asks whether to keep `%LOCALAPPDATA%\Relay` (profiles, hardware library).
       `crates/core/src/uninstall.rs`. The order is the `StepKind` enum's
       declaration order and a test asserts the generated plan is sorted by it,
       so a step inserted in the wrong place fails the build rather than the
@@ -96,6 +96,10 @@ here) and the two HKLM components. Runbook: `docs/dev/uninstall-vm.md`.
 - [x] Clean-VM test script (Hyper-V checkpoint): install → opt in to both components → share → uninstall → registry and file diff against the checkpoint is empty except the optional data folder.
       Script written and run; the checkpoint itself is Deferred (no
       hypervisor). Results below.
+- [x] **Windows Firewall rule for `relay-share.exe` (S22, 2026-09-15).** The
+      installer's `/FIREWALL` switch and the app's own banner add one inbound
+      Allow rule on private + domain profiles; the uninstaller removes it.
+      See the decision and the S22 section below.
 - [ ] Signed installer and binaries with the EV cert. **Deferred** — the
       certificate has still not been ordered. `bundle.windows.certificateThumbprint`
       plus `signCommand` is the one-line change once it exists; the NSIS
@@ -155,6 +159,102 @@ that reads it are untouched. `autostart::command_line()` delegates the choice
 to `launcher::autostart_target`, which falls back to the core itself in a
 `cargo run` tree where the launcher was not built — a flash on a dev machine
 beats silently failing to configure autostart.
+
+**The firewall rule is asked for, never taken (S22).** Windows prompts the
+first time a given *path* listens, and dismissing that prompt writes a Block
+rule that is permanent, invisible and never mentioned again -- after which
+every symptom points at the network rather than at a firewall. That makes
+"zero network config for the user" false, so Relay adds one inbound Allow rule
+for `relay-share.exe`, the only binary that opens a socket.
+
+Three constraints shaped how:
+
+* *It cannot be silent.* Firewall policy is machine-wide, and this installer
+  is per-user and unelevated. Reaching for an administrator token the user did
+  not offer is exactly the behaviour Relay promises not to have, so the rule
+  goes through `relay-elevate.exe` like the APO and the camera: a listing the
+  user reads, then one UAC prompt they can decline. `/FIREWALL` exists for
+  silent and managed installs where a deploying admin has already decided.
+  Interactively the app asks at the moment it matters instead -- the Share and
+  Receive screens detect the state and offer the fix -- which is a better
+  place to ask than a wizard page nobody reads.
+* *Adding an Allow rule is not enough.* Windows applies deny before allow, so
+  a machine that already has a Block rule stays broken no matter what we add.
+  The install therefore removes the Block rules **for our own binary**, after
+  backing each one up verbatim into `firewall.json`. The uninstall does not
+  re-create them: they named a program that is being deleted, and restoring
+  one would silently re-break Relay for anyone who reinstalls. A clean VM has
+  no such rules, so the diff is unaffected either way.
+* *It has to come off.* The rule is recorded and removed by
+  `StepKind::RemoveFirewallRule`, in the same plan, with the same elevation
+  reporting, as everything else.
+
+**Scope: private + domain, never public.** Private is obvious -- Relay is
+LAN-only by design. Domain is in scope because a managed work machine reports
+its network as Domain, not Private, and a private-only rule would leave
+exactly the silent failure this work exists to remove. Public stays blocked:
+Windows classifies unknown networks as Public by default, and a coffee-shop
+network has no business reaching a screen share. On a public-only network the
+banner says so and offers no button, because offering a fix Relay will not
+apply would be a lie.
+
+**Reads are a registry parse; only writes use COM.** Detection runs behind a
+UI banner and must not drag a COM rule enumeration (and `IEnumVARIANT`) into
+the always-on core's 10 MB budget. Windows stores every rule as one
+pipe-delimited string under
+`...\SharedAccess\Parameters\FirewallPolicy\FirewallRules`; reading needs no
+elevation and parsing it is a pure function, fixture-tested against strings
+captured from this machine and covered live by
+`crates/core/tests/firewall_live.rs`. Mutation goes through `INetFwPolicy2` in
+the elevated helper, and only ever `Add` one rule or `Remove` rules *by name*
+-- so nothing enumerates rules over COM anywhere. `INetFwRules::Remove` matches
+on name alone, which is why Relay's rule has a distinctive one, and why
+re-running the install replaces rather than accumulates (the dev machine had
+24 duplicate rules from `scripts/firewall-rules.ps1` across worktrees).
+
+### S22 measurements
+
+The probe was run against this machine's real rule store:
+
+```
+parsed 705 rules            (402 inbound Allow)
+policy: active_profiles=6 (Private|Public), firewall on, inbound blocked
+status: verdict=WillPrompt, our rule absent, 0 blocking, 24 stale
+```
+
+"24 stale" is 24 rules for a `relay-share.exe` in another worktree or the
+installed copy -- correctly *not* counted as governing this binary, which is
+the distinction the verdict depends on.
+
+The harness was then proved to enforce the promise rather than just describe
+it. `machine-snapshot.ps1` captures every firewall rule naming a Relay binary
+and `snapshot-diff.ps1` diffs them as a new section; a planted leftover rule
+produces:
+
+```
+| firewall rules | 24 | 25 | 1 |
+
+**FAIL -- 1 leftover difference(s):**
+- `added` v2.33|Action=Allow|...|App=...\Relay\relay-share.exe|Name=Relay (relay-share)|...
+```
+
+with exit code 1. Identical snapshots still PASS. `vm-cycle.ps1`'s opt-in
+phase now adds the rule, asserts `our rule: present`, and asserts
+`firewall.json` was written -- so the uninstall phase has something real to
+remove and the final diff has something real to catch.
+
+### Gates (S22)
+- `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -D warnings` clean.
+  (`opusic-sys` needs `cmake`, which is installed on this machine but not on
+  `PATH`; prepend `C:\Program Files\CMake\bin` before running the workspace
+  gates.)
+- Workspace tests: **446 passed, 0 failed**, including 19 new `firewall` unit
+  tests, 5 in `firewall_live` and 2 new `uninstall` tests.
+- UI tests: **178 passed** (8 new, covering blocked / will-prompt / declined
+  UAC / public network / unreadable probe / permissive).
+- Footprint gate **PASS**: `relay-core.exe` 1.57 MB (up from 1.31 -- the
+  firewall COM and registry code), idle RSS 6.87 MB peak, private working set
+  0.89 MB, CPU 0 %. Budget 10 MB / 0.5 %.
 
 **The uninstall plan is a pure function of a probed `MachineState`.** Only
 `probe()` reads the machine; the plan, its ordering and its rendering are pure,

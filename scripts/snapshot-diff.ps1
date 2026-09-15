@@ -4,7 +4,8 @@
   promise.
 
 .DESCRIPTION
-  Compares registry values, files, services and drivers between a "before"
+  Compares registry values, files, firewall rules, services and drivers
+  between a "before"
   and an "after" snapshot from machine-snapshot.ps1.
 
   The verdict is PASS only when the difference is empty, or empty except for
@@ -107,6 +108,10 @@ $regDiff = Compare-Section 'registry' $b.registry $a.registry { param($e) Key-Re
 $fileDiff = Compare-Section 'files'   $b.files    $a.files    { param($e) Key-File $e }     @('bytes', 'dir')
 $svcDiff = Compare-Section 'services' $b.services $a.services { param($e) $e.name }         @('status')
 $drvDiff = Compare-Section 'drivers'  $b.drivers  $a.drivers  { param($e) $e.name }         @('path', 'state')
+# A firewall rule Relay added and failed to remove is a leftover trace, and it
+# is one the registry section cannot see: the rule store lives under a key the
+# targeted registry capture does not walk.
+$fwDiff  = Compare-Section 'firewall' $b.firewall $a.firewall { param($e) $e.rule }         @()
 
 # The data root is the one thing the user is offered a choice about.
 $dataRoot = if ($a.data_root) { $a.data_root } else { $b.data_root }
@@ -114,7 +119,7 @@ function Is-DataRoot { param($key) $dataRoot -and $key -like ("{0}*" -f $dataRoo
 
 $allowed = @()
 $failures = @()
-foreach ($d in @($regDiff) + @($fileDiff) + @($svcDiff) + @($drvDiff)) {
+foreach ($d in @($regDiff) + @($fileDiff) + @($svcDiff) + @($drvDiff) + @($fwDiff)) {
     if ($KeepData -and (Is-DataRoot $d.key)) { $allowed += $d } else { $failures += $d }
 }
 
@@ -131,6 +136,7 @@ $lines += "| registry values | $($counts['registry'].before) | $($counts['regist
 $lines += "| file entries | $($counts['files'].before) | $($counts['files'].after) | $(@($fileDiff).Count) |"
 $lines += "| relay services | $($counts['services'].before) | $($counts['services'].after) | $(@($svcDiff).Count) |"
 $lines += "| relay drivers | $($counts['drivers'].before) | $($counts['drivers'].after) | $(@($drvDiff).Count) |"
+$lines += "| firewall rules | $($counts['firewall'].before) | $($counts['firewall'].after) | $(@($fwDiff).Count) |"
 $lines += ""
 if ($pass) {
     $lines += if (@($allowed).Count -eq 0) {

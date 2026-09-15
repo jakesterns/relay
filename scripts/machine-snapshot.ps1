@@ -185,6 +185,26 @@ foreach ($d in (Get-CimInstance Win32_SystemDriver -ErrorAction SilentlyContinue
                 Where-Object { $_.Name -match 'relay' -or $_.PathName -match 'relay' })) {
     $drivers += [pscustomobject]@{ name = $d.Name; path = $d.PathName; state = $d.State }
 }
+# Firewall rules. Relay adds exactly one -- an inbound Allow for
+# relay-share.exe -- and the uninstaller removes it, so a leftover rule is a
+# leftover trace like any registry value. Read straight from the policy store
+# rather than through Get-NetFirewallRule: it is the same string the app
+# parses, it needs no elevation, and it carries the program path so a rule for
+# another worktree's binary is distinguishable from the installed one's.
+$firewall = @()
+$fwKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules'
+try {
+    $fwProps = Get-ItemProperty -LiteralPath $fwKey -ErrorAction Stop
+    foreach ($prop in $fwProps.PSObject.Properties) {
+        if ($prop.Value -isnot [string]) { continue }
+        if ($prop.Value -notmatch 'relay') { continue }
+        # Key on the rule's content, not its GUID value name: Windows mints a
+        # fresh GUID each time a rule is created, so keying on the name would
+        # report a re-added identical rule as a difference.
+        $firewall += [pscustomobject]@{ rule = $prop.Value }
+    }
+} catch { $firewall = @() }
+
 $services = @()
 foreach ($s in (Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'relay' })) {
     $services += [pscustomobject]@{ name = $s.Name; status = [string]$s.Status }
@@ -247,6 +267,7 @@ $snapshot = [pscustomobject]@{
     install_dir= $InstallDir
     registry   = ($reg | Sort-Object key, name)
     files      = ($files | Sort-Object root, path)
+    firewall   = ($firewall | Sort-Object rule)
     drivers    = ($drivers | Sort-Object name)
     services   = ($services | Sort-Object name)
     sound_device_first = $defaultRender
@@ -260,4 +281,5 @@ Write-Host ("snapshot -> {0}" -f $Out)
 Write-Host ("  registry values : {0}" -f @($reg).Count)
 Write-Host ("  file entries    : {0}" -f @($files).Count)
 Write-Host ("  relay services  : {0}  drivers: {1}" -f @($services).Count, @($drivers).Count)
+Write-Host ("  firewall rules  : {0}" -f @($firewall).Count)
 if ($Broad) { Write-Host ("  broad exports   : {0}" -f @($broad.exports).Count) }

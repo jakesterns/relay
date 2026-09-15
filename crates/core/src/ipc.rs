@@ -145,6 +145,11 @@ pub enum Method {
     /// so it costs a short-lived child process -- call it when a screen opens,
     /// not on a timer.
     ShareCapabilities,
+    /// Will an inbound share connection actually reach `relay-share.exe`, or
+    /// is Windows Firewall dropping it? Read-only: a registry walk plus three
+    /// policy reads, no elevation and no prompt. Cheap enough to call when a
+    /// screen opens, but not on a timer.
+    FirewallStatus,
     /// Is the endpoint APO registered on the default render endpoint?
     /// Read-only registry probe.
     ApoStatus,
@@ -283,6 +288,10 @@ pub enum Reply {
     },
     Apo {
         status: crate::audio_apo::ApoStatus,
+    },
+    /// What Windows Firewall will do to an incoming share on this PC.
+    Firewall {
+        status: Box<crate::firewall::FirewallStatus>,
     },
     Vdevice {
         status: Box<crate::vdevice::VdeviceStatus>,

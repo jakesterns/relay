@@ -3,6 +3,14 @@
   Inspect, clean and create Windows Firewall rules for relay-share.exe.
 
 .DESCRIPTION
+  NOTE (S22, 2026-09-15): the product now handles this itself. Relay adds its
+  own inbound Allow rule through the elevated helper -- `relay-core firewall
+  status` reports the state, the installer's /FIREWALL switch and the Share /
+  Receive banners add the rule, and the uninstaller removes it. This script
+  stays because it is still the fastest way to clean up a *dev* machine, where
+  every worktree and build profile is a different path and the rules
+  accumulate; for an installed Relay, prefer `relay-core firewall`.
+
   relay-share.exe is the only Relay binary that touches the network (WebRTC on
   the LAN plus mDNS discovery); relay-core talks over a named pipe and never
   opens a socket. Windows prompts the first time a given *path* listens, and

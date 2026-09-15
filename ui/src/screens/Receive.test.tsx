@@ -148,3 +148,89 @@ describe("codec capability", () => {
     expect(screen.queryByText(/No HEVC decoder on this PC/)).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The state this whole feature exists for. A dismissed Windows prompt writes
+ * a permanent Block rule, and every symptom afterwards points at the network:
+ * the code is accepted, discovery finds nothing, the share just waits. These
+ * pin that Relay names the real cause instead.
+ */
+describe("firewall capability", () => {
+  const blocked = {
+    state: "blocked" as const,
+    program: "C:\Relay\relay-share.exe",
+    rule_present: false, blocking_rules: 3, stale_rules: 0,
+    policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
+    unknown: false,
+  };
+
+  it("stays quiet when Relay is already allowed through", async () => {
+    const h = await mount();
+    expect(screen.queryByText(/Windows Firewall/)).not.toBeInTheDocument();
+    h.expectClean();
+  });
+
+  it("calls a block a block, not a network fault", async () => {
+    core.firewall = blocked;
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.getByText("Windows Firewall is blocking Relay.")).toBeInTheDocument();
+    expect(screen.getByText(/3 rules were created/)).toBeInTheDocument();
+    expect(screen.getByText(/not a network fault/)).toBeInTheDocument();
+  });
+
+  it("warns before the prompt appears, because declining it is the trap", async () => {
+    core.firewall = { ...blocked, state: "will_prompt", blocking_rules: 0 };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.getByText(/Windows will ask whether to allow Relay/)).toBeInTheDocument();
+    expect(screen.getByText(/blocks Relay permanently/)).toBeInTheDocument();
+  });
+
+  it("fixes it through the elevated helper and then goes quiet", async () => {
+    core.firewall = blocked;
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: /Allow Relay through Windows Firewall/ }));
+    await settle();
+    expect(tauri.lastCall("run_elevated")?.args).toEqual({ op: "allow_firewall" });
+    // The banner re-probes and disappears — the fix is verified, not assumed.
+    expect(screen.queryByText("Windows Firewall is blocking Relay.")).not.toBeInTheDocument();
+  });
+
+  it("treats a declined UAC prompt as an answer and says what still works", async () => {
+    core.firewall = blocked;
+    core.elevation = { decline: true };
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: /Allow Relay through Windows Firewall/ }));
+    await settle();
+    expect(screen.getByText(/You declined the Windows permission prompt, so nothing was changed/)).toBeInTheDocument();
+    expect(screen.getByText(/Relay still works everywhere it can/)).toBeInTheDocument();
+    // Still blocked, and still saying so.
+    expect(screen.getByText("Windows Firewall is blocking Relay.")).toBeInTheDocument();
+  });
+
+  it("points at the Windows network setting on a public network, with no button", async () => {
+    core.firewall = { ...blocked, state: "public_network", blocking_rules: 0, policy: { active_profiles: 4, enabled: true, default_inbound_block: true } };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.getByText("This network is set to Public.")).toBeInTheDocument();
+    // Relay does not add public-profile rules, so offering the fix would lie.
+    expect(screen.queryByRole("button", { name: /Allow Relay through/ })).not.toBeInTheDocument();
+  });
+
+  it("says nothing at all when the probe could not read the firewall", async () => {
+    core.firewall = { ...blocked, unknown: true };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.queryByText(/Windows Firewall/)).not.toBeInTheDocument();
+  });
+
+  it("stays quiet on a permissive network even with no rule", async () => {
+    core.firewall = { ...blocked, state: "permissive", blocking_rules: 0 };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.queryByText(/Windows Firewall/)).not.toBeInTheDocument();
+  });
+});

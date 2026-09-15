@@ -182,10 +182,38 @@ export interface Preview { original: string; processed: string; sample_rate: num
 export interface ShareCapabilities {
   can_share: boolean; can_receive: boolean; adapters: string[]; encoders: string[]; decoders: string[];
 }
+/** Mirror of relay-core's `firewall::Verdict`. `blocked` is the one this
+ *  whole feature exists for: a Block rule written when somebody dismissed
+ *  Windows' prompt, which looks exactly like a dead network and is not. */
+export type FirewallState =
+  | "allowed" | "blocked" | "will_prompt" | "permissive" | "public_network" | "firewall_off";
+/** Mirror of relay-core's `firewall::Policy`. */
+export interface FirewallPolicy {
+  active_profiles: number; enabled: boolean; default_inbound_block: boolean;
+}
+/** Mirror of relay-core's `firewall::FirewallStatus` (`Reply::Firewall`). */
+export interface FirewallStatus {
+  state: FirewallState;
+  /** The relay-share.exe the verdict is about. */
+  program: string;
+  rule_present: boolean;
+  /** Block rules matching this exact binary on a connected profile. */
+  blocking_rules: number;
+  /** Rules for a relay-share.exe somewhere else (another worktree, an old
+   *  install). Harmless; shown only on a dev machine. */
+  stale_rules: number;
+  policy: FirewallPolicy;
+  /** Firewall state could not be read; every field above is a conservative
+   *  default and must not be reported as fact. */
+  unknown: boolean;
+}
+
 /** Mirror of relay-core's `elevate::ElevatedOp` — the complete set of things
  *  the elevated helper will do. There is no free-form variant: this is the
  *  allow-list, and the core refuses anything else. */
-export type ElevatedOp = "install_apo" | "uninstall_apo" | "install_camera" | "uninstall_camera";
+export type ElevatedOp =
+  | "install_apo" | "uninstall_apo" | "install_camera" | "uninstall_camera"
+  | "allow_firewall" | "remove_firewall";
 
 /** Result of one `runElevated`. `declined` means the user dismissed the UAC
  *  prompt, which is a normal answer: nothing was attempted. */
@@ -542,6 +570,19 @@ export const api = {
       };
     }
     return invoke<ShareCapabilities>("share_capabilities");
+  },
+  /** Will an inbound share reach this PC, or is Windows Firewall dropping
+   *  it? Read-only and unelevated. Call it when a screen opens. */
+  async firewallStatus(): Promise<FirewallStatus> {
+    if (!isTauri()) {
+      return {
+        state: "allowed", program: "C:\\Users\\you\\AppData\\Local\\Relay\\relay-share.exe",
+        rule_present: true, blocking_rules: 0, stale_rules: 0,
+        policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
+        unknown: false,
+      };
+    }
+    return invoke<FirewallStatus>("firewall_status");
   },
   /** Read-only probe: is the Relay APO on the default render endpoint? */
   async apoStatus(): Promise<ApoStatus> {

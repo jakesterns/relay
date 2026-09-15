@@ -8,6 +8,9 @@
 ;
 ; Command-line switches (silent installs, and the VM acceptance cycle):
 ;   installer   /AUTOSTART    also enable start-at-login
+;   installer   /FIREWALL     also add the inbound firewall rule for
+;                             relay-share.exe (raises one UAC prompt unless
+;                             the installer is already elevated)
 ;   uninstaller /KEEPDATA     keep the profiles and hardware library (default)
 ;   uninstaller /DELETEDATA   delete them too
 ;
@@ -40,6 +43,30 @@
     DetailPrint "Enabling start at login..."
     nsExec::ExecToLog '"$INSTDIR\relay-core.exe" autostart on'
     Pop $0
+  ${EndIf}
+
+  ; The inbound firewall rule for relay-share.exe. Opt-in and off by default,
+  ; for the same reason autostart is: this installer runs per-user and
+  ; unelevated, and reaching for an administrator token the user did not offer
+  ; would be exactly the behaviour Relay promises not to have.
+  ;
+  ; So there is no silent grab here. /FIREWALL is for silent and managed
+  ; installs, where the deploying admin has decided; it goes through
+  ; relay-elevate.exe, which raises a normal UAC prompt when the installer is
+  ; not already elevated, and declining it changes nothing. Interactively the
+  ; app asks instead, at the moment it matters: the Share and Receive screens
+  ; detect the blocked state and offer the same one-click fix.
+  ;
+  ; Either way the rule is recorded in firewall.json and removed by the
+  ; uninstaller, so it cannot survive a clean-VM diff.
+  ${GetOptions} $CMDLINE "/FIREWALL" $0
+  ${IfNot} ${Errors}
+    DetailPrint "Allowing Relay through Windows Firewall..."
+    nsExec::ExecToLog '"$INSTDIR\relay-core.exe" elevate run allow-firewall'
+    Pop $0
+    ${If} $0 != 0
+      DetailPrint "Firewall rule not added (exit $0). Relay still runs; the app will offer to add it."
+    ${EndIf}
   ${EndIf}
 
   ; Start the always-on core so the UI has live data the moment it opens.
@@ -85,9 +112,9 @@
 
   ${If} ${FileExists} "$INSTDIR\relay-core.exe"
     DetailPrint "Restoring Windows settings and removing Relay's components..."
-    ; Windows may prompt for permission here, and only here: the endpoint APO
-    ; and the virtual camera are the two things registered machine-wide, and
-    ; only if the user opted in to them.
+    ; Windows may prompt for permission here, and only here: the endpoint APO,
+    ; the virtual camera and the firewall rule are the three things registered
+    ; machine-wide, and only if the user opted in to them.
     nsExec::ExecToLog '"$INSTDIR\relay-core.exe" uninstall --silent $R1'
     Pop $0
     ${If} $0 != 0

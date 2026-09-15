@@ -10,21 +10,23 @@
 //! 2. shut the core down                (it restores audio/display on the way out)
 //! 3. restore the endpoint FX store     (from apo-backup\<endpoint>.json, byte-for-byte)
 //! 4. delete the camera COM keys        (exactly the keys in installed.json)
-//! 5. remove the Run key value          (HKCU, the one value)
-//! 6. delete the program files          (NSIS owns this; listed for the diff)
-//! 7. delete the data paths             (only if the user says so)
+//! 5. remove the firewall rule          (the one rule named in firewall.json)
+//! 6. remove the Run key value          (HKCU, the one value)
+//! 7. delete the program files          (NSIS owns this; listed for the diff)
+//! 8. delete the data paths             (only if the user says so)
 //! ```
 //!
-//! Step 7 deletes the paths [`Paths::data_paths`] names rather than the data
+//! Step 8 deletes the paths [`Paths::data_paths`] names rather than the data
 //! root, because Tauri's per-user NSIS installer puts Relay's binaries in
 //! that same folder — `%LOCALAPPDATA%\Relay` is both the install directory
 //! and the data root, so recursively deleting it would delete the running
-//! executable out from under step 6.
+//! executable out from under step 7.
 //!
-//! Steps 3 and 4 are the ones that touch HKLM, so they need elevation; the
-//! plan says so per step and the executor reports what it had to skip rather
-//! than failing the whole uninstall. Steps 1–2 and 5–7 are per-user and work
-//! from a plain NSIS uninstaller.
+//! Steps 3, 4 and 5 are the machine-wide ones — two HKLM registrations and
+//! the firewall rule — so they need elevation; the plan says so per step and
+//! the executor reports what it had to skip rather than failing the whole
+//! uninstall. Steps 1–2 and 6–8 are per-user and work from a plain NSIS
+//! uninstaller.
 //!
 //! [`MachineState`] is the only part that reads the machine. Everything
 //! below it — the plan, its ordering, its rendering — is a pure function of
@@ -50,6 +52,8 @@ pub enum StepKind {
     RestoreApo,
     /// Delete the camera media source's COM registration.
     RemoveVcam,
+    /// Remove the inbound Windows Firewall rule for `relay-share.exe`.
+    RemoveFirewallRule,
     /// Remove `HKCU\...\Run\Relay`.
     RemoveRunKey,
     /// Delete the installed binaries (the NSIS uninstaller's own job).
@@ -61,7 +65,7 @@ pub enum StepKind {
 impl StepKind {
     /// HKLM is involved, so a non-elevated uninstaller cannot do it.
     pub fn needs_elevation(self) -> bool {
-        matches!(self, StepKind::RestoreApo | StepKind::RemoveVcam)
+        matches!(self, StepKind::RestoreApo | StepKind::RemoveVcam | StepKind::RemoveFirewallRule)
     }
 
     /// Plain-English name for the dry-run listing and the Settings card.
@@ -71,6 +75,7 @@ impl StepKind {
             StepKind::StopCore => "Stop the core (restores your audio and display settings)",
             StepKind::RestoreApo => "Restore the endpoint audio chain",
             StepKind::RemoveVcam => "Unregister the virtual camera",
+            StepKind::RemoveFirewallRule => "Remove the Windows Firewall rule",
             StepKind::RemoveRunKey => "Remove the start-at-login entry",
             StepKind::RemoveFiles => "Delete the program files",
             StepKind::RemoveData => "Delete your profiles and settings",
@@ -149,6 +154,10 @@ pub struct MachineState {
     pub apo_backup: Option<PathBuf>,
     /// Camera COM keys recorded in `installed.json`, deepest first.
     pub vcam_keys: Vec<String>,
+    /// Relay's firewall rule is on the machine, or `firewall.json` records
+    /// that we added one. Carries the rule name, which is the handle the
+    /// removal uses.
+    pub firewall_rule: Option<String>,
     /// `HKCU\...\Run\Relay` exists.
     pub run_key: bool,
     /// Directory the running binaries live in.
@@ -212,6 +221,14 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
         }
     }
 
+    // Present when the rule is on the machine *or* when the record says we
+    // added one — either alone is enough to have something to clean up, and
+    // a rule left behind would fail the clean-VM diff like any other trace.
+    steps.push(Step {
+        kind: StepKind::RemoveFirewallRule,
+        target: state.firewall_rule.clone().unwrap_or_else(|| "not installed".into()),
+        present: state.firewall_rule.is_some(),
+    });
     steps.push(Step {
         kind: StepKind::RemoveRunKey,
         target: format!(r"HKCU\{}\{}", crate::autostart::RUN_KEY, crate::autostart::VALUE_NAME),
@@ -334,6 +351,7 @@ mod imp {
             apo_endpoint: if apo.installed { apo.endpoint } else { None },
             apo_backup,
             vcam_keys,
+            firewall_rule: firewall_rule(paths),
             run_key: crate::autostart::is_enabled().unwrap_or(false),
             install_dir: std::env::current_exe()
                 .ok()
@@ -342,6 +360,25 @@ mod imp {
             core_running: core_is_running(),
             ui_running: process_running("relay-ui.exe"),
         }
+    }
+
+    /// The firewall rule to remove, if there is one. Checks the live rules
+    /// first (the authoritative answer) and falls back to the record, so a
+    /// rule that was added and then deleted by hand does not leave the
+    /// uninstaller claiming work it cannot do — and a record with no rule
+    /// still gets its file cleaned up.
+    fn firewall_rule(paths: &Paths) -> Option<String> {
+        let live = crate::firewall::share_program()
+            .ok()
+            .map(|p| crate::firewall::status(&p))
+            .filter(|s| s.rule_present)
+            .map(|s| format!("{} — {}", crate::firewall::RULE_NAME, s.program));
+        live.or_else(|| {
+            crate::firewall::load_record(&paths.firewall_file())
+                .ok()
+                .flatten()
+                .map(|r| format!("{} — {}", r.rule_name, r.program))
+        })
     }
 
     fn first_backup(dir: &Path) -> Option<PathBuf> {
@@ -405,6 +442,9 @@ mod imp {
                             other => other,
                         }
                     }),
+                    StepKind::RemoveFirewallRule => {
+                        elevated_step(|| crate::firewall::uninstall_live(paths).map(|_| ()))
+                    }
                     StepKind::RemoveRunKey => run_step(crate::autostart::set(false)),
                     // NSIS deletes its own install tree after this process
                     // exits; doing it here would delete the running exe.
@@ -484,12 +524,14 @@ mod imp {
 #[cfg(windows)]
 pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
     use crate::elevate::{ElevatedOp, LaunchError};
-    crate::elevate::run(paths, &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera]).map_err(
-        |e| match e {
-            LaunchError::Declined => anyhow::anyhow!("{e}"),
-            LaunchError::Other(e) => e,
-        },
+    crate::elevate::run(
+        paths,
+        &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera, ElevatedOp::RemoveFirewall],
     )
+    .map_err(|e| match e {
+        LaunchError::Declined => anyhow::anyhow!("{e}"),
+        LaunchError::Other(e) => e,
+    })
 }
 
 #[cfg(not(windows))]
@@ -596,6 +638,7 @@ mod tests {
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}\InprocServer32".into(),
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}".into(),
             ],
+            firewall_rule: Some(r"Relay (relay-share) — C:\d\Relay\relay-share.exe".into()),
             run_key: true,
             install_dir: Some(PathBuf::from(r"C:\d\Relay")),
             // The per-user installer shares the folder with the data root, so
@@ -659,12 +702,48 @@ mod tests {
             StepKind::StopCore,
             StepKind::RestoreApo,
             StepKind::RemoveVcam,
+            StepKind::RemoveFirewallRule,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
             StepKind::RemoveData,
         ] {
             assert!(plan.steps.iter().any(|s| s.kind == kind), "{kind:?} missing from the listing");
         }
+    }
+
+    /// A firewall rule is a machine-wide change like the two HKLM
+    /// components, so it has to appear in the plan, name itself, and ask for
+    /// the same elevation. A rule left behind would fail the clean-VM diff.
+    #[test]
+    fn the_firewall_rule_is_planned_and_needs_elevation() {
+        let state = everything_installed();
+        let plan = plan_from(&state, false);
+        let step = plan
+            .steps
+            .iter()
+            .find(|s| s.kind == StepKind::RemoveFirewallRule)
+            .expect("no firewall step in the plan");
+        assert!(step.present);
+        assert!(step.target.contains("Relay (relay-share)"), "{}", step.target);
+        assert!(step.target.contains("relay-share.exe"), "{}", step.target);
+        assert!(plan.needs_elevation());
+        assert!(plan
+            .lines()
+            .iter()
+            .any(|l| l.contains("Windows Firewall") && l.contains("needs admin")));
+    }
+
+    /// A machine that never added a rule still lists the step, as "nothing to
+    /// do" — the listing must read the same before and after opt-in — and
+    /// must not ask for a UAC prompt it has no use for.
+    #[test]
+    fn no_firewall_rule_means_nothing_to_do_and_no_prompt() {
+        let state = MachineState { run_key: true, ..Default::default() };
+        let plan = plan_from(&state, false);
+        let step = plan.steps.iter().find(|s| s.kind == StepKind::RemoveFirewallRule).unwrap();
+        assert!(!step.present);
+        assert_eq!(step.target, "not installed");
+        assert!(!plan.needs_elevation(), "an absent firewall rule must not trigger elevation");
     }
 
     #[test]
@@ -707,6 +786,8 @@ mod tests {
     fn only_the_hklm_steps_ask_for_elevation() {
         assert!(StepKind::RestoreApo.needs_elevation());
         assert!(StepKind::RemoveVcam.needs_elevation());
+        // Firewall policy is machine-wide too.
+        assert!(StepKind::RemoveFirewallRule.needs_elevation());
         for kind in [
             StepKind::StopUi,
             StepKind::StopCore,
