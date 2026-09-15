@@ -72,6 +72,14 @@ Prepend either to `PATH` for the session before building anything touching
 `crates/capture`. The standalone install is the tidier choice; the BuildTools
 one is a working fallback if it is ever missing.
 
+**WASAPI loopback of a silent endpoint delivers no packets at all.** This is
+the dangerous one, because it does not fail — it quietly produces a zero-filled
+audio track and plausible-looking latency numbers measured over nothing. S2
+nearly recorded a bogus p99 from two passes that were measuring silence. If you
+are benchmarking or validating any audio path, play actual audio through the
+default endpoint for the duration and assert the packet count, the way
+`scripts/dual-audio-check.ps1` does with a generated 440 Hz tone.
+
 **Windows Firewall blocks `relay-share.exe` by path.** Windows prompts the
 first time a given executable path opens a socket, and dismissing that prompt
 writes a permanent Block rule. Every worktree and every build profile is a
