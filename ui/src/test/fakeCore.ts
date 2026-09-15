@@ -9,6 +9,7 @@
  */
 import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
+  ElevatedOp,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, VdeviceStatus,
 } from "../lib/ipc";
@@ -27,6 +28,9 @@ export interface FakeCore {
   vdevice: VdeviceStatus;
   capabilities: ShareCapabilities;
   autostart: boolean;
+  /** How the next UAC prompt is answered. `decline` is a normal answer, not
+   *  an error: Windows resolves, nothing was attempted, nothing changed. */
+  elevation: { decline: boolean };
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -122,6 +126,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
     },
     autostart: false,
+    elevation: { decline: false },
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
@@ -213,6 +218,42 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     }),
     share_capabilities: () => structuredClone(core.capabilities),
     apo_status: () => structuredClone(core.apo),
+    // The two halves of the S6 flow. `elevation_plan` is read-only and is
+    // what the user reads *before* Windows asks; `run_elevated` is the only
+    // thing that changes the machine.
+    elevation_plan: (a) => {
+      const cam = "HKLM\SOFTWARE\Classes\CLSID\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}";
+      const tail = ["", "Windows will ask for permission before any of this happens. Decline and nothing on this PC changes."];
+      switch (a.op as ElevatedOp) {
+        case "install_apo":
+          return [
+            "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\ep:dac\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
+            "HKLM\SOFTWARE\Classes\CLSID\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
+            "backup: %LOCALAPPDATA%\Relay\apo-backup\ep:dac.json (written before anything is changed)",
+            ...tail,
+          ];
+        case "install_camera":
+          return [cam, cam + "\InprocServer32", ...tail];
+        case "uninstall_apo":
+          return ["[x] Restore the endpoint audio chain — ep:dac (needs admin)", ...tail];
+        default:
+          return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
+      }
+    },
+    run_elevated: (a) => {
+      const op = a.op as ElevatedOp;
+      if (core.elevation.decline) {
+        return {
+          declined: true, ok: false,
+          lines: ["Windows permission was declined. Nothing on this PC was changed."],
+        };
+      }
+      if (op === "install_apo") core.apo = { installed: true, endpoint: "ep:dac", running: true };
+      if (op === "uninstall_apo") core.apo = { installed: false, endpoint: null, running: false };
+      if (op === "install_camera") core.vdevice.camera_registered = true;
+      if (op === "uninstall_camera") core.vdevice.camera_registered = false;
+      return { declined: false, ok: true, lines: [`${op}: done.`] };
+    },
     install_apo: () => {
       core.apo = { installed: true, endpoint: "ep:dac", running: true };
     },
@@ -300,6 +341,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "set_recording_settings", "start_receive", "stop_receive", "list_hardware",
   "save_hardware", "delete_hardware", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "apo_status", "install_apo", "uninstall_apo",
+  "elevation_plan", "run_elevated",
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",
   "launch_uninstaller", "discover_receivers",
