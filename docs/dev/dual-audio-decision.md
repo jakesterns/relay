@@ -76,6 +76,48 @@ should be "it works", not "it is silent". Routing is the opt-in.
 
 ## Cost
 
-The mic track is a second WASAPI capture client, a second Opus encoder and
-one extra sum per output frame on the receiver. Measured numbers are in
-`docs/plans/M4-share.md`'s Measurements table, against the M4 baseline.
+The mic track is a second WASAPI capture client, a second Opus encoder and one
+extra sum per output frame on the receiver. Measured against M4's baseline in
+`docs/plans/M4-share.md` (4 alternating reps, loopback, 1440p60):
+**+0.05 ms p50 / +0.57 ms p99** on capture→arrival, encode mean unchanged,
+60 fps and zero drops throughout. Harness: `scripts/dual-audio-check.ps1`.
+
+One finding is worth keeping, because it was not obvious and it is the whole
+reason the second encoder is configured differently from the first. The mic
+track first shipped with the program mix's encoder — 160 kb/s stereo,
+`Application::Audio`, libopus's default complexity — and that cost the **video**
+path a clean, repeatable regression: encode mean 5.12 → 5.86 ms and
+capture→arrival p99 3.3 → 7.6 ms across three reps, while the audio
+packetization numbers showed no separation at all. The cost was CPU
+contention on the sender, not the audio pipeline. A microphone is speech and
+does not need a music-grade encoder: `OpusProfile::voice()` (64 kb/s,
+`Application::Voip`, complexity 5) removed the regression entirely and cut the
+track from ~160 kb/s to ~50 kb/s. The program mix deliberately leaves
+complexity at libopus's default (`complexity: None`) so the single-track path
+is byte-for-byte what M4 measured.
+
+### Measurement trap
+
+WASAPI loopback of a **silent** render endpoint delivers no packets at all —
+not silence, nothing. A quiet desktop therefore makes the program track read
+zero packets and any comparison against it meaningless. Two measurement passes
+were thrown away before this was spotted; `scripts/dual-audio-check.ps1` now
+plays a generated tone through the default endpoint throughout and asserts
+every run carried the packet count it should have.
+
+## Containers
+
+Both recording containers carry both tracks (S4 landed MKV alongside this
+work; the muxers were merged here rather than in `main`):
+
+| | program mix | microphone | labelled by |
+|---|---|---|---|
+| fMP4 | track 2 | track 3 | `hdlr` name |
+| MKV | track 2 | track 3 | Matroska `Name` |
+
+Verified end to end with ffprobe on real 20 s loopback recordings in both
+containers: three streams each, both audio streams Opus 48 kHz stereo, tagged
+`Relay Audio` and `Relay Microphone`, zero recorder drops. The two tracks
+carry genuinely different audio — the program track measured peak −20.7 dB /
+RMS −23.8 dB (the test tone's sine crest factor) against the mic's −14.3 dB /
+−33.1 dB.
