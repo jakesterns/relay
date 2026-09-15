@@ -405,6 +405,27 @@ async fn uninstall_plan(keep_data: bool) -> CmdResult<Vec<String>> {
     }
 }
 
+/// What an elevated install/removal would change, before the UAC prompt.
+#[tauri::command]
+async fn elevation_plan(op: relay_core::elevate::ElevatedOp) -> CmdResult<Vec<String>> {
+    match call(Method::ElevationPlan { op }).await? {
+        Reply::DryRun { lines } => Ok(lines),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// Raise the UAC prompt and run one op. Declining is not an error — it comes
+/// back as `declined: true` with the sentence that says nothing changed.
+#[tauri::command]
+async fn run_elevated(op: relay_core::elevate::ElevatedOp) -> CmdResult<serde_json::Value> {
+    match call(Method::RunElevated { op }).await? {
+        Reply::Elevation { declined, ok, lines } => Ok(serde_json::json!({
+            "declined": declined, "ok": ok, "lines": lines,
+        })),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn launch_uninstaller() -> CmdResult<()> {
     match call(Method::LaunchUninstaller).await? {
@@ -555,6 +576,8 @@ pub fn run() {
             install_vcam,
             uninstall_vcam,
             uninstall_plan,
+            elevation_plan,
+            run_elevated,
             launch_uninstaller,
             search_catalog,
             add_headset_from_catalog,

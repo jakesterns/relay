@@ -4,6 +4,7 @@
     "externalBin": [
       "binaries/relay-core",
       "binaries/relay-svc",
+      "binaries/relay-elevate",
       "binaries/relay-share",
       "binaries/relay-preview"
     ],

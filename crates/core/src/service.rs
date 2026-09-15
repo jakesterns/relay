@@ -1222,6 +1222,23 @@ impl IpcHandler {
             Method::InstallVcam | Method::UninstallVcam => {
                 Reply::Error { message: "Windows only".into() }
             }
+            Method::ElevationPlan { op } => {
+                let paths = g.paths.clone();
+                drop(g);
+                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, op) }
+            }
+            // Handled ahead of this match (it blocks on a UAC prompt), and
+            // only reachable if that dispatch is ever removed.
+            #[cfg(windows)]
+            Method::RunElevated { op } => {
+                let paths = g.paths.clone();
+                drop(g);
+                self.run_elevated(&paths, op)
+            }
+            #[cfg(not(windows))]
+            Method::RunElevated { .. } => {
+                Reply::Error { message: "Elevated installs are Windows-only".into() }
+            }
             Method::UninstallPlan { keep_data } => {
                 let paths = g.paths.clone();
                 drop(g);
@@ -1251,8 +1268,54 @@ impl IpcHandler {
 }
 
 #[cfg(windows)]
+impl IpcHandler {
+    /// Ask for administrator rights and run one op in the helper.
+    ///
+    /// Declining is not an error: the reply carries `declined: true` and the
+    /// plainest sentence we have, because the whole point of the prompt is
+    /// that saying no must be safe and legible.
+    fn run_elevated(&self, paths: &crate::config::Paths, op: crate::elevate::ElevatedOp) -> Reply {
+        match crate::elevate::run(paths, &[op]) {
+            Ok(response) => {
+                let lines = response.lines();
+                for line in &lines {
+                    let _ = self.events.send(Event::Notice { text: line.clone() });
+                }
+                Reply::Elevation { declined: false, ok: response.ok(), lines }
+            }
+            Err(crate::elevate::LaunchError::Declined) => Reply::Elevation {
+                declined: true,
+                ok: false,
+                lines: vec![
+                    "Nothing on this PC was changed. You declined the Windows permission prompt."
+                        .into(),
+                ],
+            },
+            Err(crate::elevate::LaunchError::Other(e)) => {
+                Reply::Error { message: format!("{e:#}") }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 impl crate::ipc::server::Handler for IpcHandler {
     async fn handle(&self, method: Method) -> Reply {
+        // The elevated helper blocks on a UAC prompt the user may leave on
+        // screen for a minute. The core is a single-threaded runtime, so that
+        // wait goes to the blocking pool instead of stopping focus applies,
+        // share stats and every other client.
+        if let Method::RunElevated { op } = method {
+            let paths = self.inner.lock().paths.clone();
+            let handler = IpcHandler {
+                inner: self.inner.clone(),
+                shutdown: self.shutdown.clone(),
+                events: self.events.clone(),
+            };
+            return tokio::task::spawn_blocking(move || handler.run_elevated(&paths, op))
+                .await
+                .unwrap_or_else(|e| Reply::Error { message: format!("elevation task: {e}") });
+        }
         self.handle_sync(method)
     }
 }
