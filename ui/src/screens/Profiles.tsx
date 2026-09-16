@@ -93,7 +93,7 @@ export function Profiles() {
         </div>
         <OfflineBanner />
         <div className="stat">
-          <div><label>Memory</label><div className="v">{fmtMb(fp.rss_bytes)}<u>MB</u></div><div className="hint">Core service only</div></div>
+          <div><label>Memory</label><div className="v">{fmtMb(fp.rss_bytes)}<u>MB</u></div><div className="hint">Background part of Relay</div></div>
           <div><label>CPU</label><div className="v">{fp.cpu_percent.toFixed(1)}<u>%</u></div><div className="hint">{active ? "Profile active" : "Waiting for a game"}</div></div>
           <div><label>Audio chain</label><div className="v">{chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Exclusive"}</div><div className="hint">{chain === "bypass" ? "Pass-through · 0 ms" : chain === "active" ? "EQ + HRTF" : "Game bypasses the APO"}</div></div>
           <div><label>Display</label><div className="v">{state.display_state === "applied" ? "Applied" : "Default"}</div><div className="hint">{state.display_state === "applied" ? "Backup on disk" : "Windows settings"}</div></div>

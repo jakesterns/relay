@@ -177,7 +177,7 @@ function VirtualDeviceCard() {
   if (!vd) {
     return (
       <Card title="In calls">
-        <p className="note">{offline && !mock ? "Core offline — status unknown." : "Reading…"}</p>
+        <p className="note">{offline && !mock ? "Relay is not running — status unknown." : "Reading…"}</p>
       </Card>
     );
   }
@@ -285,7 +285,7 @@ export function Receive() {
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}
-        {mock && <p className="note">Preview only — the core service isn't running.</p>}
+        {mock && <p className="note">Preview only — Relay isn't running.</p>}
         <p className="note">The stream appears as a normal window. Nothing on this PC is changed.</p>
       </aside>
     </>

@@ -346,3 +346,17 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    worse than one with letterbox bars, because the point is to show exactly
    what the other side receives. */
 .preview .shot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+
+/* Backend notices (lib/core `notice` events). Bottom-right, stacked, never
+   modal: they report what already happened, so there is nothing to answer. */
+.toasts { position: fixed; right: 18px; bottom: 18px; z-index: 40; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; pointer-events: none; max-width: 380px; }
+.toast { background: var(--raised); border: 1px solid var(--line2); border-left: 2px solid var(--brass); border-radius: 6px; padding: 10px 13px; color: var(--ink); font-size: 12.5px; line-height: 1.45; box-shadow: 0 8px 24px rgba(0,0,0,.45); animation: toast-in .35s var(--ease) both; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+
+/* The offline banner carries a button now, so it needs to lay one out. */
+.offline span { flex: 1; }
+.offline .btn.tiny { flex: none; padding: 5px 10px; font-size: 11.5px; }
+/* "Starting…" is progress, not a fault: amber dot rather than the red one. */
+.offline.working { border-color: rgba(201,169,106,.3); }
+.offline.working i { background: var(--brass); }

@@ -3,7 +3,7 @@ import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Toggle } from "../c
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
-import { api, type ApoStatus, type ElevatedOp, type ElevationResult, type RecordingSettings, type VdeviceStatus } from "../lib/ipc";
+import { api, type ApoStatus, type ElevatedOp, type ElevationResult, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
   const { state, refresh, offline, mock } = useCore();
@@ -15,6 +15,8 @@ export function Settings() {
   const [restoring, setRestoring] = useState(false);
   const [restored, setRestored] = useState<string | null>(null);
   const [restoreErr, setRestoreErr] = useState<string | null>(null);
+  const [prefs, setPrefs] = useState<UiPrefs | null>(null);
+  const [prefsErr, setPrefsErr] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -24,6 +26,9 @@ export function Settings() {
     api.listPresets()
       .then((r) => { if (!cancelled) { setRecording(r.recording); setRecDirty(false); } })
       .catch(() => { if (!cancelled) setRecording(null); });
+    api.getUiPrefs()
+      .then((p) => { if (!cancelled) setPrefs(p); })
+      .catch(() => { if (!cancelled) setPrefs(null); });
     return () => { cancelled = true; };
   }, [offline]);
 
@@ -49,6 +54,12 @@ export function Settings() {
     } finally {
       setRestoring(false);
     }
+  };
+
+  const setClose = async (quit: boolean) => {
+    setPrefsErr(null);
+    try { setPrefs(await api.setUiPrefs({ close_action: quit ? "quit_relay" : "keep_running" })); }
+    catch (e) { setPrefsErr(String((e as { message?: string })?.message ?? e)); }
   };
 
   const editRecording = (patch: Partial<RecordingSettings>) => {
@@ -82,9 +93,34 @@ export function Settings() {
             onChange={autostart === null ? undefined : (v) => void toggleAutostart(v)}
             label="Start Relay at login"
             sub={autostart === null
-              ? (offline && !mock ? "Core offline — cannot read the setting." : "Reading…")
+              ? (offline && !mock ? "Relay is not running — cannot read the setting." : "Reading…")
               : "Adds one value under HKCU\\...\\CurrentVersion\\Run. Nothing else on your PC is changed; turning this off removes it."} />
           <ErrorNote text={autostartErr} onDismiss={() => setAutostartErr(null)} />
+        </Card>
+        <Card title="When you close the window">
+          {/* The honest line the background story needs. Relay is useful
+              precisely while its window is shut, so what stays running has to
+              be stated, not discovered. */}
+          <p className="p">
+            Relay keeps working after you close the window — that is how profiles
+            stay applied while you play, with the window costing nothing. What
+            keeps running is a small background part of Relay, about 7 MB of
+            memory and no measurable CPU when idle. Its icon is in the
+            notification area by the clock — Windows hides new icons at first,
+            so click the arrow there to see it, and drag it out to keep it in
+            view. Right-click it for Open Relay, Restore everything, and Quit
+            Relay.
+          </p>
+          <Toggle
+            on={prefs?.close_action === "quit_relay"}
+            onChange={prefs === null ? undefined : (v) => void setClose(v)}
+            label="Quit Relay completely when I close the window"
+            sub={prefs === null
+              ? (offline && !mock ? "Relay is not running — cannot read this setting." : "Reading…")
+              : prefs.close_action === "quit_relay"
+                ? "Closing the window stops Relay and restores your audio and display first. Profiles will not apply again until you open Relay."
+                : "Closing the window leaves Relay running so your profiles keep working. Quit Relay from the notification area to stop it."} />
+          {prefsErr && <div className="offline"><i />{prefsErr}</div>}
         </Card>
         <Card title="What Relay installs">
           <p className="p">Relay works at the OS and hardware layer only. It never injects into games, reads their memory, or changes your default devices. Two optional components need your explicit consent:</p>
@@ -93,7 +129,7 @@ export function Settings() {
         </Card>
         <Card title="Recording">
           {recording === null
-            ? <p className="note">{offline && !mock ? "Core offline — cannot read the settings." : "Reading…"}</p>
+            ? <p className="note">{offline && !mock ? "Relay is not running — cannot read the settings." : "Reading…"}</p>
             : (
               <div className="form">
                 <div className="field">
@@ -141,7 +177,7 @@ export function Settings() {
       </section>
       <aside className="side">
         <Card>
-          <Kv k="Core service" v={offline && !mock ? "Offline" : "Running"} />
+          <Kv k="Relay" v={offline && !mock ? "Offline" : "Running"} />
           <Kv k="Data folder" v={state.build?.data_dir ?? "—"} mono />
           <Kv k="Log file" v={state.build?.log_file ?? "—"} mono />
           <Kv k="Version" v={state.build?.version ?? "—"} mono />
@@ -184,7 +220,7 @@ function UninstallCard() {
             label="Keep my profiles and hardware library"
             sub="Your tuning work stays in %LOCALAPPDATA%\Relay so a reinstall picks it up. Turn this off to delete it too." />
           {lines === null
-            ? <p className="note">{offline && !mock ? "Core offline — cannot read the plan." : "Reading…"}</p>
+            ? <p className="note">{offline && !mock ? "Relay is not running — cannot read the plan." : "Reading…"}</p>
             : lines.map((l, i) => (
               l === ""
                 ? <div key={`gap-${i}`} style={{ height: 8 }} />
@@ -280,7 +316,7 @@ function ApoConsentRow() {
 
   const installed = status?.installed === true;
   const sub = status === null
-    ? (offline && !mock ? "Core offline — status unknown." : "Per-game EQ and spatial audio on one headset.")
+    ? (offline && !mock ? "Relay is not running — status unknown." : "Per-game EQ and spatial audio on one headset.")
     : installed
       ? `Installed on your headset endpoint${status.running ? " · active" : ""}. Only that endpoint carries it.`
       : "Per-game EQ and spatial audio on one headset. Not installed.";
@@ -335,7 +371,7 @@ function VdeviceConsentRow() {
     ? `Mic route: ${status.mic_targets[0].name}.`
     : "Mic: waiting on the signed driver; install VB-Cable for the interim route.";
   const sub = status === null
-    ? (offline && !mock ? "Core offline — status unknown." : "Show incoming shares as a webcam in calls.")
+    ? (offline && !mock ? "Relay is not running — status unknown." : "Show incoming shares as a webcam in calls.")
     : !status.camera_supported
       ? `Needs Windows 11 22H2+ (this PC: build ${status.windows_build ?? "?"}).${status.obs_virtualcam ? " OBS VirtualCam detected as a fallback." : ""}`
       : registered

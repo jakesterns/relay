@@ -235,6 +235,10 @@ export interface VdeviceStatus {
   consent: VdeviceConsent | null;
   elevated: boolean;
 }
+/** Mirror of `crates/core/src/uiprefs.rs`. */
+export type CloseAction = "keep_running" | "quit_relay";
+export interface UiPrefs { close_action: CloseAction }
+
 export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
 export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
 
@@ -400,6 +404,9 @@ const mockCatalog: CatalogEntry[] = [
   { name: "Beyerdynamic DT 770 Pro 80 Ohm", source: "oratory1990", rig: "", path: "oratory1990/over-ear/Beyerdynamic%20DT%20770%20Pro%2080%20Ohm" },
 ];
 
+/** Browser-mode stand-in for `settings.json`. */
+let mockUiPrefs: UiPrefs = { close_action: "keep_running" };
+
 export const api = {
   async status(): Promise<CoreState> {
     if (!isTauri()) return mockState;
@@ -436,6 +443,24 @@ export const api = {
   async listProcesses(): Promise<ProcessInfo[]> {
     if (!isTauri()) return mockProcesses;
     return invoke<ProcessInfo[]>("list_processes");
+  },
+  /** Start the core if it is not up, and wait for it to answer.
+   *
+   *  Resolves `true` when it had to launch one, `false` when a core was
+   *  already running. Rejects with a sentence written for a person — never a
+   *  command to type. Outside Tauri there is no core to start, and the mock
+   *  store is already "live", so this is a no-op. */
+  async startCore(): Promise<boolean> {
+    if (!isTauri()) return false;
+    return invoke<boolean>("start_core");
+  },
+  async getUiPrefs(): Promise<UiPrefs> {
+    if (!isTauri()) return structuredClone(mockUiPrefs);
+    return invoke<UiPrefs>("get_ui_prefs");
+  },
+  async setUiPrefs(prefs: UiPrefs): Promise<UiPrefs> {
+    if (!isTauri()) { mockUiPrefs = structuredClone(prefs); return structuredClone(mockUiPrefs); }
+    return invoke<UiPrefs>("set_ui_prefs", { prefs });
   },
   async getAutostart(): Promise<boolean> {
     if (!isTauri()) return mockAutostart;
@@ -716,6 +741,12 @@ export async function onCoreEvents(handlers: {
   replaySaved?: (s: ReplaySaved) => void;
   sourceChanged?: (s: SourceChangedData) => void;
   sharePreview?: (s: SharePreview) => void;
+  /** The shell began trying to start a core. */
+  starting?: () => void;
+  /** A core is up (it was already running, or the shell started one). */
+  started?: () => void;
+  /** The core could not be started; the text is ready to show as-is. */
+  startFailed?: (message: string) => void;
 }): Promise<() => void> {
   if (!isTauri()) return () => {};
   const { listen } = await import("@tauri-apps/api/event");
@@ -730,6 +761,9 @@ export async function onCoreEvents(handlers: {
     listen<ReplaySaved>("core://replay-saved", (e) => handlers.replaySaved?.(e.payload)),
     listen<SourceChangedData>("core://source-changed", (e) => handlers.sourceChanged?.(e.payload)),
     listen<SharePreview>("core://share-preview", (e) => handlers.sharePreview?.(e.payload)),
+    listen<void>("core://starting", () => handlers.starting?.()),
+    listen<void>("core://started", () => handlers.started?.()),
+    listen<string>("core://start-failed", (e) => handlers.startFailed?.(e.payload)),
   ]);
   return () => unlisteners.forEach((u) => u());
 }

@@ -123,6 +123,8 @@ struct Inner {
     audio_watch: bool,
     /// Share presets + recording settings (`presets.json`).
     presets: PresetStore,
+    /// App preferences, currently just what closing the window means.
+    prefs: crate::uiprefs::PrefsStore,
 }
 
 pub struct Service {
@@ -146,6 +148,7 @@ impl Service {
         }
 
         let presets = PresetStore::load(paths.presets_file())?;
+        let prefs = crate::uiprefs::PrefsStore::load(paths.settings_file());
         let library = HardwareStore::load(paths.hardware_file())?;
         let report = backends.hardware.probe(false);
         let connected = library.connected(&report);
@@ -179,6 +182,7 @@ impl Service {
             applied_audio: AudioChainState::Bypass,
             audio_watch: false,
             presets,
+            prefs,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -261,6 +265,11 @@ impl Service {
                         // last probe and does nothing when nothing changed.
                         Some(CoreEvent::HardwareChanged) => self.on_hardware_changed(),
                         Some(CoreEvent::SessionLock(locked)) => self.on_session_lock(locked),
+                        Some(CoreEvent::Tray(cmd)) => {
+                            if self.on_tray(cmd) {
+                                break;
+                            }
+                        }
                         Some(CoreEvent::Shutdown) | None => break,
                     }
                 }
@@ -277,6 +286,41 @@ impl Service {
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// Handle one notification-area menu pick. Returns `true` when the core
+    /// should stop; the caller breaks out of the loop and `run`'s teardown
+    /// does the restore, so quitting from the tray can never leave a game
+    /// profile applied.
+    fn on_tray(&self, cmd: crate::tray::TrayCommand) -> bool {
+        use crate::tray::TrayCommand;
+        match cmd {
+            TrayCommand::Open => {
+                #[cfg(windows)]
+                if let Err(e) = crate::launcher::open_ui() {
+                    warn!(error = %format!("{e:#}"), "could not open the Relay window");
+                }
+                false
+            }
+            TrayCommand::Restore => {
+                let mut g = self.inner.lock();
+                let text = match restore_all(&mut g) {
+                    Ok(()) => "Everything restored. Your audio and display are back the way Windows had them.".to_string(),
+                    Err(e) => format!("Could not restore everything: {e}"),
+                };
+                let state = Box::new(g.state.clone());
+                drop(g);
+                let _ = self.events.send(Event::StateChanged { state });
+                let _ = self.events.send(Event::Notice { text });
+                false
+            }
+            TrayCommand::Quit => {
+                // Tell the window to close itself before we go, so the user
+                // is not left looking at a live UI reporting a dead core.
+                let _ = self.events.send(Event::Quitting);
+                true
+            }
+        }
     }
 
     /// Probe, and if anything actually changed, re-run selection for the
@@ -479,6 +523,23 @@ impl Service {
             }
         }
     }
+}
+
+/// Put audio and display back the way Windows had them, and unpin.
+///
+/// Shared by `Method::RestoreAll` and the tray's "Restore everything" so the
+/// two can never drift — the tray promise is that it is the same restore the
+/// app performs, not a second, thinner one.
+fn restore_all(g: &mut Inner) -> anyhow::Result<()> {
+    g.pinned = false;
+    g.applier.restore()?;
+    g.state.active_profile = None;
+    g.state.audio_chain = AudioChainState::Bypass;
+    g.state.display_state = DisplayState::Default;
+    g.applied_audio = AudioChainState::Bypass;
+    g.audio_watch = false;
+    g.state.display_via = DisplayVia::default();
+    Ok(())
 }
 
 /// Forward one command to the running share engine's stdin.
@@ -866,24 +927,18 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }
-            Method::RestoreAll => {
-                g.pinned = false;
-                match g.applier.restore() {
-                    Ok(()) => {
-                        g.state.active_profile = None;
-                        g.state.audio_chain = AudioChainState::Bypass;
-                        g.state.display_state = DisplayState::Default;
-                        g.applied_audio = AudioChainState::Bypass;
-                        g.audio_watch = false;
-                        g.state.display_via = DisplayVia::default();
-                        Reply::Ok
-                    }
-                    Err(e) => Reply::Error { message: e.to_string() },
-                }
-            }
+            Method::RestoreAll => match restore_all(&mut g) {
+                Ok(()) => Reply::Ok,
+                Err(e) => Reply::Error { message: e.to_string() },
+            },
             Method::ListProcesses => {
                 Reply::Processes { processes: crate::processes::list_windowed() }
             }
+            Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
+            Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {
+                Ok(()) => Reply::UiPrefs { prefs: g.prefs.get() },
+                Err(e) => Reply::Error { message: format!("{e:#}") },
+            },
             Method::GetAutostart => match crate::autostart::is_enabled() {
                 Ok(enabled) => Reply::Autostart { enabled },
                 Err(e) => Reply::Error { message: e.to_string() },

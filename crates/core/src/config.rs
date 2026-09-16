@@ -135,6 +135,12 @@ impl Paths {
         self.data_dir().join("presets.json")
     }
 
+    /// App preferences that are not about any one game — currently what
+    /// closing the window means.
+    pub fn settings_file(&self) -> PathBuf {
+        self.data_dir().join("settings.json")
+    }
+
     /// Downloaded headphone measurements, one CSV per model. Cached so a
     /// model is fetched once ever; deleting this only costs a re-download.
     pub fn curves_dir(&self) -> PathBuf {
@@ -183,6 +189,7 @@ mod tests {
             p.hardware_file(),
             p.backup_file(),
             p.presets_file(),
+            p.settings_file(),
             p.log_file(),
             p.installed_file(),
         ] {

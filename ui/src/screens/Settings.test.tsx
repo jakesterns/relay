@@ -101,7 +101,7 @@ describe("the uninstall plan", () => {
     const h = await mount();
     await h.user.click(screen.getByRole("button", { name: /Show what will be removed/ }));
     await settle();
-    expect(screen.getByText(/Core offline — cannot read the plan/)).toBeInTheDocument();
+    expect(screen.getByText(/Relay is not running — cannot read the plan/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Uninstall Relay" })).toBeDisabled();
   });
 
@@ -209,7 +209,7 @@ describe("the endpoint APO opt-in", () => {
     tauri.useOfflineCore();
     await mount();
     expect(within(installRow(APO)).getByRole("button", { name: "Install…" })).toBeDisabled();
-    expect(within(installRow(APO)).getByText(/Core offline — status unknown/)).toBeInTheDocument();
+    expect(within(installRow(APO)).getByText(/Relay is not running — status unknown/)).toBeInTheDocument();
   });
 });
 
@@ -388,7 +388,7 @@ describe("startup, recording and restore", () => {
 
   it("reports the paths this core is really using", async () => {
     await mount();
-    expect(kv("Core service")).toBe("Running");
+    expect(kv("Relay")).toBe("Running");
     expect(kv("Data folder")).toBe("C:\\Users\\test\\AppData\\Local\\Relay");
     expect(kv("Log file")).toBe("C:\\Users\\test\\AppData\\Local\\Relay\\logs\\core.log");
     expect(kv("Version")).toBe("0.1.0-test");

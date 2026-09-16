@@ -135,7 +135,7 @@ describe("what the shell claims about this PC", () => {
   it("says the core is offline rather than reporting stale state as live", async () => {
     tauri.useOfflineCore();
     await mount();
-    expect(subtitle()).toBe("Core offline");
+    expect(subtitle()).toBe("Not running");
   });
 });
 

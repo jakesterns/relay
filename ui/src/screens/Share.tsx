@@ -298,7 +298,7 @@ export function Share() {
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>
           : <button className="btn acc" onClick={start} disabled={!canStart}
               title={canStart ? "" : "Enter the 6-digit code shown on the receiver"}>Start sharing</button>}
-        {mock && <p className="note">Preview data — the core service isn't running.</p>}
+        {mock && <p className="note">Preview data — Relay isn't running.</p>}
         <p className="note">Captures the screen the same way Windows does. Never touches games or other apps.</p>
       </aside>
     </>

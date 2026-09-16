@@ -50,7 +50,7 @@ describe("mock data (browser, no Tauri)", () => {
   it("never shows the offline banner — there is no core to be offline", async () => {
     renderScreen(<Settings />);
     await settle();
-    expect(screen.queryByText(/Core service not running/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Relay is not running/)).not.toBeInTheDocument();
     expect(screen.getByText("Running")).toBeInTheDocument();
   });
 
@@ -74,25 +74,30 @@ describe("offline core (inside Tauri, nothing behind the pipe)", () => {
     });
   }
 
-  it("says the core is not running, and how to start it", async () => {
+  it("says Relay is not running and offers a button, never a command to type", async () => {
     renderScreen(<Profiles />);
     await settle();
-    expect(screen.getByText(/Core service not running/)).toBeInTheDocument();
-    expect(screen.getByText("relay-core run")).toBeInTheDocument();
+    expect(screen.getByText(/Relay is not running/)).toBeInTheDocument();
+    // The remedy is a control, not instructions: this is an installed app.
+    expect(screen.getByRole("button", { name: "Start Relay" })).toBeInTheDocument();
+    expect(screen.queryByText(/relay-core/)).not.toBeInTheDocument();
+    expect(document.querySelector(".offline code")).toBeNull();
   });
 
   it("Settings reports Offline and blanks the paths rather than inventing them", async () => {
     renderScreen(<Settings />);
     await settle();
     expect(screen.getByText("Offline")).toBeInTheDocument();
-    // Startup ("the setting") and Recording ("the settings") both say so.
-    expect(screen.getAllByText(/Core offline — cannot read the setting/)).toHaveLength(2);
+    // Startup, close-behaviour and Recording each say so in their own words,
+    // and none of them offers a command to type.
+    expect(screen.getAllByText(/Relay is not running — cannot read the setting/)).toHaveLength(2);
+    expect(screen.getByText(/Relay is not running — cannot read this setting/)).toBeInTheDocument();
   });
 
   it("Receive says the call status is unknown instead of claiming a camera", async () => {
     renderScreen(<Receive />);
     await settle();
-    expect(screen.getByText(/Core offline — status unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/Relay is not running — status unknown/)).toBeInTheDocument();
     expect(screen.queryByText(/Relay Camera/)).not.toBeInTheDocument();
   });
 
@@ -102,7 +107,7 @@ describe("offline core (inside Tauri, nothing behind the pipe)", () => {
     // vdevice_status rejected, so the gate must fail open to the normal shell.
     expect(screen.queryByRole("heading", { name: /Before anything is installed/ })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { level: 1, name: /Profiles/ })).toBeInTheDocument();
-    expect(screen.getByText("Core offline")).toBeInTheDocument();
+    expect(screen.getByText("Not running")).toBeInTheDocument();
     h.expectClean();
   });
 
@@ -137,7 +142,7 @@ describe("live core (scripted fake behind the pipe)", () => {
     // Once in the profile table, once in the monitor library.
     expect(screen.getAllByText("LG ULTRAGEAR+")).toHaveLength(2);
     expect(screen.getByText("Plugged")).toBeInTheDocument();
-    expect(screen.queryByText(/Core service not running/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Relay is not running/)).not.toBeInTheDocument();
   });
 
   it("Settings reads the build info the core reported", async () => {
