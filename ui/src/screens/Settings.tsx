@@ -83,9 +83,11 @@ export function Settings() {
             Relay keeps working after you close the window — that is how profiles
             stay applied while you play, with the window costing nothing. What
             keeps running is a small background part of Relay, about 7 MB of
-            memory and no measurable CPU when idle. You will find it in the
-            notification area next to the clock, with Open Relay, Restore
-            everything, and Quit Relay on it.
+            memory and no measurable CPU when idle. Its icon is in the
+            notification area by the clock — Windows hides new icons at first,
+            so click the arrow there to see it, and drag it out to keep it in
+            view. Right-click it for Open Relay, Restore everything, and Quit
+            Relay.
           </p>
           <Toggle
             on={prefs?.close_action === "quit_relay"}

@@ -7,7 +7,7 @@
 use relay_core::ipc::{Method, Reply};
 use relay_core::types::{CoreState, ProcessInfo, Profile, ProfileSummary};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -23,9 +23,28 @@ impl From<anyhow::Error> for CmdError {
 
 type CmdResult<T> = Result<T, CmdError>;
 
-/// Set once the window's close has been intercepted, so the programmatic
-/// close that follows is let through instead of being intercepted again.
-static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The user's close preference, mirrored here so the window's close handler
+/// can decide *synchronously*.
+///
+/// It has to be synchronous. `CloseRequested` either lets the default close
+/// proceed — which ends the process, freeing the whole webview, and is the
+/// entire reason the core and the window are separate — or prevents it. There
+/// is no way to await an IPC round-trip and then un-prevent, so a handler that
+/// asked the core at close time had to prevent first and destroy later, which
+/// left the process alive with no window: the worst of both.
+///
+/// Kept fresh from three places: once at startup, on every read, and on every
+/// write. Defaults to false, the behaviour that costs nothing to be wrong
+/// about — the window closes and the core keeps running, as it always has.
+static CLOSE_QUITS_CORE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+fn remember_close_pref(prefs: &relay_core::uiprefs::UiPrefs) {
+    CLOSE_QUITS_CORE.store(
+        prefs.close_action == relay_core::uiprefs::CloseAction::QuitRelay,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
 
 async fn call(method: Method) -> anyhow::Result<Reply> {
     #[cfg(windows)]
@@ -129,7 +148,10 @@ async fn start_core() -> CmdResult<bool> {
 #[tauri::command]
 async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::GetUiPrefs).await? {
-        Reply::UiPrefs { prefs } => Ok(prefs),
+        Reply::UiPrefs { prefs } => {
+            remember_close_pref(&prefs);
+            Ok(prefs)
+        }
         other => Err(unexpected(other).into()),
     }
 }
@@ -139,7 +161,10 @@ async fn set_ui_prefs(
     prefs: relay_core::uiprefs::UiPrefs,
 ) -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::SetUiPrefs { prefs }).await? {
-        Reply::UiPrefs { prefs } => Ok(prefs),
+        Reply::UiPrefs { prefs } => {
+            remember_close_pref(&prefs);
+            Ok(prefs)
+        }
         other => Err(unexpected(other).into()),
     }
 }
@@ -592,6 +617,7 @@ fn spawn_core_autostart(app: AppHandle) {
         let _ = app.emit("core://starting", ());
         match relay_core::startup::ensure_running().await {
             Ok(_) => {
+                load_close_pref().await;
                 let _ = app.emit("core://started", ());
             }
             Err(e) => {
@@ -601,15 +627,13 @@ fn spawn_core_autostart(app: AppHandle) {
     });
 }
 
-/// Does closing the window also stop the core? Reads the user's preference;
-/// anything unreadable (including an already-dead core) means "no", which is
-/// the default and the one that cannot surprise anybody.
-async fn close_should_quit_core() -> bool {
-    matches!(
-        call(Method::GetUiPrefs).await,
-        Ok(Reply::UiPrefs { prefs })
-            if prefs.close_action == relay_core::uiprefs::CloseAction::QuitRelay
-    )
+/// Read the close preference once the core is up, so the close handler has a
+/// real answer rather than the default. Anything unreadable leaves the default
+/// in place, which is "keep running".
+async fn load_close_pref() {
+    if let Ok(Reply::UiPrefs { prefs }) = call(Method::GetUiPrefs).await {
+        remember_close_pref(&prefs);
+    }
 }
 
 pub fn run() {
@@ -627,23 +651,23 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Closing the window normally leaves the core running — that
-                // is the whole point of the split, and the notification-area
-                // icon is there to say so. If the user chose otherwise in
-                // Settings, stop the core first; its own teardown restores
-                // everything, so this cannot leave a profile applied.
-                if CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                if !CLOSE_QUITS_CORE.load(std::sync::atomic::Ordering::Relaxed) {
+                    // The default, and the point of the whole split: the close
+                    // proceeds untouched, this process ends and gives its
+                    // memory back, and the core carries on applying profiles
+                    // with the notification-area icon saying so.
                     return;
                 }
+                // The user asked for closing to mean quitting. Stop the core
+                // first — its own teardown restores audio and display, so this
+                // cannot leave a game profile applied — then end this process.
+                // `exit` is explicit rather than relying on the window count,
+                // because the prevented close will not end it by itself.
                 api.prevent_close();
-                let window = window.clone();
+                let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    if close_should_quit_core().await {
-                        let _ = call(Method::Shutdown).await;
-                    }
-                    // `destroy` does not raise CloseRequested again, so this
-                    // cannot loop back into the branch above.
-                    let _ = window.destroy();
+                    let _ = call(Method::Shutdown).await;
+                    app.exit(0);
                 });
             }
         })
