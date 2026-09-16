@@ -333,3 +333,58 @@ describe("the per-game share preset", () => {
     expect(screen.getByText(/Sharing is off for this game/)).toBeInTheDocument();
   });
 });
+
+/* The graph and the A/B preview used to be drawings: a fixed dashed path
+ * labelled as the headset's response, and two identical scenes. These pin
+ * them to the data they now come from. */
+describe("the EQ graph", () => {
+  const d = (id: string) => screen.queryByTestId(id)?.getAttribute("d") ?? null;
+  const ys = (path: string) => [...path.matchAll(/[ML][\d.]+ ([\d.]+)/g)].map((m) => Number(m[1]));
+
+  it("draws the headset's imported correction point for point", async () => {
+    await mount();
+    // hd560s: [[20, -4.11], [1000, 0], [20000, -6.2]] on a log 20 Hz–20 kHz axis.
+    expect(d("eq-correction")).toBe("M52.0 189.8 L523.2 135.0 L884.0 217.7");
+    expect(screen.getByText(/Headset correction · measured/)).toBeInTheDocument();
+  });
+
+  it("draws no headset line at all when the headset has no curve", async () => {
+    delete core.hardware.headsets[0].curve;
+    await mount();
+    expect(d("eq-correction")).toBeNull();
+    expect(screen.queryByText(/Headset/, { selector: ".eq *" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw response/)).not.toBeInTheDocument();
+  });
+
+  it("draws a flat profile flat, and bends it by the band's real response", async () => {
+    await mount();
+    expect(new Set(ys(d("eq-profile") ?? ""))).toEqual(new Set([135]));
+
+    setSlider("Presence · 3 kHz", 6, card("Bands"));
+    await settle();
+    const top = Math.min(...ys(d("eq-profile") ?? ""));
+    // +6 dB is the 55 gridline; the sampled peak lands within a pixel of it.
+    expect(top).toBeGreaterThan(54);
+    expect(top).toBeLessThan(56.5);
+  });
+});
+
+describe("the display A/B preview", () => {
+  const table = () =>
+    screen.getByTestId("ramp-table").firstElementChild?.getAttribute("tableValues")?.split(" ").map(Number) ?? [];
+
+  it("is the identity for a neutral profile and follows the gamma slider", async () => {
+    await mount("display");
+    table().forEach((v, i) => expect(v).toBeCloseTo(i / 32, 3));
+
+    setSlider("Gamma", 1.3, card("GPU color"));
+    await settle();
+    const mid = table()[16];
+    expect(mid).toBeCloseTo(0.5 ** (1 / 1.3), 3);
+  });
+
+  it("says plainly that vibrance and hue are not previewed", async () => {
+    await mount("display");
+    expect(screen.getByText(/Vibrance and hue are applied by the graphics driver and are not shown here/)).toBeInTheDocument();
+  });
+});

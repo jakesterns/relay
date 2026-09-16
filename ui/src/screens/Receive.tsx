@@ -259,7 +259,9 @@ export function Receive() {
         <CodecBanner need="receive" />
         <FirewallBanner />
         <div className="preview">
-          <div className={"scene" + (sender ? "" : " idle")} />
+          {/* The share plays in the engine's own window, never here, so this
+              frame stays empty rather than painting a stand-in for it. */}
+          <div className="scene" />
           {sender
             ? <div className="cap">Playing in a separate window · {sender}</div>
             : <div className="idlemsg">

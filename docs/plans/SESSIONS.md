@@ -99,7 +99,7 @@ sessions beat eight neglected ones.
 | S17 | EV certificate and signing | `chore/signing` | main tree | the certificate |
 | S22 | Firewall rules in the installer | `feat/firewall-rules` | create when started | — |
 | S23 | Never look dead | `feat/never-dead` | create when started | — |
-| S24 | Stop the UI lying | `feat/honest-ui` | create when started | — (not with S23) |
+| S24 | Stop the UI lying | `feat/honest-ui` | main tree | **done 2026-09-16** |
 | S25 | Keyboard, focus, destructive actions | `feat/ui-safety` | main tree | **done 2026-09-15** |
 | S26 | Shell polish | `feat/shell-polish` | create when started | — |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
@@ -858,21 +858,22 @@ Autostart is off by default, the UI never starts the core, and ui/src/components
 ---
 
 ## S24 — Stop the UI lying
-**Branch** `feat/honest-ui` · **Worktree** main tree · **Not concurrent with S23**
+**Branch** `feat/honest-ui` · **Worktree** main tree · **Done 2026-09-16**
 
 Three places render invented content as if it were measured. These are worse
 than blank space because a user tests them early and believes them.
 
 ### Definition of Ready
 - [x] The real data exists for all three: profile colour values, the headset curve in the hardware library, and the live preset plus `ShareCapabilities.adapters`.
-- [ ] Decide per case: make it real, or remove it. A removed element is a perfectly good outcome — decoration that cannot be driven by real data should not be in a product whose every screen claims nothing was faked.
+- [x] Decide per case: make it real, or remove it. A removed element is a perfectly good outcome — decoration that cannot be driven by real data should not be in a product whose every screen claims nothing was faked.
+      **Decided 2026-09-16:** EQ graph and Share labels made real (the data exists). Display A/B made real *for the part Relay can reproduce exactly* — the gamma ramp — and says in words that vibrance and hue are not previewed, because those go through the vendor driver and a CSS `saturate()` would be another invention. The `.scene` gradients were removed outright: an empty frame is the honest placeholder.
 
 ### Definition of Done
-- [ ] `Games.tsx` display A/B: both halves currently render the identical `<Scene/>` differing only by a hard-coded gradient, so Vibrance/Gamma/Contrast change nothing. Either it reflects the profile's actual colour settings, or it goes.
-- [ ] `Games.tsx` EQ graph: the dashed "Headset raw response" is a hard-coded path shown even for a headset with no curve. Drive it from the real curve, and hide it when there is none.
-- [ ] `Share.tsx`: the overlay's `3840×2160 / 60 fps / HEVC` and `NVENC · CPU x%` are hard-coded. Derive from the live preset and the adapter name the capability probe already returns.
-- [ ] `Receive.tsx` / `Share.tsx` `.scene` decoration: either a real thumbnail or an honest placeholder; not a painted gradient under a real caption.
-- [ ] A test pins at least the EQ and share-label cases, so the next session cannot quietly re-hard-code them.
+- [x] `Games.tsx` display A/B: both halves currently render the identical `<Scene/>` differing only by a hard-coded gradient, so Vibrance/Gamma/Contrast change nothing. Either it reflects the profile's actual colour settings, or it goes. (Both halves are one reference pattern; the right goes through an SVG `feComponentTransfer` built by `lib/honest.ts::buildRamp`, a port of `relay_display::gamma::build_ramp` pinned to it by shared golden samples on both sides. A note states vibrance/hue are not shown.)
+- [x] `Games.tsx` EQ graph: the dashed "Headset raw response" is a hard-coded path shown even for a headset with no curve. Drive it from the real curve, and hide it when there is none. (Log-frequency axis; dashed line is the imported curve point for point, gone with no curve. The label was wrong too — `autoeq.rs` stores the *correction*, not the raw response — so it now reads "Headset correction · measured". The gold line, previously straight segments between slider values, is the RBJ peaking cascade's actual response.)
+- [x] `Share.tsx`: the overlay's `3840×2160 / 60 fps / HEVC` and `NVENC · CPU x%` are hard-coded. Derive from the live preset and the adapter name the capability probe already returns. (Idle: the selected preset. Sharing: the preset this screen started plus the engine's measured fps; a share the screen did not start shows no size, since the core does not report its preset. Encoder name from `ShareCapabilities.encoders`, falling back to `adapters`, and "Hardware encoder" when two vendors could encode. Preset chips lock during a share. The load % had a hard-coded 60 fps budget too; it uses the preset's rate now.)
+- [x] `Receive.tsx` / `Share.tsx` `.scene` decoration: either a real thumbnail or an honest placeholder; not a painted gradient under a real caption. (Gradient and `.horizon` removed; an empty dark frame until the real thumbnail arrives.)
+- [x] A test pins at least the EQ and share-label cases, so the next session cannot quietly re-hard-code them. (`lib/honest.test.ts`, new `Games.test.tsx` EQ-graph and A/B blocks, `Share.test.tsx` overlay block; `gamma.rs::ramp_golden_samples_shared_with_the_ui`. 241 UI tests.)
 
 ### Kickoff prompt
 ```
