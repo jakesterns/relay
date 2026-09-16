@@ -169,9 +169,8 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 
 /* Share: preview + instrument strip (the signature element) */
 .preview { position: relative; border-radius: 8px; overflow: hidden; border: 1px solid var(--line2); background: #000; flex: 1; min-height: 240px; }
-.preview .scene { position: absolute; inset: 0; background: radial-gradient(60% 50% at 30% 30%, rgba(120,90,50,.35), transparent 60%), radial-gradient(45% 40% at 78% 70%, rgba(60,70,90,.45), transparent 60%), linear-gradient(180deg, #2a2622, #141210 60%, #0a0908); }
-.preview .scene.idle { background: linear-gradient(180deg, #141210, #0a0908); }
-.preview .horizon { position: absolute; left: 0; right: 0; top: 58%; height: 1px; background: linear-gradient(90deg, transparent, rgba(201,169,106,.5), transparent); }
+/* An empty frame, not a painted scene: nothing here may look like capture it is not. */
+.preview .scene { position: absolute; inset: 0; background: #0a0908; }
 .preview .tag { position: absolute; left: 14px; top: 12px; display: flex; gap: 6px; }
 .preview .tag span { background: rgba(14,13,12,.75); border: 1px solid var(--line2); padding: 4px 8px; border-radius: 4px; font-family: GeistMono; font-size: 11px; }
 .preview .cap { position: absolute; right: 14px; bottom: 12px; color: rgba(236,230,220,.6); font-size: 12px; }
@@ -257,8 +256,11 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 /* EQ graph */
 .eq { position: relative; border-radius: 8px; border: 1px solid var(--line2); background: var(--surface); height: 270px; overflow: hidden; flex: none; }
 .eq svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-.eq .lbl { position: absolute; bottom: 8px; display: flex; justify-content: space-between; left: 52px; right: 16px; color: var(--dim); font-family: GeistMono; font-size: 10.5px; }
-.eq .band { position: absolute; top: 10px; left: 52%; padding: 4px 8px; border-radius: 4px; background: rgba(201,169,106,.12); border: 1px solid rgba(201,169,106,.3); color: var(--brass); font-size: 11.5px; }
+.eq .lbl { position: absolute; bottom: 8px; left: 0; right: 0; height: 14px; color: var(--dim); font-family: GeistMono; font-size: 10.5px; }
+.eq .lbl span { position: absolute; transform: translateX(-50%); }
+.eq .lbl span:first-child { transform: none; }
+.eq .lbl span:last-child { transform: translateX(-100%); }
+.eq .band { position: absolute; top: 10px; padding: 4px 8px; border-radius: 4px; background: rgba(201,169,106,.12); border: 1px solid rgba(201,169,106,.3); color: var(--brass); font-size: 11.5px; }
 .eq .leg { position: absolute; top: 12px; left: 14px; display: flex; gap: 14px; color: var(--mute); font-size: 11.5px; }
 .eq .leg i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
 .ab { display: flex; gap: 8px; margin-top: 10px; }
@@ -268,11 +270,7 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 /* Display compare */
 .cmp { position: relative; border-radius: 8px; border: 1px solid var(--line2); overflow: hidden; height: 300px; display: grid; grid-template-columns: 1fr 1fr; flex: none; }
 .cmp > div { position: relative; }
-.cmp .a { background: radial-gradient(70% 60% at 40% 40%, #2a2f33, #121416 70%); }
-.cmp .b { background: radial-gradient(70% 60% at 60% 40%, #3a4048, #161a1e 70%); }
-.cmp .fig { position: absolute; width: 14px; height: 34px; border-radius: 7px 7px 3px 3px; background: #3b3f42; }
-.cmp .b .fig { background: #6a706e; }
-.cmp .frame { position: absolute; border: 1px solid rgba(255,255,255,.08); }
+.cmp > div > svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .cmp .cap { position: absolute; left: 12px; top: 10px; background: rgba(14,13,12,.75); border: 1px solid var(--line2); padding: 4px 8px; border-radius: 4px; font-size: 11.5px; color: var(--mute); }
 .cmp .b .cap { color: var(--brass); border-color: rgba(201,169,106,.3); }
 .cmp .div { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--brass); }

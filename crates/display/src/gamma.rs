@@ -198,6 +198,20 @@ mod tests {
         assert!(bright.r[128] > Ramp::identity().r[128]);
     }
 
+    /// The UI draws its Display A/B through a TypeScript port of `build_ramp`
+    /// (`ui/src/lib/honest.ts`). Its test asserts these same samples, so a
+    /// change to the curve here fails there too instead of quietly making the
+    /// preview wrong.
+    #[test]
+    fn ramp_golden_samples_shared_with_the_ui() {
+        let ramp = build_ramp(&RampParams { gamma: 1.2, contrast: 30, shadow_lift: 40 });
+        let got: Vec<u16> = [0, 32, 64, 128, 192, 255].iter().map(|&i| ramp.r[i]).collect();
+        let want = [6554u16, 12782, 21262, 38032, 54609, 65535];
+        for (g, w) in got.iter().zip(want) {
+            assert!((*g as i32 - w as i32).abs() <= 1, "{got:?} vs {want:?}");
+        }
+    }
+
     #[test]
     fn ramp_serde_round_trip() {
         let ramp = build_ramp(&RampParams { gamma: 1.2, contrast: 10, shadow_lift: 5 });

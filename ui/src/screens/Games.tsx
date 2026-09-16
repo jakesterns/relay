@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
@@ -6,9 +6,10 @@ import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
   api, isTauri, presetAudioLabel,
-  type ApoStatus, type ColorInfo, type Limiter, type Preview, type Profile, type SharePreset,
-  type SharePresetDef,
+  type ApoStatus, type ColorInfo, type EqBand, type GpuColor, type Limiter, type Preview, type Profile,
+  type SharePreset, type SharePresetDef,
 } from "../lib/ipc";
+import { buildRamp, cascadeDb } from "../lib/honest";
 import { colorSummary } from "./Profiles";
 
 export type Section = "audio" | "display" | "sharing";
@@ -164,13 +165,17 @@ function AudioSection({ draft, update }: {
   draft: Profile | null;
   update: (fn: (p: Profile) => void) => void;
 }) {
+  const { hardware } = useCore();
   const gains = gainsOf(draft);
   const off = !draft;
   const dbFmt = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} dB`;
+  // Same headset resolution as the correction card below and the core.
+  const headset = hardware.headsets.find((h) => h.id === (draft?.headset ?? hardware.connected.headset));
   return (
     <>
       <ExclusiveBanner />
-      <EqGraph bands={gains} />
+      <EqGraph bands={draft?.audio.bands ?? []} correction={headset?.curve ?? null}
+        correctionOn={draft?.audio.headset_correction ?? false} />
       <div className="two">
         <Card title="Bands" action="Reset"
           onAction={() => update((p) => { p.audio.bands = []; })}>
@@ -339,30 +344,65 @@ function AbListeningCard({ profileId }: { profileId: string | null }) {
   );
 }
 
-/** Static-geometry EQ graph from s2; the curve bends with the five band gains. */
-function EqGraph({ bands }: { bands: number[] }) {
-  // x positions of the five bands on the 900-wide viewBox; y = 135 - gain * (80/6)
-  const xs = [120, 330, 555, 700, 830];
-  const pts = bands.map((g, i) => [xs[i], 135 - g * (80 / 6)] as const);
-  const path = ["M52 150", ...pts.map(([x, y]) => `L${x} ${y}`), "L884 150"].join(" ");
+/* EQ graph geometry, on the 900×270 viewBox. Frequency is log from 20 Hz to
+ * 20 kHz; level is linear, ±6 dB on the gridlines, clipped at the frame. */
+const EQ_X0 = 52, EQ_X1 = 884, EQ_Y0 = 20, EQ_Y1 = 250;
+const eqX = (hz: number) => EQ_X0 + (Math.log10(hz / 20) / 3) * (EQ_X1 - EQ_X0);
+const eqY = (db: number) => Math.min(EQ_Y1, Math.max(EQ_Y0, 135 - db * (80 / 6)));
+const EQ_TICKS: [number, string][] = [[20, "20"], [100, "100"], [500, "500"], [1000, "1k"], [4000, "4k"], [10000, "10k"], [20000, "20k"]];
+const FOOTSTEPS: [number, number] = [1800, 4500];
+const pct = (x: number) => `${(x / 900) * 100}%`;
+const pathOf = (pts: [number, number][]) =>
+  pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
+
+/** The profile's EQ as the DSP will shape it, and the headset's measured
+ *  correction behind it.
+ *
+ *  Both lines are data. The gold line is the actual response of the band
+ *  cascade (the same peaking design the DSP uses), not straight segments
+ *  between slider values; the dashed line is the imported correction curve,
+ *  point for point, and is absent when the headset has none. What is stored
+ *  is AutoEQ's *correction*, not the headset's raw response, so that is what
+ *  the legend calls it. */
+export function EqGraph({ bands, correction, correctionOn }: {
+  bands: EqBand[];
+  correction: [number, number][] | null;
+  correctionOn: boolean;
+}) {
+  const samples = Array.from({ length: 121 }, (_, i) => 20 * 1000 ** (i / 120));
+  const profile = pathOf(samples.map((hz) => [eqX(hz), eqY(cascadeDb(bands, hz))]));
+  const dots = UI_BANDS.map((u) => [eqX(u.freq), eqY(cascadeDb(bands, u.freq))] as const);
+  const measured = correction && correction.length > 1
+    ? pathOf(correction.filter(([hz]) => hz >= 20 && hz <= 20000).map(([hz, db]) => [eqX(hz), eqY(db)]))
+    : null;
+  const [fs0, fs1] = FOOTSTEPS.map(eqX);
   return (
     <div className="eq">
       <svg viewBox="0 0 900 270" preserveAspectRatio="none">
         <g stroke="rgba(255,255,255,.06)">
-          <line x1="52" y1="55" x2="884" y2="55" /><line x1="52" y1="135" x2="884" y2="135" stroke="rgba(255,255,255,.12)" /><line x1="52" y1="215" x2="884" y2="215" />
-          <line x1="190" y1="20" x2="190" y2="250" /><line x1="330" y1="20" x2="330" y2="250" /><line x1="470" y1="20" x2="470" y2="250" /><line x1="610" y1="20" x2="610" y2="250" /><line x1="750" y1="20" x2="750" y2="250" />
+          <line x1={EQ_X0} y1="55" x2={EQ_X1} y2="55" /><line x1={EQ_X0} y1="135" x2={EQ_X1} y2="135" stroke="rgba(255,255,255,.12)" /><line x1={EQ_X0} y1="215" x2={EQ_X1} y2="215" />
+          {EQ_TICKS.slice(1, -1).map(([hz]) => <line key={hz} x1={eqX(hz)} y1={EQ_Y0} x2={eqX(hz)} y2={EQ_Y1} />)}
         </g>
-        <rect x="470" y="20" width="170" height="230" fill="rgba(201,169,106,.06)" />
+        <rect x={fs0} y={EQ_Y0} width={fs1 - fs0} height={EQ_Y1 - EQ_Y0} fill="rgba(201,169,106,.06)" />
         <text x="14" y="59" fill="#5A544C" fontFamily="GeistMono" fontSize="10">+6</text>
         <text x="20" y="139" fill="#5A544C" fontFamily="GeistMono" fontSize="10">0</text>
         <text x="14" y="219" fill="#5A544C" fontFamily="GeistMono" fontSize="10">−6</text>
-        <path d="M52 150 C150 148 220 132 330 138 S470 160 560 145 S700 120 780 128 S860 150 884 150" fill="none" stroke="#5A544C" strokeWidth="1.5" strokeDasharray="4 4" />
-        <path d={path} fill="none" stroke="#C9A96A" strokeWidth="2" strokeLinejoin="round" style={{ transition: "d .4s var(--ease)" }} />
-        <g fill="#ECE6DC">{pts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="4" />)}</g>
+        {measured && (
+          <path data-testid="eq-correction" d={measured} fill="none" stroke="#5A544C" strokeWidth="1.5" strokeDasharray="4 4" />
+        )}
+        <path data-testid="eq-profile" d={profile} fill="none" stroke="#C9A96A" strokeWidth="2" strokeLinejoin="round" />
+        <g fill="#ECE6DC">{dots.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="4" />)}</g>
       </svg>
-      <div className="leg"><span><i style={{ background: "#C9A96A" }} />Profile</span><span><i style={{ background: "#5A544C" }} />Headset raw response</span></div>
-      <div className="band">Footsteps · 1.8–4.5 kHz</div>
-      <div className="lbl"><span>20</span><span>100</span><span>500</span><span>1k</span><span>4k</span><span>10k</span><span>20k</span></div>
+      <div className="leg">
+        <span><i style={{ background: "#C9A96A" }} />Profile</span>
+        {measured && (
+          <span><i style={{ background: "#5A544C" }} />Headset correction · measured{correctionOn ? "" : " (off)"}</span>
+        )}
+      </div>
+      <div className="band" style={{ left: pct(fs0) }}>Footsteps · 1.8–4.5 kHz</div>
+      <div className="lbl">
+        {EQ_TICKS.map(([hz, t]) => <span key={hz} style={{ left: pct(eqX(hz)) }}>{t}</span>)}
+      </div>
     </div>
   );
 }
@@ -486,11 +526,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
   const responseIx = Math.max(0, responseLevels.indexOf(mon.response ?? responseLevels[0] ?? ""));
   return (
     <>
-      <div className="cmp">
-        <div className="a"><div className="cap">Monitor default</div><Scene /></div>
-        <div className="b"><div className="cap">Game profile</div><Scene /></div>
-        <div className="div" />
-      </div>
+      <RampPreview gpu={gpu} />
       <div className="two">
         <Card title="GPU color" action="Reset"
           onAction={() => update((p) => { p.display.gpu = { vibrance: 50, gamma: 1, contrast: 0, shadow_lift: 0, hue_deg: 0 }; })}>
@@ -531,13 +567,56 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
   );
 }
 
-function Scene() {
+/** Before / after of the one colour transform the UI can reproduce exactly.
+ *
+ *  This used to be two copies of the same drawn scene, told apart only by a
+ *  fixed background, so moving a slider changed nothing on it. Now both halves
+ *  are the same reference pattern — grey ramp, grey steps, primary ramps — and
+ *  the right half goes through `buildRamp`, the port of the gamma ramp Relay
+ *  writes to the monitor. Vibrance and hue go through the GPU driver, whose
+ *  maths Relay does not have, so the caption says they are not shown rather
+ *  than faking them with a CSS filter. */
+function RampPreview({ gpu }: { gpu: GpuColor }) {
+  const filterId = `ramp-${useId().replace(/:/g, "")}`;
+  const table = buildRamp(gpu, 33).map((v) => v.toFixed(4)).join(" ");
+  const pattern = (filter?: string) => (
+    <svg viewBox="0 0 400 300" preserveAspectRatio="none" aria-hidden="true">
+      <defs>
+        <linearGradient id={`${filterId}-k`}><stop offset="0" stopColor="#000" /><stop offset="1" stopColor="#fff" /></linearGradient>
+        <linearGradient id={`${filterId}-r`}><stop offset="0" stopColor="#000" /><stop offset="1" stopColor="#f00" /></linearGradient>
+        <linearGradient id={`${filterId}-g`}><stop offset="0" stopColor="#000" /><stop offset="1" stopColor="#0f0" /></linearGradient>
+        <linearGradient id={`${filterId}-b`}><stop offset="0" stopColor="#000" /><stop offset="1" stopColor="#00f" /></linearGradient>
+      </defs>
+      <g filter={filter}>
+        <rect x="0" y="0" width="400" height="300" fill="#000" />
+        <rect x="0" y="44" width="400" height="70" fill={`url(#${filterId}-k)`} />
+        {Array.from({ length: 11 }, (_, i) => {
+          const v = Math.round((i / 10) * 255);
+          return <rect key={i} x={(400 / 11) * i} y="118" width={400 / 11 + 0.5} height="60" fill={`rgb(${v},${v},${v})`} />;
+        })}
+        <rect x="0" y="182" width="400" height="36" fill={`url(#${filterId}-r)`} />
+        <rect x="0" y="222" width="400" height="36" fill={`url(#${filterId}-g)`} />
+        <rect x="0" y="262" width="400" height="38" fill={`url(#${filterId}-b)`} />
+      </g>
+    </svg>
+  );
   return (
     <>
-      <div className="frame" style={{ left: 60, top: 70, width: 120, height: 90 }} />
-      <div className="frame" style={{ left: 250, top: 60, width: 90, height: 110 }} />
-      <div className="fig" style={{ left: 120, top: 150 }} />
-      <div className="fig" style={{ left: 300, top: 200 }} />
+    <div className="cmp">
+      <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true">
+        <filter id={filterId} colorInterpolationFilters="sRGB">
+          <feComponentTransfer data-testid="ramp-table">
+            <feFuncR type="table" tableValues={table} />
+            <feFuncG type="table" tableValues={table} />
+            <feFuncB type="table" tableValues={table} />
+          </feComponentTransfer>
+        </filter>
+      </svg>
+      <div className="a"><div className="cap">Without profile</div>{pattern()}</div>
+      <div className="b"><div className="cap">Through this profile's gamma ramp</div>{pattern(`url(#${filterId})`)}</div>
+      <div className="div" />
+    </div>
+    <p className="note">Gamma, contrast and shadow lift are drawn through the same ramp Relay writes to the monitor. Vibrance and hue are applied by the graphics driver and are not shown here.</p>
     </>
   );
 }

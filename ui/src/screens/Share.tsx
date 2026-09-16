@@ -4,30 +4,33 @@ import { OfflineBanner } from "../components/Offline";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
+import { encoderBrand, shareTags } from "../lib/honest";
 import {
   api, onCoreEvents, presetAudioLabel,
-  type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type SharePresetDef,
-  type ShareStats, type SharePreview, type SourceTarget,
+  type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type ShareCapabilities,
+  type SharePresetDef, type ShareStats, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
 interface Strip {
   mbps: number; latencyMs: number; dropped: number; sent: number;
   gpuPct: number; cpuPct: number; audioDb: number; history: number[];
+  /** Frames per second the engine reports sending; 0 before the first stats line. */
+  fps: number;
   /** Mic track level, and whether a second audio track is arriving at all. */
   micDb: number; micLive: boolean;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
 }
 const idleStrip: Strip = {
-  mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0,
+  mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0, fps: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
   micDb: -Infinity, micLive: false,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
 };
 
 export function Share() {
-  const { state, mock } = useCore();
+  const { state, mock, offline } = useCore();
   const sharing = state.sharing.kind === "sharing";
   const peer = state.sharing.kind === "sharing" ? state.sharing.peer : null;
   const [presets, setPresets] = useState<SharePresetDef[]>([]);
@@ -54,9 +57,21 @@ export function Share() {
   // Latest capture thumbnail from the engine; cleared when the share stops.
   const [preview, setPreview] = useState<SharePreview | null>(null);
   const [windows, setWindows] = useState<ProcessInfo[]>([]);
+  // What the capability probe found, so the strip names the encoder this PC
+  // actually has rather than assuming NVENC.
+  const [caps, setCaps] = useState<ShareCapabilities | null>(null);
+  // The preset the running share was started with from this screen. Null
+  // while idle, and also when a share is running that this screen did not
+  // start (the core does not report which preset that one uses).
+  const [running, setRunning] = useState<string | null>(null);
 
   const selectedDef = presets.find((p) => p.id === preset) ?? presets[0];
-  const bitrateCeil = Math.max(selectedDef?.bitrate_mbps ?? 60, 1);
+  const runningDef = running ? presets.find((p) => p.id === running) : undefined;
+  const liveDef = sharing ? runningDef : selectedDef;
+  const bitrateCeil = Math.max(liveDef?.bitrate_mbps ?? 60, 1);
+  // Encode load is encode time over the frame budget, and the budget is the
+  // preset's frame rate, not a fixed 60.
+  const frameMs = 1000 / Math.max(liveDef?.fps ?? 60, 1);
 
   const reloadPresets = useCallback(async (select?: string) => {
     const r = await api.listPresets();
@@ -64,6 +79,14 @@ export function Share() {
     if (select) setPreset(select);
     else if (!r.presets.some((p) => p.id === preset)) setPreset(r.presets[0]?.id ?? "game");
   }, [preset]);
+
+  useEffect(() => {
+    let live = true;
+    api.shareCapabilities()
+      .then((c) => { if (live) setCaps(c); })
+      .catch(() => { if (live) setCaps(null); });
+    return () => { live = false; };
+  }, [offline]);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,7 +110,8 @@ export function Share() {
           latencyMs: Math.round(s.capture_to_send_ms ?? 0),
           dropped: s.dropped ?? 0,
           sent: s.frames ?? 0,
-          gpuPct: Math.round(s.encode_ms ? (s.encode_ms / (1000 / 60)) * 100 : 0),
+          fps: s.fps ?? 0,
+          gpuPct: Math.round(s.encode_ms ? (s.encode_ms / frameMs) * 100 : 0),
           cpuPct: Math.round((s.cpu_percent ?? 0) * 10) / 10,
           audioDb: s.audio_peak ? 20 * Math.log10(Math.max(1e-4, s.audio_peak)) : -Infinity,
           micDb: s.mic_peak ? 20 * Math.log10(Math.max(1e-4, s.mic_peak)) : -Infinity,
@@ -108,7 +132,7 @@ export function Share() {
       sourceChanged: (s) => { if (s.target) setSource(s.target); },
     }).then((u) => { unsub = u; });
     return () => unsub();
-  }, [bitrateCeil]);
+  }, [bitrateCeil, frameMs]);
 
   useEffect(() => {
     if (!sharing) {
@@ -117,6 +141,7 @@ export function Share() {
       setRec({ on: false, path: null });
       setSource({ kind: "display", index: 0 });
       setShowRegion(false);
+      setRunning(null);
     }
   }, [sharing]);
 
@@ -138,7 +163,7 @@ export function Share() {
 
   const start = async () => {
     setBusy(true); setError(null);
-    try { await api.startSharePreset(preset, code.trim(), selected); }
+    try { await api.startSharePreset(preset, code.trim(), selected); setRunning(preset); }
     catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
@@ -176,13 +201,15 @@ export function Share() {
     <>
       <section className="main">
         <div className="hdr">
-          <h1>Display 1 <em>— this PC</em></h1>
+          <h1>{sourceTitle(sharing ? source : { kind: "display", index: 0 })} <em>— this PC</em></h1>
           <Live on={sharing} text={sharing ? "Sharing" : "Not sharing"} />
         </div>
         <OfflineBanner />
         <CodecBanner need="share" />
         <FirewallBanner />
-        <Chips label="Preset" value={preset} onChange={setPreset}
+        {/* Locked while sharing: the engine read the preset when it started,
+            so switching the chip mid-share would change nothing but the labels. */}
+        <Chips label="Preset" value={preset} onChange={sharing ? undefined : setPreset}
           options={presets.map((p) => ({ key: p.id, label: p.name }))} />
         {sharing && (
           <div className="chips">
@@ -242,18 +269,19 @@ export function Share() {
           </div>
         )}
         <div className="preview">
-          {/* A real thumbnail of the capture once one arrives; the drawn
-              placeholder until then, so the box is never empty. */}
+          {/* A real thumbnail of the capture once one arrives; an empty
+              frame until then, never a painted stand-in for one. */}
           {sharing && preview
             ? <img className="shot" src={`data:image/jpeg;base64,${preview.jpeg}`} alt="What is being shared" />
-            : <div className={"scene" + (sharing ? "" : " idle")} />}
-          {sharing && !preview && <div className="horizon" />}
-          <div className="tag"><span>Up to 3840×2160</span><span>60 fps</span><span>HEVC</span></div>
+            : <div className="scene" />}
+          <div className="tag" data-testid="share-tags">
+            {(sharing ? shareTags(runningDef, strip.fps) : shareTags(selectedDef)).map((t) => <span key={t}>{t}</span>)}
+          </div>
           {sharing
             ? <div className="cap">{preview ? `Live · ${preview.width}×${preview.height} thumbnail` : "Waiting for the first frame…"}</div>
             : <div className="idlemsg">Capture starts when you share. Nothing is running now.</div>}
         </div>
-        <InstrumentStrip s={strip} live={sharing} recOn={rec.on} />
+        <InstrumentStrip s={strip} live={sharing} recOn={rec.on} encoder={encoderBrand(caps)} />
         {sharing && (
           <div className="recrow">
             <button className={"btn" + (rec.on ? " danger" : "")} onClick={() => void toggleRecord()}>
@@ -470,7 +498,20 @@ function PresetCard({ def, locked, onSaved }: {
   );
 }
 
-function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: boolean }) {
+/** The heading names what is being captured, not always "Display 1". */
+function sourceTitle(source: SourceTarget): string {
+  switch (source.kind) {
+    case "display": return `Display ${source.index + 1}`;
+    case "window": return "A window";
+    case "region": return `Region of Display ${source.display + 1}`;
+  }
+}
+
+function InstrumentStrip({ s, live, recOn, encoder }: {
+  s: Strip; live: boolean; recOn: boolean;
+  /** Vendor encoder name from the capability probe; null when unknown or ambiguous. */
+  encoder: string | null;
+}) {
   const audioSegs = 12;
   const segsFor = (db: number) =>
     live && isFinite(db) ? Math.round(((db + 40) / 40) * audioSegs) : 0;
@@ -502,7 +543,7 @@ function InstrumentStrip({ s, live, recOn }: { s: Strip; live: boolean; recOn: b
       <div>
         <label>Load</label>
         <div className="v">{live ? s.gpuPct : "0"}<u>% enc</u></div>
-        <div className="hint">{live ? `NVENC · CPU ${s.cpuPct}%` : "Encoder not loaded"}</div>
+        <div className="hint">{live ? `${encoder ?? "Hardware encoder"} · CPU ${s.cpuPct}%` : "Encoder not loaded"}</div>
       </div>
       <div>
         <label>{s.micLive ? "Desktop audio" : "Audio"}</label>
