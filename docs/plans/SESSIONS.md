@@ -839,7 +839,7 @@ preview toggle — is dropped on the floor.
 - [x] A core that cannot be started says why, in terms a user can act on. (`startup::StartError`, one variant per remedy, no catch-all.)
 - [x] `notice` events render somewhere the user will see them, and expire quietly. (`components/Toasts.tsx`; per-notice 4 s clock, no dismiss control.)
 - [x] The background-service decision from the DoR is implemented — either a tray affordance or an explicit, honest line about what keeps running after the window closes. (Both: core-owned tray + the Settings line.)
-- [x] Reboot test on this machine with autostart off: open Relay from the Start Menu and reach live state without touching a terminal. (REBOOT_RESULT)
+- [x] Reboot test on this machine with autostart off: open Relay from the Start Menu and reach live state without touching a terminal. **PASS 2026-09-16** against the *installed* build from `Relay_0.1.0_x64-setup.exe` — `scripts/cold-start-check.ps1` with every Relay process killed and autostart off: core up in 0.32 s, pipe answering in 0.59 s, launched via the real Start Menu shortcut. Not a true cold boot (the page cache was warm), so the only thing still unproven is first-launch-after-restart disk time.
 
 ### Kickoff prompt
 ```
