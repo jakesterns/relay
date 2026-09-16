@@ -24,20 +24,20 @@ impl From<anyhow::Error> for CmdError {
 type CmdResult<T> = Result<T, CmdError>;
 
 /// The user's close preference, mirrored here so the window's close handler
-/// can decide *synchronously*.
+/// can read it without waiting.
 ///
-/// It has to be synchronous. `CloseRequested` either lets the default close
-/// proceed — which ends the process, freeing the whole webview, and is the
-/// entire reason the core and the window are separate — or prevents it. There
-/// is no way to await an IPC round-trip and then un-prevent, so a handler that
-/// asked the core at close time had to prevent first and destroy later, which
-/// left the process alive with no window: the worst of both.
+/// The handler must not block: the window should disappear the instant it is
+/// closed, and asking the core over IPC first would put a round-trip in front
+/// of that. Mirroring the one bit that matters keeps the decision free.
 ///
 /// Kept fresh from three places: once at startup, on every read, and on every
-/// write. Defaults to false, the behaviour that costs nothing to be wrong
-/// about — the window closes and the core keeps running, as it always has.
-static CLOSE_QUITS_CORE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// write. Defaults to false, the value that costs nothing to be wrong about —
+/// the window closes and the core keeps running, as it always has.
+static CLOSE_QUITS_CORE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Set once the window's close has been handled, so the exit that follows
+/// cannot re-enter the handler.
+static CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn remember_close_pref(prefs: &relay_core::uiprefs::UiPrefs) {
     CLOSE_QUITS_CORE.store(
@@ -650,23 +650,40 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if !CLOSE_QUITS_CORE.load(std::sync::atomic::Ordering::Relaxed) {
-                    // The default, and the point of the whole split: the close
-                    // proceeds untouched, this process ends and gives its
-                    // memory back, and the core carries on applying profiles
-                    // with the notification-area icon saying so.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                // Act once. The `exit` on the quit path can raise this event
+                // again for the same window; re-entering would queue a second
+                // shutdown and a second exit.
+                if CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                // The user asked for closing to mean quitting. Stop the core
-                // first — its own teardown restores audio and display, so this
-                // cannot leave a game profile applied — then end this process.
-                // `exit` is explicit rather than relying on the window count,
-                // because the prevented close will not end it by itself.
-                api.prevent_close();
+                if !CLOSE_QUITS_CORE.load(std::sync::atomic::Ordering::Relaxed) {
+                    // The default, and the reason the window and the core are
+                    // separate processes: the close proceeds untouched, this
+                    // process ends and gives its ~25 MB back, and the core
+                    // carries on applying profiles with the notification-area
+                    // icon there to say so. Nothing to do.
+                    return;
+                }
+                // The user asked for closing to mean quitting Relay. The close
+                // still is not prevented — the window goes now — but the core
+                // has to be told to stop, and that cannot be done from here
+                // synchronously, so the exit is made explicit rather than
+                // racing the window count against the task below.
                 let app = window.app_handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = call(Method::Shutdown).await;
+                    // The core's own teardown restores audio and display, so
+                    // this cannot leave a game profile applied.
+                    //
+                    // Bounded, and the bound matters: the core acts on the
+                    // request as soon as it reads it, so its reply can be lost
+                    // in its own shutdown. Exiting must never wait on an
+                    // answer that may not be coming.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        call(Method::Shutdown),
+                    )
+                    .await;
                     app.exit(0);
                 });
             }
