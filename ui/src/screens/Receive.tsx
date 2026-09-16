@@ -273,9 +273,14 @@ export function Receive() {
       </section>
       <aside className="side">
         <Card title="Your pairing code">
-          <div className="code" style={{ fontSize: 34, letterSpacing: 6, fontVariantNumeric: "tabular-nums" }}>
-            {code ?? "— — — — — —"}
-          </div>
+          {code
+            ? <div className="code paircode">{code}</div>
+            // Before there is a code: six empty hairline slots in the same
+            // box the digits will fill, so nothing moves when it arrives and
+            // nothing at 34 px reads as an error.
+            : <div className="paircode empty" role="img" aria-label="No code yet">
+                {Array.from({ length: 6 }, (_, i) => <span key={i} />)}
+              </div>}
           <p className="note">Type this on the other PC's Share screen.</p>
         </Card>
         <Card>

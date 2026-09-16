@@ -10,6 +10,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+mod window_state;
+
 #[derive(Debug, Serialize)]
 struct CmdError {
     message: String,
@@ -550,6 +552,11 @@ fn spawn_event_bridge(app: AppHandle) {
                                 // reporting an offline service, which would
                                 // look like a fault instead of a choice.
                                 Event::Quitting => {
+                                    // `exit` skips the close event, which is
+                                    // where the window state is normally saved.
+                                    if let Some(w) = app.get_webview_window("main") {
+                                        window_state::persist(&w.as_ref().window());
+                                    }
                                     app.exit(0);
                                     return;
                                 }
@@ -647,6 +654,44 @@ async fn load_close_pref() {
     }
 }
 
+/// One window per session. Returns the held lock when this process is the
+/// window, or `None` when it handed focus to the window that already exists
+/// and should exit.
+///
+/// A second launch — the Start Menu shortcut clicked again, the installer's
+/// "run Relay" — used to open a second window, each with its own IPC
+/// subscription. Now it brings the first one forward and leaves.
+///
+/// The wait covers the two moments the other window cannot be focused: it is
+/// still starting (the window is created hidden until its position is
+/// restored), or it is closing and holding the name for its last few seconds
+/// while it tells the core to stop. In the first case it appears and gets
+/// focus; in the second the name frees up and this launch becomes the window,
+/// so the click is never lost.
+#[cfg(windows)]
+fn single_instance() -> Option<Option<relay_core::instance::InstanceLock>> {
+    use relay_core::instance::InstanceLock;
+
+    let name = relay_core::config::ui_mutex_name();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        match InstanceLock::acquire(&name) {
+            Ok(Some(lock)) => return Some(Some(lock)),
+            // A mutex that cannot be created at all says nothing about another
+            // window. Opening a possible second window beats opening none.
+            Err(e) => {
+                tracing::warn!("single-instance check unavailable: {e:#}");
+                return Some(None);
+            }
+            Ok(None) => {}
+        }
+        if relay_core::launcher::focus_ui() || std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -654,8 +699,18 @@ pub fn run() {
         .compact()
         .init();
 
+    // Held until the process ends; the OS releases the name then.
+    #[cfg(windows)]
+    let _instance = match single_instance() {
+        Some(lock) => lock,
+        None => return,
+    };
+
     tauri::Builder::default()
         .setup(|app| {
+            if let Some(w) = app.get_webview_window("main") {
+                window_state::restore(&w.as_ref().window());
+            }
             spawn_event_bridge(app.handle().clone());
             spawn_core_autostart(app.handle().clone());
             Ok(())
@@ -668,6 +723,9 @@ pub fn run() {
                 if CLOSING.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
+                // Before anything else: on either path below the window is
+                // about to be gone.
+                window_state::persist(window);
                 if !CLOSE_QUITS_CORE.load(std::sync::atomic::Ordering::Relaxed) {
                     // The default, and the reason the window and the core are
                     // separate processes: the close proceeds untouched, this

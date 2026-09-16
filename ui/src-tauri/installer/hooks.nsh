@@ -136,7 +136,9 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ; Tauri's template records the install location under
-  ; HKCU\Software\relay\Relay so a reinstall can offer the same folder, and
+  ; HKCU\Software\Relay\Relay (publisher\product; before S26 set the publisher
+  ; it was relay\Relay, the same key to the case-insensitive registry) so a
+  ; reinstall can offer the same folder, and
   ; only deletes it when "Delete the application data" is ticked. That is
   ; install bookkeeping, not the user's profiles, and Relay's promise is that
   ; an uninstall leaves nothing behind except the data folder they chose to

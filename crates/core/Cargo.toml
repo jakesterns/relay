@@ -29,6 +29,11 @@ path = "src/bin/relay-svc.rs"
 name = "relay-elevate"
 path = "src/bin/relay-elevate.rs"
 
+# Version resources (publisher, description) for the three binaries; see
+# build.rs. Already in the tree through tauri-build.
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 # params + sessions only: the DSP (FFT) must not live in the always-on core.
 relay-audio.workspace = true

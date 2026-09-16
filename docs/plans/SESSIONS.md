@@ -101,7 +101,7 @@ sessions beat eight neglected ones.
 | S23 | Never look dead | `feat/never-dead` | create when started | — |
 | S24 | Stop the UI lying | `feat/honest-ui` | main tree | **done 2026-09-16** |
 | S25 | Keyboard, focus, destructive actions | `feat/ui-safety` | main tree | **done 2026-09-15** |
-| S26 | Shell polish | `feat/shell-polish` | create when started | — |
+| S26 | Shell polish | `feat/shell-polish` | main tree | **done 2026-09-16** |
 | S18 | Relay Send VST3 | `feat/vst3-send` | create when started | — (v1.1) |
 | S19 | Call-audio return and mix-minus | `feat/mix-minus` | create when started | S2 done, so unblocked (v1.1) |
 | S20 | Stream Deck and NDI output | `feat/streamdeck-ndi` | create when started | — (v1.1) |
@@ -930,20 +930,21 @@ Separately, four different patterns exist for destructive actions: preset delete
 ---
 
 ## S26 — Shell polish
-**Branch** `feat/shell-polish` · **Worktree** main tree
+**Branch** `feat/shell-polish` · **Worktree** main tree · **Done 2026-09-16**
 
 Small Windows-integration details, none hard, all noticed.
 
 ### Definition of Ready
 - [x] Icons are already custom and on-brand, not the Tauri default.
-- [ ] Decide the publisher string. It shows in Add/Remove Programs and, now that S6 added an elevation prompt, in the UAC dialog. Unsigned binaries will still read "Unknown publisher" there until the EV certificate lands (S17).
+- [x] Decide the publisher string. It shows in Add/Remove Programs and, now that S6 added an elevation prompt, in the UAC dialog. Unsigned binaries will still read "Unknown publisher" there until the EV certificate lands (S17).
+      **Decided 2026-09-16:** publisher `Relay`, support URL `https://github.com/jakesterns/relay`.
 
 ### Definition of Done
-- [ ] Window size and position persist across launches (currently resets to 1280×800 centred every time).
-- [ ] A second launch focuses the existing window instead of opening a second one. The core has a single-instance mutex; the UI has none.
-- [ ] Add/Remove Programs shows a real publisher rather than the lowercase crate name `relay`, plus a support URL.
-- [ ] Disabled sliders show their current value instead of `—`, so a locked setting is still readable.
-- [ ] Loading states do not pop: at minimum the pairing-code placeholder stops rendering six em-dashes at 34 px, which reads as an error.
+- [x] Window size and position persist across launches (currently resets to 1280×800 centred every time). (`ui/src-tauri/src/window_state.rs`, in the UI process only. Normal bounds + maximised flag from `GetWindowPlacement` at close — tracking move/resize events was tried first and recorded the *maximised* rectangle — into `data\window.json`, so delete-my-data covers it. The window is created hidden and shown after placement, so there is no jump. A pure `placement()` rejects a title bar that would not be reachable on any current work area (unplugged monitor, off the top) and shrinks/nudges a window saved on a bigger screen; 10 unit tests. Live on this PC: move → relaunch exact; maximised → relaunch maximised and un-maximises to the saved bounds; bounds on a missing monitor → centred default.)
+- [x] A second launch focuses the existing window instead of opening a second one. The core has a single-instance mutex; the UI has none. (`Local\RelayUi` via the core's `InstanceLock`, before Tauri starts. A second launch calls `launcher::focus_ui` and exits; it retries for 6 s so a window still starting gets focus and a window still closing hands over the name rather than eating the click. `focus_ui` now only un-minimises — `SW_RESTORE` on a maximised window had been un-maximising it, from the tray too. Live: second launch exits 0, one process, first window foreground, un-minimised.)
+- [x] Add/Remove Programs shows a real publisher rather than the lowercase crate name `relay`, plus a support URL. (`bundle.publisher` / `bundle.homepage` in `tauri.conf.json`; the generated `installer.nsi` writes `Publisher=Relay` and `URLInfoAbout`/`HelpLink`/`URLUpdateInfo`. The uninstall key is keyed by product name, and `HKCU\Software\relay` vs `Relay` is the same key, so an upgrade keeps one entry. `relay-core`, `relay-svc` and `relay-elevate` gained version resources — CompanyName `Relay`, a FileDescription each — from `crates/core/build.rs`, so Task Manager and, once signed, the UAC prompt have a name to show. Before S17 the UAC publisher still reads Unknown; only a signature changes that.)
+- [x] Disabled sliders show their current value instead of `—`, so a locked setting is still readable. (Muted rather than dimmed out. A monitor field the profile does not set reads `Not set` — printing the thumb's resting 50 would claim a setting nobody chose, the S24 rule.)
+- [x] Loading states do not pop: at minimum the pairing-code placeholder stops rendering six em-dashes at 34 px, which reads as an error. (Six hairline slots in a fixed-height box the digits then fill, so nothing moves when the code arrives. 244 UI tests.)
 
 ### Kickoff prompt
 ```

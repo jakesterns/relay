@@ -88,9 +88,9 @@ pub fn spawn_core(_args: &[String]) -> Result<u32> {
 /// Bring the Relay window up: focus the one that is already running, or start
 /// it if there is none. Used by the tray's "Open Relay".
 ///
-/// Focusing first matters — the Tauri shell has no single-instance guard, so
-/// spawning unconditionally would give the user a second window every time
-/// they clicked the tray icon.
+/// Focusing first saves a process start: the window has its own
+/// single-instance guard now (a second `relay-ui.exe` hands focus to the first
+/// and exits), but there is no reason to launch one just for that.
 #[cfg(windows)]
 pub fn open_ui() -> Result<()> {
     if focus_ui() {
@@ -106,11 +106,17 @@ pub fn open_ui() -> Result<()> {
     Ok(())
 }
 
-/// Restore and focus an existing Relay window. `false` if none is up.
+/// Bring an existing Relay window to the front. `false` if none is up.
+///
+/// Also what a second launch of `relay-ui.exe` calls before exiting. It works
+/// from there because the process the user just started is allowed to take
+/// the foreground, and it is handing it straight to the window they wanted.
 #[cfg(windows)]
-fn focus_ui() -> bool {
+pub fn focus_ui() -> bool {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
 
     let Some(p) =
         crate::processes::list_windowed().into_iter().find(|p| p.exe.eq_ignore_ascii_case(UI_EXE))
@@ -121,9 +127,18 @@ fn focus_ui() -> bool {
     // SAFETY: a window handle the enumeration just produced. Both calls are
     // no-ops on a handle that died in between.
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
+        // Only un-minimise. SW_RESTORE on a maximised window would also
+        // un-maximise it, which is not what "show me Relay" means.
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
         SetForegroundWindow(hwnd).as_bool()
     }
+}
+
+#[cfg(not(windows))]
+pub fn focus_ui() -> bool {
+    false
 }
 
 #[cfg(not(windows))]

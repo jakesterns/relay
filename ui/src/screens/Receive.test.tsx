@@ -23,12 +23,20 @@ async function mount() {
   return h;
 }
 
-const code = () => (document.querySelector(".code")?.textContent ?? "").trim();
+/** The digits, or `null` while the placeholder slots are showing. */
+const code = () => {
+  if (screen.queryByRole("img", { name: "No code yet" })) return null;
+  return (document.querySelector(".paircode")?.textContent ?? "").trim();
+};
 
 describe("pairing", () => {
   it("shows no code until the core hands one out", async () => {
     const h = await mount();
-    expect(code()).toBe("— — — — — —");
+    expect(code()).toBeNull();
+    // Empty slots, not six em-dashes at 34 px, which read as an error.
+    const placeholder = screen.getByRole("img", { name: "No code yet" });
+    expect(placeholder.textContent).toBe("");
+    expect(placeholder.children).toHaveLength(6);
     expect(kv("Status")).toBe("Idle");
     expect(kv("Codec")).toBe("—");
     h.expectClean();
@@ -69,7 +77,7 @@ describe("pairing", () => {
     expect(tauri.lastCall("stop_receive")).toBeDefined();
 
     await push(() => tauri.emit("core://receive-status", { receiving: false }));
-    expect(code()).toBe("— — — — — —");
+    expect(code()).toBeNull();
     expect(kv("Status")).toBe("Idle");
   });
 

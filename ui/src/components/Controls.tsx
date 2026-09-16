@@ -39,9 +39,19 @@ export function Toggle({ on, onChange, label, sub }: {
   );
 }
 
-export function Slider({ label, value, min, max, step = 1, format, onChange, disabled }: {
+/**
+ * A labelled range with its value readout.
+ *
+ * A disabled slider still prints its value: a setting that is locked, by the
+ * panel or by there being no profile open, is still worth reading. `unset` is
+ * the one case that prints no number — a field the profile leaves alone, where
+ * `value` is only where the thumb rests and printing it would claim a setting
+ * nobody chose.
+ */
+export function Slider({ label, value, min, max, step = 1, format, onChange, disabled, unset }: {
   label: string; value: number; min: number; max: number; step?: number;
   format?: (v: number) => string; onChange?: (v: number) => void; disabled?: boolean;
+  unset?: boolean;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
   return (
@@ -53,7 +63,9 @@ export function Slider({ label, value, min, max, step = 1, format, onChange, dis
             onChange={(e) => onChange?.(Number(e.target.value))} />
         )}
       </div>
-      <div className="val">{disabled ? "—" : (format ? format(value) : String(value))}</div>
+      <div className={"val" + (unset ? " unset" : "")}>
+        {unset ? "Not set" : (format ? format(value) : String(value))}
+      </div>
     </div>
   );
 }
