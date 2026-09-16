@@ -14,22 +14,32 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
   const { offline } = useCore();
   const [caps, setCaps] = useState<ShareCapabilities | null>(null);
 
+  // Re-probe when the window regains focus. Installing the codec happens in
+  // the Store, i.e. in another window, so the user comes back expecting Relay
+  // to have noticed. Telling them to restart the app for something Windows
+  // already knows is the kind of small indignity that reads as broken.
   useEffect(() => {
     let live = true;
-    api.shareCapabilities()
-      .then((c) => { if (live) setCaps(c); })
-      .catch(() => { if (live) setCaps(null); });
-    return () => { live = false; };
+    const probe = () => {
+      api.shareCapabilities()
+        .then((c) => { if (live) setCaps(c); })
+        .catch(() => { if (live) setCaps(null); });
+    };
+    probe();
+    window.addEventListener("focus", probe);
+    return () => { live = false; window.removeEventListener("focus", probe); };
   }, [offline]);
 
   if (!caps) return null;
   if (need === "receive" && !caps.can_receive) {
     return (
       <div className="offline"><i />
-        No HEVC decoder on this PC, so receiving would fail on the first frame. Install the free
-        "HEVC Video Extensions from Device Manufacturer" from the{" "}
-        <a href={HEVC_STORE_SEARCH}>Microsoft Store</a>, then reopen Relay. Relay cannot bundle it —
-        Microsoft licenses that package to PC makers, not for redistribution by apps.
+        This PC cannot decode HEVC video, so Relay cannot show the shared screen.
+        Windows includes the decoder for free only on PCs whose manufacturer licensed it;
+        otherwise Microsoft sells it in the Store as{" "}
+        <a href={HEVC_STORE_PAID}>HEVC Video Extensions</a>. Relay cannot bundle either —
+        Microsoft does not license that codec for redistribution by apps. This banner clears
+        itself once the decoder is present.
       </div>
     );
   }
@@ -151,10 +161,24 @@ export function FirewallBanner() {
   );
 }
 
-/** The Store has two HEVC packages and the free one's product ID is not
- *  something we can verify from here, so link the search rather than ship a
- *  deep link that might open an error page. */
-const HEVC_STORE_SEARCH = "ms-windows-store://search/?query=HEVC%20Video%20Extensions";
+/** Deep link to the *paid* HEVC extension, deliberately.
+ *
+ *  There are two Microsoft packages. The free one (9N4WGH0Z6VHQ,
+ *  `Microsoft.HEVCVideoExtension`, singular) is OEM-entitlement only: its
+ *  catalog entry has no Purchase action, and on a PC whose manufacturer did
+ *  not license it the Store shows the page with Install greyed out — verified
+ *  on a real Windows 10 machine 2026-09-16, not inferred. The paid one
+ *  (9NMZLZ57R3T7, `Microsoft.HEVCVideoExtensions`, plural) has a Purchase
+ *  action and is installable by anyone.
+ *
+ *  This used to link to a Store *search*, which is worse than useless: the
+ *  free package does not appear in search results at all, so the user was
+ *  shown CapCut and third-party "HEVC Player" apps instead. Never link the
+ *  search.
+ *
+ *  Price is not hardcoded — it varies by market (0.99 USD, 0.79 GBP) and the
+ *  Store page states it. */
+const HEVC_STORE_PAID = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7";
 
 /** Whether a call on this PC will actually see the incoming share.
  *

@@ -148,12 +148,18 @@ describe("codec capability", () => {
     core.capabilities = { can_share: true, can_receive: false, adapters: ["NVIDIA GeForce RTX 3090"], encoders: ["x"], decoders: [] };
     tauri.useFakeCore(core.handler);
     await mount();
-    expect(screen.getByText(/HEVC Video Extensions from Device Manufacturer/)).toBeInTheDocument();
+    expect(screen.getByText(/cannot decode HEVC video/)).toBeInTheDocument();
+    // Must be the product deep link, never a Store search: the free package
+    // does not appear in search results, so a search sends the user to
+    // CapCut and third-party players instead.
+    const link = screen.getByRole("link", { name: /HEVC Video Extensions/ });
+    expect(link).toHaveAttribute("href", expect.stringContaining("pdp/?ProductId="));
+    expect(link.getAttribute("href")).not.toContain("search");
   });
 
   it("stays quiet when this PC can decode", async () => {
     await mount();
-    expect(screen.queryByText(/No HEVC decoder on this PC/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cannot decode HEVC video/)).not.toBeInTheDocument();
   });
 });
 
