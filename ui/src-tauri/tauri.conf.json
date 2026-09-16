@@ -22,6 +22,7 @@
         "decorations": false,
         "resizable": true,
         "center": true,
+        "visible": false,
         "backgroundColor": "#0E0D0C"
       }
     ],
@@ -36,6 +37,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Relay",
+    "homepage": "https://github.com/jakesterns/relay",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

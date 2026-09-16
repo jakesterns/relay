@@ -139,7 +139,12 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .sl .val { text-align: right; color: var(--ink); font-family: GeistMono; font-size: 12px; font-variant-numeric: tabular-nums; }
 .sl.dis .tr:before { background: #3a3531; }
 .sl.dis .tr:after { background: #6a6258; }
-.sl.dis .val { color: var(--dim); }
+/* A locked slider's value stays readable: muted like the row, not dimmed out
+   of sight. "Not set" takes the same tone, since it is a statement, not data. */
+.sl.dis .val, .sl .val.unset { color: var(--mute); }
+.paircode { height: 44px; line-height: 44px; font-size: 34px; letter-spacing: 6px; font-variant-numeric: tabular-nums; }
+.paircode.empty { display: flex; align-items: flex-end; gap: 6px; padding-bottom: 9px; }
+.paircode.empty span { width: 20px; height: 1px; background: var(--line2); }
 
 /* Tables */
 .tbl { width: 100%; border-collapse: collapse; }

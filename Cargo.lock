@@ -3524,6 +3524,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "directories",
+ "embed-resource",
  "parking_lot",
  "relay-apo",
  "relay-audio",
@@ -3565,6 +3566,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -23,6 +23,9 @@ pub const INSTANCE_ENV: &str = "RELAY_INSTANCE";
 const PIPE_BASE: &str = r"\\.\pipe\relay-core";
 /// Base of the single-instance mutex. The `Local` prefix scopes it to this session.
 const MUTEX_BASE: &str = r"Local\RelayCore";
+/// Base of the window's own single-instance mutex. Separate from the core's:
+/// the window and the core come and go independently.
+const UI_MUTEX_BASE: &str = r"Local\RelayUi";
 
 fn instance_suffix() -> Option<String> {
     std::env::var(INSTANCE_ENV).ok().filter(|s| !s.is_empty())
@@ -41,6 +44,14 @@ pub fn mutex_name() -> String {
     match instance_suffix() {
         Some(s) => format!("{MUTEX_BASE}-{s}"),
         None => MUTEX_BASE.to_string(),
+    }
+}
+
+/// The window's mutex name, suffixed the same way as [`mutex_name`].
+pub fn ui_mutex_name() -> String {
+    match instance_suffix() {
+        Some(s) => format!("{UI_MUTEX_BASE}-{s}"),
+        None => UI_MUTEX_BASE.to_string(),
     }
 }
 
@@ -141,6 +152,12 @@ impl Paths {
         self.data_dir().join("settings.json")
     }
 
+    /// The window's last size, position and maximised state. Written and read
+    /// by `relay-ui` only; the core never touches it.
+    pub fn window_file(&self) -> PathBuf {
+        self.data_dir().join("window.json")
+    }
+
     /// Downloaded headphone measurements, one CSV per model. Cached so a
     /// model is fetched once ever; deleting this only costs a re-download.
     pub fn curves_dir(&self) -> PathBuf {
@@ -190,6 +207,7 @@ mod tests {
             p.backup_file(),
             p.presets_file(),
             p.settings_file(),
+            p.window_file(),
             p.log_file(),
             p.installed_file(),
         ] {
@@ -208,5 +226,7 @@ mod tests {
         // Other tests may set RELAY_INSTANCE; only assert the prefix.
         assert!(pipe_name().starts_with(PIPE_BASE));
         assert!(mutex_name().starts_with(MUTEX_BASE));
+        assert!(ui_mutex_name().starts_with(UI_MUTEX_BASE));
+        assert_ne!(mutex_name(), ui_mutex_name());
     }
 }

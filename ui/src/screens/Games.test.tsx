@@ -207,6 +207,38 @@ describe("the display editor", () => {
     expect(slider("Sharpness", mon).disabled).toBe(true);
   });
 
+  it("keeps a locked slider's value readable", async () => {
+    // Stored on the profile, but the panel cannot take them (0x87 is not
+    // advertised; no vendor evidence) — locked, and still worth reading.
+    core.profiles.get("1")!.display.monitor = { sharpness: 70, black_equalizer: 12, response: "fast" };
+    tauri.useFakeCore(core.handler);
+    await mount("display");
+    const mon = card("Monitor");
+    expect(slider("Sharpness", mon)).toMatchObject({ disabled: true, value: "70" });
+    expect(slider("Black equalizer", mon)).toMatchObject({ disabled: true, value: "12" });
+    expect(slider("Response", mon)).toMatchObject({ disabled: true, value: "Fast" });
+    for (const s of mon.querySelectorAll(".sl .val")) expect(s.textContent).not.toBe("—");
+  });
+
+  it("says Not set for a monitor field the profile leaves alone, until it is set", async () => {
+    await mount("display");
+    const mon = card("Monitor");
+    // Printing 50 here would claim a brightness nobody chose.
+    expect(slider("Brightness", mon)).toMatchObject({ disabled: false, value: "Not set" });
+    expect(slider("Sharpness", mon)).toMatchObject({ disabled: true, value: "Not set" });
+    setSlider("Brightness", 60, mon);
+    expect(slider("Brightness", mon).value).toBe("60");
+  });
+
+  it("shows the neutral GPU values, not dashes, before a profile is open", async () => {
+    core.profiles.clear();
+    tauri.useFakeCore(core.handler);
+    await mount("display");
+    const gpu = card("GPU color");
+    expect(slider("Vibrance", gpu)).toMatchObject({ disabled: true, value: "+50" });
+    expect(slider("Gamma", gpu)).toMatchObject({ disabled: true, value: "1.00" });
+  });
+
   it("leaves a vendor control off until the core says it verified an opcode", async () => {
     await mount("display");
     const mon = card("Monitor");

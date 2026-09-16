@@ -543,20 +543,30 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
           <PanelColorNote color={panelColor} vibrance={gpu.vibrance} />
         </Card>
         <Card title="Monitor" action="Reset" onAction={() => update((p) => { p.display.monitor = {}; })}>
+          {/* Monitor fields are optional: an absent one is a setting Relay
+              leaves alone, so it reads "Not set" rather than the resting
+              position of the thumb. */}
           <Slider label="Brightness" value={mon.brightness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x10)}
+            unset={mon.brightness === undefined}
             onChange={(v) => update((p) => { p.display.monitor.brightness = v; })} />
           <Slider label="Contrast" value={mon.contrast ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x12)}
+            unset={mon.contrast === undefined}
             onChange={(v) => update((p) => { p.display.monitor.contrast = v; })} />
           <Slider label="Black equalizer" value={mon.black_equalizer ?? 10} min={0} max={20}
-            disabled={off || !vendor?.black_equalizer}
+            disabled={off || !vendor?.black_equalizer} unset={mon.black_equalizer === undefined}
             onChange={(v) => update((p) => { p.display.monitor.black_equalizer = v; })} />
+          {/* With no verified levels there is no index to point at, so the
+              readout falls back to the level the profile stored, by name. */}
           <Slider label="Response" value={responseIx} min={0} max={Math.max(0, responseLevels.length - 1)}
-            format={(v) => levelLabel(responseLevels[v])} disabled={off || responseLevels.length < 2}
+            format={(v) => levelLabel(responseLevels.length ? responseLevels[v] : mon.response)}
+            disabled={off || responseLevels.length < 2}
+            unset={responseLevels.length === 0 && mon.response === undefined}
             onChange={(v) => update((p) => {
               const level = responseLevels[v];
               if (!level || v === 0) delete p.display.monitor.response; else p.display.monitor.response = level;
             })} />
           <Slider label="Sharpness" value={mon.sharpness ?? 50} min={0} max={100} disabled={off || !vcpAvailable(codes, 0x87)}
+            unset={mon.sharpness === undefined}
             onChange={(v) => update((p) => { p.display.monitor.sharpness = v; })} />
           {(!vendor?.black_equalizer || responseLevels.length < 2) && (
             <p className="note">Black equalizer and Response sit on vendor-private codes Relay has not verified on this panel, so they stay off. Nothing on your monitor was changed.</p>
