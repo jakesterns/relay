@@ -32,14 +32,19 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
 
   if (!caps) return null;
   if (need === "receive" && !caps.can_receive) {
+    // `.offline` is a flex row, so every text node and the <a> would each
+    // become a column — on a real machine the link rendered one word per
+    // line. `.msg` keeps it a single inline flow.
     return (
       <div className="offline"><i />
-        This PC cannot decode HEVC video, so Relay cannot show the shared screen.
-        Windows includes the decoder for free only on PCs whose manufacturer licensed it;
-        otherwise Microsoft sells it in the Store as{" "}
-        <a href={HEVC_STORE_PAID}>HEVC Video Extensions</a>. Relay cannot bundle either —
-        Microsoft does not license that codec for redistribution by apps. This banner clears
-        itself once the decoder is present.
+        <span className="msg">
+          This PC cannot decode HEVC video, so Relay cannot show the shared screen.
+          Windows includes the decoder for free only on PCs whose manufacturer licensed it;
+          otherwise Microsoft sells it in the Store as{" "}
+          <a href={HEVC_STORE_PAID}>HEVC Video Extensions</a>. Relay cannot bundle the decoder —
+          Microsoft does not license it for redistribution by apps. This banner clears
+          itself once a decoder is present.
+        </span>
       </div>
     );
   }
@@ -50,10 +55,12 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
     const gpu = caps.adapters.length ? caps.adapters.join(" and ") : "this PC's GPU";
     return (
       <div className="offline"><i />
-        No hardware HEVC encoder on {gpu}. Relay encodes in hardware only (NVENC / Quick Sync /
-        AMF) — there is no software encode path, so this PC can receive a share but not send one.
-        If the GPU is recent, update its graphics driver: Windows only lists the encoder once the
-        vendor driver is installed.
+        <span className="msg">
+          No hardware HEVC encoder on {gpu}. Relay encodes in hardware only (NVENC / Quick Sync /
+          AMF) — there is no software encode path, so this PC can receive a share but not send one.
+          If the GPU is recent, update its graphics driver: Windows only lists the encoder once the
+          vendor driver is installed.
+        </span>
       </div>
     );
   }

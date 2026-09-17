@@ -97,7 +97,11 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .card { background: var(--surface); border: 1px solid var(--line2); border-radius: 8px; padding: 14px 16px; }
 .card h3 { font-size: 12px; font-weight: 450; color: var(--mute); margin-bottom: 10px; display: flex; justify-content: space-between; }
 .card h3 a, .card h3 button { color: var(--brass); }
-.kv { display: flex; justify-content: space-between; padding: 8px 0; border-top: 1px solid var(--line); color: var(--mute); }
+/* gap, because space-between leaves none once the value wraps: a long value
+   ran straight into its label ("CameraNeeds Windows 11 22H2+..."). */
+.kv { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); color: var(--mute); }
+.kv > span { flex: none; }
+.kv strong { text-align: right; }
 .kv:first-of-type { border-top: 0; padding-top: 0; }
 .kv strong { color: var(--ink); font-weight: 450; }
 .kv strong.m { font-family: GeistMono; font-size: 12px; font-variant-numeric: tabular-nums; }

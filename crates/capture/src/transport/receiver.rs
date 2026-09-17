@@ -88,7 +88,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let port = listener.local_addr()?.port();
     let _ad = discovery::Advertisement::start(&name, port)?;
     info!(%name, port, "advertising receiver");
-    eprintln!("\n  Relay receiver \"{name}\" — pairing code: {code}\n");
+    eprintln!("\n  Relay receiver \"{name}\" - pairing code: {code}\n");
     println!(
         "{}",
         serde_json::json!({

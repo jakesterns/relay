@@ -233,6 +233,9 @@ fn activate_decoder(codec: VideoCodec) -> Result<(IMFTransform, String)> {
         )
         .with_context(|| format!("MFTEnumEx({} decoder)", codec.label()))?;
         if activates.is_null() || count == 0 {
+            // Deliberately ASCII: this reaches a console, where a UTF-8 em
+            // dash renders as mojibake on the OEM code page (seen on Windows 10).
+            //
             // The receiver only registers codecs it found a decoder for, so
             // reaching this means the decoder vanished between the answer
             // and the first frame, or the peer ignored the answer.

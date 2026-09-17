@@ -789,6 +789,9 @@ fn spawn_receive(
     std::thread::Builder::new()
         .name("relay-receive-pump".into())
         .spawn(move || {
+            // Why the engine stopped, carried to the final ReceiveStatus so a
+            // failure is never reported as a plain return to idle.
+            let mut last_failure: Option<String> = None;
             crate::share::pump(rx, |ev| match ev {
                 // The receiver renders into its own window, so a preview from
                 // that side would be a picture of something already on screen.
@@ -813,6 +816,9 @@ fn spawn_receive(
                     let _ = events2.send(Event::ShareStats { data });
                 }
                 ShareEvent::Error { message } => {
+                    // Remember it: if the engine then exits, this is the only
+                    // explanation the user will ever get.
+                    last_failure = Some(message.clone());
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -820,8 +826,20 @@ fn spawn_receive(
                         message: Some(message),
                     });
                 }
-                ShareEvent::Exited { .. }
-                | ShareEvent::Connected { .. }
+                // Keep *why* it stopped. An engine that dies during startup --
+                // no decoder for the incoming codec, say -- emits an error or a
+                // non-zero exit and then nothing. Dropping both here is what
+                // made "Start receiving" look like it did nothing at all: the
+                // UI flipped straight back to Idle with no reason given.
+                ShareEvent::Exited { ok, code } => {
+                    if !ok && last_failure.is_none() {
+                        last_failure = Some(match code {
+                            Some(c) => format!("the receiver stopped unexpectedly (exit {c})"),
+                            None => "the receiver stopped unexpectedly".to_string(),
+                        });
+                    }
+                }
+                ShareEvent::Connected { .. }
                 | ShareEvent::Recording { .. }
                 | ShareEvent::ReplaySaved { .. }
                 | ShareEvent::SourceChanged { .. } => {}
@@ -834,7 +852,7 @@ fn spawn_receive(
                     receiving: false,
                     code: None,
                     sender: None,
-                    message: None,
+                    message: last_failure.take(),
                 });
             }
         })

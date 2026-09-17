@@ -352,7 +352,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let answer_json = match sig.recv().await? {
         signal::SigMsg::Answer { name, sdp, mac } => {
             if !signal::verify_mac(&opts.code, &sdp, &mac) {
-                bail!("pairing code mismatch — the receiver used a different code");
+                bail!("pairing code mismatch - the receiver used a different code");
             }
             if let Some(fp) = signal::sdp_fingerprint(&sdp) {
                 let _ = signal::remember_peer(&name, &fp);
