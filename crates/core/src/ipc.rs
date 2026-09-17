@@ -145,8 +145,8 @@ pub enum Method {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         wav: Option<String>,
     },
-    /// What this PC can actually do with HEVC: hardware encoders (needed to
-    /// share) and any decoder (needed to receive). Runs `relay-share probe`,
+    /// What this PC can actually do with video (HEVC and H.264): hardware
+    /// encoders (needed to share) and any decoder (needed to receive). Runs `relay-share probe`,
     /// so it costs a short-lived child process -- call it when a screen opens,
     /// not on a timer.
     ShareCapabilities,
@@ -293,6 +293,11 @@ pub enum Reply {
         adapters: Vec<String>,
         encoders: Vec<String>,
         decoders: Vec<String>,
+        /// `"hevc"` / `"h264"` this PC can send and receive (S27).
+        #[serde(default)]
+        share_codecs: Vec<String>,
+        #[serde(default)]
+        receive_codecs: Vec<String>,
     },
     Apo {
         status: crate::audio_apo::ApoStatus,
@@ -368,6 +373,9 @@ pub enum Event {
         code: Option<String>,
         sender: Option<String>,
         message: Option<String>,
+        /// The negotiated video codec, once the first frame names it.
+        #[serde(default)]
+        codec: Option<String>,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

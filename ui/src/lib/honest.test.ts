@@ -66,14 +66,15 @@ describe("the share overlay labels", () => {
     cursor: false, record: false, replay_secs: 0, container: "mp4", ...patch,
   });
 
-  it("describes the selected preset while idle", () => {
-    expect(shareTags(def({ size: [2560, 1440] }))).toEqual(["Up to 2560×1440", "30 fps", "HEVC"]);
-    expect(shareTags(def({ fps: 120 }))).toEqual(["Native size", "120 fps", "HEVC"]);
+  it("describes the selected preset while idle, and names no codec before a receiver answers", () => {
+    expect(shareTags(def({ size: [2560, 1440] }))).toEqual(["Up to 2560×1440", "30 fps"]);
+    expect(shareTags(def({ fps: 120 }))).toEqual(["Native size", "120 fps"]);
   });
 
-  it("shows the measured frame rate while sharing, and omits what is not known", () => {
-    expect(shareTags(def({}), 29.6)).toEqual(["Native size", "30 fps", "HEVC"]);
-    expect(shareTags(def({}), 0)).toEqual(["Native size", "HEVC"]);
-    expect(shareTags(undefined, 59.9)).toEqual(["60 fps", "HEVC"]);
+  it("shows the measured frame rate and the negotiated codec while sharing", () => {
+    expect(shareTags(def({}), 29.6, "hevc")).toEqual(["Native size", "30 fps", "HEVC"]);
+    expect(shareTags(def({}), 29.6, "h264")).toEqual(["Native size", "30 fps", "H.264"]);
+    expect(shareTags(def({}), 0)).toEqual(["Native size"]);
+    expect(shareTags(undefined, 59.9, "h264")).toEqual(["60 fps", "H.264"]);
   });
 });

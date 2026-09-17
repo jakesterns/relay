@@ -110,8 +110,9 @@ impl<'de> Deserialize<'de> for PresetAudio {
     }
 }
 
-/// One share preset. Encoder codec is HEVC by construction (the engine has no
-/// other path); GOP is fixed by the engine's latency tuning.
+/// One share preset. The codec is not a preset field: each share negotiates
+/// HEVC or H.264 with its receiver (S27). GOP is fixed by the engine's latency
+/// tuning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SharePresetDef {
     /// Stable id: `game` / `daw` / `desktop` for built-ins.

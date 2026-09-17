@@ -61,7 +61,10 @@ describe("pairing", () => {
     await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254", sender: "studio-pc" }));
 
     expect(kv("Status")).toBe("Paired with studio-pc");
-    expect(kv("Codec")).toBe("HEVC");
+    // Not claimed until the stream names it: the codec is negotiated.
+    expect(kv("Codec")).toBe("—");
+    await push(() => tauri.emit("core://receive-status", { receiving: true, codec: "h264" }));
+    expect(kv("Codec")).toBe("H.264");
     expect(screen.getByText(/Playing in a separate window · studio-pc/)).toBeInTheDocument();
     expect(screen.getByText(/The stream appears as a normal window\. Nothing on this PC is changed\./)).toBeInTheDocument();
     h.expectClean();
@@ -144,22 +147,39 @@ describe("whether a call will see the stream", () => {
 });
 
 describe("codec capability", () => {
-  it("names the Store download needed to decode, before the first frame fails", async () => {
-    core.capabilities = { can_share: true, can_receive: false, adapters: ["NVIDIA GeForce RTX 3090"], encoders: ["x"], decoders: [] };
+  /* B6: the Windows 10 test PC has no HEVC decoder and cannot install one for
+   * free. Since S27 its shares work over H.264, so a red "cannot show" error
+   * there would claim a working feature is broken. */
+  it("notes H.264 without an error when this PC has no HEVC decoder", async () => {
+    core.capabilities = {
+      can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 2080"],
+      encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft H264 Video Decoder MFT"],
+      share_codecs: ["hevc", "h264"], receive_codecs: ["h264"],
+    };
     tauri.useFakeCore(core.handler);
     await mount();
-    expect(screen.getByText(/cannot decode HEVC video/)).toBeInTheDocument();
-    // Must be the product deep link, never a Store search: the free package
-    // does not appear in search results, so a search sends the user to
-    // CapCut and third-party players instead.
-    const link = screen.getByRole("link", { name: /HEVC Video Extensions/ });
-    expect(link).toHaveAttribute("href", expect.stringContaining("pdp/?ProductId="));
-    expect(link.getAttribute("href")).not.toContain("search");
+    expect(screen.getByTestId("codec-note")).toHaveTextContent(/use H\.264, because it has no HEVC decoder/);
+    expect(screen.queryByText(/cannot show a shared screen/)).not.toBeInTheDocument();
+    // Relay is free: nothing points anyone at a paid codec.
+    expect(screen.queryByRole("link", { name: /HEVC/ })).not.toBeInTheDocument();
+    expect(document.querySelector(".offline")).toBeNull();
   });
 
-  it("stays quiet when this PC can decode", async () => {
+  it("errors only when no decoder for either codec exists", async () => {
+    core.capabilities = {
+      can_share: true, can_receive: false, adapters: ["NVIDIA GeForce RTX 3090"],
+      encoders: ["x"], decoders: [], share_codecs: ["hevc"], receive_codecs: [],
+    };
+    tauri.useFakeCore(core.handler);
     await mount();
-    expect(screen.queryByText(/cannot decode HEVC video/)).not.toBeInTheDocument();
+    expect(screen.getByText(/no H\.264 or HEVC video decoder/)).toBeInTheDocument();
+    expect(screen.getByText(/Media Feature Pack/)).toBeInTheDocument();
+  });
+
+  it("stays quiet when this PC decodes both", async () => {
+    await mount();
+    expect(screen.queryByTestId("codec-note")).not.toBeInTheDocument();
+    expect(screen.queryByText(/video decoder/)).not.toBeInTheDocument();
   });
 });
 

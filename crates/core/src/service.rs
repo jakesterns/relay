@@ -732,7 +732,10 @@ fn spawn_share(
                 ShareEvent::SourceChanged { data } => {
                     let _ = events2.send(Event::SourceChanged { data });
                 }
-                ShareEvent::Waiting { .. } | ShareEvent::Paired { .. } => {}
+                // The sender's stats lines carry the codec for the strip.
+                ShareEvent::Waiting { .. }
+                | ShareEvent::Paired { .. }
+                | ShareEvent::Codec { .. } => {}
                 ShareEvent::Exited { ok, .. } => {
                     let mut ig = inner2.lock();
                     ig.share = None;
@@ -802,6 +805,16 @@ fn spawn_receive(
                         code: Some(code),
                         sender: None,
                         message: None,
+                        codec: None,
+                    });
+                }
+                ShareEvent::Codec { codec } => {
+                    let _ = events2.send(Event::ReceiveStatus {
+                        receiving: true,
+                        code: None,
+                        sender: None,
+                        message: None,
+                        codec: Some(codec),
                     });
                 }
                 ShareEvent::Paired { sender } => {
@@ -810,6 +823,7 @@ fn spawn_receive(
                         code: None,
                         sender: Some(sender),
                         message: None,
+                        codec: None,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -824,6 +838,7 @@ fn spawn_receive(
                         code: None,
                         sender: None,
                         message: Some(message),
+                        codec: None,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -853,6 +868,7 @@ fn spawn_receive(
                     code: None,
                     sender: None,
                     message: last_failure.take(),
+                    codec: None,
                 });
             }
         })
@@ -870,6 +886,7 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
                 code: None,
                 sender: None,
                 message: None,
+                codec: None,
             });
             Reply::Ok
         }
@@ -1231,11 +1248,13 @@ impl IpcHandler {
                 drop(g);
                 match crate::share::capabilities() {
                     Ok(c) => Reply::Capabilities {
-                        can_share: !c.encoders.is_empty(),
-                        can_receive: !c.decoders.is_empty(),
+                        can_share: !c.share_codecs.is_empty(),
+                        can_receive: !c.receive_codecs.is_empty(),
                         adapters: c.adapters,
                         encoders: c.encoders,
                         decoders: c.decoders,
+                        share_codecs: c.share_codecs,
+                        receive_codecs: c.receive_codecs,
                     },
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }

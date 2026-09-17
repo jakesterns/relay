@@ -288,12 +288,12 @@ describe("codec capability", () => {
     core.capabilities = { can_share: false, can_receive: true, adapters: ["Intel(R) UHD Graphics 630"], encoders: [], decoders: ["x"] };
     tauri.useFakeCore(core.handler);
     await mount();
-    expect(screen.getByText(/No hardware HEVC encoder on Intel\(R\) UHD Graphics 630/)).toBeInTheDocument();
+    expect(screen.getByText(/No hardware HEVC or H\.264 encoder on Intel\(R\) UHD Graphics 630/)).toBeInTheDocument();
   });
 
   it("stays quiet when the PC can send", async () => {
     await mount();
-    expect(screen.queryByText(/No hardware HEVC encoder/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No hardware HEVC or H\.264 encoder/)).not.toBeInTheDocument();
     expect(card(/Send to/)).toBeInTheDocument();
   });
 });
@@ -306,9 +306,10 @@ describe("the overlay and encoder labels", () => {
   it("describes the selected preset while idle", async () => {
     core.presets = core.presets.map((p) => (p.id === "daw" ? { ...p, fps: 30 } : p));
     const h = await mount();
-    expect(tags()).toEqual(["Native size", "60 fps", "HEVC"]);
+    // No codec while idle: it is negotiated with the receiver at start.
+    expect(tags()).toEqual(["Native size", "60 fps"]);
     await h.user.click(screen.getByRole("button", { name: "DAW" }));
-    expect(tags()).toEqual(["Up to 2560×1440", "30 fps", "HEVC"]);
+    expect(tags()).toEqual(["Up to 2560×1440", "30 fps"]);
   });
 
   it("while sharing, shows the started preset, the measured rate and this PC's encoder", async () => {
@@ -321,17 +322,17 @@ describe("the overlay and encoder labels", () => {
     await settle();
     await pushState();
 
-    expect(tags()).toEqual(["Up to 2560×1440", "HEVC"]);
+    expect(tags()).toEqual(["Up to 2560×1440"]);
     await push(() =>
-      tauri.emit("core://share-stats", { event: "stats", bitrate_mbps: 38, fps: 29.8, encode_ms: 16.7, cpu_percent: 3.1 }),
+      tauri.emit("core://share-stats", { event: "stats", codec: "h264", bitrate_mbps: 38, fps: 29.8, encode_ms: 16.7, cpu_percent: 3.1 }),
     );
-    expect(tags()).toEqual(["Up to 2560×1440", "30 fps", "HEVC"]);
+    expect(tags()).toEqual(["Up to 2560×1440", "30 fps", "H.264"]);
     // 16.7 ms against a 30 fps budget, not a 60 fps one.
     expect(readout("Load")).toEqual({ value: "50% enc", hint: "Quick Sync · CPU 3.1%" });
 
     // The engine read the preset at start; the chips cannot pretend otherwise.
     await h.user.click(screen.getByRole("button", { name: "Game" }));
-    expect(tags()).toEqual(["Up to 2560×1440", "30 fps", "HEVC"]);
+    expect(tags()).toEqual(["Up to 2560×1440", "30 fps", "H.264"]);
   });
 
   it("does not name a preset or an encoder it cannot back", async () => {
@@ -340,7 +341,7 @@ describe("the overlay and encoder labels", () => {
     // A share this screen did not start: the core does not say which preset.
     core.state.sharing = { kind: "sharing", peer: "living-room-pc" };
     await pushState();
-    await push(() => tauri.emit("core://share-stats", { event: "stats", bitrate_mbps: 50, fps: 60, cpu_percent: 2 }));
+    await push(() => tauri.emit("core://share-stats", { event: "stats", codec: "hevc", bitrate_mbps: 50, fps: 60, cpu_percent: 2 }));
     expect(tags()).toEqual(["60 fps", "HEVC"]);
     expect(readout("Load").hint).toBe("Hardware encoder · CPU 2%");
   });

@@ -667,6 +667,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 let fp = meter.sample();
                 let mut line = serde_json::json!({
                     "event": "stats",
+                    "codec": codec,
                     "bitrate_mbps": (bytes - last_bytes) as f64 * 8.0 / 0.5 / 1e6,
                     "fps": (frames - last_frames) as f64 / 0.5,
                     "frames": frames,

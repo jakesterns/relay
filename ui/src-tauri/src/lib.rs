@@ -370,20 +370,28 @@ async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>
     }
 }
 
-/// What this PC can do with HEVC. Spawns a probe child, so call it when a
-/// screen opens rather than on every refresh.
+/// What this PC can do with video (HEVC, H.264). Spawns a probe child, so
+/// call it when a screen opens rather than on every refresh.
 #[tauri::command]
 async fn share_capabilities() -> CmdResult<serde_json::Value> {
     match call(Method::ShareCapabilities).await? {
-        Reply::Capabilities { can_share, can_receive, adapters, encoders, decoders } => {
-            Ok(serde_json::json!({
-                "can_share": can_share,
-                "can_receive": can_receive,
-                "adapters": adapters,
-                "encoders": encoders,
-                "decoders": decoders,
-            }))
-        }
+        Reply::Capabilities {
+            can_share,
+            can_receive,
+            adapters,
+            encoders,
+            decoders,
+            share_codecs,
+            receive_codecs,
+        } => Ok(serde_json::json!({
+            "can_share": can_share,
+            "can_receive": can_receive,
+            "adapters": adapters,
+            "encoders": encoders,
+            "decoders": decoders,
+            "share_codecs": share_codecs,
+            "receive_codecs": receive_codecs,
+        })),
         other => Err(unexpected(other).into()),
     }
 }
@@ -596,7 +604,13 @@ fn spawn_event_bridge(app: AppHandle) {
                                         }),
                                     );
                                 }
-                                Event::ReceiveStatus { receiving, code, sender, message } => {
+                                Event::ReceiveStatus {
+                                    receiving,
+                                    code,
+                                    sender,
+                                    message,
+                                    codec,
+                                } => {
                                     let _ = app.emit(
                                         "core://receive-status",
                                         serde_json::json!({
@@ -604,6 +618,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "code": code,
                                             "sender": sender,
                                             "message": message,
+                                            "codec": codec,
                                         }),
                                     );
                                 }

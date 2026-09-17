@@ -170,6 +170,8 @@ pub enum ShareEvent {
     SourceChanged { data: serde_json::Value },
     /// A JPEG thumbnail of what is being captured, base64 in the engine line.
     Preview { width: u32, height: u32, jpeg: String },
+    /// The video codec the share negotiated: `"hevc"` or `"h264"`.
+    Codec { codec: String },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -180,17 +182,23 @@ pub fn share_binary() -> Result<PathBuf> {
     Ok(cand)
 }
 
-/// What this PC can do with HEVC, from `relay-share probe`.
+/// What this PC can do with video, from `relay-share probe`. A share runs on
+/// HEVC or H.264, negotiated per share (S27), so each half is possible when
+/// *either* codec is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// GPUs with a display attached, so the "cannot share" banner can name the
     /// hardware it is talking about instead of saying "this GPU".
     pub adapters: Vec<String>,
-    /// Hardware HEVC encoder MFTs. Empty = this PC cannot send.
+    /// Hardware encoder MFTs for either codec. Empty = this PC cannot send.
     pub encoders: Vec<String>,
-    /// Any HEVC decoder MFT, hardware or the Microsoft HEVC Video Extension.
-    /// Empty = this PC cannot receive until the extension is installed.
+    /// Decoder MFTs for either codec. Empty = this PC cannot receive.
     pub decoders: Vec<String>,
+    /// Codecs this PC can send, preference order: `"hevc"`, `"h264"`.
+    pub share_codecs: Vec<String>,
+    /// Codecs this PC can receive. Missing `"hevc"` is not a failure: shares
+    /// to this PC negotiate H.264, at a higher bitrate for the same picture.
+    pub receive_codecs: Vec<String>,
 }
 
 /// Ask the share engine what the machine supports. A short-lived child, so
@@ -225,18 +233,44 @@ fn parse_probe(json: &str) -> Capabilities {
         }
         out
     };
-    // Prefer the "any decoder" list: the Video Extension is a software MFT,
-    // and it is what makes receiving work at all.
-    let mut decoders = names("hevc_any_decoders");
-    if decoders.is_empty() {
-        decoders = names("hevc_hardware_decoders");
+    // Prefer the "any decoder" list: the HEVC Video Extension and the H.264
+    // decoder Windows ships are both software-category MFTs that decode on
+    // the GPU once given a device.
+    let mut hevc_decoders = names("hevc_any_decoders");
+    if hevc_decoders.is_empty() {
+        hevc_decoders = names("hevc_hardware_decoders");
     }
+    let h264_decoders = names("h264_any_decoders");
+    let hevc_encoders = names("hevc_hardware_encoders");
+    let h264_encoders = names("h264_hardware_encoders");
     let adapters = v
         .get("adapters")
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    Capabilities { adapters, encoders: names("hevc_hardware_encoders"), decoders }
+    let union = |a: &[String], b: &[String]| -> Vec<String> {
+        let mut out = a.to_vec();
+        for n in b {
+            if !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+        out
+    };
+    let codecs = |hevc: &[String], h264: &[String]| -> Vec<String> {
+        [("hevc", hevc), ("h264", h264)]
+            .into_iter()
+            .filter(|(_, list)| !list.is_empty())
+            .map(|(c, _)| c.to_string())
+            .collect()
+    };
+    Capabilities {
+        adapters,
+        encoders: union(&hevc_encoders, &h264_encoders),
+        decoders: union(&hevc_decoders, &h264_decoders),
+        share_codecs: codecs(&hevc_encoders, &h264_encoders),
+        receive_codecs: codecs(&hevc_decoders, &h264_decoders),
+    }
 }
 
 /// A running share child. Dropping it stops and reaps the process.
@@ -449,6 +483,9 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
             path: v.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
             ms: v.get("ms").and_then(|m| m.as_u64()).unwrap_or(0),
         }),
+        Some("codec") => {
+            Some(ShareEvent::Codec { codec: v.get("codec").and_then(|c| c.as_str())?.to_string() })
+        }
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");
@@ -653,6 +690,44 @@ mod tests {
             ["AMDh265Encoder", "NVIDIA HEVC Encoder MFT"],
             "deduplicated, first-seen order kept"
         );
+    }
+
+    /// S27: a PC with an HEVC encoder but no HEVC decoder -- the Windows 10
+    /// test PC exactly -- can still receive, over H.264.
+    #[test]
+    fn h264_makes_a_pc_without_hevc_decode_a_receiver() {
+        let json = r#"{
+          "adapters": ["NVIDIA GeForce RTX 2080"],
+          "hevc_hardware_encoders": [{"friendly_name":"NVIDIA HEVC Encoder MFT"}],
+          "hevc_hardware_decoders": [],
+          "hevc_any_decoders": [],
+          "h264_hardware_encoders": [{"friendly_name":"NVIDIA H.264 Encoder MFT"}],
+          "h264_any_decoders": [{"friendly_name":"Microsoft H264 Video Decoder MFT"}],
+          "wgc_supported": true
+        }"#;
+        let c = parse_probe(json);
+        assert_eq!(c.share_codecs, ["hevc", "h264"]);
+        assert_eq!(c.receive_codecs, ["h264"], "no HEVC decode, and that is fine");
+        assert_eq!(c.encoders, ["NVIDIA HEVC Encoder MFT", "NVIDIA H.264 Encoder MFT"]);
+        assert_eq!(c.decoders, ["Microsoft H264 Video Decoder MFT"]);
+
+        // An engine from before S27 reports HEVC only; codecs follow from it.
+        let old = r#"{"hevc_hardware_encoders":[{"friendly_name":"X"}],"hevc_any_decoders":[]}"#;
+        let c = parse_probe(old);
+        assert_eq!(c.share_codecs, ["hevc"]);
+        assert!(c.receive_codecs.is_empty());
+    }
+
+    #[test]
+    fn codec_line_decodes() {
+        let ev = decode_line(r#"{"event":"codec","codec":"h264"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Codec { codec } if codec == "h264"));
+        // The sender's version also lists what was offered and answered.
+        let ev = decode_line(
+            r#"{"event":"codec","codec":"hevc","offered":["hevc"],"answered":["hevc"]}"#,
+        );
+        assert!(matches!(ev, Some(ShareEvent::Codec { codec }) if codec == "hevc"));
+        assert!(decode_line(r#"{"event":"codec"}"#).is_none(), "no codec, no event");
     }
 
     /// Locks the stdin command strings to `relay_capture::command`'s shapes.

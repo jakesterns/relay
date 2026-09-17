@@ -8,7 +8,7 @@ import { encoderBrand, shareTags } from "../lib/honest";
 import {
   api, onCoreEvents, presetAudioLabel,
   type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type ShareCapabilities,
-  type SharePresetDef, type ShareStats, type SharePreview, type SourceTarget,
+  type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
@@ -21,12 +21,15 @@ interface Strip {
   micDb: number; micLive: boolean;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
+  /** The codec the running share negotiated; null until the engine says. */
+  codec: VideoCodec | null;
 }
 const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0, fps: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
   micDb: -Infinity, micLive: false,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
+  codec: null,
 };
 
 export function Share() {
@@ -124,6 +127,7 @@ export function Share() {
           recDropped: s.rec_dropped ?? 0,
           replayFill: s.replay_fill ?? 0,
           recStoppedDisk: s.rec_stopped_disk ?? false,
+          codec: s.codec ?? null,
         });
       },
       shareStatus: (st) => { if (st.message) setError(st.message); },
@@ -275,7 +279,7 @@ export function Share() {
             ? <img className="shot" src={`data:image/jpeg;base64,${preview.jpeg}`} alt="What is being shared" />
             : <div className="scene" />}
           <div className="tag" data-testid="share-tags">
-            {(sharing ? shareTags(runningDef, strip.fps) : shareTags(selectedDef)).map((t) => <span key={t}>{t}</span>)}
+            {(sharing ? shareTags(runningDef, strip.fps, strip.codec) : shareTags(selectedDef)).map((t) => <span key={t}>{t}</span>)}
           </div>
           {sharing
             ? <div className="cap">{preview ? `Live · ${preview.width}×${preview.height} thumbnail` : "Waiting for the first frame…"}</div>

@@ -740,7 +740,7 @@ function SharingSide({ draft, save, dirty }: {
           <p className="p">Sharing is off for this game. Relay still shares when you start it manually; this only decides what happens automatically.</p>
         ) : def ? (
           <>
-            <Kv k="Encoder" v="HEVC · hardware" />
+            <Kv k="Encoder" v="HEVC or H.264 · hardware" />
             <Kv k="Bitrate" v={`${def.bitrate_mbps} Mb/s`} mono />
             <Kv k="Frame rate" v={`${def.fps} fps`} mono />
             <Kv k="Size" v={def.size ? `${def.size[0]}×${def.size[1]}` : "Native"} mono />

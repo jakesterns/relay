@@ -3,21 +3,25 @@ import { Card, ErrorNote, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
-import { api, onCoreEvents, type FirewallStatus, type ShareCapabilities, type VdeviceStatus } from "../lib/ipc";
+import {
+  api, codecLabel, onCoreEvents, type FirewallStatus, type ShareCapabilities, type VdeviceStatus, type VideoCodec,
+} from "../lib/ipc";
 
 /** Warn before the user tries, not after it fails.
  *
- *  Hardware HEVC *decode* on Windows goes through the Microsoft HEVC Video
- *  Extension; GPU vendors register encode MFTs only. Without it `recv` dies on
- *  the first frame, which looks like a network problem and is not one. */
+ *  A share runs on HEVC or H.264, negotiated per share (S27). H.264 decode
+ *  ships with every Windows install, so "cannot receive" now means no decoder
+ *  for *either* codec — an N edition without the Media Feature Pack — and a PC
+ *  without HEVC decode gets a plain note, not an error: its shares work, at a
+ *  higher bitrate for the same picture. Relay is free, so nothing here sends
+ *  anyone to buy a codec. */
 export function CodecBanner({ need }: { need: "share" | "receive" }) {
   const { offline } = useCore();
   const [caps, setCaps] = useState<ShareCapabilities | null>(null);
 
-  // Re-probe when the window regains focus. Installing the codec happens in
-  // the Store, i.e. in another window, so the user comes back expecting Relay
-  // to have noticed. Telling them to restart the app for something Windows
-  // already knows is the kind of small indignity that reads as broken.
+  // Re-probe when the window regains focus: a Media Feature Pack or codec
+  // install happens in another window, and the user comes back expecting
+  // Relay to have noticed.
   useEffect(() => {
     let live = true;
     const probe = () => {
@@ -32,20 +36,25 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
 
   if (!caps) return null;
   if (need === "receive" && !caps.can_receive) {
-    // `.offline` is a flex row, so every text node and the <a> would each
-    // become a column — on a real machine the link rendered one word per
-    // line. `.msg` keeps it a single inline flow.
+    // `.offline` is a flex row, so every text node would become a column;
+    // `.msg` keeps it a single inline flow.
     return (
       <div className="offline"><i />
         <span className="msg">
-          This PC cannot decode HEVC video, so Relay cannot show the shared screen.
-          Windows includes the decoder for free only on PCs whose manufacturer licensed it;
-          otherwise Microsoft sells it in the Store as{" "}
-          <a href={HEVC_STORE_PAID}>HEVC Video Extensions</a>. Relay cannot bundle the decoder —
-          Microsoft does not license it for redistribution by apps. This banner clears
-          itself once a decoder is present.
+          This PC has no H.264 or HEVC video decoder, so Relay cannot show a shared screen.
+          H.264 decoding is part of Windows; on an N edition of Windows, install Microsoft's free
+          Media Feature Pack, then come back — this banner clears itself.
         </span>
       </div>
+    );
+  }
+  if (need === "receive" && caps.receive_codecs && !caps.receive_codecs.includes("hevc")) {
+    return (
+      <p className="note" data-testid="codec-note">
+        Shares to this PC use H.264, because it has no HEVC decoder. Everything works; HEVC gives
+        the same picture at a lower bitrate, and Relay uses it automatically wherever both PCs
+        have it.
+      </p>
     );
   }
   if (need === "share" && !caps.can_share) {
@@ -56,10 +65,10 @@ export function CodecBanner({ need }: { need: "share" | "receive" }) {
     return (
       <div className="offline"><i />
         <span className="msg">
-          No hardware HEVC encoder on {gpu}. Relay encodes in hardware only (NVENC / Quick Sync /
-          AMF) — there is no software encode path, so this PC can receive a share but not send one.
-          If the GPU is recent, update its graphics driver: Windows only lists the encoder once the
-          vendor driver is installed.
+          No hardware HEVC or H.264 encoder on {gpu}. Relay encodes in hardware only (NVENC / Quick
+          Sync / AMF) — there is no software encode path, so this PC can receive a share but not
+          send one. If the GPU is recent, update its graphics driver: Windows only lists the encoder
+          once the vendor driver is installed.
         </span>
       </div>
     );
@@ -168,25 +177,6 @@ export function FirewallBanner() {
   );
 }
 
-/** Deep link to the *paid* HEVC extension, deliberately.
- *
- *  There are two Microsoft packages. The free one (9N4WGH0Z6VHQ,
- *  `Microsoft.HEVCVideoExtension`, singular) is OEM-entitlement only: its
- *  catalog entry has no Purchase action, and on a PC whose manufacturer did
- *  not license it the Store shows the page with Install greyed out — verified
- *  on a real Windows 10 machine 2026-09-16, not inferred. The paid one
- *  (9NMZLZ57R3T7, `Microsoft.HEVCVideoExtensions`, plural) has a Purchase
- *  action and is installable by anyone.
- *
- *  This used to link to a Store *search*, which is worse than useless: the
- *  free package does not appear in search results at all, so the user was
- *  shown CapCut and third-party "HEVC Player" apps instead. Never link the
- *  search.
- *
- *  Price is not hardcoded — it varies by market (0.99 USD, 0.79 GBP) and the
- *  Store page states it. */
-const HEVC_STORE_PAID = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7";
-
 /** Whether a call on this PC will actually see the incoming share.
  *
  *  This is the question the Receive screen exists to answer and previously
@@ -250,6 +240,7 @@ export function Receive() {
   const [receiving, setReceiving] = useState(false);
   const [code, setCode] = useState<string | null>(null);
   const [sender, setSender] = useState<string | null>(null);
+  const [codec, setCodec] = useState<VideoCodec | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -261,7 +252,8 @@ export function Receive() {
         if (s.code) setCode(s.code);
         if (s.sender) setSender(s.sender);
         if (s.message) setError(s.message);
-        if (!s.receiving) { setSender(null); setCode(null); }
+        if (s.codec) setCodec(s.codec);
+        if (!s.receiving) { setSender(null); setCode(null); setCodec(null); }
       },
     }).then((u) => { unsub = u; });
     return () => unsub();
@@ -316,7 +308,9 @@ export function Receive() {
         </Card>
         <Card>
           <Kv k="Status" v={sender ? `Paired with ${sender}` : receiving ? "Advertising on the LAN" : "Idle"} />
-          <Kv k="Codec" v={receiving ? "HEVC" : "—"} mono />
+          {/* Named only once the stream says which: HEVC or H.264 is decided per
+              share, by what both PCs can do. */}
+          <Kv k="Codec" v={receiving && codec ? codecLabel(codec) : "—"} mono />
         </Card>
         <VirtualDeviceCard />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
