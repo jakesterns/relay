@@ -1,4 +1,5 @@
-//! webrtc-rs transport: one HEVC video track, one or two Opus audio tracks,
+//! webrtc-rs transport: one video track (HEVC or H.264, negotiated — see
+//! `crate::codec`), one or two Opus audio tracks,
 //! DTLS-SRTP, ICE host candidates only (no STUN/TURN — LAN only by design).
 //!
 //! `discovery` finds receivers over mDNS, `signal` pairs them with a
@@ -21,9 +22,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
-use rtc::peer_connection::configuration::media_engine::{
-    MediaEngine, MIME_TYPE_HEVC, MIME_TYPE_OPUS,
-};
+use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
 use tokio::sync::mpsc;
@@ -34,19 +33,22 @@ use webrtc::peer_connection::{
 };
 use webrtc::runtime::{default_runtime, Runtime};
 
-pub const VIDEO_PT: u8 = 98;
+use crate::codec::VideoCodec;
+
 pub const AUDIO_PT: u8 = 120;
 
-pub fn video_codec() -> RTCRtpCodecParameters {
+/// RTP codec parameters for `codec`. Sender and receiver build these from the
+/// same table, so the fmtp lines match exactly.
+pub fn video_codec(codec: VideoCodec) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
         rtp_codec: RTCRtpCodec {
-            mime_type: MIME_TYPE_HEVC.to_owned(),
+            mime_type: codec.mime().to_owned(),
             clock_rate: 90_000,
             channels: 0,
-            sdp_fmtp_line: String::new(),
+            sdp_fmtp_line: codec.fmtp().to_owned(),
             rtcp_feedback: vec![],
         },
-        payload_type: VIDEO_PT,
+        payload_type: codec.payload_type(),
     }
 }
 
@@ -132,13 +134,18 @@ impl PeerConnectionEventHandler for Handler {
     }
 }
 
-/// Peer connection bound to `local_ip`, host candidates only, HEVC + Opus
-/// registered. Returns the connection, its event channels and the runtime.
+/// Peer connection bound to `local_ip`, host candidates only, `video` codecs
+/// (preference order) + Opus registered. The sender registers what it can
+/// encode and the receiver what it can decode, so the answer is the
+/// intersection. Returns the connection, its event channels and the runtime.
 pub async fn build_pc(
     local_ip: IpAddr,
+    video: &[VideoCodec],
 ) -> Result<(impl PeerConnection, PcEvents, Arc<dyn Runtime>)> {
     let mut media_engine = MediaEngine::default();
-    media_engine.register_codec(video_codec(), RtpCodecKind::Video)?;
+    for &c in video {
+        media_engine.register_codec(video_codec(c), RtpCodecKind::Video)?;
+    }
     media_engine.register_codec(audio_codec(), RtpCodecKind::Audio)?;
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
 

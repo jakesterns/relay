@@ -1,6 +1,13 @@
-//! Annex B ↔ MP4 helpers for the recorded HEVC bitstream: start-code
+//! Annex B ↔ MP4 helpers for the recorded bitstream (HEVC or H.264): start-code
 //! splitting, length-prefix conversion, parameter-set extraction and the
-//! minimal SPS fields the `hvcC` box needs. Pure — no OS dependencies.
+//! minimal SPS fields the `hvcC` / `avcC` boxes need. Pure — no OS dependencies.
+//!
+//! The unsuffixed functions are the HEVC forms the recorder has always used;
+//! the `_for` forms take the share's codec.
+
+use crate::codec::VideoCodec;
+
+pub use crate::codec::{rbsp_unescape, split_nalus};
 
 /// H.265 NAL unit types (nal_unit_header, 6-bit type).
 pub const NAL_VPS: u8 = 32;
@@ -17,42 +24,35 @@ pub fn nal_type(nal: &[u8]) -> u8 {
     (nal[0] >> 1) & 0x3F
 }
 
-/// Split an Annex B stream into NAL units (3- and 4-byte start codes).
-pub fn split_nalus(data: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    let mut start: Option<usize> = None;
-    while i + 3 <= data.len() {
-        let three = data[i..i + 3] == [0, 0, 1];
-        let four = i + 4 <= data.len() && data[i..i + 4] == [0, 0, 0, 1];
-        if three || four {
-            if let Some(s) = start {
-                out.push(&data[s..i]);
-            }
-            i += if four { 4 } else { 3 };
-            start = Some(i);
-        } else {
-            i += 1;
-        }
-    }
-    if let Some(s) = start {
-        if s < data.len() {
-            out.push(&data[s..]);
-        }
-    }
-    out
-}
-
 /// Parameter sets pulled out of a keyframe access unit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamSets {
+    /// HEVC only; empty for H.264, which has no VPS.
     pub vps: Vec<u8>,
     pub sps: Vec<u8>,
     pub pps: Vec<u8>,
 }
 
-/// Extract VPS/SPS/PPS from an Annex B access unit (first of each kind).
+/// Extract VPS/SPS/PPS from an HEVC Annex B access unit (first of each kind).
 pub fn extract_param_sets(annexb: &[u8]) -> Option<ParamSets> {
+    extract_param_sets_for(VideoCodec::Hevc, annexb)
+}
+
+/// Extract the parameter sets `codec` needs from an Annex B access unit:
+/// VPS/SPS/PPS for HEVC, SPS/PPS for H.264.
+pub fn extract_param_sets_for(codec: VideoCodec, annexb: &[u8]) -> Option<ParamSets> {
+    if codec == VideoCodec::H264 {
+        let mut sps = None;
+        let mut pps = None;
+        for nal in split_nalus(annexb) {
+            match codec.nal_type(nal) {
+                7 if sps.is_none() => sps = Some(nal.to_vec()),
+                8 if pps.is_none() => pps = Some(nal.to_vec()),
+                _ => {}
+            }
+        }
+        return Some(ParamSets { vps: Vec::new(), sps: sps?, pps: pps? });
+    }
     let mut vps = None;
     let mut sps = None;
     let mut pps = None;
@@ -70,32 +70,37 @@ pub fn extract_param_sets(annexb: &[u8]) -> Option<ParamSets> {
 /// Convert an Annex B access unit into length-prefixed (4-byte) MP4 sample
 /// data, dropping parameter sets and AUDs (they live in `hvcC`, not samples).
 pub fn to_mp4_sample(annexb: &[u8]) -> Vec<u8> {
+    to_mp4_sample_for(VideoCodec::Hevc, annexb)
+}
+
+/// [`to_mp4_sample`] for either codec: parameter sets and AUDs of `codec`
+/// are dropped, everything else is length-prefixed.
+pub fn to_mp4_sample_for(codec: VideoCodec, annexb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(annexb.len() + 16);
     for nal in split_nalus(annexb) {
-        match nal_type(nal) {
-            NAL_VPS | NAL_SPS | NAL_PPS | NAL_AUD => continue,
-            _ => {
-                out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-                out.extend_from_slice(nal);
-            }
+        if codec.is_out_of_band(codec.nal_type(nal)) {
+            continue;
         }
+        out.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+        out.extend_from_slice(nal);
     }
     out
 }
 
-/// Remove emulation-prevention bytes (00 00 03 → 00 00) from a NAL payload.
-pub fn rbsp_unescape(nal: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(nal.len());
-    let mut zeros = 0u32;
-    for &b in nal {
-        if zeros >= 2 && b == 3 {
-            zeros = 0;
-            continue; // emulation-prevention byte
-        }
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-        out.push(b);
-    }
-    out
+/// The three SPS bytes `avcC` repeats: profile_idc, the constraint flags
+/// (`profile_compatibility`) and level_idc. They sit at fixed positions right
+/// after the one-byte NAL header, before any Exp-Golomb field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvcSummary {
+    pub profile_idc: u8,
+    pub profile_compatibility: u8,
+    pub level_idc: u8,
+}
+
+pub fn parse_avc_sps_summary(sps_nal: &[u8]) -> Option<AvcSummary> {
+    let r = rbsp_unescape(sps_nal);
+    let b = r.get(1..4)?;
+    Some(AvcSummary { profile_idc: b[0], profile_compatibility: b[1], level_idc: b[2] })
 }
 
 /// The profile_tier_level fields `hvcC` repeats, read from the SPS.
@@ -207,5 +212,39 @@ mod tests {
         assert_eq!(s.general_constraint_indicator_flags, 0x9000_0000_0000);
         assert_eq!(s.general_level_idc, 123);
         assert!(parse_sps_summary(&[0x42, 0x01]).is_none(), "truncated SPS");
+    }
+
+    #[test]
+    fn h264_param_sets_and_samples() {
+        let sps = vec![0x67, 100, 0, 52, 0xAC];
+        let pps = vec![0x68, 0xEE, 0x3C];
+        let aud = vec![0x09, 0xF0];
+        let sei = vec![0x06, 5, 1];
+        let idr = vec![0x65, 0x88, 0x84];
+        let mut au = Vec::new();
+        for n in [&aud, &sps, &pps, &sei, &idr] {
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(n);
+        }
+        let ps = extract_param_sets_for(VideoCodec::H264, &au).unwrap();
+        assert_eq!(ps, ParamSets { vps: vec![], sps: sps.clone(), pps: pps.clone() });
+        // The HEVC reader finds nothing it recognises in an H.264 AU.
+        assert!(extract_param_sets(&au).is_none());
+
+        let sample = to_mp4_sample_for(VideoCodec::H264, &au);
+        let mut want = Vec::new();
+        for n in [&sei, &idr] {
+            want.extend_from_slice(&(n.len() as u32).to_be_bytes());
+            want.extend_from_slice(n);
+        }
+        assert_eq!(sample, want, "SPS, PPS and AUD live in avcC, not the sample");
+
+        let s = parse_avc_sps_summary(&sps).unwrap();
+        assert_eq!((s.profile_idc, s.profile_compatibility, s.level_idc), (100, 0, 52));
+        assert!(parse_avc_sps_summary(&[0x67, 100]).is_none());
+        // No PPS: not a usable keyframe.
+        let mut bare = vec![0, 0, 0, 1];
+        bare.extend_from_slice(&sps);
+        assert!(extract_param_sets_for(VideoCodec::H264, &bare).is_none());
     }
 }

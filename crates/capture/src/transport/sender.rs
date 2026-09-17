@@ -1,5 +1,5 @@
-//! The send side of a share: capture → NV12 → HEVC → SEI stamp → webrtc
-//! track, plus Opus audio. Emits NDJSON stats on stdout every 500 ms for the
+//! The send side of a share: capture → NV12 → HEVC or H.264 (negotiated) →
+//! SEI stamp → webrtc track, plus Opus audio. Emits NDJSON stats on stdout every 500 ms for the
 //! core to relay to the instrument strip; `stop` on stdin tears down.
 
 use std::net::SocketAddr;
@@ -17,15 +17,17 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
 use webrtc::media_stream::track_local::{TrackLocal, TrackLocalEvent};
 use webrtc::media_stream::Track;
 use webrtc::peer_connection::PeerConnection;
 
-use super::{audio_codec, build_pc, discovery, sei, signal, video_codec};
+use super::{audio_codec, build_pc, discovery, sei, signal};
 use crate::audio::{AudioSource, OpusProfile, OpusStream};
+use crate::codec::{self, VideoCodec};
 use crate::command::{self, EngineCmd, SourceTarget};
-use crate::encode::mf::{EncoderConfig, EncoderEvent, MfHevcEncoder};
+use crate::encode::mf::{EncoderConfig, EncoderEvent, MfEncoder};
 use crate::record::{budget::DiskBudget, RecordConfig, Recorder};
 use crate::source::switch::{self, Switcher};
 use crate::time;
@@ -263,7 +265,48 @@ async fn add_audio_track(
     Ok((track, sender))
 }
 
+/// Video codecs this sender can offer, in preference order: the ones the
+/// primary monitor's GPU has a hardware encoder for, narrowed by
+/// `RELAY_VIDEO_CODECS`. Enumeration only — no encoder is created here.
+fn offerable_codecs() -> Result<Vec<VideoCodec>> {
+    let _mf = crate::probe::MediaFoundation::start()?;
+    let (luid, adapter) = crate::d3d::adapter_luid_for_monitor(crate::d3d::primary_monitor())?;
+    let offered = codec::filter_supported(&codec::allowed_codecs(), |c| {
+        crate::encode::mf::hardware_encoder_available(c, luid)
+    });
+    if offered.is_empty() {
+        bail!(crate::encode::mf::no_encoder_error(&adapter));
+    }
+    Ok(offered)
+}
+
+/// The one video track's description. The SSRC and ids stay fixed so setting
+/// the codec after the answer is a `replace_track`, not a new m-line.
+///
+/// `None` leaves the encoding's codec empty, which is what makes webrtc-rs put
+/// *every* registered video codec on the offer's m-line. A track described
+/// with a codec narrows the offer to that one codec, and the receiver could
+/// then only take HEVC or reject video outright.
+fn video_stream_track(codec: Option<VideoCodec>, ssrc: u32) -> MediaStreamTrack {
+    MediaStreamTrack::new(
+        "relay-video-stream".into(),
+        "relay-video".into(),
+        "Relay Video".into(),
+        RtpCodecKind::Video,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: codec.map(|c| super::video_codec(c).rtp_codec).unwrap_or_default(),
+            ..Default::default()
+        }],
+    )
+}
+
 pub async fn run(opts: SendOpts) -> Result<()> {
+    let offered = tokio::task::spawn_blocking(offerable_codecs).await??;
+    info!(offered = ?offered, "video codecs this GPU can encode");
     let (peer_addr, peer_name) = resolve_peer(&opts.peer).await?;
     info!(%peer_addr, %peer_name, "connecting to receiver");
     let tcp = tokio::net::TcpStream::connect(peer_addr).await.context("signalling connect")?;
@@ -271,23 +314,12 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let local_ip = tcp.local_addr()?.ip();
     let mut sig = signal::SigStream::new(tcp);
 
-    let (pc, mut events, runtime) = build_pc(local_ip).await?;
+    let (pc, mut events, runtime) = build_pc(local_ip, &offered).await?;
 
-    // Video + audio tracks.
-    let video_track = Arc::new(TrackLocalStaticSample::new(MediaStreamTrack::new(
-        "relay-video-stream".into(),
-        "relay-video".into(),
-        "Relay Video".into(),
-        RtpCodecKind::Video,
-        vec![RTCRtpEncodingParameters {
-            rtp_coding_parameters: RTCRtpCodingParameters {
-                ssrc: Some(rand::random::<u32>()),
-                ..Default::default()
-            },
-            codec: video_codec().rtp_codec,
-            ..Default::default()
-        }],
-    ))?);
+    // Video + audio tracks. The video track is raw RTP: the codec is not
+    // known until the answer arrives, so we packetize ourselves once it is.
+    let video_ssrc = rand::random::<u32>();
+    let video_track = Arc::new(TrackLocalStaticRTP::new(video_stream_track(None, video_ssrc)));
     let video_sender = pc.add_track(video_track.clone() as Arc<dyn TrackLocal>).await?;
 
     // Up to two audio tracks. The msid track ids are the contract the
@@ -330,6 +362,28 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         other => bail!("expected answer, got {other:?}"),
     };
     let answer: RTCSessionDescription = serde_json::from_str(&answer_json)?;
+    debug!(offer = %local.sdp, answer = %answer.sdp, "sdp exchange");
+    let answered = codec::sdp_video_codecs(&answer.sdp);
+    let codec = codec::pick(&offered, &answered).with_context(|| {
+        format!(
+            "the receiver cannot decode any video codec this PC can encode \
+             (offered {offered:?}, receiver kept {answered:?})"
+        )
+    })?;
+    // Now describe the track with the negotiated codec (same SSRC and ids)
+    // *before* the remote description starts the senders, so the RTCP/NACK
+    // interceptors bind to it.
+    video_sender
+        .replace_track(Arc::new(TrackLocalStaticRTP::new(video_stream_track(
+            Some(codec),
+            video_ssrc,
+        ))) as Arc<dyn TrackLocal>)
+        .await?;
+    info!(codec = codec.label(), ?offered, ?answered, "video codec negotiated");
+    println!(
+        "{}",
+        serde_json::json!({ "event": "codec", "codec": codec, "offered": offered, "answered": answered })
+    );
     pc.set_remote_description(answer).await?;
 
     let (offset_ns, rtt_ns) = signal::clock_sync(&mut sig, 7).await?;
@@ -442,6 +496,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let sw = switcher.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
             if let Err(e) = video_pipeline(
+                codec,
                 bitrate,
                 fps,
                 cursor,
@@ -505,34 +560,49 @@ pub async fn run(opts: SendOpts) -> Result<()> {
 
     // Async writers: channels → tracks.
     {
+        use rtc::rtp::packetizer::Packetizer as _;
         let track = video_track.clone();
         let sender = video_sender.clone();
         let stats = stats.clone();
-        let frame = Duration::from_micros(1_000_000 / opts.fps as u64);
+        let samples_per_frame = 90_000 / opts.fps.max(1);
+        let payloader = super::video_codec(codec).rtp_codec.payloader()?;
         runtime.spawn(Box::pin(async move {
             let Ok(params) = sender.get_parameters().await else { return };
-            let Some(pt) = params.rtp_parameters.codecs.first().map(|c| c.payload_type) else {
-                return;
-            };
-            let ssrcs = track.ssrcs().await;
-            let Some(&ssrc) = ssrcs.first() else { return };
-            while let Some(au) = vrx.recv().await {
+            // The negotiated payload type for our codec (the answer echoes the
+            // offer's, but read it rather than assume it).
+            let pt = params
+                .rtp_parameters
+                .codecs
+                .iter()
+                .find(|c| c.rtp_codec.mime_type.eq_ignore_ascii_case(codec.mime()))
+                .map(|c| c.payload_type)
+                .unwrap_or(codec.payload_type());
+            let mut packetizer = rtc::rtp::packetizer::new_packetizer(
+                RTP_OUTBOUND_MTU,
+                pt,
+                video_ssrc,
+                payloader,
+                Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                90_000,
+            );
+            'aus: while let Some(au) = vrx.recv().await {
                 let n = au.data.len() as u64;
                 let t0 = std::time::Instant::now();
-                let res = track
-                    .sample_writer(ssrc, pt)
-                    .write_sample(&Sample {
-                        data: Bytes::from(au.data),
-                        duration: frame,
-                        ..Default::default()
-                    })
-                    .await;
-                if t0.elapsed() > Duration::from_millis(30) {
-                    tracing::debug!(ms = t0.elapsed().as_millis() as u64, "slow write_sample");
+                let packets = match packetizer.packetize(&Bytes::from(au.data), samples_per_frame) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "packetize failed");
+                        break;
+                    }
+                };
+                for p in packets {
+                    if let Err(e) = track.write_rtp(p).await {
+                        tracing::warn!(error = %e, "write_rtp failed");
+                        break 'aus;
+                    }
                 }
-                if let Err(e) = res {
-                    tracing::warn!(error = %e, "write_sample failed");
-                    break;
+                if t0.elapsed() > Duration::from_millis(30) {
+                    tracing::debug!(ms = t0.elapsed().as_millis() as u64, "slow video write");
                 }
                 stats.video_bytes.fetch_add(n, Ordering::Relaxed);
                 stats.video_frames.fetch_add(1, Ordering::Relaxed);
@@ -693,9 +763,14 @@ struct RecordSetup {
     container: RecordingContainer,
 }
 
-/// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC MFT → SEI → channel.
+/// webrtc-rs's own outbound MTU for sample tracks; kept identical so the
+/// packet sizes on the wire did not change when the video track went raw.
+const RTP_OUTBOUND_MTU: usize = 1200;
+
+/// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC/H.264 MFT → SEI → channel.
 #[allow(clippy::too_many_arguments)]
 fn video_pipeline(
+    codec: VideoCodec,
     bitrate_bps: u32,
     fps: u32,
     cursor: bool,
@@ -724,15 +799,16 @@ fn video_pipeline(
     // of any size are GPU-scaled into it, so switching never renegotiates.
     let size = out_size.unwrap_or(in_size);
     let mut conv = crate::encode::convert::Converter::new(&gpu, in_size, size)?;
-    let enc = MfHevcEncoder::new(
+    let enc = MfEncoder::new(
         &gpu,
-        &EncoderConfig { width: size.0, height: size.1, fps, bitrate_bps },
+        &EncoderConfig { codec, width: size.0, height: size.1, fps, bitrate_bps },
     )?;
     if let Some(rs) = record_setup {
         // Ring RAM ≈ bitrate × (window + one GOP + margin), hard-capped.
         let ring_max =
             ((bitrate_bps as u64 / 8) * (rs.replay_secs as u64 + 15)).min(1_500_000_000) as usize;
         match Recorder::start(RecordConfig {
+            codec,
             dir: rs.dir,
             width: size.0,
             height: size.1,
@@ -757,12 +833,21 @@ fn video_pipeline(
             }
         }
     }
-    info!(encoder = %enc.name, w = size.0, h = size.1, fps, bitrate_bps, "video pipeline up");
+    info!(
+        encoder = %enc.name,
+        codec = codec.label(),
+        w = size.0,
+        h = size.1,
+        fps,
+        bitrate_bps,
+        "video pipeline up"
+    );
     println!(
         "{}",
         serde_json::json!({
             "event": "video_up",
             "encoder": enc.name,
+            "codec": codec,
             "width": size.0,
             "height": size.1,
             "fps": fps,
@@ -871,7 +956,7 @@ fn video_pipeline(
                 stats
                     .capture_to_send_us_last
                     .store(((now_qpc - out.pts_100ns) / 10).max(0) as u64, Ordering::Relaxed);
-                let mut data = sei::timestamp_sei(capture_unix_ns);
+                let mut data = sei::timestamp_sei(codec, capture_unix_ns);
                 data.extend_from_slice(&out.data);
                 let au = VideoAu { data, keyframe: out.keyframe };
                 if tx.blocking_send(au).is_err() {

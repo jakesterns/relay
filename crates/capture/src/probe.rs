@@ -1,13 +1,15 @@
-//! Capability probes: which hardware HEVC encoder MFTs exist, and whether
-//! Windows.Graphics.Capture is available. `relay-share probe` prints this and
+//! Capability probes: which hardware HEVC and H.264 encoder MFTs exist, which
+//! decoders exist for each, and whether Windows.Graphics.Capture is available. `relay-share probe` prints this and
 //! the output is recorded in docs/plans/M4-share.md → Measurements.
 
 use anyhow::{Context, Result};
+
+use crate::codec::VideoCodec;
 use windows::Graphics::Capture::GraphicsCaptureSession;
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, MFMediaType_Video, MFShutdown, MFStartup, MFTEnumEx,
-    MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFVideoFormat_HEVC,
-    MFSTARTUP_LITE, MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT,
+    MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute, MFSTARTUP_LITE,
+    MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_ASYNCMFT,
     MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SORTANDFILTER,
     MFT_ENUM_FLAG_SYNCMFT, MFT_REGISTER_TYPE_INFO, MF_VERSION,
 };
@@ -26,6 +28,10 @@ pub struct ProbeReport {
     pub hevc_hardware_encoders: Vec<EncoderMft>,
     pub hevc_hardware_decoders: Vec<EncoderMft>,
     pub hevc_any_decoders: Vec<EncoderMft>,
+    /// H.264 alongside (S27). Decode ships with every Windows install, so
+    /// this list is what makes receiving free.
+    pub h264_hardware_encoders: Vec<EncoderMft>,
+    pub h264_any_decoders: Vec<EncoderMft>,
     pub wgc_supported: bool,
 }
 
@@ -49,12 +55,13 @@ impl Drop for MediaFoundation {
     }
 }
 
-/// Hardware HEVC encoder MFTs, best first (`MFT_ENUM_FLAG_SORTANDFILTER`).
-/// Software MFTs are deliberately not requested: there is no CPU encode path.
-pub fn hevc_hardware_encoders() -> Result<Vec<EncoderMft>> {
+/// Hardware encoder MFTs for `codec` on any adapter, best first
+/// (`MFT_ENUM_FLAG_SORTANDFILTER`). Software MFTs are deliberately not
+/// requested: there is no CPU encode path.
+pub fn hardware_encoders(codec: VideoCodec) -> Result<Vec<EncoderMft>> {
     let out_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_HEVC,
+        guidSubtype: crate::encode::mf::mf_subtype(codec),
     };
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
@@ -69,7 +76,7 @@ pub fn hevc_hardware_encoders() -> Result<Vec<EncoderMft>> {
             &mut count,
         )
     }
-    .context("MFTEnumEx(video encoder, HEVC, hardware)")?;
+    .with_context(|| format!("MFTEnumEx(video encoder, {}, hardware)", codec.label()))?;
 
     if activates.is_null() || count == 0 {
         return Ok(Vec::new());
@@ -106,11 +113,12 @@ fn get_string(activate: &IMFActivate, key: &windows::core::GUID) -> Option<Strin
     }
 }
 
-/// HEVC decoder MFTs (any flags), for diagnosing receiver decode support.
-pub fn hevc_decoders(hardware_only: bool) -> Result<Vec<EncoderMft>> {
+/// Decoder MFTs for `codec` (any flags unless `hardware_only`), for
+/// receiver decode support.
+pub fn decoders(codec: VideoCodec, hardware_only: bool) -> Result<Vec<EncoderMft>> {
     let in_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_HEVC,
+        guidSubtype: crate::encode::mf::mf_subtype(codec),
     };
     let flags = if hardware_only {
         MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_LOCALMFT | MFT_ENUM_FLAG_SORTANDFILTER
@@ -133,7 +141,7 @@ pub fn hevc_decoders(hardware_only: bool) -> Result<Vec<EncoderMft>> {
             &mut activates,
             &mut count,
         )
-        .context("MFTEnumEx(HEVC decoder)")?;
+        .with_context(|| format!("MFTEnumEx({} decoder)", codec.label()))?;
         if activates.is_null() || count == 0 {
             return Ok(Vec::new());
         }
@@ -185,13 +193,24 @@ pub fn wgc_supported() -> bool {
     GraphicsCaptureSession::IsSupported().unwrap_or(false)
 }
 
+/// Codecs this PC can decode, in preference order, narrowed by
+/// `RELAY_VIDEO_CODECS`. What a receiver registers for the answer. Needs MF
+/// started.
+pub fn decodable_codecs() -> Vec<VideoCodec> {
+    crate::codec::filter_supported(&crate::codec::allowed_codecs(), |c| {
+        decoders(c, false).map(|d| !d.is_empty()).unwrap_or(false)
+    })
+}
+
 /// Full report; requires MF started (see [`MediaFoundation::start`]).
 pub fn report() -> Result<ProbeReport> {
     Ok(ProbeReport {
         adapters: display_adapters(),
-        hevc_hardware_encoders: hevc_hardware_encoders()?,
-        hevc_hardware_decoders: hevc_decoders(true).unwrap_or_default(),
-        hevc_any_decoders: hevc_decoders(false).unwrap_or_default(),
+        hevc_hardware_encoders: hardware_encoders(VideoCodec::Hevc)?,
+        hevc_hardware_decoders: decoders(VideoCodec::Hevc, true).unwrap_or_default(),
+        hevc_any_decoders: decoders(VideoCodec::Hevc, false).unwrap_or_default(),
+        h264_hardware_encoders: hardware_encoders(VideoCodec::H264).unwrap_or_default(),
+        h264_any_decoders: decoders(VideoCodec::H264, false).unwrap_or_default(),
         wgc_supported: wgc_supported(),
     })
 }

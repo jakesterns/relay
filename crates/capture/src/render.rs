@@ -1,5 +1,5 @@
 //! Receiver presentation: a native D3D11 swapchain window fed by the MF
-//! hardware HEVC decoder. Decoded NV12 stays on the GPU; the D3D11 video
+//! DXVA decoder for the negotiated codec (HEVC or H.264). Decoded NV12 stays on the GPU; the D3D11 video
 //! processor converts it straight into the swapchain back buffer. Audio plays
 //! out through WASAPI shared mode.
 //!
@@ -21,7 +21,7 @@ use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use crate::decode::mf::MfHevcDecoder;
+use crate::decode::mf::MfDecoder;
 use crate::transport::receiver::{AccessUnit, RecvStats};
 use crate::{probe, signal_now_ns};
 
@@ -118,15 +118,22 @@ fn video_thread(
 
     // Block for the first AU so we can size the window to the stream.
     let first = aus.blocking_recv().context("connection closed before any frame")?;
-    let (w, h) = crate::decode::probe_dimensions(&first.data).unwrap_or((2560, 1440));
-    info!(w, h, "stream dimensions");
+    let codec = first.codec;
+    let (w, h) = crate::decode::probe_dimensions(codec, &first.data).unwrap_or((2560, 1440));
+    info!(w, h, codec = codec.label(), "stream dimensions");
 
     let win = Window::create(w, h)?;
-    let mut decoder = MfHevcDecoder::new(&win.device, w, h)?;
+    let mut decoder = MfDecoder::new(&win.device, codec, w, h)?;
     info!(decoder = %decoder.name, "decoder up");
     println!(
         "{}",
-        serde_json::json!({ "event": "render_up", "decoder": decoder.name, "width": w, "height": h })
+        serde_json::json!({
+            "event": "render_up",
+            "decoder": decoder.name,
+            "codec": codec,
+            "width": w,
+            "height": h,
+        })
     );
 
     let mut vp = VideoPresent::new(&win, w, h)?;
@@ -256,7 +263,7 @@ impl Window {
         };
 
         // Build the device on the primary monitor's adapter — the same GPU the
-        // hardware HEVC decoder MFT is registered on — so decode and present
+        // DXVA decoder runs on — so decode and present
         // share one device with no cross-adapter copy.
         let gpu = crate::d3d::device_for_monitor(crate::d3d::primary_monitor())?;
         let device = gpu.device;
@@ -356,6 +363,11 @@ impl VideoPresent {
                 &out_desc,
                 Some(&mut out_view),
             )?;
+            // H.264 codes 1080 rows as 1088 and crops; the decoded texture can
+            // be the coded size, so blit only the picture, never the padding.
+            let src =
+                RECT { left: 0, top: 0, right: frame.width as i32, bottom: frame.height as i32 };
+            win.vp_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&src));
             let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 pInputSurface: std::mem::ManuallyDrop::new(in_view),

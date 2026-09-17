@@ -1,16 +1,20 @@
-//! Media Foundation HEVC decoder MFT, D3D11-backed (DXVA). Fed Annex B access
-//! units, produces NV12 textures on the render device.
+//! Media Foundation HEVC or H.264 decoder MFT, D3D11-backed (DXVA). Fed
+//! Annex B access units, produces NV12 textures on the render device.
 //!
 //! We drive it synchronously: the hardware vendor decoders register only an
-//! encoder MFT, so the decoder that exists on a stock Windows box is the
-//! Microsoft HEVC Video Extension — a **sync** MFT that decodes on the GPU via
-//! DXVA once it has the D3D device manager. There is no CPU-only fallback: if
-//! no decoder can bind our D3D device, construction fails.
+//! encoder MFT, so the decoders that exist on a stock Windows box are
+//! Microsoft's — the HEVC Video Extension (a LOCALMFT, present only where it
+//! was entitled or bought) and the H.264 Video Decoder MFT that every Windows
+//! install ships. Both are **sync** MFTs that decode on the GPU via DXVA once
+//! they have the D3D device manager. There is no CPU-only fallback: if no
+//! decoder can bind our D3D device, construction fails.
 
 use anyhow::{bail, Context, Result};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
 use windows::Win32::Media::MediaFoundation::*;
+
+use crate::codec::VideoCodec;
 
 pub struct DecodedFrame {
     pub texture: ID3D11Texture2D,
@@ -21,7 +25,8 @@ pub struct DecodedFrame {
     pub height: u32,
 }
 
-pub struct MfHevcDecoder {
+pub struct MfDecoder {
+    pub codec: VideoCodec,
     transform: IMFTransform,
     in_id: u32,
     out_id: u32,
@@ -32,11 +37,11 @@ pub struct MfHevcDecoder {
 }
 
 // SAFETY: driven from a single thread only.
-unsafe impl Send for MfHevcDecoder {}
+unsafe impl Send for MfDecoder {}
 
-impl MfHevcDecoder {
-    pub fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
-        let (transform, name) = activate_hevc_decoder()?;
+impl MfDecoder {
+    pub fn new(device: &ID3D11Device, codec: VideoCodec, width: u32, height: u32) -> Result<Self> {
+        let (transform, name) = activate_decoder(codec)?;
         // SAFETY: standard MFT decode setup on live COM interfaces.
         unsafe {
             let attrs = transform.GetAttributes().context("decoder attributes")?;
@@ -55,11 +60,13 @@ impl MfHevcDecoder {
 
             let in_type = MFCreateMediaType()?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC)?;
+            in_type.SetGUID(&MF_MT_SUBTYPE, &crate::encode::mf::mf_subtype(codec))?;
             in_type.SetUINT64(&MF_MT_FRAME_SIZE, size64(width, height))?;
             in_type.SetUINT64(&MF_MT_FRAME_RATE, size64(60, 1))?;
             in_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            transform.SetInputType(in_id, &in_type, 0).context("decoder SetInputType HEVC")?;
+            transform
+                .SetInputType(in_id, &in_type, 0)
+                .with_context(|| format!("decoder SetInputType {}", codec.label()))?;
 
             select_nv12_output(&transform, out_id)?;
 
@@ -76,19 +83,18 @@ impl MfHevcDecoder {
                 == 0
             {
                 bail!(
-                    "the HEVC decoder \"{name}\" wants caller-allocated output, which means \
+                    "the {} decoder \"{name}\" wants caller-allocated output, which means \
                      it is decoding on the CPU rather than through DXVA. Relay only presents \
-                     GPU-decoded frames. Install \"HEVC Video Extensions from Device \
-                     Manufacturer\" from the Microsoft Store and update the graphics driver, \
-                     then receive again"
+                     GPU-decoded frames. Update the graphics driver, then receive again",
+                    codec.label()
                 );
             }
 
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
-            tracing::info!(decoder = %name, "HEVC DXVA decoder ready");
+            tracing::info!(decoder = %name, codec = codec.label(), "DXVA decoder ready");
 
-            Ok(Self { transform, in_id, out_id, width, height, name, _dev_manager: manager })
+            Ok(Self { codec, transform, in_id, out_id, width, height, name, _dev_manager: manager })
         }
     }
 
@@ -200,14 +206,14 @@ fn select_nv12_output(transform: &IMFTransform, out_id: u32) -> Result<()> {
     }
 }
 
-/// First HEVC decoder MFT, hardware or locally-registered (the Microsoft HEVC
-/// Video Extension is a LOCALMFT). Preference order comes from
-/// `SORTANDFILTER`. Software-only category decoders are still DXVA-accelerated
+/// First decoder MFT for `codec`, hardware or locally-registered (the
+/// Microsoft HEVC Video Extension is a LOCALMFT). Preference order comes from
+/// `SORTANDFILTER`. Software-category decoders are still DXVA-accelerated
 /// once the D3D manager is attached, which the caller does.
-fn activate_hevc_decoder() -> Result<(IMFTransform, String)> {
+fn activate_decoder(codec: VideoCodec) -> Result<(IMFTransform, String)> {
     let in_type = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_HEVC,
+        guidSubtype: crate::encode::mf::mf_subtype(codec),
     };
     // SAFETY: enumeration; array freed below.
     unsafe {
@@ -225,15 +231,17 @@ fn activate_hevc_decoder() -> Result<(IMFTransform, String)> {
             &mut activates,
             &mut count,
         )
-        .context("MFTEnumEx(HEVC decoder)")?;
+        .with_context(|| format!("MFTEnumEx({} decoder)", codec.label()))?;
         if activates.is_null() || count == 0 {
+            // The receiver only registers codecs it found a decoder for, so
+            // reaching this means the decoder vanished between the answer
+            // and the first frame, or the peer ignored the answer.
             bail!(
-                "no HEVC decoder is registered on this PC, so it cannot receive a share. \
-                 Media Foundation gets HEVC decode from the Microsoft \"HEVC Video \
-                 Extensions from Device Manufacturer\" package — GPU drivers register only \
-                 encoders. Install it from the Microsoft Store (search for \"HEVC Video \
-                 Extensions\"), then start receiving again. Relay cannot bundle it: \
-                 Microsoft licenses it per-device to OEMs, not for redistribution by apps"
+                "no {} decoder is registered on this PC, so this share cannot be shown. \
+                 Relay negotiates H.264 whenever HEVC is missing; if this is H.264, the \
+                 Windows media components are absent (an N edition of Windows needs the \
+                 free Media Feature Pack)",
+                codec.label()
             );
         }
         let slice = std::slice::from_raw_parts(activates, count as usize);

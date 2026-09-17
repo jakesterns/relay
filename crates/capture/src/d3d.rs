@@ -48,6 +48,17 @@ fn adapter_for_monitor(hmonitor: HMONITOR) -> Result<(IDXGIAdapter1, IDXGIOutput
     bail!("no DXGI output matches the requested monitor")
 }
 
+/// LUID and description of the adapter driving `hmonitor`, without creating
+/// a device — enough to ask Media Foundation which encoders that GPU has.
+pub fn adapter_luid_for_monitor(
+    hmonitor: HMONITOR,
+) -> Result<(windows::Win32::Foundation::LUID, String)> {
+    let (adapter, _output, name) = adapter_for_monitor(hmonitor)?;
+    // SAFETY: adapter is live.
+    let luid = unsafe { adapter.GetDesc1()? }.AdapterLuid;
+    Ok((luid, name))
+}
+
 /// The DXGI output for `hmonitor` (Desktop Duplication needs it).
 pub fn output_for_monitor(hmonitor: HMONITOR) -> Result<IDXGIOutput> {
     let (_adapter, output, _name) = adapter_for_monitor(hmonitor)?;
