@@ -15,6 +15,12 @@ stays in the record — a wrong theory that looked right is worth remembering.
 58–62. Either the counter measures capture rate rather than encode rate, or the
 fps cap is not applied to the encoder at all. Seen on both two-PC runs.
 
+**S27 (branch `feat/h264-fallback`): cause found and fixed, verified on loopback
+only.** The counter was honest; nothing dropped frames, so the encoder ran at
+display refresh while told 30 fps. Reproduced on the pre-S27 binary on loopback
+(asked 30, encoded 24–58). `pace::FramePacer` now drops frames before
+conversion; loopback reads 30.0 on every tick. Still to see on the second PC.
+
 Matters because the 4K60 acceptance criterion is measured in exactly these
 units — we cannot currently prove or disprove it. Fix the measurement before
 trusting any fps number already recorded in the plans.
@@ -38,6 +44,11 @@ tell the peer.
 It should close the peer connection with a reason, so the sender can report
 "receiver: no HEVC decoder" immediately. Handed to S27, which is already in
 `sender.rs`/`receiver.rs` for codec negotiation.
+
+**S27: fix in the branch, not yet seen working.** The render thread's error now
+reaches the sender as `SigMsg::Abort { reason }` before the receiver closes, and
+the sender prints `{"event":"error","where":"receiver",...}`. A headless loopback
+cannot fail the render path, so the first real test is the second PC.
 
 ### B4 — Firewall rule policy misses a disabled Private profile
 S22 scopes Relay's rule to private + domain, never public — right for a
@@ -64,7 +75,11 @@ error claiming otherwise is worse than silence. It needs to degrade to an
 informational note — HEVC would give better quality per bit where available —
 rather than an error. Belongs with S27.
 
-### B8 — A windowed `relay-share recv` never exits
+**S27: fixed in the branch.** Red only when neither H.264 nor HEVC decodes;
+otherwise a plain note that shares use H.264. The paid-codec link is gone.
+Covered by UI tests; still to see on the Windows 10 PC.
+
+### B8 — A windowed `relay-share recv` never exits  |  MITIGATED 2026-09-17, not cured
 After the sender stops it logs "connection closed" and keeps running. Found by
 S27 during loopback work and reproduced against a pre-S27 binary, so it
 predates the codec work.
@@ -73,7 +88,7 @@ Hidden in normal use because the core kills the child, which is exactly why it
 survived this long. Anyone running the binary by hand — as we did for the
 Windows 10 diagnosis — leaves a process holding an open render window.
 
-### B9 — Relay will happily capture its own render window
+### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, unverified on hardware
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
 the sender was capturing, so the capture contained the window showing the
 capture. Jake's description was "an infinite loop of whatever is on my screen,
@@ -97,6 +112,37 @@ established whether a window appeared first and vanished, or never appeared at
 all. A window that flashes and disappears reads as a crash to a user even when
 the failure is handled. Needs eyes on the screen.
 
+### B10 — The picture freezes a few seconds into a share
+Seen on the second PC on the first share that actually displayed: video
+appeared, then froze on one frame within seconds and stayed there for the rest
+of the 30 s run. Audio behaviour at the same moment is unknown (see B11).
+
+`share.log` had no line at all between "decoder up" and the disconnect 33 s
+later — no warning, no error, no stall — so there was no way to tell whether
+access units stopped arriving, stopped decoding, or stopped reaching the
+screen. Instrumented rather than fixed: `video_presented` is now counted
+separately from `video_aus` and both are logged every 500 ms, with a warning
+when either stops moving. The next run should say which.
+
+The sender saw none of it: 892 frames, zero dropped, for the full 30 s.
+
+### B11 — A long continuous beep from the receiver's speakers
+Started when the share started, described as loud and constant. The sender was
+sending real audio (2,999 packets, peak 0.091), so this is the receiver's
+playback path rather than the source — a stale buffer repeating, or an
+underrun turning into a tone. Unknown whether it began at connect or at the
+moment the picture froze, which would tie it to B10.
+
+Worse than it sounds: it is the first thing a user hears from Relay, through
+whatever their speakers are set to.
+
+### B12 — Installers are not byte-reproducible
+Two builds of the same commit from different worktrees ship different files:
+`relay-preview.exe` gets cargo-cached when its source has not changed, and
+`autoeq-index.tsv` picks up per-worktree line endings (8,849 records either
+way — Rust's `.lines()` strips `\r`). Harmless today, but it must be fixed
+before anything is signed: a signature over a build nobody can reproduce is
+worth very little.
 ## Fixed, verified on the second PC
 
 - **`relay-share.exe` could not start on Windows 10 at all.** A static import of

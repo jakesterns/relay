@@ -1,13 +1,14 @@
-//! Dev harness: mux a raw annex-B HEVC elementary stream into a Relay
+//! Dev harness: mux a raw annex-B HEVC or H.264 elementary stream into a Relay
 //! recording file with the production muxer, so real output can be handed to
 //! real players/editors. Not part of the shipped product.
 //!
-//! Usage: cargo run -p relay-capture --example mux_from_annexb -- <in.h265> <out.mp4> <w> <h>
+//! Usage: cargo run -p relay-capture --example mux_from_annexb -- <in.h265> <out.mp4> <w> <h> [hevc|h264]
 
 use std::fs;
 
 use std::io::{Seek, Write};
 
+use relay_capture::codec::VideoCodec;
 use relay_capture::record::annexb;
 use relay_capture::record::mkv::MkvMuxer;
 use relay_capture::record::mux::{Mp4Muxer, MuxConfig};
@@ -44,7 +45,11 @@ fn main() -> anyhow::Result<()> {
     let w: u32 = args[3].parse()?;
     let h: u32 = args[4].parse()?;
 
-    let cfg = MuxConfig::video_only(w, h);
+    let codec = match args.get(5).map(String::as_str) {
+        Some("h264") => VideoCodec::H264,
+        _ => VideoCodec::Hevc,
+    };
+    let cfg = MuxConfig::video_only(w, h).with_codec(codec);
     let mut mux = if args[2].ends_with(".mkv") {
         AnyMuxer::Mkv(MkvMuxer::new(out, cfg))
     } else {
@@ -63,8 +68,10 @@ fn main() -> anyhow::Result<()> {
             if au.is_empty() {
                 return Ok(());
             }
-            let key =
-                annexb::split_nalus(au).iter().any(|n| matches!(annexb::nal_type(n), 16..=21));
+            let key = annexb::split_nalus(au).iter().any(|n| match codec {
+                VideoCodec::Hevc => matches!(codec.nal_type(n), 16..=21),
+                VideoCodec::H264 => codec.nal_type(n) == 5,
+            });
             mux.push_video(au, *idx * frame_100ns, key)?;
             *idx += 1;
             au.clear();
@@ -72,11 +79,17 @@ fn main() -> anyhow::Result<()> {
         };
 
     for n in nalus {
-        let t = annexb::nal_type(n);
-        let is_vcl = t <= 31;
-        // A VCL NAL with first_slice_segment_in_pic_flag == 1 starts a new AU.
-        let first_slice = is_vcl && n.len() > 2 && (n[2] & 0x80) != 0;
-        if first_slice && au_has_vcl {
+        let t = codec.nal_type(n);
+        let (is_vcl, starts_au) = match codec {
+            // A VCL NAL with first_slice_segment_in_pic_flag == 1 starts a new AU.
+            VideoCodec::Hevc => (t <= 31, t <= 31 && n.len() > 2 && (n[2] & 0x80) != 0),
+            // first_mb_in_slice == 0 (ue '1'), or SEI/SPS/PPS/AUD after a picture.
+            VideoCodec::H264 => {
+                let vcl = (1..=5).contains(&t);
+                (vcl, (vcl && n.len() > 1 && (n[1] & 0x80) != 0) || (6..=9).contains(&t))
+            }
+        };
+        if starts_au && au_has_vcl {
             flush(&mut au, &mut idx, &mut mux)?;
             au_has_vcl = false;
         }
