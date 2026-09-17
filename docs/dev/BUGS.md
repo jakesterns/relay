@@ -51,7 +51,7 @@ Today it happens to work because a disabled profile filters nothing, and
 cover the profile in force, and we should decide what that means rather than
 rely on the coincidence.
 
-### B5 — `relay-core status` prints the foreground window title
+### B5 — ~~`relay-core status` prints the foreground window title~~ FIXED 2026-09-17
 The CLI status line echoes whatever window is in front — during testing that
 was a browser tab title. Anyone pasting `status` output into a bug report or a
 log leaks it. `relay-pc2` redacted it by hand, which is the only reason it did
@@ -63,6 +63,33 @@ H.264 negotiation exists, a receiver without HEVC will work fine, and a red
 error claiming otherwise is worse than silence. It needs to degrade to an
 informational note — HEVC would give better quality per bit where available —
 rather than an error. Belongs with S27.
+
+### B8 — A windowed `relay-share recv` never exits
+After the sender stops it logs "connection closed" and keeps running. Found by
+S27 during loopback work and reproduced against a pre-S27 binary, so it
+predates the codec work.
+
+Hidden in normal use because the core kills the child, which is exactly why it
+survived this long. Anyone running the binary by hand — as we did for the
+Windows 10 diagnosis — leaves a process holding an open render window.
+
+### B9 — Relay will happily capture its own render window
+2026-09-17, on the dev box: loopback runs left a receiver window on the display
+the sender was capturing, so the capture contained the window showing the
+capture. Jake's description was "an infinite loop of whatever is on my screen,
+like smearing a painting repeatedly", and with B8 keeping the window alive it
+did not stop on its own. His machine was unusable until the processes were
+killed.
+
+Not just a test-harness problem: a user receiving on the same PC they share
+from hits it, and so does anyone trying Relay against itself to see what it
+does. Nothing in the product prevents it.
+
+The fix is to exclude our own window from capture rather than to rely on nobody
+doing this — `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` on the
+receiver's render window, which makes it invisible to WGC and Desktop
+Duplication alike. Worth checking the preview thumbnail path for the same
+exposure.
 
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody
