@@ -11,7 +11,7 @@ import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
   ElevatedOp, FirewallStatus,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
-  SharePresetDef, UiPrefs, VdeviceStatus,
+  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus,
 } from "../lib/ipc";
 import { newProfile, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
@@ -30,6 +30,8 @@ export interface FakeCore {
   /** What Windows Firewall will do to an incoming share. Defaults to the
    *  healthy machine so screens that do not care show no banner. */
   firewall: FirewallStatus;
+  /** The received stream's native window, as the shell reports it (S29). */
+  stream: StreamStatus;
   autostart: boolean;
   /** `settings.json`: what closing the window means. */
   prefs: UiPrefs;
@@ -139,6 +141,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
       unknown: false,
     },
+    stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
     autostart: false,
     prefs: { close_action: "keep_running" },
     elevation: { decline: false },
@@ -205,6 +208,9 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     set_recording_settings: (a) => void (core.recording = structuredClone(a.settings as RecordingSettings)),
     start_receive: () => undefined,
     stop_receive: () => undefined,
+    set_video_area: () => undefined,
+    set_stream_mode: () => undefined,
+    stream_status: () => structuredClone(core.stream),
     list_hardware: (): HardwareReply => structuredClone(core.hardware),
     save_hardware: (a) => {
       const item = a.item as HardwareItem;
@@ -369,7 +375,8 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "get_ui_prefs", "set_ui_prefs", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "list_presets", "save_preset", "delete_preset",
-  "set_recording_settings", "start_receive", "stop_receive", "list_hardware",
+  "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
+  "set_stream_mode", "stream_status", "list_hardware",
   "save_hardware", "delete_hardware", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "install_apo", "uninstall_apo",

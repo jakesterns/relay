@@ -1,0 +1,139 @@
+# The stream inside the app (S29)
+
+How a received share is shown in the Relay window instead of a window of its
+own, why it is built the way it is, and how to check it on one PC.
+
+## The shape
+
+Three processes touch the picture:
+
+| Process | Owns | Does |
+|---|---|---|
+| `relay-share recv --host <hwnd>` | the stream window (class `RelayReceiver`) and its styles | decodes and presents; changes hosting mode on command; keeps `WDA_EXCLUDEFROMCAPTURE` applied |
+| `relay-core` | nothing | relays `host` commands down and `render_up` / `host` / `host_close` events up |
+| `relay-ui` (Tauri shell) | the app window | fills in its HWND on `start_receive`; positions the stream window over the video area with `SetWindowPos`; hides it when the Receive screen is not showing |
+
+The webview only measures. `Receive.tsx` reports the video area's
+`getBoundingClientRect()` (CSS px, clipped to the viewport) through
+`set_video_area` on mount, on every `ResizeObserver` tick and on unmount
+(`null`). It never sees an HWND.
+
+### Why an owned popup and not `WS_CHILD`
+
+The kickoff suggested `SetParent` + `WS_CHILD`. That was rejected for one
+reason: `SetWindowDisplayAffinity`, the guard that stops Relay capturing its
+own output (B9), is honoured only on **top-level** windows and only from the
+process that owns them. A child of the app window would need the app to
+exclude its *whole* window from capture, and the app cannot do that for a
+window another process owns either. So the stream window stays top-level in
+every mode:
+
+- **Embedded**: `WS_POPUP`, owned by the app window (`GWLP_HWNDPARENT`),
+  `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`. Owned windows stay above their
+  owner, hide when it minimises, and have no taskbar button, which is the set
+  of behaviours a piece of the app window should have. `WM_MOUSEACTIVATE`
+  returns `MA_NOACTIVATE`, so the keyboard never leaves the app; a click on
+  the picture calls `SetForegroundWindow(owner)` so the app comes forward as
+  it would for a click anywhere else in it.
+- **Popped out**: `WS_OVERLAPPEDWINDOW`, unowned (so the app can be brought
+  in front of it), `WS_EX_APPWINDOW`, sized to 90 % of the work area of the
+  monitor the app is on. Close or Esc **hides** it and emits `host_close`;
+  the shell then asks for `embedded` again. Nothing ends the receive but
+  Stop, the sender stopping, or the connection dropping.
+- **Standalone** (`recv` from a console, no `--host`): the pre-S29 window.
+  Close and Esc end the receive.
+
+The engine reasserts the affinity after every style change and reports what
+`GetWindowDisplayAffinity` says back — not what was asked — in the `host`
+event as `excluded_from_capture`. The core logs a warning when it is false,
+the shell passes it to the page, and the Receive screen says so.
+
+### Why the shell positions and the engine styles
+
+Position changes are continuous (every mouse move of a drag); style changes
+are rare. A round trip through the core for each move would put the picture
+visibly behind the frame. `SetWindowPos` on another process's window is an
+ordinary Win32 call; the shell does it directly from its `Moved`, `Resized`
+and `ScaleFactorChanged` handlers and from every page measurement. The shell
+**never shows the window until the engine has confirmed `embedded`**, so a
+framed window cannot flash at the video area during pop-in.
+
+Both processes are per-monitor-DPI-aware (the engine sets
+`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` before creating its window), so
+the coordinates they exchange are physical pixels and the swapchain is not
+bitmap-stretched on a scaled display.
+
+### Two threads in the engine
+
+`render.rs` used to pump window messages on the thread that decodes and
+presents. A modal move/size loop on that thread stalls the picture for as
+long as the drag lasts, and once the window is inside the app, resizing the
+app is that drag. Now `render::host::WindowThread` creates the HWND and only
+pumps; `video_thread` decodes and presents through the HWND alone (the
+swapchain). Rules that keep them from deadlocking:
+
+- The window thread never waits on the render thread. Close/Esc/owner death
+  set a flag and keep pumping.
+- The render thread releases every D3D object *before* posting
+  `WM_APP_SHUTDOWN`; DXGI may need the window's thread to answer a message
+  during release.
+- `MakeWindowAssociation(DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER)`
+  so DXGI does not hook the window procedure from the render thread.
+- The render thread polls the AU channel (`try_recv` + 1 ms sleep) instead
+  of blocking on it, so a stop always lands within a frame. This is also what
+  finally cures B8: the receiver now reads `stop` on stdin and exits on it.
+
+### If the app closes while embedded
+
+Either Windows destroys the owned window with its owner (the engine sees
+`WM_DESTROY`, ends the receive, the core reports it), or it does not, in
+which case a 1 s timer in the engine notices `!IsWindow(owner)` and pops the
+stream out so a frameless picture is never left floating over the desktop.
+Which of the two Windows does was not established in S29; both are handled.
+
+## Checking it on one PC
+
+A real receiver on the sending PC captures itself (B9), so the mechanics are
+exercised with a stand-in:
+
+```
+RELAY_RECEIVE_STUB=1 relay-core run          # StartReceive spawns `relay-share host-stub`
+```
+
+The stub prints the same `waiting` / `paired` / `codec` / `render_up` /
+`host` / `host_close` lines, honours the same `host` and `stop` commands, and
+paints a hue sweep with a marching bar at 1920×1080 in the real window so a
+stall, a stretch or a tear is obvious. Nothing is captured.
+
+Two harness scripts (neither sends input to the desktop):
+
+- `scripts/webview-eval.mjs <port> <js>` — runs JavaScript in the app's
+  page over the Chrome DevTools Protocol. Launch the shell with
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223`.
+  In-page `button.click()` drives the UI exactly as the jsdom tests do.
+- `scripts/stream-window-check.ps1` — lists the shell and `RelayReceiver`
+  windows with owner, styles, visibility and rect. `-Close` posts `WM_CLOSE`
+  to the receiver window; `-MoveShell x,y,w,h` moves the shell
+  (`powershell -Command "& 'scripts/stream-window-check.ps1' -MoveShell 300,200,1500,950"`
+  — `-File` cannot parse the array).
+
+Run everything under `RELAY_INSTANCE=<name>` so it sits beside the installed
+core. Note the engine still writes `share.log` under the default data root,
+not the core's `--data-dir`.
+
+### What was verified locally (2026-09-17, stub, dev box)
+
+| Check | Result |
+|---|---|
+| Start receiving with the Receive screen open | window created embedded, hidden, then shown at the letterboxed rect: shell client origin + area + `fit()` offset, to the pixel (`229,375 738x415` for a 738×670 area at DPR 1) |
+| Owner / styles while embedded | owner = shell HWND, `WS_POPUP`, no caption, `WS_EX_NOACTIVATE`, `WS_EX_TOOLWINDOW`, `excluded=true` |
+| Pop out | unowned, captioned, `1936x1119` centred on the app's monitor, `excluded=true` |
+| Close the popped-out window (`WM_CLOSE`) | `host_close` → shell requests embedded → back at the same rect, `excluded=true` |
+| Resize the shell to 1500×950 and to 1200×760 | stream re-fitted each time (`942x530`, then `642x361`), still centred |
+| Navigate to Profiles / back to Receive | hidden / shown; page state (paired, code, codec, Stop button) restored on return |
+| Stop receiving | window gone, video area reads "The share from host-stub ended." |
+| Present rate during moves | `stub presenting presented=` kept climbing at ~240/s |
+
+Not verifiable on one PC: a real modal drag of the app window (needs a
+mouse), real decode, audio, and the second PC's Windows 10 build. Those are
+the two-PC pass in `BUGS.md`.

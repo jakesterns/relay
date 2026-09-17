@@ -1,29 +1,46 @@
 //! Receiver presentation: a native D3D11 swapchain window fed by the MF
-//! DXVA decoder for the negotiated codec (HEVC or H.264). Decoded NV12 stays on the GPU; the D3D11 video
-//! processor converts it straight into the swapchain back buffer. Audio plays
-//! out through WASAPI shared mode.
+//! DXVA decoder for the negotiated codec (HEVC or H.264). Decoded NV12 stays
+//! on the GPU; the D3D11 video processor converts it straight into the
+//! swapchain back buffer. Audio plays out through WASAPI shared mode.
 //!
-//! The window owns its thread and message pump; access units arrive over a
-//! channel from the transport. `capture→present` latency (from the in-band
-//! SEI) is reported every 500 ms.
+//! Two threads, on purpose (S29). The *window* thread creates the HWND and
+//! does nothing but pump its messages; the *render* thread decodes and
+//! presents. They used to be one thread, and a message pump that also
+//! decodes stalls the picture for the whole of any modal loop — a title-bar
+//! drag, a resize — which was tolerable for a window of its own and would be
+//! reachable from ordinary app resizing once the stream lives inside the app.
+//! The two never wait on each other while both are alive: the window thread
+//! sets a flag and keeps pumping; the render thread releases its D3D objects
+//! and *then* posts the window a shutdown message.
+//!
+//! Hosting (`host` module): with `--host <hwnd>` the window is created as a
+//! frameless popup *owned by* the app window, hidden until the app positions
+//! it over its video area, and the app can pop it out into an ordinary
+//! top-level window and back. It is a popup, not a `WS_CHILD`, because
+//! `SetWindowDisplayAffinity` — the thing that stops Relay capturing its own
+//! output (B9) — applies only to top-level windows of the calling process.
+//! The engine therefore keeps ownership of every style change and reasserts
+//! the affinity after each one; the app only moves the window about.
 
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 use tracing::{info, warn};
-use windows::core::{w, Interface};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::core::Interface;
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
-use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::command::{self, EngineCmd, HostMode};
 use crate::decode::mf::MfDecoder;
 use crate::transport::receiver::{AccessUnit, RecvStats};
 use crate::{probe, signal_now_ns};
+
+pub mod host;
 
 /// Receiver output options beyond the window itself.
 #[derive(Debug, Default, Clone)]
@@ -34,11 +51,47 @@ pub struct RenderOpts {
     /// device (the interim virtual-mic route: a VB-Cable / VoiceMeeter
     /// input endpoint).
     pub mic_route: Option<String>,
+    /// The app window to embed the stream window in. `None` = a window of
+    /// its own, as when run from a console.
+    pub host: Option<u64>,
 }
 
 /// Hands a fatal error to the signalling task, which tells the sender and
 /// acknowledges on the oneshot once the message is written.
 pub type AbortTx = mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>;
+
+/// The transport's link to the window thread: the HWND once it exists, and
+/// a host command that arrived before it did.
+pub struct HostLink {
+    hwnd: AtomicIsize,
+    pending: Mutex<Option<(HostMode, u64)>>,
+}
+
+impl HostLink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { hwnd: AtomicIsize::new(0), pending: Mutex::new(None) })
+    }
+
+    /// Ask the window thread to change hosting mode. Before the window
+    /// exists the request is parked and applied at creation, so a command
+    /// that races the first frame is not lost.
+    pub fn post(&self, mode: HostMode, owner: u64) {
+        let hwnd = self.hwnd.load(Ordering::Acquire);
+        if hwnd == 0 {
+            *self.pending.lock().unwrap() = Some((mode, owner));
+            return;
+        }
+        host::post_mode(HWND(hwnd as *mut _), mode, owner);
+    }
+
+    fn take_pending(&self) -> Option<(HostMode, u64)> {
+        self.pending.lock().unwrap().take()
+    }
+
+    fn set_hwnd(&self, hwnd: HWND) {
+        self.hwnd.store(hwnd.0 as isize, Ordering::Release);
+    }
+}
 
 /// Entry point used by the transport when not headless.
 #[allow(clippy::too_many_arguments)]
@@ -69,8 +122,13 @@ pub async fn run(
     let vcam = opts.vcam;
     let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let failure2 = failure.clone();
+    let quit = Arc::new(AtomicBool::new(false));
+    let quit2 = quit.clone();
+    let link = HostLink::new();
+    let link2 = link.clone();
+    let host_owner = opts.host;
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl, vcam) {
+        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner) {
             warn!(error = %e, "render thread stopped");
             *failure2.lock().unwrap() = Some(e.to_string());
             println!(
@@ -79,6 +137,16 @@ pub async fn run(
             );
         }
     })?;
+
+    // Commands from the core on stdin: `stop`, and `host` to move the window
+    // between the app and a window of its own. The receiver never read stdin
+    // before S29, so a stop had to wait out the core's 3 s grace and a kill.
+    let mut stdin_lines = {
+        use tokio::io::AsyncBufReadExt;
+        tokio::io::BufReader::new(tokio::io::stdin()).lines()
+    };
+    let spawned_by_core = std::env::var("RELAY_SPAWNED").is_ok();
+    let mut stdin_open = true;
 
     // Report present latency until the window or the connection closes.
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
@@ -129,10 +197,26 @@ pub async fn run(
                 last_aus = aus;
                 last_presented = presented;
             }
+            line = stdin_lines.next_line(), if stdin_open => {
+                match line {
+                    Ok(Some(l)) => match command::parse_line(&l) {
+                        Some(EngineCmd::Stop) => { info!("stop command received"); break; }
+                        Some(EngineCmd::Host { mode, owner }) => link.post(mode, owner),
+                        Some(other) => tracing::debug!(?other, "command not for a receiver"),
+                        None => tracing::debug!(line = %l, "unrecognised stdin line ignored"),
+                    },
+                    _ if spawned_by_core => { info!("stdin closed; core went away"); break; }
+                    _ => stdin_open = false,
+                }
+            }
             _ = closed.recv() => { info!("connection closed"); break; }
             _ = tokio::signal::ctrl_c() => break,
         }
     }
+    // Whatever ended the loop, the render thread must stop now (B8): it polls
+    // this flag between frames and no longer blocks on a channel that the
+    // peer connection may never close.
+    quit.store(true, Ordering::Release);
 
     // Tell the sender why before closing, or it only learns "connection lost"
     // seconds later when ICE gives up (B3). Bounded: never hang the exit.
@@ -147,18 +231,9 @@ pub async fn run(
     let _ = audio_stop_tx.send(());
     let _ = pc.close().await;
 
-    // Bounded joins (B8). The render thread blocks in `aus.blocking_recv()`,
-    // and the sending half of that channel lives in `receiver.rs`'s on_track
-    // handler, not here — so if closing the peer connection does not drop it,
-    // `blocking_recv` never returns and an unconditional join hangs forever.
-    // That is exactly what was seen on a real machine: 37 s after "connection
-    // closed", relay-share was still resident holding an open render window.
-    //
-    // This is a mitigation, not the cure: the cure is for the AU sender not to
-    // outlive `pc.close()`. Waiting is pure tidiness by this point — the
-    // failure reason was taken above, the peer connection is closed, and the
-    // process is on its way out — so a thread that will not wake is not worth
-    // hanging the exit for.
+    // Bounded joins (B8): a thread that will not wake is not worth hanging
+    // the exit for — the failure reason was taken above, the peer connection
+    // is closed, and the process is on its way out.
     join_bounded(video_join, "render");
     join_bounded(audio_join, "audio playback");
     Ok(())
@@ -188,8 +263,10 @@ fn join_bounded<T: Send + 'static>(handle: std::thread::JoinHandle<T>, what: &st
     }
 }
 
-struct Window {
-    hwnd: HWND,
+/// The D3D side of the window: device, swapchain and video-processor
+/// interfaces. Lives on the render thread; the HWND it targets belongs to
+/// the window thread.
+pub struct Surface {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     swapchain: IDXGISwapChain1,
@@ -197,24 +274,91 @@ struct Window {
     vp_context: ID3D11VideoContext,
 }
 
+impl Surface {
+    fn new(hwnd: HWND, w: u32, h: u32) -> Result<Self> {
+        // Build the device on the primary monitor's adapter — the same GPU the
+        // DXVA decoder runs on — so decode and present share one device with
+        // no cross-adapter copy.
+        let gpu = crate::d3d::device_for_monitor(crate::d3d::primary_monitor())?;
+        let device = gpu.device;
+        let context = gpu.context;
+
+        let dxgi_device: IDXGIDevice = device.cast()?;
+        // SAFETY: live DXGI device.
+        let adapter = unsafe { dxgi_device.GetAdapter()? };
+        let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
+
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: w,
+            Height: h,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            // The window is whatever size the app or the user makes it; the
+            // back buffer stays at stream size and DWM scales it.
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            ..Default::default()
+        };
+        // SAFETY: valid device, hwnd and desc.
+        let swapchain =
+            unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)? };
+        // The window is pumped on another thread. DXGI would otherwise hook
+        // its message procedure to watch for Alt+Enter and window changes,
+        // and that hook is the classic cross-thread deadlock: the pump waits
+        // on DXGI while DXGI waits on Present. Tell it to leave the window
+        // alone; fullscreen switching is not something a receiver does.
+        // SAFETY: factory and hwnd are live.
+        unsafe {
+            let _ = factory
+                .MakeWindowAssociation(hwnd, DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER);
+        }
+
+        let vp_device: ID3D11VideoDevice = device.cast()?;
+        let vp_context: ID3D11VideoContext = context.cast()?;
+
+        Ok(Self { device, context, swapchain, vp_device, vp_context })
+    }
+}
+
+/// Decode + present. Owns the D3D objects; the window is on its own thread.
 fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
     present_latency: Arc<AtomicI64>,
     vcam: bool,
+    quit: Arc<AtomicBool>,
+    link: Arc<HostLink>,
+    host_owner: Option<u64>,
 ) -> Result<()> {
     // SAFETY: COM MTA for MF + free-threaded D3D; balanced on return.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
     let _mf = probe::MediaFoundation::start()?;
 
-    // Block for the first AU so we can size the window to the stream.
-    let first = aus.blocking_recv().context("connection closed before any frame")?;
+    // Wait for the first AU so we can size the window to the stream. The
+    // core can stop us meanwhile (a stop before any frame), so poll rather
+    // than block: a blocked thread here is the B8 hang.
+    let first = loop {
+        if quit.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        match aus.try_recv() {
+            Ok(au) => break au,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(2))
+            }
+            Err(_) => anyhow::bail!("connection closed before any frame"),
+        }
+    };
     let codec = first.codec;
     let (w, h) = crate::decode::probe_dimensions(codec, &first.data).unwrap_or((2560, 1440));
     info!(w, h, codec = codec.label(), "stream dimensions");
 
-    let win = Window::create(w, h)?;
-    let mut decoder = MfDecoder::new(&win.device, codec, w, h)?;
+    let win = host::WindowThread::start(w, h, host_owner, link, quit.clone())?;
+    let surface = Surface::new(win.hwnd, w, h)?;
+    let mut decoder = MfDecoder::new(&surface.device, codec, w, h)?;
     info!(decoder = %decoder.name, "decoder up");
     println!(
         "{}",
@@ -224,10 +368,13 @@ fn video_thread(
             "codec": codec,
             "width": w,
             "height": h,
+            "hwnd": win.hwnd.0 as isize as u64,
+            "host": win.mode_label(),
+            "excluded_from_capture": win.excluded_from_capture,
         })
     );
 
-    let mut vp = VideoPresent::new(&win, w, h)?;
+    let mut vp = VideoPresent::new(&surface, w, h)?;
 
     // Refuse below Windows 11 22H2 *before* touching the API. mfsensorgroup.dll
     // is delay-loaded (see build.rs), so a missing MFCreateVirtualCamera raises
@@ -244,7 +391,7 @@ fn video_thread(
                     "event": "vcam_error",
                     "message": format!(
                         "this PC has no virtual camera API (Windows build {}); \
-                         the share still plays in its own window",
+                         the share still plays in Relay",
                         build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
                     ),
                 })
@@ -275,23 +422,16 @@ fn video_thread(
     };
 
     let mut pending: Option<AccessUnit> = Some(first);
-    let mut msg = MSG::default();
     // Nothing is decoded until the first keyframe: see the gate in the loop.
     let mut seen_keyframe = false;
     let mut skipped_pre_keyframe: u64 = 0;
     let mut last_au_at = std::time::Instant::now();
 
-    'outer: loop {
-        // Pump window messages; quit on close.
-        // SAFETY: standard non-blocking message pump on our window thread.
-        unsafe {
-            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == WM_QUIT {
-                    break 'outer;
-                }
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+    let result: Result<()> = 'outer: loop {
+        // The window thread asks us to stop (Esc, close, the owner window
+        // going away) and the transport does too (stop, connection closed).
+        if quit.load(Ordering::Acquire) {
+            break Ok(());
         }
 
         let au = match pending.take() {
@@ -320,12 +460,12 @@ fn video_thread(
                             presented = stats.video_presented.load(Ordering::Relaxed),
                             "no access units; treating the share as ended"
                         );
-                        break 'outer;
+                        break 'outer Ok(());
                     }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
                 }
-                Err(_) => break,
+                Err(_) => break Ok(()),
             },
         };
         last_au_at = std::time::Instant::now();
@@ -357,7 +497,11 @@ fn video_thread(
             }
         }
 
-        for frame in decoder.decode(&au.data, au.pts_or_zero())? {
+        let frames = match decoder.decode(&au.data, au.pts_or_zero()) {
+            Ok(f) => f,
+            Err(e) => break Err(e),
+        };
+        for frame in frames {
             // Diagnostics for B10, the freeze that logs no stall: `presented`
             // kept climbing at 30/s while the user watched a still picture, so
             // Present() is being called on something that is not changing.
@@ -367,10 +511,17 @@ fn video_thread(
             // array repeatedly and presenting whatever is in it.
             stats.last_pts_100ns.store(frame.pts_100ns, Ordering::Relaxed);
             stats.last_subresource.store(frame.subresource as u64, Ordering::Relaxed);
-            vp.present(&win, &frame)?;
+            if let Err(e) = vp.present(&surface, &frame) {
+                // A Present that fails because the window is already gone is
+                // the window thread stopping us, not a fault.
+                if quit.load(Ordering::Acquire) {
+                    break 'outer Ok(());
+                }
+                break 'outer Err(e);
+            }
             stats.video_presented.fetch_add(1, Ordering::Relaxed);
             if let Some(sink) = vcam_sink.as_mut() {
-                if let Err(e) = sink.push(&win.device, &win.context, &frame) {
+                if let Err(e) = sink.push(&surface.device, &surface.context, &frame) {
                     warn!(error = %e, "virtual camera sink stopped");
                     vcam_sink = None;
                 }
@@ -379,134 +530,21 @@ fn video_thread(
                 present_latency.store((signal_now_ns() - cap_ns) / 1_000, Ordering::Relaxed);
             }
         }
-    }
+    };
+
+    // Release everything that targets the window *before* asking the window
+    // thread to destroy it: a swapchain must not outlive its HWND, and DXGI
+    // may need the window's thread to answer a message during release, so
+    // that thread has to still be pumping here.
+    drop(vcam_sink);
+    drop(vp);
+    drop(decoder);
+    drop(surface);
+    win.shutdown();
 
     // SAFETY: balances CoInitializeEx.
     unsafe { CoUninitialize() };
-    Ok(())
-}
-
-impl Window {
-    fn create(w: u32, h: u32) -> Result<Self> {
-        // SAFETY: standard window-class registration + creation on this thread.
-        let hwnd = unsafe {
-            let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(wndproc),
-                hInstance: hinstance.into(),
-                lpszClassName: w!("RelayReceiver"),
-                hCursor: LoadCursorW(None, IDC_ARROW)?,
-                ..Default::default()
-            };
-            RegisterClassW(&class);
-            // Fit the *monitor*, not the stream.
-            //
-            // This used to clamp to the stream size, so a 2560x1440 share on a
-            // 1920x1080 display produced a window bigger than the screen: the
-            // title bar and its close button sat off-screen, the taskbar was
-            // covered, and the window looked like inescapable borderless
-            // fullscreen. On a real receiver the only way out was killing the
-            // process from another machine.
-            //
-            // Scale to fit the work area (which excludes the taskbar), keeping
-            // the stream's aspect ratio, and never exceed it.
-            let work =
-                monitor_work_area().unwrap_or(RECT { left: 0, top: 0, right: 1280, bottom: 720 });
-            let avail_w = ((work.right - work.left) as f64 * 0.9).max(320.0);
-            let avail_h = ((work.bottom - work.top) as f64 * 0.9).max(180.0);
-            let scale = (avail_w / w.max(1) as f64).min(avail_h / h.max(1) as f64).min(1.0);
-            let win_w = ((w as f64 * scale).round() as i32).max(320);
-            let win_h = ((h as f64 * scale).round() as i32).max(180);
-
-            // Resizable on purpose: a fixed-size window that does not fit is
-            // exactly the trap described above.
-            let mut rect = RECT { left: 0, top: 0, right: win_w, bottom: win_h };
-            let style = WS_OVERLAPPEDWINDOW;
-            let _ = AdjustWindowRect(&mut rect, style, false);
-            CreateWindowExW(
-                Default::default(),
-                w!("RelayReceiver"),
-                w!("Relay — receiving"),
-                style | WS_VISIBLE,
-                CW_USEDEFAULT,
-                CW_USEDEFAULT,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                None,
-                None,
-                Some(hinstance.into()),
-                None,
-            )?
-        };
-
-        // Make this window invisible to screen capture (B9).
-        //
-        // Without it Relay will happily capture its own output: run a sender
-        // and a receiver on one PC and the capture contains the window showing
-        // the capture, which contains the window showing the capture. On this
-        // project's dev machine that produced an unbounded feedback loop the
-        // user described as "an infinite loop of whatever is on my screen, like
-        // smearing a painting repeatedly", and it did not stop on its own.
-        //
-        // WDA_EXCLUDEFROMCAPTURE hides the window from WGC and Desktop
-        // Duplication while leaving it fully visible on screen -- unlike
-        // WDA_MONITOR, which blacks it out for the user too. Windows 10 2004+.
-        // Best-effort: on an older build this fails and the window still works,
-        // it is just capturable again, so a share of a share would smear as
-        // before rather than the receiver refusing to run.
-        //
-        // SAFETY: hwnd is the window we just created.
-        unsafe {
-            if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
-                tracing::warn!(
-                    "could not exclude the receiver window from capture; \
-                     sharing this PC's screen while receiving on it will feed back"
-                );
-            }
-        }
-
-        // Build the device on the primary monitor's adapter — the same GPU the
-        // DXVA decoder runs on — so decode and present
-        // share one device with no cross-adapter copy.
-        let gpu = crate::d3d::device_for_monitor(crate::d3d::primary_monitor())?;
-        let device = gpu.device;
-        let context = gpu.context;
-
-        let dxgi_device: IDXGIDevice = device.cast()?;
-        // SAFETY: live DXGI device.
-        let adapter = unsafe { dxgi_device.GetAdapter()? };
-        let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
-
-        let desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: w,
-            Height: h,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 2,
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            ..Default::default()
-        };
-        // SAFETY: valid device, hwnd and desc.
-        let swapchain =
-            unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)? };
-
-        let vp_device: ID3D11VideoDevice = device.cast()?;
-        let vp_context: ID3D11VideoContext = context.cast()?;
-
-        Ok(Self { hwnd, device, context, swapchain, vp_device, vp_context })
-    }
-}
-
-impl Drop for Window {
-    fn drop(&mut self) {
-        // SAFETY: destroying our own window.
-        unsafe {
-            let _ = DestroyWindow(self.hwnd);
-        }
-    }
+    result
 }
 
 /// Owns the video processor and the current swapchain render target.
@@ -516,7 +554,7 @@ struct VideoPresent {
 }
 
 impl VideoPresent {
-    fn new(win: &Window, w: u32, h: u32) -> Result<Self> {
+    fn new(win: &Surface, w: u32, h: u32) -> Result<Self> {
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputWidth: w,
@@ -535,7 +573,7 @@ impl VideoPresent {
         Ok(Self { enumerator, processor })
     }
 
-    fn present(&mut self, win: &Window, frame: &crate::decode::mf::DecodedFrame) -> Result<()> {
+    fn present(&mut self, win: &Surface, frame: &crate::decode::mf::DecodedFrame) -> Result<()> {
         // SAFETY: create views on the decoded texture and the back buffer,
         // blt (NV12→BGRA + scale), present. Views drop at scope end.
         unsafe {
@@ -592,43 +630,138 @@ impl VideoPresent {
     }
 }
 
-/// Work area of the primary monitor: the desktop minus the taskbar. Sizing to
-/// the full screen rect would put the window under the taskbar, which is half
-/// of how the borderless-fullscreen trap looked to a user.
-fn monitor_work_area() -> Option<RECT> {
-    // SAFETY: SystemParametersInfo writing one RECT we own.
-    unsafe {
-        let mut r = RECT::default();
-        SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut r as *mut RECT as *mut core::ffi::c_void),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        )
-        .ok()?;
-        Some(r)
+/// `relay-share host-stub [--host <hwnd>]`: the receiver's window, events and
+/// host commands with a moving colour wash in place of a decoded stream.
+///
+/// Exists because the real thing cannot be tried on one PC — a receiver on
+/// the sending PC captures itself (B9) — and the hosting mechanics (owner
+/// changes, affinity, z-order, the app positioning the window) are the part
+/// most likely to go wrong. Nothing here captures anything.
+pub async fn run_stub(host: Option<u64>) -> Result<()> {
+    println!(
+        "{}",
+        serde_json::json!({ "event": "waiting", "name": "stub", "port": 0, "code": "000000" })
+    );
+    println!("{}", serde_json::json!({ "event": "paired", "sender": "host-stub" }));
+    println!("{}", serde_json::json!({ "event": "codec", "codec": "h264" }));
+
+    let quit = Arc::new(AtomicBool::new(false));
+    let link = HostLink::new();
+    let presented = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (q2, l2, p2) = (quit.clone(), link.clone(), presented.clone());
+    let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
+        if let Err(e) = stub_thread(q2, l2, p2, host) {
+            warn!(error = %e, "stub render thread stopped");
+            println!(
+                "{}",
+                serde_json::json!({ "event": "error", "where": "render", "message": e.to_string() })
+            );
+        }
+    })?;
+
+    let mut stdin_lines = {
+        use tokio::io::AsyncBufReadExt;
+        tokio::io::BufReader::new(tokio::io::stdin()).lines()
+    };
+    let spawned_by_core = std::env::var("RELAY_SPAWNED").is_ok();
+    let mut stdin_open = true;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if video_join.is_finished() { break; }
+                let p = presented.load(Ordering::Relaxed);
+                println!("{}", serde_json::json!({
+                    "event": "stats", "aus": p, "presented": p,
+                    "audio_packets": 0, "mic_packets": 0, "capture_to_present_ms": 0.0,
+                }));
+                info!(presented = p, "stub presenting");
+            }
+            line = stdin_lines.next_line(), if stdin_open => {
+                match line {
+                    Ok(Some(l)) => match command::parse_line(&l) {
+                        Some(EngineCmd::Stop) => break,
+                        Some(EngineCmd::Host { mode, owner }) => link.post(mode, owner),
+                        _ => {}
+                    },
+                    _ if spawned_by_core => break,
+                    _ => stdin_open = false,
+                }
+            }
+            _ = tokio::signal::ctrl_c() => break,
+        }
     }
+    quit.store(true, Ordering::Release);
+    join_bounded(video_join, "stub render");
+    println!("{}", serde_json::json!({ "event": "stopped" }));
+    Ok(())
 }
 
-extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    // SAFETY: standard window procedure.
-    unsafe {
-        match msg {
-            WM_CLOSE | WM_DESTROY => {
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            // Escape closes it. A receive window that cannot be dismissed is a
-            // trap, and the close button is the first thing to go out of reach
-            // if the window is ever mis-sized again.
-            WM_KEYDOWN
-                if wp.0 as u32
-                    == windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0 as u32 =>
-            {
-                PostQuitMessage(0);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wp, lp),
+fn stub_thread(
+    quit: Arc<AtomicBool>,
+    link: Arc<HostLink>,
+    presented: Arc<std::sync::atomic::AtomicU64>,
+    host: Option<u64>,
+) -> Result<()> {
+    // SAFETY: balanced below.
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+    let (w, h) = (1920u32, 1080u32);
+    let win = host::WindowThread::start(w, h, host, link, quit.clone())?;
+    let surface = Surface::new(win.hwnd, w, h)?;
+    // `ClearView` (a rect-bounded clear) is on the 11.1 context.
+    let ctx1: ID3D11DeviceContext1 = surface.context.cast()?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "render_up", "decoder": "stub", "codec": "h264",
+            "width": w, "height": h,
+            "hwnd": win.hwnd.0 as isize as u64, "host": win.mode_label(),
+            "excluded_from_capture": win.excluded_from_capture,
+        })
+    );
+    let started = std::time::Instant::now();
+    while !quit.load(Ordering::Acquire) {
+        // A slow hue sweep with a bright bar marching across it: a stalled
+        // picture is unmistakable, and so is a torn or stretched one.
+        let t = started.elapsed().as_secs_f32();
+        let (r, g, b) = hue(t * 0.1);
+        // SAFETY: back buffer of our own swapchain; the view drops at scope end.
+        let presented_ok = unsafe {
+            let back: ID3D11Texture2D = surface.swapchain.GetBuffer(0)?;
+            let mut rtv: Option<ID3D11RenderTargetView> = None;
+            surface.device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
+            let rtv = rtv.context("render target view")?;
+            surface.context.ClearRenderTargetView(&rtv, &[r * 0.25, g * 0.25, b * 0.25, 1.0]);
+            let x = ((t * 0.5).fract() * w as f32) as i32;
+            let bar = RECT { left: x, top: 0, right: (x + 24).min(w as i32), bottom: h as i32 };
+            ctx1.ClearView(&rtv, &[r, g, b, 1.0], Some(std::slice::from_ref(&bar)));
+            let band = RECT { left: 0, top: 0, right: w as i32, bottom: 12 };
+            ctx1.ClearView(&rtv, &[0.79, 0.66, 0.42, 1.0], Some(std::slice::from_ref(&band)));
+            surface.swapchain.Present(1, DXGI_PRESENT(0)).ok().is_ok()
+        };
+        if !presented_ok && quit.load(Ordering::Acquire) {
+            break;
         }
+        presented.fetch_add(1, Ordering::Relaxed);
+    }
+    drop(ctx1);
+    drop(surface);
+    win.shutdown();
+    // SAFETY: balances CoInitializeEx.
+    unsafe { CoUninitialize() };
+    Ok(())
+}
+
+/// A saturated colour at `t` turns round the hue circle.
+fn hue(t: f32) -> (f32, f32, f32) {
+    let x = t.fract() * 6.0;
+    let f = x.fract();
+    match x as u32 {
+        0 => (1.0, f, 0.0),
+        1 => (1.0 - f, 1.0, 0.0),
+        2 => (0.0, 1.0, f),
+        3 => (0.0, 1.0 - f, 1.0),
+        4 => (f, 0.0, 1.0),
+        _ => (1.0, 0.0, 1.0 - f),
     }
 }

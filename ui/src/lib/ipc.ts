@@ -256,6 +256,24 @@ export interface ReceiveStatus {
   codec?: VideoCodec | null;
 }
 
+/** How the received stream's native window is hosted (S29). `embedded` =
+ *  inside this window over the Receive screen's video area; `popout` = a
+ *  window of its own; `none` = no stream window right now. */
+export type StreamMode = "embedded" | "popout" | "none";
+/** Mirror of the shell's `stream_host::StreamStatus`. */
+export interface StreamStatus {
+  live: boolean; mode: StreamMode; width: number; height: number;
+  /** Windows confirmed the window is hidden from screen capture (B9). */
+  excluded_from_capture: boolean;
+  /** The receive state the core last pushed, for a screen that mounts
+   *  mid-receive. Absent from a shell that predates it. */
+  receiving?: boolean; code?: string | null; sender?: string | null; codec?: VideoCodec | null;
+}
+/** The video area in CSS px, relative to the viewport. */
+export interface VideoArea { x: number; y: number; w: number; h: number }
+
+const noStream: StreamStatus = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true };
+
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -553,6 +571,20 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("stop_receive");
   },
+  /** Where the Receive screen's video area is, so the shell can put the
+   *  stream window over it; `null` when the screen is not showing. */
+  async setVideoArea(area: VideoArea | null): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("set_video_area", { area });
+  },
+  async setStreamMode(mode: "embedded" | "popout"): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("set_stream_mode", { mode });
+  },
+  async streamStatus(): Promise<StreamStatus> {
+    if (!isTauri()) return { ...noStream };
+    return invoke<StreamStatus>("stream_status");
+  },
   async listHardware(): Promise<HardwareReply> {
     if (!isTauri()) return structuredClone(mockHardware);
     return invoke<HardwareReply>("list_hardware");
@@ -753,6 +785,8 @@ export async function onCoreEvents(handlers: {
   shareStats?: (s: ShareStats) => void;
   shareStatus?: (s: ShareStatus) => void;
   receiveStatus?: (s: ReceiveStatus) => void;
+  /** The stream window appeared, changed mode, or went away. */
+  stream?: (s: StreamStatus) => void;
   recordingStatus?: (s: RecordingStatus) => void;
   replaySaved?: (s: ReplaySaved) => void;
   sourceChanged?: (s: SourceChangedData) => void;
@@ -773,6 +807,7 @@ export async function onCoreEvents(handlers: {
     listen<ShareStats>("core://share-stats", (e) => handlers.shareStats?.(e.payload)),
     listen<ShareStatus>("core://share-status", (e) => handlers.shareStatus?.(e.payload)),
     listen<ReceiveStatus>("core://receive-status", (e) => handlers.receiveStatus?.(e.payload)),
+    listen<StreamStatus>("core://stream", (e) => handlers.stream?.(e.payload)),
     listen<RecordingStatus>("core://recording-status", (e) => handlers.recordingStatus?.(e.payload)),
     listen<ReplaySaved>("core://replay-saved", (e) => handlers.replaySaved?.(e.payload)),
     listen<SourceChangedData>("core://source-changed", (e) => handlers.sourceChanged?.(e.payload)),

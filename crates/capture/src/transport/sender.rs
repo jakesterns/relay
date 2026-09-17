@@ -727,6 +727,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                                 debug!(?target, "switch dropped (already live)");
                             }
                         }
+                        Some(EngineCmd::Host { .. }) => {
+                            debug!("host is a receiver command; ignored by the sender");
+                        }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");
                         }

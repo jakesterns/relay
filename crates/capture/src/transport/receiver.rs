@@ -31,6 +31,9 @@ pub struct RecvOpts {
     pub vcam: bool,
     /// Render decoded audio to this endpoint id (interim virtual-mic route).
     pub mic_route: Option<String>,
+    /// The app window's HWND: create the stream window embedded in it (S29)
+    /// rather than as a window of its own.
+    pub host: Option<u64>,
 }
 
 /// One depacketized video access unit.
@@ -312,8 +315,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    let render_opts =
-        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
+    let render_opts = crate::render::RenderOpts {
+        vcam: opts.vcam,
+        mic_route: opts.mic_route.clone(),
+        host: opts.host,
+    };
     crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts, abort_tx)
         .await
 }

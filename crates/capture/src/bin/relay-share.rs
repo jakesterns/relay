@@ -144,6 +144,20 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&found)?);
             Ok(())
         }
+        // A stand-in receiver for exercising the in-app hosting on one PC:
+        // same events, same window, same host commands, but it paints a
+        // moving pattern instead of decoding a stream, so nothing is captured
+        // and nothing can feed back (B9). The core spawns it in place of
+        // `recv` when RELAY_RECEIVE_STUB is set.
+        #[cfg(windows)]
+        "host-stub" => {
+            let opts = parse_recv_args(&args[1..])?;
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()?
+                .block_on(relay_capture::render::run_stub(opts.host))
+        }
         #[cfg(windows)]
         "recv" => {
             let opts = parse_recv_args(&args[1..])?;
@@ -246,6 +260,7 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         code: None,
         vcam: false,
         mic_route: None,
+        host: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -255,6 +270,9 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--code" => opts.code = it.next().cloned(),
             "--vcam" => opts.vcam = true,
             "--mic-route" => opts.mic_route = it.next().cloned(),
+            "--host" => {
+                opts.host = Some(it.next().context("--host <hwnd>")?.parse().context("--host")?)
+            }
             other => bail!("unknown recv flag `{other}`"),
         }
     }
@@ -825,6 +843,10 @@ mod tests {
         assert_eq!(o.name.as_deref(), Some("den-pc"));
         assert!(o.headless);
         assert_eq!(o.code.as_deref(), Some("555555"));
+
+        let o = parse_recv_args(&s(&["--host", "133742"])).unwrap();
+        assert_eq!(o.host, Some(133742));
+        assert!(parse_recv_args(&s(&["--host", "nope"])).is_err());
 
         assert!(parse_recv_args(&s(&["--wat"])).is_err());
     }

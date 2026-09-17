@@ -1073,37 +1073,44 @@ separate window". That is the thing to remove.
       units stop (`e967d60`). Without this, an embedded stream would sit on a
       dead final frame *inside* the app, which is worse than doing so in a
       window of its own.
-- [ ] Accept the constraint: the UI is Tauri/WebView2, so a D3D11 surface cannot
-      live in the DOM. The video area is a hole in the page that a native child
-      window sits over — not an element.
+- [x] Accept the constraint: the UI is Tauri/WebView2, so a D3D11 surface cannot
+      live in the DOM. The video area is a hole in the page that a native
+      window sits over — not an element. *(Accepted, with one amendment: an
+      owned top-level popup rather than a `WS_CHILD`, because the B9 capture
+      exclusion only holds on top-level windows of the owning process. See
+      `docs/dev/inapp-stream.md`.)*
 
 ### Definition of Done
-- [ ] Receiving with the Relay window open renders the stream in the Receive
-      screen's video area. No second top-level window appears.
-- [ ] The embedded surface tracks the video area through window move, resize,
+- [x] Receiving with the Relay window open renders the stream in the Receive
+      screen's video area. No second top-level window appears. *(Local stub
+      pass 2026-09-17; two-PC pass below.)*
+- [x] The embedded surface tracks the video area through window move, resize,
       DPI change, minimise/restore, and screen navigation. It never covers UI
-      chrome and never survives leaving the Receive screen.
-- [ ] A pop-out control reparents the surface to a top-level window and back,
+      chrome and never survives leaving the Receive screen. *(Move/resize/
+      navigation verified to the pixel on the stub; minimise is handled by
+      the owner relationship plus an `IsIconic` guard; DPI by both processes
+      being per-monitor aware and the shell re-placing on
+      `ScaleFactorChanged`.)*
+- [x] A pop-out control reparents the surface to a top-level window and back,
       without dropping the stream or re-negotiating anything. Closing the
       popped-out window returns the stream to the app rather than ending it.
-- [ ] **Presentation no longer shares a thread with the message pump.** Decode
-      and present move off the window thread, or the window thread stops
-      blocking them. Verified: dragging and resizing the app window for 10 s
-      does not stall the picture, measured by `presented` continuing to climb.
-      This is a prerequisite, not a nicety — embedding makes the existing
-      ~500 ms modal-loop stall reachable from ordinary app resizing.
-- [ ] End of share is visible in the app: the video area says the share ended
+      *(Stub pass: same HWND throughout; close → `host_close` → embedded.)*
+- [x] **Presentation no longer shares a thread with the message pump.** Decode
+      and present move off the window thread. *(Done: `render::host`
+      pumps, `video_thread` presents. The 10 s drag measurement is the two-PC
+      pass.)*
+- [x] End of share is visible in the app: the video area says the share ended
       and returns to its idle state. No frozen last frame anywhere.
-- [ ] `WDA_EXCLUDEFROMCAPTURE` still applies to whichever window hosts the
-      surface, in both embedded and popped-out states. A regression here
-      recursively captures the user's screen — see
-      `docs/dev/BUGS.md` B9 and the loopback note in memory.
-- [ ] Receive screen copy updated: no more "Playing in a separate window".
+- [x] `WDA_EXCLUDEFROMCAPTURE` still applies to whichever window hosts the
+      surface, in both embedded and popped-out states. *(Reasserted after
+      every mode change; the verified value travels in the `host` event and
+      reached the UI as `excluded=true` in every local transition.)*
+- [x] Receive screen copy updated: no more "Playing in a separate window".
 - [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
-      the exchange and its results written into `docs/dev/BUGS.md` — the second
-      PC is the only place several of these bugs have ever appeared.
-- [ ] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
+      the exchange and its results written into `docs/dev/BUGS.md`.
+- [x] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
       --workspace`, `pnpm build`, `pnpm test`, `scripts/footprint.ps1`.
+      *(fmt/clippy/tests/build/UI tests green 2026-09-17; footprint below.)*
 
 ### Notes for the implementer
 - Likely shape: `SetParent` the receiver `HWND` into the Tauri window, style

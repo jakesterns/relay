@@ -143,6 +143,34 @@ Two builds of the same commit from different worktrees ship different files:
 way — Rust's `.lines()` strips `\r`). Harmless today, but it must be fixed
 before anything is signed: a signature over a build nobody can reproduce is
 worth very little.
+### B13 — The received stream played in a window of its own  |  S29, local pass done, two-PC pass pending
+Jake, after the first real two-PC test: the picture belongs *inside* the
+Relay window, in the Receive screen's video area, with a pop-out like
+Discord's. The old Receive screen painted an empty frame captioned "Playing
+in a separate window", and the window itself was a top-level `relay-share`
+window with its own message pump on the decode thread, so dragging it stalled
+the picture (B10's cousin: a stall that `presented` does not show because
+nothing is presented while the modal loop runs).
+
+**S29 (branch `feat/inapp-stream`), design:** the engine's window becomes a
+frameless popup *owned by* the app window and the shell keeps it over the
+video area; pop-out is the same window with a frame and no owner; closing
+the popped-out window puts it back. Decode/present moved off the window
+thread. Not a `WS_CHILD`, because the B9 capture exclusion only holds on
+top-level windows of the owning process — the engine reasserts it after every
+mode change and reports the verified value. Full write-up:
+`docs/dev/inapp-stream.md`.
+
+**Local pass, 2026-09-17, dev box, pattern stub (`RELAY_RECEIVE_STUB=1`),
+worktree at the S29 commit:** embedded placement exact to the pixel;
+owner/styles as designed; pop-out, close-to-re-embed, two shell resizes,
+navigate-away (hidden) and back (shown, page state restored), stop (window
+gone, "The share from host-stub ended."); `excluded_from_capture=true` after
+every transition; present counter climbing throughout. What the stub cannot
+show: a real modal drag of the app window, real decode and audio, Windows 10.
+
+**Two-PC pass:** see the S29 run log below once it has happened.
+
 ## Fixed, verified on the second PC
 
 - **`relay-share.exe` could not start on Windows 10 at all.** A static import of
