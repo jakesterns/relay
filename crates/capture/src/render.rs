@@ -82,17 +82,47 @@ pub async fn run(
 
     // Report present latency until the window or the connection closes.
     let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+    // Previous sample, so a stall shows up as "no change" rather than needing
+    // two log lines compared by eye.
+    let mut last_aus: u64 = 0;
+    let mut last_presented: u64 = 0;
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 if video_join.is_finished() { break; }
+                let aus = stats.video_aus.load(Ordering::Relaxed);
+                let presented = stats.video_presented.load(Ordering::Relaxed);
+                let audio = stats.audio_packets.load(Ordering::Relaxed);
+                let latency_ms = present_latency.load(Ordering::Relaxed) as f64 / 1e3;
                 println!("{}", serde_json::json!({
                     "event": "stats",
-                    "aus": stats.video_aus.load(Ordering::Relaxed),
-                    "audio_packets": stats.audio_packets.load(Ordering::Relaxed),
+                    "aus": aus,
+                    "presented": presented,
+                    "audio_packets": audio,
                     "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
-                    "capture_to_present_ms": present_latency.load(Ordering::Relaxed) as f64 / 1e3,
+                    "capture_to_present_ms": latency_ms,
                 }));
+
+                // Also to the log. A receiver that freezes mid-share leaves
+                // nothing behind otherwise: on a real machine the picture
+                // stopped after a few seconds and share.log had no line at all
+                // between "decoder up" and the disconnect 33 s later, so there
+                // was no way to tell whether frames stopped arriving, stopped
+                // decoding, or stopped being presented. These three counters
+                // separate those cases.
+                let stalled_aus = aus == last_aus;
+                let stalled_present = presented == last_presented;
+                if stalled_aus || stalled_present {
+                    warn!(
+                        aus, presented, audio, latency_ms,
+                        arriving = !stalled_aus, presenting = !stalled_present,
+                        "receiver stalled"
+                    );
+                } else {
+                    info!(aus, presented, audio, latency_ms, "receiving");
+                }
+                last_aus = aus;
+                last_presented = presented;
             }
             _ = closed.recv() => { info!("connection closed"); break; }
             _ = tokio::signal::ctrl_c() => break,
@@ -111,9 +141,38 @@ pub async fn run(
 
     let _ = audio_stop_tx.send(());
     let _ = pc.close().await;
-    let _ = video_join.join();
-    let _ = audio_join.join();
+
+    // Bounded joins (B8). The render thread blocks in `aus.blocking_recv()`,
+    // and the sending half of that channel lives in `receiver.rs`'s on_track
+    // handler, not here — so if closing the peer connection does not drop it,
+    // `blocking_recv` never returns and an unconditional join hangs forever.
+    // That is exactly what was seen on a real machine: 37 s after "connection
+    // closed", relay-share was still resident holding an open render window.
+    //
+    // This is a mitigation, not the cure: the cure is for the AU sender not to
+    // outlive `pc.close()`. Waiting is pure tidiness by this point — the
+    // failure reason was taken above, the peer connection is closed, and the
+    // process is on its way out — so a thread that will not wake is not worth
+    // hanging the exit for.
+    join_bounded(video_join, "render");
+    join_bounded(audio_join, "audio playback");
     Ok(())
+}
+
+/// Wait briefly for a worker, then give up and say so. A thread still parked
+/// on a channel at process exit costs nothing; a process that never exits
+/// costs the user a stuck window and a stray capture.
+fn join_bounded<T: Send + 'static>(handle: std::thread::JoinHandle<T>, what: &str) {
+    const GRACE: std::time::Duration = std::time::Duration::from_millis(750);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let r = handle.join();
+        let _ = tx.send(r.is_ok());
+    });
+    match rx.recv_timeout(GRACE) {
+        Ok(_) => {}
+        Err(_) => warn!(thread = what, "did not stop within {GRACE:?}; exiting anyway"),
+    }
 }
 
 struct Window {
@@ -232,6 +291,7 @@ fn video_thread(
         stats.video_aus.fetch_add(1, Ordering::Relaxed);
         for frame in decoder.decode(&au.data, au.pts_or_zero())? {
             vp.present(&win, &frame)?;
+            stats.video_presented.fetch_add(1, Ordering::Relaxed);
             if let Some(sink) = vcam_sink.as_mut() {
                 if let Err(e) = sink.push(&win.device, &win.context, &frame) {
                     warn!(error = %e, "virtual camera sink stopped");
@@ -262,8 +322,29 @@ impl Window {
                 ..Default::default()
             };
             RegisterClassW(&class);
-            let mut rect = RECT { left: 0, top: 0, right: w as i32, bottom: h as i32 };
-            let style = WS_OVERLAPPEDWINDOW & !WS_THICKFRAME & !WS_MAXIMIZEBOX;
+            // Fit the *monitor*, not the stream.
+            //
+            // This used to clamp to the stream size, so a 2560x1440 share on a
+            // 1920x1080 display produced a window bigger than the screen: the
+            // title bar and its close button sat off-screen, the taskbar was
+            // covered, and the window looked like inescapable borderless
+            // fullscreen. On a real receiver the only way out was killing the
+            // process from another machine.
+            //
+            // Scale to fit the work area (which excludes the taskbar), keeping
+            // the stream's aspect ratio, and never exceed it.
+            let work =
+                monitor_work_area().unwrap_or(RECT { left: 0, top: 0, right: 1280, bottom: 720 });
+            let avail_w = ((work.right - work.left) as f64 * 0.9).max(320.0);
+            let avail_h = ((work.bottom - work.top) as f64 * 0.9).max(180.0);
+            let scale = (avail_w / w.max(1) as f64).min(avail_h / h.max(1) as f64).min(1.0);
+            let win_w = ((w as f64 * scale).round() as i32).max(320);
+            let win_h = ((h as f64 * scale).round() as i32).max(180);
+
+            // Resizable on purpose: a fixed-size window that does not fit is
+            // exactly the trap described above.
+            let mut rect = RECT { left: 0, top: 0, right: win_w, bottom: win_h };
+            let style = WS_OVERLAPPEDWINDOW;
             let _ = AdjustWindowRect(&mut rect, style, false);
             CreateWindowExW(
                 Default::default(),
@@ -272,14 +353,40 @@ impl Window {
                 style | WS_VISIBLE,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                (rect.right - rect.left).min(2560),
-                (rect.bottom - rect.top).min(1440),
+                rect.right - rect.left,
+                rect.bottom - rect.top,
                 None,
                 None,
                 Some(hinstance.into()),
                 None,
             )?
         };
+
+        // Make this window invisible to screen capture (B9).
+        //
+        // Without it Relay will happily capture its own output: run a sender
+        // and a receiver on one PC and the capture contains the window showing
+        // the capture, which contains the window showing the capture. On this
+        // project's dev machine that produced an unbounded feedback loop the
+        // user described as "an infinite loop of whatever is on my screen, like
+        // smearing a painting repeatedly", and it did not stop on its own.
+        //
+        // WDA_EXCLUDEFROMCAPTURE hides the window from WGC and Desktop
+        // Duplication while leaving it fully visible on screen -- unlike
+        // WDA_MONITOR, which blacks it out for the user too. Windows 10 2004+.
+        // Best-effort: on an older build this fails and the window still works,
+        // it is just capturable again, so a share of a share would smear as
+        // before rather than the receiver refusing to run.
+        //
+        // SAFETY: hwnd is the window we just created.
+        unsafe {
+            if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
+                tracing::warn!(
+                    "could not exclude the receiver window from capture; \
+                     sharing this PC's screen while receiving on it will feed back"
+                );
+            }
+        }
 
         // Build the device on the primary monitor's adapter — the same GPU the
         // DXVA decoder runs on — so decode and present
@@ -408,11 +515,39 @@ impl VideoPresent {
     }
 }
 
+/// Work area of the primary monitor: the desktop minus the taskbar. Sizing to
+/// the full screen rect would put the window under the taskbar, which is half
+/// of how the borderless-fullscreen trap looked to a user.
+fn monitor_work_area() -> Option<RECT> {
+    // SAFETY: SystemParametersInfo writing one RECT we own.
+    unsafe {
+        let mut r = RECT::default();
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut r as *mut RECT as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .ok()?;
+        Some(r)
+    }
+}
+
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     // SAFETY: standard window procedure.
     unsafe {
         match msg {
             WM_CLOSE | WM_DESTROY => {
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            // Escape closes it. A receive window that cannot be dismissed is a
+            // trap, and the close button is the first thing to go out of reach
+            // if the window is ever mis-sized again.
+            WM_KEYDOWN
+                if wp.0 as u32
+                    == windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE.0 as u32 =>
+            {
                 PostQuitMessage(0);
                 LRESULT(0)
             }

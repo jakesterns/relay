@@ -56,6 +56,11 @@ impl AccessUnit {
 pub struct RecvStats {
     pub video_bytes: AtomicU64,
     pub video_aus: AtomicU64,
+    /// Frames actually presented to the window. Separate from `video_aus` on
+    /// purpose: when a receiver froze mid-share there was no way to tell
+    /// whether access units had stopped arriving, stopped decoding, or stopped
+    /// reaching the screen. Comparing the two answers that in one line.
+    pub video_presented: AtomicU64,
     pub audio_packets: AtomicU64,
     /// Packets on the second (microphone) audio track, 0 when the sender
     /// ships only one.
