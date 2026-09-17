@@ -959,6 +959,101 @@ Small Windows-integration details that are all individually minor and collective
 
 ---
 
+# Group 7 — Free everywhere, everywhere
+
+Two requirements Jake set on 2026-09-16: Relay must be **completely free for
+every user** and must **run on all operating systems**, macOS first.
+
+This supersedes `CLAUDE.md`'s "Single Windows desktop app" framing. That file
+has not been rewritten; treat its scope line as stale — its non-negotiables
+still bind.
+
+Measured 2026-09-16: **80 of 139 Rust files touch Windows** (156 `cfg(windows)`
+sites, 134 `windows` crate imports). So ~40% is already portable — the DSP,
+profile model, webrtc-rs transport, muxers, catalogue — and four platform seams
+exist already: `AudioControl`, `DisplayControl`, `HardwareProbe`, `FrameSource`.
+
+**There is no Mac on this network.** S28 is scoped to work that needs no Mac.
+Everything after it does, and that hardware is the gate.
+
+---
+
+## S27 — H.264 fallback: remove the paywall
+**Branch** `feat/h264-fallback` · **Worktree** main tree
+
+Relay sends HEVC only. On Windows without OEM codec entitlement the HEVC
+decoder cannot be installed for free — proven 2026-09-16 on a real Windows 10
+PC where the free package's Install button is greyed out and the Store search
+surfaces only paid and third-party apps. So a receiver may have to pay before
+Relay works at all, which is incompatible with "completely free".
+
+H.264 decode ships with every Windows install, is standard on macOS
+(VideoToolbox) and Linux (VAAPI), and every GPU that encodes HEVC also encodes
+H.264. The cost is bitrate, not capability.
+
+### Definition of Ready
+- [x] `Method::ShareCapabilities` probes decoders via MFTEnumEx, not package names, so it sees any source.
+- [x] The encoder path enumerates hardware MFTs bound to the capture adapter's LUID.
+- [ ] Confirm the RTP/SDP layer can offer two video codecs. webrtc-rs registers HEVC pt98 today; H.264 needs its own payload type and the receiver must choose.
+
+### Definition of Done
+- [ ] Sender offers H.264 **and** HEVC; the pair negotiates HEVC only when both ends decode it, H.264 otherwise. No user-visible codec setting — this is a capability, not a preference.
+- [ ] A receiver with no HEVC decoder completes a share end to end. That is the acceptance test, run against a machine that genuinely lacks the codec (Jake's second PC).
+- [ ] Both codecs measured at the same resolution: bitrate for equivalent quality, encode latency, CPU. Expect ~30–50% more bitrate for H.264; record what it actually is.
+- [ ] The Receive banner stops being a paywall notice. Keep an honest line that HEVC gives better quality per bit where available, but never block on it.
+- [ ] `docs/plans/M4-share.md` updated; the HEVC Video Extension deferral there is closed by this.
+
+### Kickoff prompt
+```
+You are starting session S27 (H.264 fallback) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S27) and docs/plans/M4-share.md. Work in the main tree C:\Users\stern\Documents\Code\Stream Share on a new branch: git checkout -b feat/h264-fallback. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for commits AND pushes — the pre-push hook runs the installer too.
+
+Relay sends HEVC only, and on Windows without OEM codec entitlement the HEVC decoder cannot be installed for free — verified on a real Windows 10 PC where the Install button is greyed out. Jake has since required Relay be completely free for every user, so HEVC cannot be the only codec.
+
+1. Offer H.264 alongside HEVC and negotiate: HEVC when both ends decode it, H.264 otherwise. Not a user setting.
+2. Do not regress the latency budget. Re-measure on loopback and record both codecs side by side: bitrate for equivalent quality, encode latency, CPU. Record what you measure, not what you expect.
+3. WASAPI loopback of a silent endpoint delivers no packets, so a quiet desktop makes an audio benchmark read zero and still look plausible. Use scripts/dual-audio-check.ps1, which plays a tone and asserts packet counts.
+4. CMake is needed by opusic-sys and is not on PATH: prepend "C:\Program Files\CMake\bin".
+5. The acceptance test needs a machine with no HEVC decoder. Jake's second PC is exactly that — tell me when you are ready and I will drive it from here.
+6. Finish only when the Definition of Done is met, then update docs/plans/M4-share.md and docs/ROADMAP.md.
+```
+
+---
+
+## S28 — Portability seam and a macOS build
+**Branch** `feat/portability-seam` · **Worktree** `C:\Users\stern\Documents\Code\relay-portable`
+
+Everything needed to make macOS *possible*, none of which needs a Mac to write.
+
+### Definition of Ready
+- [x] Four seams exist: `AudioControl`, `DisplayControl`, `HardwareProbe`, `FrameSource`.
+- [x] 59 of 139 Rust files already have no Windows dependency.
+- [ ] Accept the constraint: no Mac is available, so "it compiles for the target" is the bar, not "it runs". Do not claim otherwise anywhere.
+
+### Definition of Done
+- [ ] Every Windows API call sits behind a seam and a `#[cfg(windows)]` module. No `use windows::` outside a platform module.
+- [ ] A `stub` platform backend that compiles everywhere and returns a clear "not supported on this platform" per capability, so the portable half builds and tests on any target.
+- [ ] `cargo check --target x86_64-apple-darwin` and `--target aarch64-apple-darwin` succeed for the portable crates. Where a crate cannot yet build, name the exact API that blocks it.
+- [ ] CI builds the macOS targets. Private repos consume paid Actions minutes at a higher rate — tell Jake the cost before enabling it broadly.
+- [ ] `docs/dev/porting.md`: for each seam, the Windows API today, the macOS equivalent, and the honest difficulty. Include the ones with no clean answer — DDC/CI over IOKit, and the endpoint APO, which has no macOS analogue and needs a different design (an AudioServerPlugIn), not a port.
+- [ ] No behaviour change on Windows: all gates stay green.
+
+### Kickoff prompt
+```
+You are starting session S28 (portability seam and a macOS build) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S28). Create the worktree: git worktree add -b feat/portability-seam ..\relay-portable main, then cd into it and run pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+Jake has redirected Relay to run on all operating systems, macOS first. There is NO Mac on this network, so your bar is "compiles for the macOS target", never "works on macOS". Do not write or imply otherwise in any doc or commit message.
+
+Measured today: 80 of 139 Rust files touch Windows, 156 cfg(windows) sites, 134 windows crate imports. Four seams already exist: AudioControl, DisplayControl, HardwareProbe, FrameSource.
+
+1. Get every Windows API call behind a seam and a cfg(windows) module, add a stub backend that compiles anywhere and reports "not supported on this platform" clearly, and make cargo check succeed for the Apple targets on the portable crates.
+2. Where a crate genuinely cannot build for macOS yet, name the exact API that blocks it rather than papering over it.
+3. Write docs/dev/porting.md mapping each seam to its macOS equivalent with an honest difficulty. Two need real design work, not translation: DDC/CI has no clean macOS path, and the endpoint APO has no macOS analogue at all — the equivalent is an AudioServerPlugIn, a different architecture.
+4. Windows behaviour must not change. All gates stay green: cargo fmt, clippy -D warnings, cargo test --workspace, pnpm build, pnpm test, scripts/footprint.ps1.
+5. Finish only when the Definition of Done is met, then update docs/ROADMAP.md and summarise.
+```
+
+---
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
