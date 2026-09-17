@@ -76,8 +76,39 @@ pub fn windows_build() -> Option<u32> {
 }
 
 /// True when the frame-server virtual camera API is available.
+///
+/// Asks the loader whether `MFCreateVirtualCamera` actually exists rather than
+/// comparing build numbers. That matters for two reasons. The number is our
+/// reading of the docs, so a version test would wrongly refuse a machine if
+/// Microsoft ever backported the API. And `mfsensorgroup.dll` is delay-loaded
+/// (see `crates/capture/build.rs`), so calling a missing export raises a
+/// structured exception rather than returning an error — this probe is what
+/// keeps that call from ever being reached.
+///
+/// Windows 10 ships the DLL *without* the export, which is exactly the case
+/// that stopped `relay-share.exe` starting at all before the delay-load fix.
 pub fn frameserver_supported() -> bool {
-    windows_build().is_some_and(|b| b >= MIN_VCAM_BUILD)
+    vcam_export_present().unwrap_or_else(|| windows_build().is_some_and(|b| b >= MIN_VCAM_BUILD))
+}
+
+/// `Some(true/false)` when the loader gave a definite answer; `None` when the
+/// DLL could not be probed at all, leaving the caller to fall back.
+fn vcam_export_present() -> Option<bool> {
+    use windows::core::{s, w};
+    use windows::Win32::Foundation::FreeLibrary;
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+    };
+
+    // SAFETY: a system DLL, loaded with the System32-only search path so this
+    // is not a DLL-planting vector, and freed before returning.
+    unsafe {
+        let module =
+            LoadLibraryExW(w!("mfsensorgroup.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
+        let found = GetProcAddress(module, s!("MFCreateVirtualCamera")).is_some();
+        let _ = FreeLibrary(module);
+        Some(found)
+    }
 }
 
 /// The OBS VirtualCam filter DLL path, when the filter is registered.
