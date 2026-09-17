@@ -111,6 +111,8 @@ pub struct RecordStats {
 
 #[derive(Debug, Clone)]
 pub struct RecordConfig {
+    /// The share's negotiated video codec; the file describes it faithfully.
+    pub codec: crate::codec::VideoCodec,
     /// Recording folder, e.g. `%USERPROFILE%\Videos\Relay`.
     pub dir: PathBuf,
     pub width: u32,
@@ -347,6 +349,7 @@ fn mux_config(cfg: &RecordConfig) -> MuxConfig {
         (true, false) => MuxConfig::with_opus(cfg.width, cfg.height),
         (false, _) => MuxConfig::video_only(cfg.width, cfg.height),
     }
+    .with_codec(cfg.codec)
 }
 
 fn save_replay(cfg: &RecordConfig, ring: &ReplayRing) -> Result<PathBuf> {
@@ -505,6 +508,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         let cfg = RecordConfig {
+            codec: crate::codec::VideoCodec::Hevc,
             dir: dir.clone(),
             width: 640,
             height: 480,

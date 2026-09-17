@@ -29,10 +29,10 @@
 
 use std::io::{Seek, SeekFrom, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use super::annexb;
-use super::mux::{hvcc_payload, AudioConfig, MuxConfig, MuxState};
+use super::mux::{video_entry, AudioConfig, MuxConfig, MuxState, VideoEntry};
 
 /// Matroska `TimestampScale`, in nanoseconds per tick. 100 000 ns = 0.1 ms:
 /// fine enough that 60 fps frame times never collide, and coarse enough that a
@@ -112,10 +112,8 @@ impl<W: Write + Seek> MkvMuxer<W> {
                     self.dropped_awaiting_key += 1;
                     return Ok(());
                 }
-                let ps = annexb::extract_param_sets(annexb_au)
-                    .context("keyframe carries no VPS/SPS/PPS")?;
-                let sps = annexb::parse_sps_summary(&ps.sps).context("unparseable SPS")?;
-                let (head, duration_at) = header(&self.cfg, &ps, &sps);
+                let entry = video_entry(self.cfg.codec, annexb_au)?;
+                let (head, duration_at) = header(&self.cfg, &entry);
                 self.w.write_all(&head)?;
                 self.bytes_written += head.len() as u64;
                 self.duration_at = duration_at as u64;
@@ -142,7 +140,7 @@ impl<W: Write + Seek> MkvMuxer<W> {
             self.cluster_start = Some(pts);
         }
         self.pending.push(PendingSample {
-            data: annexb::to_mp4_sample(annexb_au),
+            data: annexb::to_mp4_sample_for(self.cfg.codec, annexb_au),
             pts,
             key: keyframe,
             track: TRACK_VIDEO,
@@ -366,7 +364,7 @@ impl Ebml {
 /// EBML header + the open `Segment`, its `Info` and its `Tracks`. Returns the
 /// bytes and the offset of the `Duration` payload within them, which is also
 /// its offset in the file: the header is the first thing written.
-fn header(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummary) -> (Vec<u8>, usize) {
+fn header(cfg: &MuxConfig, video: &VideoEntry) -> (Vec<u8>, usize) {
     let mut e = Ebml::new();
 
     let ebml = e.open(id::EBML);
@@ -401,8 +399,8 @@ fn header(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummary) -> 
         e.uint(id::TRACK_UID, TRACK_VIDEO);
         e.uint(id::TRACK_TYPE, 1); // video
         e.uint(id::FLAG_LACING, 0);
-        e.string(id::CODEC_ID, "V_MPEGH/ISO/HEVC");
-        e.elem(id::CODEC_PRIVATE, &hvcc_payload(ps, sps));
+        e.string(id::CODEC_ID, video.matroska_codec_id);
+        e.elem(id::CODEC_PRIVATE, &video.config);
         let v = e.open(id::VIDEO);
         e.uint(id::PIXEL_WIDTH, cfg.width as u64);
         e.uint(id::PIXEL_HEIGHT, cfg.height as u64);
@@ -675,5 +673,24 @@ mod tests {
              UPDATE_GOLDEN=1 cargo test -p relay-capture golden",
         );
         assert_eq!(a, golden, "muxer bytes drifted from the golden fixture");
+    }
+
+    #[test]
+    fn h264_track_is_mpeg4_avc_with_avcc_private_data() {
+        use super::super::mux::tests::{h264_key_au, h264_p_au};
+        let cfg = MuxConfig::with_opus(1920, 1080).with_codec(crate::codec::VideoCodec::H264);
+        let mut m = MkvMuxer::new(Cursor::new(Vec::new()), cfg);
+        m.push_video(&h264_key_au(), 0, true).unwrap();
+        m.push_video(&h264_p_au(1), 166_666, false).unwrap();
+        let out = m.finalize().unwrap().into_inner();
+        let find = |needle: &[u8]| out.windows(needle.len()).position(|w| w == needle);
+        assert!(find(b"V_MPEG4/ISO/AVC").is_some());
+        assert!(find(b"V_MPEGH/ISO/HEVC").is_none());
+        // CodecPrivate is the avcC record: version 1, High, level 5.2.
+        assert!(find(&[1, 100, 0, 52, 0xFF, 0xE1]).is_some());
+        assert!(
+            find(&[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21]).is_some(),
+            "IDR block, length-prefixed"
+        );
     }
 }

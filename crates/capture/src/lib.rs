@@ -4,7 +4,8 @@
 //! Layout:
 //! - `probe`     MFTEnumEx / WGC capability checks (`relay-share probe`).
 //! - `source/`   Windows.Graphics.Capture (primary), DXGI Desktop Duplication (fallback).
-//! - `encode/`   Media Foundation HEVC hardware MFT (NVENC/QSV/AMF). No CPU path.
+//! - `codec`     HEVC / H.264: the negotiation rule and per-codec bitstream helpers.
+//! - `encode/`   Media Foundation HEVC or H.264 hardware MFT (NVENC/QSV/AMF). No CPU path.
 //! - `resample` endpoint audio (any rate, any channel count) → Opus 48 kHz stereo.
 //! - `transport/` webrtc-rs, mDNS discovery, pairing, DTLS-SRTP. LAN only.
 //! - `stats`     the instrument-strip feed: bitrate, latency, drops, load, audio level.
@@ -15,6 +16,7 @@
 
 #[cfg(windows)]
 pub mod audio;
+pub mod codec;
 pub mod command;
 #[cfg(windows)]
 pub mod d3d;
@@ -22,6 +24,7 @@ pub mod d3d;
 pub mod decode;
 #[cfg(windows)]
 pub mod encode;
+pub mod pace;
 #[cfg(windows)]
 pub mod playback;
 #[cfg(windows)]

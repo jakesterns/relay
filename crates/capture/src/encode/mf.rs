@@ -1,5 +1,7 @@
-//! The vendor's HEVC hardware encoder MFT (NVENC / QSV / AMF behind Media
-//! Foundation), driven as an async MFT with D3D11 texture input.
+//! The vendor's HEVC or H.264 hardware encoder MFT (NVENC / QSV / AMF behind
+//! Media Foundation), driven as an async MFT with D3D11 texture input. Both
+//! codecs take the identical path and tuning; only the output subtype (and,
+//! for H.264, the profile) differs.
 //!
 //! Tuning for the latency budget: low-latency mode on, CBR, zero B-frames,
 //! 10 s GOP with keyframe-on-request. Software MFTs are never enumerated
@@ -42,9 +44,19 @@ fn variant_bool(b: bool) -> VARIANT {
 }
 
 use super::EncodedFrame;
+use crate::codec::VideoCodec;
 use crate::d3d::Gpu;
 
+/// Media Foundation's subtype for `codec`.
+pub fn mf_subtype(codec: VideoCodec) -> windows::core::GUID {
+    match codec {
+        VideoCodec::Hevc => MFVideoFormat_HEVC,
+        VideoCodec::H264 => MFVideoFormat_H264,
+    }
+}
+
 pub struct EncoderConfig {
+    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -58,14 +70,15 @@ pub enum EncoderEvent {
     Output(EncodedFrame),
 }
 
-pub struct MfHevcEncoder {
+pub struct MfEncoder {
+    pub codec: VideoCodec,
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
     codec_api: ICodecAPI,
     in_id: u32,
     out_id: u32,
     /// The MFT hands back its own output samples. When false we allocate them
-    /// (see [`MfHevcEncoder::alloc_output_sample`]).
+    /// (see [`alloc_output_sample`]).
     provides_samples: bool,
     /// `cbSize` / `cbAlignment` from `GetOutputStreamInfo`, for that path.
     output_sample_size: u32,
@@ -77,11 +90,11 @@ pub struct MfHevcEncoder {
 }
 
 // SAFETY: the MFT is only driven from one thread; hardware MFTs are free-threaded COM objects.
-unsafe impl Send for MfHevcEncoder {}
+unsafe impl Send for MfEncoder {}
 
-impl MfHevcEncoder {
+impl MfEncoder {
     pub fn new(gpu: &Gpu, cfg: &EncoderConfig) -> Result<Self> {
-        let (transform, name) = activate_hardware_hevc(gpu.adapter_luid, &gpu.adapter_name)?;
+        let (transform, name) = activate_hardware(cfg.codec, gpu.adapter_luid, &gpu.adapter_name)?;
 
         // SAFETY: standard MFT setup sequence; all pointers are live COM interfaces.
         unsafe {
@@ -121,13 +134,20 @@ impl MfHevcEncoder {
             // Output type first (encoders require it), then input.
             let out_type = MFCreateMediaType()?;
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_HEVC)?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &mf_subtype(cfg.codec))?;
+            if cfg.codec == VideoCodec::H264 {
+                // High: 8x8 transform and CABAC, the best H.264 has per bit,
+                // and decodable by every H.264 decoder Windows ships.
+                out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)?;
+            }
             out_type.SetUINT32(&MF_MT_AVG_BITRATE, cfg.bitrate_bps)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, size64(cfg.width, cfg.height))?;
             out_type.SetUINT64(&MF_MT_FRAME_RATE, size64(cfg.fps, 1))?;
             out_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, size64(1, 1))?;
             out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            transform.SetOutputType(out_id, &out_type, 0).context("SetOutputType HEVC")?;
+            transform
+                .SetOutputType(out_id, &out_type, 0)
+                .with_context(|| format!("SetOutputType {}", cfg.codec.label()))?;
 
             let in_type = MFCreateMediaType()?;
             in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -167,7 +187,8 @@ impl MfHevcEncoder {
                 encoder = %name,
                 provides_samples,
                 output_sample_size,
-                "HEVC hardware encoder ready"
+                codec = cfg.codec.label(),
+                "hardware encoder ready"
             );
 
             transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)?;
@@ -175,6 +196,7 @@ impl MfHevcEncoder {
 
             let events: IMFMediaEventGenerator = transform.cast()?;
             Ok(Self {
+                codec: cfg.codec,
                 transform,
                 events,
                 codec_api,
@@ -320,18 +342,18 @@ fn stream_ids(transform: &IMFTransform) -> Result<(u32, u32)> {
     }
 }
 
-/// Software HEVC encode is out of scope by design, not by omission: a CPU
-/// encoder cannot hold 4K60 inside the <50 ms budget, and CLAUDE.md pins the
-/// share to NVENC / Quick Sync / AMF. So the failure is permanent — which
-/// makes it all the more important that it names the adapter it looked at,
-/// and says whether some *other* adapter in the machine could do the job.
-/// That second case is the common one: a laptop whose display hangs off the
-/// iGPU while the encoder lives on the dGPU.
+/// Software encode is out of scope by design, not by omission: a CPU encoder
+/// cannot hold 4K60 inside the <50 ms budget, and CLAUDE.md pins the share to
+/// NVENC / Quick Sync / AMF. So the failure is permanent — which makes it all
+/// the more important that it names the adapter it looked at, and says
+/// whether some *other* adapter in the machine could do the job. That second
+/// case is the common one: a laptop whose display hangs off the iGPU while
+/// the encoder lives on the dGPU.
 fn no_encoder_message(adapter: &str, all_adapters: &[String]) -> String {
     let mut msg = format!(
-        "no hardware HEVC encoder on \"{adapter}\", the GPU driving the display you are \
-         capturing. Relay encodes HEVC in hardware only (NVENC / Quick Sync / AMF) — there \
-         is no software encode path, so this PC can receive a share but not send one."
+        "no hardware HEVC or H.264 encoder on \"{adapter}\", the GPU driving the display you \
+         are capturing. Relay encodes in hardware only (NVENC / Quick Sync / AMF) — there is \
+         no software encode path, so this PC can receive a share but not send one."
     );
     if all_adapters.is_empty() {
         msg.push_str(
@@ -350,18 +372,17 @@ fn no_encoder_message(adapter: &str, all_adapters: &[String]) -> String {
     msg
 }
 
-/// First hardware HEVC encoder MFT on the adapter with `luid`. `adapter` is
-/// that GPU's description, used only to make the failure message specific.
-fn activate_hardware_hevc(luid: LUID, adapter: &str) -> Result<(IMFTransform, String)> {
-    let out_type = MFT_REGISTER_TYPE_INFO {
-        guidMajorType: MFMediaType_Video,
-        guidSubtype: MFVideoFormat_HEVC,
-    };
-    // SAFETY: attribute store + enumeration; array freed below.
+/// Hardware encoder activates for `codec` on the adapter with `luid`, best
+/// first. The CoTaskMem array is released before returning.
+fn enum_hardware(codec: VideoCodec, luid: LUID) -> Result<Vec<IMFActivate>> {
+    let out_type =
+        MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: mf_subtype(codec) };
+    // SAFETY: attribute store + enumeration; each element is moved out exactly
+    // once and the array itself freed below.
     unsafe {
         let mut attrs: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attrs, 1)?;
-        let attrs = attrs.unwrap();
+        let attrs = attrs.context("MFCreateAttributes")?;
         let luid_bytes: [u8; 8] = std::mem::transmute(luid);
         attrs.SetBlob(&MFT_ENUM_ADAPTER_LUID, &luid_bytes)?;
 
@@ -377,16 +398,55 @@ fn activate_hardware_hevc(luid: LUID, adapter: &str) -> Result<(IMFTransform, St
             &mut count,
         )
         .context("MFTEnum2")?;
-        if count == 0 {
-            bail!(no_encoder_message(
-                adapter,
-                &crate::probe::hevc_hardware_encoders()
-                    .map(|e| e.into_iter().map(|m| m.friendly_name).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            ));
+        if activates.is_null() {
+            return Ok(Vec::new());
         }
-        let slice = std::slice::from_raw_parts(activates, count as usize);
-        let first = slice[0].as_ref().context("null activate")?;
+        let mut out = Vec::with_capacity(count as usize);
+        for i in 0..count as usize {
+            if let Some(a) = std::ptr::read(activates.add(i)) {
+                out.push(a);
+            }
+        }
+        windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
+        Ok(out)
+    }
+}
+
+/// The full "cannot share" message for `adapter`, naming any other GPU in
+/// the machine that has an encoder for either codec.
+pub fn no_encoder_error(adapter: &str) -> String {
+    let mut others: Vec<String> = Vec::new();
+    for c in crate::codec::PREFERENCE {
+        for e in crate::probe::hardware_encoders(c).unwrap_or_default() {
+            if !others.contains(&e.friendly_name) {
+                others.push(e.friendly_name);
+            }
+        }
+    }
+    no_encoder_message(adapter, &others)
+}
+
+/// Whether the adapter with `luid` has a hardware encoder for `codec`. Only
+/// enumerates — no MFT is activated — so the sender can decide what to offer
+/// before any GPU work starts. Needs MF started.
+pub fn hardware_encoder_available(codec: VideoCodec, luid: LUID) -> bool {
+    enum_hardware(codec, luid).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// First hardware encoder MFT for `codec` on the adapter with `luid`.
+/// `adapter` is that GPU's description, used only to make the failure
+/// message specific.
+fn activate_hardware(
+    codec: VideoCodec,
+    luid: LUID,
+    adapter: &str,
+) -> Result<(IMFTransform, String)> {
+    let activates = enum_hardware(codec, luid)?;
+    let Some(first) = activates.first() else {
+        bail!(no_encoder_error(adapter));
+    };
+    // SAFETY: live activation object.
+    unsafe {
         let name = first
             .GetStringLength(&MFT_FRIENDLY_NAME_Attribute)
             .ok()
@@ -397,10 +457,6 @@ fn activate_hardware_hevc(luid: LUID, adapter: &str) -> Result<(IMFTransform, St
             })
             .unwrap_or_else(|| "(unnamed)".into());
         let transform: IMFTransform = first.ActivateObject()?;
-        for i in 0..count as usize {
-            std::ptr::drop_in_place(activates.add(i));
-        }
-        windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
         Ok((transform, name))
     }
 }
@@ -497,6 +553,7 @@ mod tests {
         let multi =
             no_encoder_message("Intel(R) UHD Graphics 630", &["NVIDIA HEVC Encoder MFT".into()]);
         assert!(multi.contains("NVIDIA HEVC Encoder MFT"), "{multi}");
+        assert!(alone.contains("HEVC or H.264"), "{alone}");
         assert!(multi.contains("High performance"), "{multi}");
         // Never claims the machine is hopeless when another adapter can encode.
         assert!(!multi.contains("No other GPU"), "{multi}");

@@ -1,5 +1,6 @@
 //! The receive side: advertise over mDNS, show a pairing code, answer the
-//! offer, then depacketize HEVC access units and Opus packets. Rendering and
+//! offer, then depacketize video access units (HEVC or H.264, whichever the
+//! answer negotiated) and Opus packets. Rendering and
 //! audio playback attach on top (`recv` command); `--headless` just counts
 //! and reports latency, which is how the transport is benchmarked.
 
@@ -16,6 +17,7 @@ use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use webrtc::peer_connection::PeerConnection;
 
 use super::{build_pc, discovery, sei, signal};
+use crate::codec::VideoCodec;
 
 #[derive(Debug)]
 pub struct RecvOpts {
@@ -31,8 +33,10 @@ pub struct RecvOpts {
     pub mic_route: Option<String>,
 }
 
-/// One depacketized HEVC access unit.
+/// One depacketized video access unit.
 pub struct AccessUnit {
+    /// Which codec the bitstream is, from the RTP payload type.
+    pub codec: VideoCodec,
     pub data: Vec<u8>,
     /// Sender capture time mapped to this machine's clock (unix ns), when the
     /// in-band SEI was present.
@@ -64,6 +68,22 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let code = opts.code.clone().unwrap_or_else(signal::pairing_code);
     let name = opts.name.clone().unwrap_or_else(discovery::hostname);
 
+    // What goes in the answer. Headless never decodes, so it accepts whatever
+    // the test hook allows; a real receiver offers only what it can decode.
+    let codecs = if opts.headless {
+        crate::codec::allowed_codecs()
+    } else {
+        let _mf = crate::probe::MediaFoundation::start()?;
+        crate::probe::decodable_codecs()
+    };
+    if codecs.is_empty() {
+        bail!(
+            "this PC has neither an H.264 nor an HEVC decoder, so it cannot show a share. \
+             H.264 decode is part of Windows; an N edition needs the free Media Feature Pack"
+        );
+    }
+    info!(codecs = ?codecs, "receiver video codecs");
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     let port = listener.local_addr()?.port();
     let _ad = discovery::Advertisement::start(&name, port)?;
@@ -71,7 +91,13 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     eprintln!("\n  Relay receiver \"{name}\" - pairing code: {code}\n");
     println!(
         "{}",
-        serde_json::json!({ "event": "waiting", "name": name, "port": port, "code": code })
+        serde_json::json!({
+            "event": "waiting",
+            "name": name,
+            "port": port,
+            "code": code,
+            "codecs": codecs,
+        })
     );
 
     let (tcp, from) = listener.accept().await?;
@@ -95,7 +121,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         let _ = signal::remember_peer(&sender_name, &fp);
     }
 
-    let (pc, mut events, runtime) = build_pc(local_ip).await?;
+    let (pc, mut events, runtime) = build_pc(local_ip, &codecs).await?;
     let offer: RTCSessionDescription = serde_json::from_str(&offer_json)?;
     pc.set_remote_description(offer).await?;
     let answer = pc.create_answer(None).await?;
@@ -114,6 +140,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let clock_offset_ns = Arc::new(AtomicI64::new(0));
     // Loss fractions computed by the video loop, forwarded to the sender.
     let (loss_tx, mut loss_rx) = mpsc::channel::<f32>(4);
+    // A fatal render error, forwarded to the sender before we close (B3).
+    let (abort_tx, mut abort_rx) = mpsc::channel::<(String, tokio::sync::oneshot::Sender<()>)>(1);
     {
         let offset = clock_offset_ns.clone();
         let mut sig = sig;
@@ -148,6 +176,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         if sig.send(&signal::SigMsg::Loss { fraction }).await.is_err() {
                             break;
                         }
+                    }
+                    Some((reason, done)) = abort_rx.recv() => {
+                        let _ = sig.send(&signal::SigMsg::Abort { reason }).await;
+                        let _ = done.send(());
+                        break;
                     }
                 }
             }
@@ -269,7 +302,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Full receive mode is attached by the caller (decode + present + audio).
     let render_opts =
         crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
-    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts).await
+    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts, abort_tx)
+        .await
 }
 
 /// Depacketize one video track into access units (marker bit = AU boundary).
@@ -280,9 +314,11 @@ async fn video_track_loop(
     au_tx: mpsc::Sender<AccessUnit>,
     loss_tx: mpsc::Sender<f32>,
 ) {
-    use super::depay::H265Depay;
+    use super::depay::VideoDepay;
 
-    let mut depkt = H265Depay::default();
+    // Built from the first packet's payload type, and rebuilt if it changes.
+    let mut depkt: Option<(VideoCodec, VideoDepay)> = None;
+    let mut unknown_pt_logged = false;
     let mut au: Vec<u8> = Vec::with_capacity(256 * 1024);
     // RTP-sequence loss estimation over ~1 s windows.
     let mut loss = super::control::LossWindow::default();
@@ -294,11 +330,25 @@ async fn video_track_loop(
             let _ = loss_tx.try_send(loss.take_fraction());
             window_start = std::time::Instant::now();
         }
-        depkt.push(&pkt.payload, &mut au);
+        let Some(codec) = VideoCodec::from_payload_type(pkt.header.payload_type) else {
+            if !unknown_pt_logged {
+                warn!(pt = pkt.header.payload_type, "video packet with an unknown payload type");
+                unknown_pt_logged = true;
+            }
+            continue;
+        };
+        if depkt.as_ref().map(|(c, _)| *c) != Some(codec) {
+            info!(codec = codec.label(), "video codec");
+            println!("{}", serde_json::json!({ "event": "codec", "codec": codec }));
+            au.clear();
+            depkt = Some((codec, VideoDepay::new(codec)));
+        }
+        let Some((_, d)) = depkt.as_mut() else { continue };
+        d.push(&pkt.payload, &mut au);
         if pkt.header.marker && !au.is_empty() {
             stats.video_bytes.fetch_add(au.len() as u64, Ordering::Relaxed);
             stats.video_aus.fetch_add(1, Ordering::Relaxed);
-            let capture_local_ns = sei::extract_timestamp(&au).map(|sender_ns| {
+            let capture_local_ns = sei::extract_timestamp(codec, &au).map(|sender_ns| {
                 let local = sender_ns + clock_offset_ns.load(Ordering::Relaxed);
                 stats
                     .arrival_latency_us_last
@@ -306,6 +356,7 @@ async fn video_track_loop(
                 local
             });
             let unit = AccessUnit {
+                codec,
                 data: std::mem::take(&mut au),
                 capture_local_ns,
                 rtp_timestamp: pkt.header.timestamp,
@@ -324,15 +375,35 @@ mod tests {
     #[test]
     fn pts_converts_90khz_to_100ns_ticks() {
         // One second of 90 kHz clock = 10^7 100-ns ticks.
-        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 90_000 };
+        let au = AccessUnit {
+            codec: VideoCodec::Hevc,
+            data: vec![],
+            capture_local_ns: None,
+            rtp_timestamp: 90_000,
+        };
         assert_eq!(au.pts_or_zero(), 10_000_000);
         // One 60 fps frame = 1500 ticks of 90 kHz = 166_666 (truncated) 100-ns ticks.
-        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 1_500 };
+        let au = AccessUnit {
+            codec: VideoCodec::Hevc,
+            data: vec![],
+            capture_local_ns: None,
+            rtp_timestamp: 1_500,
+        };
         assert_eq!(au.pts_or_zero(), 166_666);
-        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: 0 };
+        let au = AccessUnit {
+            codec: VideoCodec::Hevc,
+            data: vec![],
+            capture_local_ns: None,
+            rtp_timestamp: 0,
+        };
         assert_eq!(au.pts_or_zero(), 0);
         // u32::MAX must not overflow the i64 math.
-        let au = AccessUnit { data: vec![], capture_local_ns: None, rtp_timestamp: u32::MAX };
+        let au = AccessUnit {
+            codec: VideoCodec::Hevc,
+            data: vec![],
+            capture_local_ns: None,
+            rtp_timestamp: u32::MAX,
+        };
         assert_eq!(au.pts_or_zero(), u32::MAX as i64 * 1000 / 9);
     }
 }

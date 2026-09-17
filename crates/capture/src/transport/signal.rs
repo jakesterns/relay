@@ -55,6 +55,14 @@ pub enum SigMsg {
     Loss {
         fraction: f32,
     },
+    /// Receiver→sender: the receiver hit a fatal error and is stopping. Sent
+    /// before it closes the peer connection, so the sender can say why at
+    /// once instead of reporting a lost connection when ICE times out (B3).
+    /// An older sender fails to parse it and ends its feedback loop, which is
+    /// what the closing connection would have done a moment later anyway.
+    Abort {
+        reason: String,
+    },
     Bye,
 }
 
@@ -285,6 +293,11 @@ mod tests {
         let m: SigMsg =
             serde_json::from_str(r#"{"type":"offer","name":"pc","sdp":"v=0","mac":"ab"}"#).unwrap();
         assert!(matches!(m, SigMsg::Offer { .. }));
+        let m = SigMsg::Abort { reason: "no H.264 decoder".into() };
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"type":"abort","reason":"no H.264 decoder"}"#
+        );
         let m: SigMsg = serde_json::from_str(r#"{"type":"bye"}"#).unwrap();
         assert!(matches!(m, SigMsg::Bye));
         let m: SigMsg =

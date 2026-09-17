@@ -3,7 +3,7 @@
  * the EQ graph, the Display A/B and the Share overlay. Pure functions, so a
  * test can pin each against the Rust it mirrors.
  */
-import type { EqBand, GpuColor, ShareCapabilities, SharePresetDef } from "./ipc";
+import { codecLabel, type EqBand, type GpuColor, type ShareCapabilities, type SharePresetDef, type VideoCodec } from "./ipc";
 
 /* ---------- EQ ---------- */
 
@@ -57,7 +57,7 @@ export function buildRamp(gpu: Pick<GpuColor, "gamma" | "contrast" | "shadow_lif
 
 /* ---------- Share ---------- */
 
-/** "NVENC", "Quick Sync" or "AMF", from the hardware HEVC encoders the probe
+/** "NVENC", "Quick Sync" or "AMF", from the hardware encoders the probe
  *  found (falling back to the adapter names). `null` when there is none, or
  *  when two vendors could encode: the engine picks the one on the adapter that
  *  drives the captured display, which the UI cannot know in advance. */
@@ -82,11 +82,16 @@ export function encoderBrand(caps: ShareCapabilities | null): string | null {
  *  sharing, pass `measuredFps` (the engine's own `stats` figure, or null
  *  before the first one) and `def` only if it is the preset the running share
  *  was started with; a label that cannot be backed is left out, not guessed.
- *  HEVC is the one codec the engine has, so that one may be stated flat. */
-export function shareTags(def: SharePresetDef | undefined, measuredFps?: number | null): string[] {
+ *  The codec is negotiated with the receiver when a share starts (HEVC or
+ *  H.264), so it is named only once the engine reports it via `codec`. */
+export function shareTags(
+  def: SharePresetDef | undefined,
+  measuredFps?: number | null,
+  codec?: VideoCodec | null,
+): string[] {
   const size = def && (def.size ? `Up to ${def.size[0]}×${def.size[1]}` : "Native size");
   const fps = measuredFps === undefined
     ? def && `${def.fps} fps`
     : measuredFps && measuredFps > 0 ? `${Math.round(measuredFps)} fps` : null;
-  return [size, fps, "HEVC"].filter((t): t is string => !!t);
+  return [size, fps, codec ? codecLabel(codec) : null].filter((t): t is string => !!t);
 }

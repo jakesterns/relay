@@ -3,7 +3,10 @@
 //! ```text
 //! relay-share probe                capability report (MFTEnumEx, WGC) as JSON
 //! relay-share bench-capture [SECS] capture-only latency benchmark
-//! relay-share bench-encode [SECS]  capture → NV12 → HEVC encode benchmark
+//! relay-share bench-encode [SECS] [WxH|4k|native] [hevc|h264]
+//!                                  capture → NV12 → hardware encode benchmark
+//! relay-share bench-codec IN.nv12 W H hevc|h264 MBPS OUT
+//!                                  encode a raw clip, for codec quality comparisons
 //! relay-share send                 share the primary monitor to a paired peer
 //! relay-share recv                 receive and render to a window
 //! ```
@@ -74,6 +77,7 @@ fn main() -> Result<()> {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(60);
             let out_size = match args.get(2).map(String::as_str) {
                 Some("4k") => Some((3840u32, 2160u32)),
+                Some("native") => None,
                 Some(s) => {
                     let (w, h) = s.split_once('x').context("size must be WxH or `4k`")?;
                     Some((w.parse()?, h.parse()?))
@@ -82,7 +86,21 @@ fn main() -> Result<()> {
             };
             let bitrate: u32 =
                 std::env::var("RELAY_BITRATE_MBPS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
-            bench_encode(secs, out_size, bitrate * 1_000_000)
+            let codec = parse_codec(args.get(3).map(String::as_str).unwrap_or("hevc"))?;
+            bench_encode(secs, out_size, bitrate * 1_000_000, codec)
+        }
+        #[cfg(windows)]
+        "bench-codec" => {
+            let [input, w, h, codec, mbps, out] = &args[1..] else {
+                bail!("bench-codec IN.nv12 W H hevc|h264 MBPS OUT");
+            };
+            bench_codec(
+                std::path::Path::new(input),
+                (w.parse()?, h.parse()?),
+                parse_codec(codec)?,
+                mbps.parse::<u32>()? * 1_000_000,
+                std::path::Path::new(out),
+            )
         }
         #[cfg(windows)]
         "bench-audio" => {
@@ -140,6 +158,17 @@ fn main() -> Result<()> {
             Ok(())
         }
         other => bail!("unknown command `{other}`\n{USAGE}"),
+    }
+}
+
+/// `hevc` / `h264` for the benches. Benches only: a share negotiates.
+#[cfg(windows)]
+fn parse_codec(s: &str) -> Result<relay_capture::codec::VideoCodec> {
+    use relay_capture::codec::VideoCodec;
+    match s.to_ascii_lowercase().as_str() {
+        "hevc" | "h265" => Ok(VideoCodec::Hevc),
+        "h264" | "avc" => Ok(VideoCodec::H264),
+        other => bail!("unknown codec `{other}` (expected hevc or h264)"),
     }
 }
 
@@ -381,12 +410,17 @@ fn bench_audio_dual(secs: u64) -> Result<()> {
     Ok(())
 }
 
-/// Capture → NV12 (optionally scaled) → HEVC hardware encode for `secs`.
+/// Capture → NV12 (optionally scaled) → hardware encode for `secs`.
 /// The decision-gate number is `capture_to_encoder_input` p99 + `encode` p99.
 #[cfg(windows)]
-fn bench_encode(secs: u64, out_size: Option<(u32, u32)>, bitrate_bps: u32) -> Result<()> {
+fn bench_encode(
+    secs: u64,
+    out_size: Option<(u32, u32)>,
+    bitrate_bps: u32,
+    codec: relay_capture::codec::VideoCodec,
+) -> Result<()> {
     use relay_capture::encode::convert::Converter;
-    use relay_capture::encode::mf::{EncoderConfig, EncoderEvent, InflightClock, MfHevcEncoder};
+    use relay_capture::encode::mf::{EncoderConfig, EncoderEvent, InflightClock, MfEncoder};
     use relay_capture::source::{wgc::WgcCapture, FrameSource};
     use relay_capture::{d3d, probe, time, Percentiles};
     use std::time::{Duration, Instant};
@@ -399,7 +433,7 @@ fn bench_encode(secs: u64, out_size: Option<(u32, u32)>, bitrate_bps: u32) -> Re
     let (w, h) = out_size.unwrap_or(in_size);
     let mut conv = Converter::new(&gpu, in_size, (w, h))?;
     let enc =
-        MfHevcEncoder::new(&gpu, &EncoderConfig { width: w, height: h, fps: 60, bitrate_bps })?;
+        MfEncoder::new(&gpu, &EncoderConfig { codec, width: w, height: h, fps: 60, bitrate_bps })?;
     eprintln!(
         "encoder: {} on {} | {}x{} -> {}x{} @60, {} Mb/s CBR, {secs}s",
         enc.name,
@@ -461,6 +495,7 @@ fn bench_encode(secs: u64, out_size: Option<(u32, u32)>, bitrate_bps: u32) -> Re
         "{}",
         serde_json::json!({
             "stage": "encode",
+            "codec": codec,
             "encoder": enc.name,
             "input": format!("{}x{}", in_size.0, in_size.1),
             "output": format!("{w}x{h}@60"),
@@ -479,13 +514,174 @@ fn bench_encode(secs: u64, out_size: Option<(u32, u32)>, bitrate_bps: u32) -> Re
     Ok(())
 }
 
+/// Encode a raw NV12 clip (as written by `ffmpeg -pix_fmt nv12 -f rawvideo`)
+/// with the share's exact encoder and tuning, paced at 60 fps like a live
+/// capture, and write the Annex B bitstream to `out`. Same frames in, so two
+/// codecs can be compared for quality at a given bitrate by decoding `out`
+/// against the source. Frames are uploaded through a staging texture; the
+/// upload is outside the timed encode window.
+#[cfg(windows)]
+fn bench_codec(
+    input: &std::path::Path,
+    (w, h): (u32, u32),
+    codec: relay_capture::codec::VideoCodec,
+    bitrate_bps: u32,
+    out: &std::path::Path,
+) -> Result<()> {
+    use relay_capture::encode::mf::{EncoderConfig, EncoderEvent, InflightClock, MfEncoder};
+    use relay_capture::{d3d, probe, time, Percentiles};
+    use std::io::{Read, Write};
+    use std::time::{Duration, Instant};
+    use windows::Win32::Graphics::Direct3D11::*;
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+
+    const FPS: u32 = 60;
+    const RING: usize = 8;
+    let _mf = probe::MediaFoundation::start()?;
+    let gpu = d3d::device_for_monitor(d3d::primary_monitor())?;
+    let enc =
+        MfEncoder::new(&gpu, &EncoderConfig { codec, width: w, height: h, fps: FPS, bitrate_bps })?;
+    eprintln!(
+        "bench-codec: {} ({}) {w}x{h}@{FPS} {} Mb/s",
+        enc.name,
+        codec.label(),
+        bitrate_bps / 1_000_000
+    );
+
+    let desc = |usage, bind: u32, cpu: u32| D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: usage,
+        BindFlags: bind,
+        CPUAccessFlags: cpu,
+        MiscFlags: 0,
+    };
+    let mut staging = None;
+    let mut ring = Vec::with_capacity(RING);
+    // SAFETY: valid descriptors; out pointers are ours.
+    unsafe {
+        gpu.device.CreateTexture2D(
+            &desc(D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_WRITE.0 as u32),
+            None,
+            Some(&mut staging),
+        )?;
+        for _ in 0..RING {
+            let mut t = None;
+            gpu.device.CreateTexture2D(
+                &desc(D3D11_USAGE_DEFAULT, D3D11_BIND_RENDER_TARGET.0 as u32, 0),
+                None,
+                Some(&mut t),
+            )?;
+            ring.push(t.unwrap());
+        }
+    }
+    let staging = staging.unwrap();
+
+    let frame_len = (w * h * 3 / 2) as usize;
+    let mut reader = std::io::BufReader::with_capacity(frame_len * 2, std::fs::File::open(input)?);
+    let mut writer = std::io::BufWriter::new(std::fs::File::create(out)?);
+    let mut buf = vec![0u8; frame_len];
+    let mut clock = InflightClock::default();
+    let mut encode_time = Percentiles::default();
+    let (mut submitted, mut outputs, mut bytes, mut keyframes) = (0u64, 0u64, 0u64, 0u64);
+    let mut eof = false;
+    let start = Instant::now();
+    let frame_100ns = 10_000_000 / FPS as i64;
+
+    loop {
+        match enc.next_event()? {
+            EncoderEvent::NeedInput => {
+                if eof || reader.read_exact(&mut buf).is_err() {
+                    eof = true;
+                    if clock.in_flight() == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                // Pace like a live 60 fps capture: rate control and the
+                // encoder's queueing both behave differently when flooded.
+                let due = start + Duration::from_micros(submitted * 1_000_000 / FPS as u64);
+                if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                    std::thread::sleep(wait);
+                }
+                let tex = &ring[submitted as usize % RING];
+                // SAFETY: map the CPU staging texture, copy both NV12 planes
+                // honouring the row pitch, unmap, then copy to the GPU texture.
+                unsafe {
+                    let mut m = D3D11_MAPPED_SUBRESOURCE::default();
+                    gpu.context.Map(&staging, 0, D3D11_MAP_WRITE, 0, Some(&mut m))?;
+                    let pitch = m.RowPitch as usize;
+                    let dst = m.pData as *mut u8;
+                    let (wu, hu) = (w as usize, h as usize);
+                    for row in 0..hu {
+                        std::ptr::copy_nonoverlapping(
+                            buf.as_ptr().add(row * wu),
+                            dst.add(row * pitch),
+                            wu,
+                        );
+                    }
+                    for row in 0..hu / 2 {
+                        std::ptr::copy_nonoverlapping(
+                            buf.as_ptr().add(wu * hu + row * wu),
+                            dst.add(hu * pitch + row * pitch),
+                            wu,
+                        );
+                    }
+                    gpu.context.Unmap(&staging, 0);
+                    gpu.context.CopyResource(tex, &staging);
+                }
+                let pts = submitted as i64 * frame_100ns;
+                clock.submitted(pts, time::qpc_now_100ns());
+                enc.submit(tex, pts)?;
+                submitted += 1;
+            }
+            EncoderEvent::Output(frame) => {
+                if let Some(dt) = clock.completed(frame.pts_100ns, time::qpc_now_100ns()) {
+                    encode_time.push_ms(time::ticks_to_ms(dt));
+                }
+                outputs += 1;
+                keyframes += u64::from(frame.keyframe);
+                bytes += frame.data.len() as u64;
+                writer.write_all(&frame.data)?;
+                if eof && clock.in_flight() == 0 {
+                    break;
+                }
+            }
+        }
+    }
+    writer.flush()?;
+    let clip_secs = submitted as f64 / FPS as f64;
+    let (e50, e99, emax) = encode_time.summary().unwrap_or((0.0, 0.0, 0.0));
+    println!(
+        "{}",
+        serde_json::json!({
+            "stage": "codec",
+            "codec": codec,
+            "encoder": enc.name,
+            "size": format!("{w}x{h}@{FPS}"),
+            "target_mbps": bitrate_bps as f64 / 1e6,
+            "frames_in": submitted,
+            "frames_out": outputs,
+            "keyframes": keyframes,
+            "produced_mbps": bytes as f64 * 8.0 / clip_secs.max(1e-9) / 1e6,
+            "encode_ms": { "p50": e50, "p99": e99, "max": emax },
+        })
+    );
+    Ok(())
+}
+
 const USAGE: &str = "\
 relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
 
   probe          print the capability report (hardware HEVC MFTs, WGC) as JSON
   bench-audio    capture audio (desktop | mic | pid N), Opus-encode, report packet flow
   bench-capture  measure capture latency on the primary monitor
-  bench-encode   measure capture -> NV12 -> HEVC hardware encode latency
+  bench-encode   measure capture -> NV12 -> hardware encode latency (hevc | h264)
+  bench-codec    encode a raw NV12 clip to an Annex B file (codec comparisons)
   bench-audio    measure Opus packetization latency for one source, or for
                  the program mix and the microphone together (`dual`)
   send           share to a paired peer (spawned by relay-core)

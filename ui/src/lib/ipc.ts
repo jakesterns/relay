@@ -141,7 +141,7 @@ export function presetAudioLabel(a: PresetAudio): string {
   return a.mic ? "Microphone" : "None";
 }
 /**
- * Recording container. Same HEVC + Opus bitstream either way — the choice
+ * Recording container. Same video + Opus bitstream either way — the choice
  * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
  */
 export type RecordingContainer = "mp4" | "mkv";
@@ -157,6 +157,8 @@ export interface DiscoveredReceiver { name: string; addr: string; port: number }
 /** One `stats` NDJSON line from the share/receive engine (loose shape). */
 export interface ShareStats {
   event: string;
+  /** The codec this share negotiated. */
+  codec?: VideoCodec;
   bitrate_mbps?: number; fps?: number; frames?: number; keyframes?: number;
   dropped?: number; encode_ms?: number; capture_to_send_ms?: number;
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
@@ -176,11 +178,19 @@ export interface SourceChangedData {
 /** A/B listening-test render (`Method::RenderPreview`). Paths are absolute. */
 export interface Preview { original: string; processed: string; sample_rate: number; hrtf_applied: boolean }
 
-/** HEVC support on this PC (`Reply::Capabilities`). Sending needs a hardware
- *  encoder; receiving needs any decoder, usually the Microsoft HEVC Video
- *  Extension, which is a free Store download and not something Relay bundles. */
+/** A share's video codec, negotiated per share: HEVC when both ends can,
+ *  H.264 otherwise (S27). Never a user setting. */
+export type VideoCodec = "hevc" | "h264";
+export const codecLabel = (c: VideoCodec | string): string => (c === "h264" ? "H.264" : c === "hevc" ? "HEVC" : c);
+
+/** Video support on this PC (`Reply::Capabilities`). Sending needs a hardware
+ *  encoder for either codec; receiving needs a decoder for either. H.264
+ *  decode ships with Windows, so a PC without HEVC decode still receives. */
 export interface ShareCapabilities {
   can_share: boolean; can_receive: boolean; adapters: string[]; encoders: string[]; decoders: string[];
+  /** Codecs this PC can send / receive, preference order. Absent from a core
+   *  that predates S27, which only knew HEVC. */
+  share_codecs?: VideoCodec[]; receive_codecs?: VideoCodec[];
 }
 /** Mirror of relay-core's `firewall::Verdict`. `blocked` is the one this
  *  whole feature exists for: a Block rule written when somebody dismissed
@@ -240,7 +250,11 @@ export type CloseAction = "keep_running" | "quit_relay";
 export interface UiPrefs { close_action: CloseAction }
 
 export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
-export interface ReceiveStatus { receiving: boolean; code?: string | null; sender?: string | null; message?: string | null }
+export interface ReceiveStatus {
+  receiving: boolean; code?: string | null; sender?: string | null; message?: string | null;
+  /** Negotiated codec, sent once the first video packet names it. */
+  codec?: VideoCodec | null;
+}
 
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -585,13 +599,15 @@ export const api = {
     if (!isTauri()) throw new Error("A/B rendering needs the Relay core");
     return invoke<Preview>("render_preview", { id, wav: wav ?? null });
   },
-  /** What this PC can do with HEVC. Spawns a probe child in the core, so call
+  /** What this PC can do with video. Spawns a probe child in the core, so call
    *  it once when a screen opens, not on every state refresh. */
   async shareCapabilities(): Promise<ShareCapabilities> {
     if (!isTauri()) {
       return {
         can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 3090"],
-        encoders: ["NVIDIA HEVC Encoder MFT"], decoders: ["Microsoft HEVC Video Extension"],
+        encoders: ["NVIDIA HEVC Encoder MFT", "NVIDIA H.264 Encoder MFT"],
+        decoders: ["Microsoft HEVC Video Extension", "Microsoft H264 Video Decoder MFT"],
+        share_codecs: ["hevc", "h264"], receive_codecs: ["hevc", "h264"],
       };
     }
     return invoke<ShareCapabilities>("share_capabilities");

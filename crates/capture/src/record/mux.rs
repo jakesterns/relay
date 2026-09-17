@@ -1,5 +1,5 @@
 //! Fragmented-MP4 muxer for the recorded share bitstream: HEVC (`hvc1` +
-//! `hvcC`) and Opus (`dOps`). Pure and byte-deterministic — the same inputs
+//! `hvcC`) or H.264 (`avc1` + `avcC`), and Opus (`dOps`). Pure and byte-deterministic — the same inputs
 //! always produce the same file, which is what the golden-fixture tests lock.
 //!
 //! State machine: `AwaitingKeyframe` (drop non-key video, drop audio) →
@@ -15,6 +15,7 @@ use std::io::Write;
 use anyhow::{bail, Context, Result};
 
 use super::annexb;
+use crate::codec::VideoCodec;
 
 /// 100 ns units per second — the video track timescale, chosen so encoder
 /// PTS values (QPC 100 ns) map exactly with no rounding.
@@ -22,6 +23,9 @@ pub const VIDEO_TIMESCALE: u32 = 10_000_000;
 
 #[derive(Debug, Clone)]
 pub struct MuxConfig {
+    /// The share's negotiated video codec. The constructors default to HEVC;
+    /// see [`MuxConfig::with_codec`].
+    pub codec: VideoCodec,
     pub width: u32,
     pub height: u32,
     /// One entry per audio track, in track order; empty = video-only file.
@@ -43,12 +47,24 @@ pub struct AudioConfig {
 
 impl MuxConfig {
     pub fn video_only(width: u32, height: u32) -> Self {
-        Self { width, height, audio: Vec::new(), fragment_100ns: 10_000_000 }
+        Self {
+            codec: VideoCodec::Hevc,
+            width,
+            height,
+            audio: Vec::new(),
+            fragment_100ns: 10_000_000,
+        }
+    }
+
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self
     }
 
     /// Video plus the program-mix Opus track.
     pub fn with_opus(width: u32, height: u32) -> Self {
         Self {
+            codec: VideoCodec::Hevc,
             width,
             height,
             audio: vec![opus_track(PROGRAM_TRACK_NAME)],
@@ -61,6 +77,7 @@ impl MuxConfig {
     /// `docs/dev/dual-audio-decision.md` for why they stay unmixed.
     pub fn with_opus_and_mic(width: u32, height: u32) -> Self {
         Self {
+            codec: VideoCodec::Hevc,
             width,
             height,
             audio: vec![opus_track(PROGRAM_TRACK_NAME), opus_track(MIC_TRACK_NAME)],
@@ -163,10 +180,8 @@ impl<W: Write> Mp4Muxer<W> {
                     self.dropped_awaiting_key += 1;
                     return Ok(());
                 }
-                let ps = annexb::extract_param_sets(annexb_au)
-                    .context("keyframe carries no VPS/SPS/PPS")?;
-                let sps = annexb::parse_sps_summary(&ps.sps).context("unparseable SPS")?;
-                let init = init_segment(&self.cfg, &ps, &sps);
+                let entry = video_entry(self.cfg.codec, annexb_au)?;
+                let init = init_segment(&self.cfg, &entry);
                 self.w.write_all(&init)?;
                 self.bytes_written += init.len() as u64;
                 self.t0 = pts_100ns;
@@ -186,7 +201,7 @@ impl<W: Write> Mp4Muxer<W> {
             }
         }
         self.video.push(PendingSample {
-            data: annexb::to_mp4_sample(annexb_au),
+            data: annexb::to_mp4_sample_for(self.cfg.codec, annexb_au),
             pts,
             dur: None,
             key: keyframe,
@@ -364,7 +379,7 @@ impl Boxes {
 const MATRIX_IDENTITY: [u32; 9] = [0x0001_0000, 0, 0, 0, 0x0001_0000, 0, 0, 0, 0x4000_0000];
 
 /// `ftyp` + `moov` for this stream configuration.
-fn init_segment(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummary) -> Vec<u8> {
+fn init_segment(cfg: &MuxConfig, entry: &VideoEntry) -> Vec<u8> {
     let mut b = Boxes::new();
 
     let ftyp = b.open(b"ftyp");
@@ -390,7 +405,7 @@ fn init_segment(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummar
         b.u32(cfg.audio.len() as u32 + 2); // next_track_ID
         b.close(mvhd);
 
-        video_trak(&mut b, cfg, ps, sps);
+        video_trak(&mut b, cfg, entry);
         for (i, a) in cfg.audio.iter().enumerate() {
             audio_trak(&mut b, a, audio_track_id(i));
         }
@@ -411,7 +426,7 @@ fn init_segment(cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummar
     b.buf
 }
 
-fn video_trak(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummary) {
+fn video_trak(b: &mut Boxes, cfg: &MuxConfig, entry: &VideoEntry) {
     let trak = b.open(b"trak");
     {
         let tkhd = b.full(b"tkhd", 0, 3); // enabled + in movie
@@ -455,7 +470,7 @@ fn video_trak(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &anne
                 {
                     let stsd = b.full(b"stsd", 0, 0);
                     b.u32(1);
-                    hvc1(b, cfg, ps, sps);
+                    visual_sample_entry(b, cfg, entry);
                     b.close(stsd);
                     empty_stbl_tail(b);
                 }
@@ -468,8 +483,46 @@ fn video_trak(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &anne
     b.close(trak);
 }
 
-fn hvc1(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::SpsSummary) {
-    let entry = b.open(b"hvc1");
+/// How a video track describes its codec, derived once from the first
+/// keyframe. MP4 wraps `config` in `config_box` inside a `sample_entry` box;
+/// Matroska carries the identical bytes as `CodecPrivate` under
+/// `matroska_codec_id`.
+pub(crate) struct VideoEntry {
+    pub sample_entry: [u8; 4],
+    pub config_box: [u8; 4],
+    pub config: Vec<u8>,
+    pub matroska_codec_id: &'static str,
+}
+
+pub(crate) fn video_entry(codec: VideoCodec, keyframe_au: &[u8]) -> Result<VideoEntry> {
+    match codec {
+        VideoCodec::Hevc => {
+            let ps = annexb::extract_param_sets(keyframe_au)
+                .context("keyframe carries no VPS/SPS/PPS")?;
+            let sps = annexb::parse_sps_summary(&ps.sps).context("unparseable SPS")?;
+            Ok(VideoEntry {
+                sample_entry: *b"hvc1",
+                config_box: *b"hvcC",
+                config: hvcc_payload(&ps, &sps),
+                matroska_codec_id: "V_MPEGH/ISO/HEVC",
+            })
+        }
+        VideoCodec::H264 => {
+            let ps = annexb::extract_param_sets_for(codec, keyframe_au)
+                .context("keyframe carries no SPS/PPS")?;
+            let sps = annexb::parse_avc_sps_summary(&ps.sps).context("unparseable SPS")?;
+            Ok(VideoEntry {
+                sample_entry: *b"avc1",
+                config_box: *b"avcC",
+                config: avcc_payload(&ps, &sps),
+                matroska_codec_id: "V_MPEG4/ISO/AVC",
+            })
+        }
+    }
+}
+
+fn visual_sample_entry(b: &mut Boxes, cfg: &MuxConfig, video: &VideoEntry) {
+    let entry = b.open(&video.sample_entry);
     b.zeros(6); // reserved
     b.u16(1); // data_reference_index
     b.zeros(16); // pre_defined + reserved
@@ -483,10 +536,35 @@ fn hvc1(b: &mut Boxes, cfg: &MuxConfig, ps: &annexb::ParamSets, sps: &annexb::Sp
     b.u16(0x0018); // depth
     b.i16(-1); // pre_defined
 
-    let hvcc = b.open(b"hvcC");
-    b.bytes(&hvcc_payload(ps, sps));
-    b.close(hvcc);
+    let config = b.open(&video.config_box);
+    b.bytes(&video.config);
+    b.close(config);
     b.close(entry);
+}
+
+/// The `avcC` decoder-configuration payload (ISO/IEC 14496-15 §5.3.3.1).
+pub(crate) fn avcc_payload(ps: &annexb::ParamSets, sps: &annexb::AvcSummary) -> Vec<u8> {
+    let mut b = Boxes::new();
+    b.u8(1); // configurationVersion
+    b.u8(sps.profile_idc);
+    b.u8(sps.profile_compatibility);
+    b.u8(sps.level_idc);
+    b.u8(0xFC | 3); // lengthSizeMinusOne = 3: 4-byte lengths
+    b.u8(0xE0 | 1); // one SPS
+    b.u16(ps.sps.len() as u16);
+    b.bytes(&ps.sps);
+    b.u8(1); // one PPS
+    b.u16(ps.pps.len() as u16);
+    b.bytes(&ps.pps);
+    // High and above carry the chroma/bit-depth trailer. NV12 in, so 4:2:0
+    // 8-bit is fixed by the encoder setup, exactly as `hvcc_payload` assumes.
+    if matches!(sps.profile_idc, 100 | 110 | 122 | 144) {
+        b.u8(0xFC | 1); // chroma_format = 1
+        b.u8(0xF8); // bit_depth_luma_minus8 = 0
+        b.u8(0xF8); // bit_depth_chroma_minus8 = 0
+        b.u8(0); // numOfSequenceParameterSetExt
+    }
+    b.buf
 }
 
 /// The `hvcC` decoder-configuration payload (everything after the box header).
@@ -822,6 +900,25 @@ pub(crate) mod tests {
         au
     }
 
+    /// A synthetic H.264 keyframe AU: AUD, SPS (High, level 5.2), PPS, IDR.
+    pub(crate) fn h264_key_au() -> Vec<u8> {
+        let mut au = Vec::new();
+        for n in [
+            &[0x09u8, 0xF0][..],
+            &[0x67, 100, 0, 52, 0xAC, 0x2B],
+            &[0x68, 0xEE, 0x3C, 0x80],
+            &[0x65, 0x88, 0x84, 0x21],
+        ] {
+            au.extend_from_slice(&[0, 0, 0, 1]);
+            au.extend_from_slice(n);
+        }
+        au
+    }
+
+    pub(crate) fn h264_p_au(n: u8) -> Vec<u8> {
+        vec![0, 0, 0, 1, 0x41, 0x9A, n, n]
+    }
+
     pub(crate) fn p_au(n: u8) -> Vec<u8> {
         let mut au = vec![0, 0, 0, 1];
         au.extend_from_slice(&nal(1, &[b'p', n, n, n]));
@@ -1112,5 +1209,50 @@ pub(crate) mod tests {
         let at = out.windows(4).position(|w| w == b"tfdt").unwrap();
         let base = u64::from_be_bytes(out[at + 8..at + 16].try_into().unwrap());
         assert_eq!(base, 0);
+    }
+
+    #[test]
+    fn h264_stream_writes_avc1_with_a_complete_avcc() {
+        let cfg = MuxConfig::with_opus(1920, 1080).with_codec(VideoCodec::H264);
+        let mut m = Mp4Muxer::new(Vec::new(), cfg);
+        m.push_video(&h264_p_au(9), 0, false).unwrap(); // before the keyframe: dropped
+        m.push_video(&h264_key_au(), 1_000, true).unwrap();
+        for i in 1..5 {
+            m.push_video(&h264_p_au(i as u8), 1_000 + i * 166_666, false).unwrap();
+        }
+        let out = m.finalize().unwrap();
+        let find = |needle: &[u8]| out.windows(needle.len()).position(|w| w == needle);
+        assert!(find(b"avc1").is_some(), "avc1 sample entry");
+        assert!(find(b"hvc1").is_none() && find(b"hvcC").is_none(), "no HEVC boxes");
+        let at = find(b"avcC").expect("avcC box");
+        let body = &out[at + 4..];
+        assert_eq!(&body[..4], &[1, 100, 0, 52], "version, profile, compat, level");
+        assert_eq!(body[4], 0xFF, "4-byte NAL lengths");
+        assert_eq!(body[5], 0xE1, "one SPS");
+        assert_eq!(&body[6..8], &6u16.to_be_bytes());
+        assert_eq!(&body[8..14], &[0x67, 100, 0, 52, 0xAC, 0x2B]);
+        assert_eq!(body[14], 1, "one PPS");
+        assert_eq!(&body[17..21], &[0x68, 0xEE, 0x3C, 0x80]);
+        assert_eq!(&body[21..25], &[0xFD, 0xF8, 0xF8, 0], "High-profile trailer");
+        // The box length covers exactly that payload.
+        let size = u32::from_be_bytes(out[at - 4..at].try_into().unwrap()) as usize;
+        assert_eq!(size, 8 + 25);
+        // The keyframe sample carries the IDR (length-prefixed), never the SPS.
+        assert!(find(&[0, 0, 0, 4, 0x65, 0x88, 0x84, 0x21]).is_some());
+        assert!(find(&[0, 0, 0, 6, 0x67]).is_none());
+        assert_mdat_offsets(&out);
+    }
+
+    #[test]
+    fn h264_keyframe_without_pps_is_an_error() {
+        let mut m =
+            Mp4Muxer::new(Vec::new(), MuxConfig::video_only(640, 480).with_codec(VideoCodec::H264));
+        let au = vec![0, 0, 0, 1, 0x67, 100, 0, 52, 0, 0, 0, 1, 0x65, 0x88];
+        let err = m.push_video(&au, 0, true).unwrap_err().to_string();
+        assert!(err.contains("SPS/PPS"), "{err}");
+        // And an HEVC keyframe fed to an H.264 file is refused, not mislabelled.
+        let mut m =
+            Mp4Muxer::new(Vec::new(), MuxConfig::video_only(640, 480).with_codec(VideoCodec::H264));
+        assert!(m.push_video(&key_au(), 0, true).is_err());
     }
 }
