@@ -27,69 +27,87 @@ impl LinkKind {
     }
 }
 
-/// The link kind of the local adapter that owns `local_ip` (the address the
-/// share's UDP/ICE traffic goes out of).
+pub use imp::link_kind_for;
+
 #[cfg(windows)]
-pub fn link_kind_for(local_ip: IpAddr) -> Result<LinkKind> {
-    use windows::Win32::NetworkManagement::IpHelper::{
-        GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-        GAA_FLAG_SKIP_MULTICAST, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
-        IP_ADAPTER_ADDRESSES_LH,
-    };
-    use windows::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
+mod imp {
+    use super::*;
 
-    // SAFETY: standard GetAdaptersAddresses two-call pattern.
-    unsafe {
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        let mut size = 0u32;
-        let _ = GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, None, &mut size);
-        anyhow::ensure!(size > 0, "GetAdaptersAddresses reported no size");
-        let mut buf = vec![0u8; size as usize];
-        let ret = GetAdaptersAddresses(
-            AF_UNSPEC.0 as u32,
-            flags,
-            None,
-            Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
-            &mut size,
-        );
-        anyhow::ensure!(ret == 0, "GetAdaptersAddresses failed: {ret}");
+    /// The link kind of the local adapter that owns `local_ip` (the address the
+    /// share's UDP/ICE traffic goes out of).
+    pub fn link_kind_for(local_ip: IpAddr) -> Result<LinkKind> {
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+            GAA_FLAG_SKIP_MULTICAST, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
+            IP_ADAPTER_ADDRESSES_LH,
+        };
+        use windows::Win32::Networking::WinSock::{AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
 
-        let mut adapter = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-        while !adapter.is_null() {
-            let a = &*adapter;
-            let mut ua = a.FirstUnicastAddress;
-            while !ua.is_null() {
-                let sa = (*ua).Address.lpSockaddr;
-                if !sa.is_null() {
-                    let family = (*sa).sa_family;
-                    let matches = match local_ip {
-                        IpAddr::V4(v4) => {
-                            family == windows::Win32::Networking::WinSock::AF_INET && {
-                                let s = &*(sa as *const SOCKADDR_IN);
-                                u32::from(v4).to_be() == s.sin_addr.S_un.S_addr
+        // SAFETY: standard GetAdaptersAddresses two-call pattern.
+        unsafe {
+            let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+            let mut size = 0u32;
+            let _ = GetAdaptersAddresses(AF_UNSPEC.0 as u32, flags, None, None, &mut size);
+            anyhow::ensure!(size > 0, "GetAdaptersAddresses reported no size");
+            let mut buf = vec![0u8; size as usize];
+            let ret = GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                flags,
+                None,
+                Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut size,
+            );
+            anyhow::ensure!(ret == 0, "GetAdaptersAddresses failed: {ret}");
+
+            let mut adapter = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+            while !adapter.is_null() {
+                let a = &*adapter;
+                let mut ua = a.FirstUnicastAddress;
+                while !ua.is_null() {
+                    let sa = (*ua).Address.lpSockaddr;
+                    if !sa.is_null() {
+                        let family = (*sa).sa_family;
+                        let matches = match local_ip {
+                            IpAddr::V4(v4) => {
+                                family == windows::Win32::Networking::WinSock::AF_INET && {
+                                    let s = &*(sa as *const SOCKADDR_IN);
+                                    u32::from(v4).to_be() == s.sin_addr.S_un.S_addr
+                                }
                             }
-                        }
-                        IpAddr::V6(v6) => {
-                            family == windows::Win32::Networking::WinSock::AF_INET6 && {
-                                let s = &*(sa as *const SOCKADDR_IN6);
-                                s.sin6_addr.u.Byte == v6.octets()
+                            IpAddr::V6(v6) => {
+                                family == windows::Win32::Networking::WinSock::AF_INET6 && {
+                                    let s = &*(sa as *const SOCKADDR_IN6);
+                                    s.sin6_addr.u.Byte == v6.octets()
+                                }
                             }
+                        };
+                        if matches {
+                            return Ok(match a.IfType {
+                                x if x == IF_TYPE_IEEE80211 => LinkKind::WiFi,
+                                x if x == IF_TYPE_ETHERNET_CSMACD => LinkKind::Wired,
+                                _ => LinkKind::Other,
+                            });
                         }
-                    };
-                    if matches {
-                        return Ok(match a.IfType {
-                            x if x == IF_TYPE_IEEE80211 => LinkKind::WiFi,
-                            x if x == IF_TYPE_ETHERNET_CSMACD => LinkKind::Wired,
-                            _ => LinkKind::Other,
-                        });
                     }
+                    ua = (*ua).Next;
                 }
-                ua = (*ua).Next;
+                adapter = a.Next;
             }
-            adapter = a.Next;
         }
+        Ok(LinkKind::Unknown)
     }
-    Ok(LinkKind::Unknown)
+}
+
+/// Stub: the adapter type is not read outside Windows, so the answer is the
+/// honest one — unknown — and no Wi-Fi advice is given. A port reads
+/// `getifaddrs` plus `SCNetworkInterfaceGetInterfaceType` on macOS.
+#[cfg(not(windows))]
+mod imp {
+    use super::*;
+
+    pub fn link_kind_for(_local_ip: IpAddr) -> Result<LinkKind> {
+        Ok(LinkKind::Unknown)
+    }
 }
 
 /// Local IP the OS routes toward `peer` (the interface ICE will use).

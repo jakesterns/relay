@@ -78,7 +78,11 @@ impl Backends {
                     }
                 }
                 #[cfg(not(windows))]
-                Self::default()
+                Self {
+                    audio: Arc::new(crate::audio_apo::ApoAudioControl),
+                    hardware: Arc::new(NoopHardwareProbe),
+                    display: Arc::new(crate::display_backend::UnsupportedDisplay),
+                }
             }
         }
     }
@@ -238,14 +242,11 @@ impl Service {
             events: self.events.clone(),
         });
         let events_tx = self.events.clone();
-        #[cfg(windows)]
         tokio::spawn(async move {
             if let Err(e) = crate::ipc::server::serve(handler, events_tx).await {
                 warn!(error = %e, "ipc server stopped");
             }
         });
-        #[cfg(not(windows))]
-        let _ = (handler, events_tx);
 
         // Startup touched COM/WASAPI/display DLLs (probe, watcher). Hand those
         // pages back so idle RSS reflects steady state.
@@ -296,7 +297,6 @@ impl Service {
         use crate::tray::TrayCommand;
         match cmd {
             TrayCommand::Open => {
-                #[cfg(windows)]
                 if let Err(e) = crate::launcher::open_ui() {
                     warn!(error = %format!("{e:#}"), "could not open the Relay window");
                 }
@@ -373,28 +373,25 @@ impl Service {
     /// foreground window's monitor against the one we recorded; on change,
     /// route through the normal foreground path (restore old → apply new).
     fn recheck_monitor(&self) {
-        #[cfg(windows)]
-        {
-            let needs = {
-                let g = self.inner.lock();
-                g.applier.is_applied() && g.state.foreground.is_some()
-            };
-            if !needs {
-                return;
-            }
-            let Some(now) = crate::winloop::current_foreground() else { return };
-            let stale = {
-                let g = self.inner.lock();
-                g.state
-                    .foreground
-                    .as_ref()
-                    .map(|fg| fg.pid == now.pid && fg.hmonitor != now.hmonitor)
-                    .unwrap_or(false)
-            };
-            if stale {
-                info!(hmonitor = now.hmonitor, "game window moved monitors");
-                self.on_foreground(now);
-            }
+        let needs = {
+            let g = self.inner.lock();
+            g.applier.is_applied() && g.state.foreground.is_some()
+        };
+        if !needs {
+            return;
+        }
+        let Some(now) = crate::winloop::current_foreground() else { return };
+        let stale = {
+            let g = self.inner.lock();
+            g.state
+                .foreground
+                .as_ref()
+                .map(|fg| fg.pid == now.pid && fg.hmonitor != now.hmonitor)
+                .unwrap_or(false)
+        };
+        if stale {
+            info!(hmonitor = now.hmonitor, "game window moved monitors");
+            self.on_foreground(now);
         }
     }
 
@@ -1226,7 +1223,6 @@ impl IpcHandler {
                 drop(g);
                 Reply::Apo { status: crate::audio_apo::apo_status() }
             }
-            #[cfg(windows)]
             Method::InstallApo => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
@@ -1240,7 +1236,6 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
-            #[cfg(windows)]
             Method::UninstallApo => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
@@ -1253,10 +1248,6 @@ impl IpcHandler {
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
-            }
-            #[cfg(not(windows))]
-            Method::InstallApo | Method::UninstallApo => {
-                Reply::Error { message: "Windows only".into() }
             }
             Method::VdeviceStatus => {
                 let paths = g.paths.clone();
@@ -1278,7 +1269,6 @@ impl IpcHandler {
                 drop(g);
                 Reply::DryRun { lines: crate::vdevice::camera_dry_run() }
             }
-            #[cfg(windows)]
             Method::InstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
@@ -1292,7 +1282,6 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
-            #[cfg(windows)]
             Method::UninstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
@@ -1305,10 +1294,6 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
-            #[cfg(not(windows))]
-            Method::InstallVcam | Method::UninstallVcam => {
-                Reply::Error { message: "Windows only".into() }
-            }
             Method::ElevationPlan { op } => {
                 let paths = g.paths.clone();
                 drop(g);
@@ -1316,15 +1301,10 @@ impl IpcHandler {
             }
             // Handled ahead of this match (it blocks on a UAC prompt), and
             // only reachable if that dispatch is ever removed.
-            #[cfg(windows)]
             Method::RunElevated { op } => {
                 let paths = g.paths.clone();
                 drop(g);
                 self.run_elevated(&paths, op)
-            }
-            #[cfg(not(windows))]
-            Method::RunElevated { .. } => {
-                Reply::Error { message: "Elevated installs are Windows-only".into() }
             }
             Method::UninstallPlan { keep_data } => {
                 let paths = g.paths.clone();
@@ -1354,7 +1334,6 @@ impl IpcHandler {
     }
 }
 
-#[cfg(windows)]
 impl IpcHandler {
     /// Ask for administrator rights and run one op in the helper.
     ///
@@ -1385,7 +1364,6 @@ impl IpcHandler {
     }
 }
 
-#[cfg(windows)]
 impl crate::ipc::server::Handler for IpcHandler {
     async fn handle(&self, method: Method) -> Reply {
         // The elevated helper blocks on a UAC prompt the user may leave on

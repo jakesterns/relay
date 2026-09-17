@@ -26,16 +26,19 @@ pub mod encode;
 pub mod playback;
 #[cfg(windows)]
 pub mod preview;
+#[cfg(windows)]
 pub mod probe;
 pub mod record;
 #[cfg(windows)]
+pub mod render;
+#[cfg(not(windows))]
+#[path = "render_stub.rs"]
 pub mod render;
 pub mod resample;
 #[cfg(windows)]
 pub mod source;
 #[cfg(windows)]
 pub mod time;
-#[cfg(windows)]
 pub mod transport;
 #[cfg(windows)]
 pub mod vcam_sink;

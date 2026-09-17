@@ -164,17 +164,26 @@ pub fn init_service(log_file: &Path, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-/// True when stderr goes somewhere (console, pipe or file).
+use imp::has_console;
+
 #[cfg(windows)]
-fn has_console() -> bool {
+mod imp {
     use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
-    // SAFETY: querying our own standard handle.
-    unsafe { GetStdHandle(STD_ERROR_HANDLE).is_ok() }
+
+    /// True when stderr goes somewhere (console, pipe or file).
+    pub fn has_console() -> bool {
+        // SAFETY: querying our own standard handle.
+        unsafe { GetStdHandle(STD_ERROR_HANDLE).is_ok() }
+    }
 }
 
+/// Stub: a Unix process always has a stderr descriptor; writing to a closed
+/// one fails quietly, so logging to it is harmless.
 #[cfg(not(windows))]
-fn has_console() -> bool {
-    true
+mod imp {
+    pub fn has_console() -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

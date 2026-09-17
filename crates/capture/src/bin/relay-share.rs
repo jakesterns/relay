@@ -76,7 +76,6 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(relay_capture::transport::sender::run(opts))
         }
-        #[cfg(windows)]
         "discover" => {
             let mut timeout_ms = 2000u64;
             let mut it = args[1..].iter();
@@ -91,7 +90,6 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&found)?);
             Ok(())
         }
-        #[cfg(windows)]
         "recv" => {
             let opts = parse_recv_args(&args[1..])?;
             tokio::runtime::Builder::new_multi_thread()
@@ -99,6 +97,11 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(relay_capture::transport::receiver::run(opts))
+        }
+        // Capture, encode and the benches need the Windows media stack.
+        #[cfg(not(windows))]
+        "probe" | "bench-encode" | "bench-audio" | "bench-capture" | "send" => {
+            Err(relay_core::platform::unsupported(relay_core::platform::Capability::Share))
         }
         "" | "-h" | "--help" => {
             print!("{USAGE}");
@@ -174,7 +177,6 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
 }
 
 /// Parse `relay-share recv` flags into [`RecvOpts`].
-#[cfg(windows)]
 fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver::RecvOpts> {
     let mut opts = relay_capture::transport::receiver::RecvOpts {
         name: None,

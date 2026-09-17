@@ -15,7 +15,7 @@
 //!   that is no longer attached fails the restore so the snapshot stays
 //!   pending and is retried on the next start (it may be plugged in again).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use relay_display::gamma::{build_ramp, Ramp, RampParams};
 use relay_display::vcp::{self, MonitorPlanInput, Unsupported, VcpWrite};
 use tracing::warn;
@@ -275,6 +275,7 @@ pub use real::{RealIo, WinDisplay};
 #[cfg(windows)]
 mod real {
     use super::*;
+    use anyhow::bail;
     use relay_display::{amd, ddc, gamma, nvapi};
 
     /// The production backend type wired in `service::Backends`.
@@ -446,6 +447,33 @@ mod real {
         // The captured raw values, not a re-derived mapping.
         adl.set_saturation(&d, snap.dvc)?;
         adl.set_hue(&d, snap.hue_deg)?;
+        Ok(())
+    }
+}
+
+/// Stub backend: capture and apply refuse, so the `Applier` never records a
+/// snapshot it could not restore, and restore has nothing to put back. A
+/// macOS port implements [`DisplayIo`] over CoreGraphics
+/// (`CGSetDisplayTransferByTable`) and IOKit I2C; see `docs/dev/porting.md`.
+#[cfg(not(windows))]
+#[derive(Debug, Default)]
+pub struct UnsupportedDisplay;
+
+#[cfg(not(windows))]
+impl DisplayControl for UnsupportedDisplay {
+    fn capture(
+        &self,
+        _: Option<&MonitorProbe>,
+        _: &DisplaySettings,
+    ) -> Result<DisplayStateSnapshot> {
+        Err(crate::platform::unsupported(crate::platform::Capability::DisplayControl))
+    }
+
+    fn apply(&self, _: Option<&MonitorProbe>, _: &DisplaySettings) -> Result<DisplayVia> {
+        Err(crate::platform::unsupported(crate::platform::Capability::DisplayControl))
+    }
+
+    fn restore(&self, _: &DisplayStateSnapshot) -> Result<()> {
         Ok(())
     }
 }

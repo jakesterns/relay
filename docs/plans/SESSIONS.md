@@ -1020,22 +1020,22 @@ Relay sends HEVC only, and on Windows without OEM codec entitlement the HEVC dec
 ---
 
 ## S28 — Portability seam and a macOS build
-**Branch** `feat/portability-seam` · **Worktree** `C:\Users\stern\Documents\Code\relay-portable`
+**Branch** `feat/portability-seam` · **Worktree** `C:\Users\stern\Documents\Code\relay-portable` · **Done 2026-09-16 — compiles for macOS, never run there**
 
 Everything needed to make macOS *possible*, none of which needs a Mac to write.
 
 ### Definition of Ready
 - [x] Four seams exist: `AudioControl`, `DisplayControl`, `HardwareProbe`, `FrameSource`.
 - [x] 59 of 139 Rust files already have no Windows dependency.
-- [ ] Accept the constraint: no Mac is available, so "it compiles for the target" is the bar, not "it runs". Do not claim otherwise anywhere.
+- [x] Accept the constraint: no Mac is available, so "it compiles for the target" is the bar, not "it runs". Do not claim otherwise anywhere.
 
 ### Definition of Done
-- [ ] Every Windows API call sits behind a seam and a `#[cfg(windows)]` module. No `use windows::` outside a platform module.
-- [ ] A `stub` platform backend that compiles everywhere and returns a clear "not supported on this platform" per capability, so the portable half builds and tests on any target.
-- [ ] `cargo check --target x86_64-apple-darwin` and `--target aarch64-apple-darwin` succeed for the portable crates. Where a crate cannot yet build, name the exact API that blocks it.
-- [ ] CI builds the macOS targets. Private repos consume paid Actions minutes at a higher rate — tell Jake the cost before enabling it broadly.
-- [ ] `docs/dev/porting.md`: for each seam, the Windows API today, the macOS equivalent, and the honest difficulty. Include the ones with no clean answer — DDC/CI over IOKit, and the endpoint APO, which has no macOS analogue and needs a different design (an AudioServerPlugIn), not a port.
-- [ ] No behaviour change on Windows: all gates stay green.
+- [x] Every Windows API call sits behind a seam and a `#[cfg(windows)]` module. No `use windows::` outside a platform module. (Enforced by `crates/core/tests/platform_seam.rs`. It scans the workspace on every OS and rejects a `windows`/`windows_core` path anywhere but a file or inline `mod` gated on Windows; a function-level `cfg` does not count. It found 49 uses at the start. The vendor colour curves (`relay_display::{nvapi, amd}`) and the mic-name matcher (`relay_vdevice::detect`) were split from their FFI so they are portable.)
+- [x] A `stub` platform backend that compiles everywhere and returns a clear "not supported on this platform" per capability, so the portable half builds and tests on any target. (`relay_core::platform` has 16 `Capability`s and `unsupported(cap)`, which reads "… is not supported on this platform (macos) yet". Actions refuse; reads give the honest empty answer. Stubbed: the IPC server and client, event loop, launcher, processes, APO control, `UnsupportedDisplay`, camera, elevation, uninstall execute (every present step reports *Failed*, not an empty success), catalog fetch, the receiver's render, netcheck, the recorder's clock and free space, and window placement.)
+- [x] `cargo check --target x86_64-apple-darwin` and `--target aarch64-apple-darwin` succeed for the portable crates. Where a crate cannot yet build, name the exact API that blocks it. (Stronger than asked: `cargo clippy --workspace --all-targets -D warnings` is green for **every** crate on both targets, the Tauri shell and the share engine included, so no crate is blocked at compile time. The share engine's sender (capture → encode) is Windows-only, and `relay-share` refuses those commands with the stub error; its `discover`/`recv` transport compiles. Nothing is linked and nothing has run on macOS. From Windows: `scripts/check-macos.ps1`, which uses zig from pip as the C compiler for `ring` and `objc2-exception-helper`.)
+- [x] CI builds the macOS targets. Private repos consume paid Actions minutes at a higher rate — tell Jake the cost before enabling it broadly. (`macos-cross` runs on every push and PR on **ubuntu-latest**, the cheapest runner, and cross-checks both Apple targets, then runs the seam test and stub tests on Linux. `macos-native` on `macos-latest` is `workflow_dispatch` only, because macOS minutes bill at a multiple of Linux; Jake decides before it runs on every push.)
+- [x] `docs/dev/porting.md`: for each seam, the Windows API today, the macOS equivalent, and the honest difficulty. Include the ones with no clean answer — DDC/CI over IOKit, and the endpoint APO, which has no macOS analogue and needs a different design (an AudioServerPlugIn), not a port. (GPU vibrance/hue is also rated "no clean answer": Apple GPUs have no API for it. The APO section weighs an AudioServerPlugIn against Core Audio process taps, because the plug-in route collides with "never touch global config".)
+- [x] No behaviour change on Windows: all gates stay green. (All green on the dev machine: fmt, clippy `-D warnings`, `cargo test --workspace`, `pnpm build`, `pnpm test` (244), and the footprint gate (1.59 MB, 7.49 MB peak RSS, 0 % CPU).)
 
 ### Kickoff prompt
 ```

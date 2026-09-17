@@ -125,12 +125,7 @@ fn areas(window: &tauri::Window) -> Vec<Area> {
 /// every path ends in `show`, so a failure here still opens a window.
 pub fn restore(window: &tauri::Window) {
     if let Some(state) = load().and_then(|s| placement(s, &areas(window))) {
-        // Outer bounds, so through `SetWindowPos` rather than Tauri's
-        // `set_size`, which sizes the client area.
-        #[cfg(windows)]
-        if let Ok(hwnd) = window.hwnd() {
-            win::set_bounds(hwnd.0, state);
-        }
+        win::set_bounds(window, state);
         if state.maximized {
             // The normal bounds are already in place, so un-maximising later
             // lands where the window was, on the monitor it was maximised on.
@@ -143,18 +138,13 @@ pub fn restore(window: &tauri::Window) {
 
 /// Write the state as the window goes away.
 pub fn persist(window: &tauri::Window) {
-    #[cfg(windows)]
-    if let Some(state) = window.hwnd().ok().and_then(|h| win::placement_of(h.0)) {
+    if let Some(state) = win::placement_of(window) {
         save(state);
     }
-    #[cfg(not(windows))]
-    let _ = window;
 }
 
 #[cfg(windows)]
 mod win {
-    use std::ffi::c_void;
-
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -168,8 +158,8 @@ mod win {
 
     /// The normal bounds in screen coordinates, and whether the window is (or
     /// would un-minimise to) maximised.
-    pub fn placement_of(hwnd: *mut c_void) -> Option<WindowState> {
-        let hwnd = HWND(hwnd);
+    pub fn placement_of(window: &tauri::Window) -> Option<WindowState> {
+        let hwnd = HWND(window.hwnd().ok()?.0);
         let mut wp = WINDOWPLACEMENT {
             length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
             ..Default::default()
@@ -205,12 +195,15 @@ mod win {
         })
     }
 
-    pub fn set_bounds(hwnd: *mut c_void, s: WindowState) {
+    /// Outer bounds, so through `SetWindowPos` rather than Tauri's
+    /// `set_size`, which sizes the client area.
+    pub fn set_bounds(window: &tauri::Window, s: WindowState) {
+        let Ok(hwnd) = window.hwnd() else { return };
         // SAFETY: a live window handle from Tauri. A failure leaves the
         // window where it was created: centred, the old behaviour.
         let _ = unsafe {
             SetWindowPos(
-                HWND(hwnd),
+                HWND(hwnd.0),
                 None,
                 s.x,
                 s.y,
@@ -220,6 +213,20 @@ mod win {
             )
         };
     }
+}
+
+/// Stub: nothing is read or restored, so the window opens at Tauri's default
+/// (centred) every launch. A port reads the frame from Tauri's own
+/// `outer_position` / `outer_size`, which on macOS are the window frame.
+#[cfg(not(windows))]
+mod win {
+    use super::WindowState;
+
+    pub fn placement_of(_window: &tauri::Window) -> Option<WindowState> {
+        None
+    }
+
+    pub fn set_bounds(_window: &tauri::Window, _s: WindowState) {}
 }
 
 #[cfg(test)]

@@ -26,11 +26,10 @@
 // SAFETY notes. Pure modules stay safe.
 #![deny(unsafe_code)]
 
+pub mod detect;
 pub mod installed;
 pub mod reg;
 
-#[cfg(windows)]
-pub mod detect;
 #[cfg(windows)]
 pub mod frames;
 #[cfg(windows)]

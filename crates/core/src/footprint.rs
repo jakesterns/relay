@@ -41,59 +41,64 @@ impl FootprintMeter {
 /// demand; what remains resident afterwards is what the core actually uses.
 /// Called after startup init and after each (rare) hardware re-probe so the
 /// ≤10 MB idle budget reflects steady state, not probe residue.
+pub use imp::trim_working_set;
+use imp::{cpu_time_100ns, rss_bytes};
+
 #[cfg(windows)]
-pub fn trim_working_set() {
-    use windows::Win32::System::ProcessStatus::K32EmptyWorkingSet;
-    use windows::Win32::System::Threading::GetCurrentProcess;
-    // SAFETY: trimming our own process; purely a paging hint.
-    unsafe {
-        let _ = K32EmptyWorkingSet(GetCurrentProcess());
+mod imp {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::ProcessStatus::{
+        K32EmptyWorkingSet, K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+
+    pub fn trim_working_set() {
+        // SAFETY: trimming our own process; purely a paging hint.
+        unsafe {
+            let _ = K32EmptyWorkingSet(GetCurrentProcess());
+        }
+    }
+
+    pub fn rss_bytes() -> u64 {
+        let mut pmc = PROCESS_MEMORY_COUNTERS::default();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        // SAFETY: querying our own process with a correctly sized out-struct.
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, size) };
+        if ok.as_bool() {
+            pmc.WorkingSetSize as u64
+        } else {
+            0
+        }
+    }
+
+    pub fn cpu_time_100ns() -> u64 {
+        let mut c = FILETIME::default();
+        let mut e = FILETIME::default();
+        let mut k = FILETIME::default();
+        let mut u = FILETIME::default();
+        // SAFETY: querying our own process.
+        let r = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+        if r.is_err() {
+            return 0;
+        }
+        let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+        ft(k) + ft(u)
     }
 }
 
+/// Stub: the readouts show zero rather than a guess. The footprint gate is a
+/// Windows measurement; a port brings `task_info` (macOS) or `/proc` (Linux).
 #[cfg(not(windows))]
-pub fn trim_working_set() {}
+mod imp {
+    pub fn trim_working_set() {}
 
-#[cfg(windows)]
-fn rss_bytes() -> u64 {
-    use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
-    use windows::Win32::System::Threading::GetCurrentProcess;
-    let mut pmc = PROCESS_MEMORY_COUNTERS::default();
-    let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
-    // SAFETY: querying our own process with a correctly sized out-struct.
-    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, size) };
-    if ok.as_bool() {
-        pmc.WorkingSetSize as u64
-    } else {
+    pub fn rss_bytes() -> u64 {
         0
     }
-}
 
-#[cfg(windows)]
-fn cpu_time_100ns() -> u64 {
-    use windows::Win32::Foundation::FILETIME;
-    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
-    let mut c = FILETIME::default();
-    let mut e = FILETIME::default();
-    let mut k = FILETIME::default();
-    let mut u = FILETIME::default();
-    // SAFETY: querying our own process.
-    let r = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
-    if r.is_err() {
-        return 0;
+    pub fn cpu_time_100ns() -> u64 {
+        0
     }
-    let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
-    ft(k) + ft(u)
-}
-
-#[cfg(not(windows))]
-fn rss_bytes() -> u64 {
-    0
-}
-
-#[cfg(not(windows))]
-fn cpu_time_100ns() -> u64 {
-    0
 }
 
 #[cfg(test)]

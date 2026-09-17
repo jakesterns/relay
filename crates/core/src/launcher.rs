@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 /// Name of the launcher the Run key and the installer invoke.
 pub const LAUNCHER_EXE: &str = "relay-svc.exe";
@@ -32,12 +32,6 @@ pub const CORE_EXE: &str = "relay-core.exe";
 /// Name of the Tauri window. The core launches it from the tray; it is never
 /// required for the core to run.
 pub const UI_EXE: &str = "relay-ui.exe";
-
-/// `CREATE_NO_WINDOW` — run a console application without giving it a visible
-/// console window. The child still has valid standard handles, so the core's
-/// "log to stderr when attached" path keeps working under a debugger.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Resolve a sibling of `exe` by file name.
 ///
@@ -58,92 +52,108 @@ pub fn autostart_target(exe: &Path) -> PathBuf {
     sibling_of(exe, LAUNCHER_EXE).filter(|p| p.exists()).unwrap_or_else(|| exe.to_path_buf())
 }
 
-/// Start `relay-core.exe` with no console window and do not wait for it.
-///
-/// `args` is forwarded verbatim, so `relay-svc run --data-dir X` starts
-/// `relay-core run --data-dir X` and the Run key's command line keeps the
-/// shape it always had.
+pub use imp::{focus_ui, open_ui, spawn_core};
+
 #[cfg(windows)]
-pub fn spawn_core(args: &[String]) -> Result<u32> {
+mod imp {
+    use super::*;
+    use anyhow::Context;
     use std::os::windows::process::CommandExt;
-
-    let me = std::env::current_exe().context("locating relay-svc.exe")?;
-    let core = sibling_of(&me, CORE_EXE)
-        .filter(|p| p.exists())
-        .with_context(|| format!("{CORE_EXE} not found next to {}", me.display()))?;
-
-    let child = std::process::Command::new(&core)
-        .args(args)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .with_context(|| format!("starting {}", core.display()))?;
-    Ok(child.id())
-}
-
-#[cfg(not(windows))]
-pub fn spawn_core(_args: &[String]) -> Result<u32> {
-    anyhow::bail!("the windowless launcher is Windows-only")
-}
-
-/// Bring the Relay window up: focus the one that is already running, or start
-/// it if there is none. Used by the tray's "Open Relay".
-///
-/// Focusing first saves a process start: the window has its own
-/// single-instance guard now (a second `relay-ui.exe` hands focus to the first
-/// and exits), but there is no reason to launch one just for that.
-#[cfg(windows)]
-pub fn open_ui() -> Result<()> {
-    if focus_ui() {
-        return Ok(());
-    }
-    let me = std::env::current_exe().context("locating relay-core.exe")?;
-    let ui = sibling_of(&me, UI_EXE)
-        .filter(|p| p.exists())
-        .with_context(|| format!("{UI_EXE} not found next to {}", me.display()))?;
-    std::process::Command::new(&ui)
-        .spawn()
-        .with_context(|| format!("starting {}", ui.display()))?;
-    Ok(())
-}
-
-/// Bring an existing Relay window to the front. `false` if none is up.
-///
-/// Also what a second launch of `relay-ui.exe` calls before exiting. It works
-/// from there because the process the user just started is allowed to take
-/// the foreground, and it is handing it straight to the window they wanted.
-#[cfg(windows)]
-pub fn focus_ui() -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
         IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
     };
 
-    let Some(p) =
-        crate::processes::list_windowed().into_iter().find(|p| p.exe.eq_ignore_ascii_case(UI_EXE))
-    else {
-        return false;
-    };
-    let hwnd = HWND(p.hwnd as usize as *mut std::ffi::c_void);
-    // SAFETY: a window handle the enumeration just produced. Both calls are
-    // no-ops on a handle that died in between.
-    unsafe {
-        // Only un-minimise. SW_RESTORE on a maximised window would also
-        // un-maximise it, which is not what "show me Relay" means.
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
+    /// `CREATE_NO_WINDOW` — run a console application without giving it a
+    /// visible console window. The child still has valid standard handles,
+    /// so the core's "log to stderr when attached" path keeps working under
+    /// a debugger.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    /// Start `relay-core.exe` with no console window and do not wait for it.
+    ///
+    /// `args` is forwarded verbatim, so `relay-svc run --data-dir X` starts
+    /// `relay-core run --data-dir X` and the Run key's command line keeps the
+    /// shape it always had.
+    pub fn spawn_core(args: &[String]) -> Result<u32> {
+        let me = std::env::current_exe().context("locating relay-svc.exe")?;
+        let core = sibling_of(&me, CORE_EXE)
+            .filter(|p| p.exists())
+            .with_context(|| format!("{CORE_EXE} not found next to {}", me.display()))?;
+
+        let child = std::process::Command::new(&core)
+            .args(args)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .with_context(|| format!("starting {}", core.display()))?;
+        Ok(child.id())
+    }
+
+    /// Bring the Relay window up: focus the one that is already running, or
+    /// start it if there is none. Used by the tray's "Open Relay".
+    ///
+    /// Focusing first saves a process start: the window has its own
+    /// single-instance guard now (a second `relay-ui.exe` hands focus to the
+    /// first and exits), but there is no reason to launch one just for that.
+    pub fn open_ui() -> Result<()> {
+        if focus_ui() {
+            return Ok(());
         }
-        SetForegroundWindow(hwnd).as_bool()
+        let me = std::env::current_exe().context("locating relay-core.exe")?;
+        let ui = sibling_of(&me, UI_EXE)
+            .filter(|p| p.exists())
+            .with_context(|| format!("{UI_EXE} not found next to {}", me.display()))?;
+        std::process::Command::new(&ui)
+            .spawn()
+            .with_context(|| format!("starting {}", ui.display()))?;
+        Ok(())
+    }
+
+    /// Bring an existing Relay window to the front. `false` if none is up.
+    ///
+    /// Also what a second launch of `relay-ui.exe` calls before exiting. It
+    /// works from there because the process the user just started is allowed
+    /// to take the foreground, and it is handing it straight to the window
+    /// they wanted.
+    pub fn focus_ui() -> bool {
+        let Some(p) = crate::processes::list_windowed()
+            .into_iter()
+            .find(|p| p.exe.eq_ignore_ascii_case(UI_EXE))
+        else {
+            return false;
+        };
+        let hwnd = HWND(p.hwnd as usize as *mut std::ffi::c_void);
+        // SAFETY: a window handle the enumeration just produced. Both calls
+        // are no-ops on a handle that died in between.
+        unsafe {
+            // Only un-minimise. SW_RESTORE on a maximised window would also
+            // un-maximise it, which is not what "show me Relay" means.
+            if IsIconic(hwnd).as_bool() {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(hwnd).as_bool()
+        }
     }
 }
 
+/// Stub. A macOS port launches the core as a LaunchAgent and the window as an
+/// app bundle, so neither half of this module carries over as code.
 #[cfg(not(windows))]
-pub fn focus_ui() -> bool {
-    false
-}
+mod imp {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
 
-#[cfg(not(windows))]
-pub fn open_ui() -> Result<()> {
-    anyhow::bail!("the Relay window is Windows-only")
+    pub fn spawn_core(_args: &[String]) -> Result<u32> {
+        Err(unsupported(Capability::Launcher))
+    }
+
+    pub fn open_ui() -> Result<()> {
+        Err(unsupported(Capability::Launcher))
+    }
+
+    pub fn focus_ui() -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

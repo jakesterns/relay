@@ -32,7 +32,6 @@ pub enum CoreEvent {
 
 /// Handle to the loop thread. Dropping it asks the loop to quit and joins it.
 pub struct WinLoop {
-    #[cfg(windows)]
     thread_id: u32,
     join: Option<std::thread::JoinHandle<()>>,
 }
@@ -41,15 +40,7 @@ impl WinLoop {
     /// Start the loop thread. It emits the current foreground window immediately
     /// so the service starts from a known state.
     pub fn spawn(tx: UnboundedSender<CoreEvent>, hotkeys: Vec<Hotkey>) -> Result<Self> {
-        #[cfg(windows)]
-        {
-            imp::spawn(tx, hotkeys)
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = (tx, hotkeys);
-            anyhow::bail!("the Relay core only runs on Windows")
-        }
+        imp::spawn(tx, hotkeys)
     }
 
     pub fn stop(mut self) {
@@ -60,7 +51,6 @@ impl WinLoop {
     }
 
     fn request_stop(&self) {
-        #[cfg(windows)]
         imp::post_quit(self.thread_id);
     }
 }
@@ -74,21 +64,7 @@ impl Drop for WinLoop {
     }
 }
 
-/// Full image path of a process, or `None` if it cannot be queried.
-#[cfg(windows)]
-pub fn process_image_path(pid: u32) -> Option<String> {
-    // SAFETY: only limited-information access is requested; see `imp::process_image`.
-    unsafe { imp::process_image(pid) }
-}
-
-/// The current foreground window, described the same way the hook events are.
-/// Used by the service's slow tick to notice a game moved monitors through a
-/// path no hook covers (e.g. Win+Shift+Arrow).
-#[cfg(windows)]
-pub fn current_foreground() -> Option<Foreground> {
-    // SAFETY: read-only queries on the current foreground window.
-    unsafe { imp::describe(windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()) }
-}
+pub use imp::{current_foreground, process_image_path};
 
 /// `C:\Games\CoD\cod.exe` → `cod.exe`
 pub fn exe_name(path: &str) -> String {
@@ -269,6 +245,20 @@ mod imp {
 
         let thread_id = id_rx.recv()?;
         Ok(WinLoop { thread_id, join: Some(join) })
+    }
+
+    /// Full image path of a process, or `None` if it cannot be queried.
+    pub fn process_image_path(pid: u32) -> Option<String> {
+        // SAFETY: only limited-information access is requested; see `process_image`.
+        unsafe { process_image(pid) }
+    }
+
+    /// The current foreground window, described the same way the hook events
+    /// are. Used by the service's slow tick to notice a game moved monitors
+    /// through a path no hook covers (e.g. Win+Shift+Arrow).
+    pub fn current_foreground() -> Option<Foreground> {
+        // SAFETY: read-only queries on the current foreground window.
+        unsafe { describe(GetForegroundWindow()) }
     }
 
     pub fn post_quit(thread_id: u32) {
@@ -461,6 +451,29 @@ mod imp {
         let _ = CloseHandle(h);
         r.ok()?;
         Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+/// Stub: no event loop, so the service cannot start. The reads answer "none".
+/// A macOS port watches `NSWorkspace.didActivateApplicationNotification` and
+/// registers hotkeys with Carbon `RegisterEventHotKey`.
+#[cfg(not(windows))]
+mod imp {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+
+    pub fn spawn(_tx: UnboundedSender<CoreEvent>, _hotkeys: Vec<Hotkey>) -> Result<WinLoop> {
+        Err(unsupported(Capability::FocusWatch))
+    }
+
+    pub fn post_quit(_thread_id: u32) {}
+
+    pub fn process_image_path(_pid: u32) -> Option<String> {
+        None
+    }
+
+    pub fn current_foreground() -> Option<Foreground> {
+        None
     }
 }
 

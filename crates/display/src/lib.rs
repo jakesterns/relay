@@ -17,18 +17,20 @@
 //!   *not* NVIDIA's, because the two drivers do not expose the same control;
 //!   the module docs carry the reasoning.
 //!
+//! The unit mappings in `nvapi` and `amd` and all of `gamma`'s maths and `vcp`
+//! are portable; the driver calls sit in Windows-only `ffi` submodules, and
+//! `ddc` and `gamma::io` are Windows-only. See `docs/dev/porting.md`.
+//!
 //! This crate deliberately does not depend on `relay-core`: it exposes raw
 //! operations and raw state; the `DisplayControl` adapter in the core is what
 //! enforces capture-before-apply and owns the snapshot shape.
 
+pub mod amd;
 pub mod gamma;
+pub mod nvapi;
 pub mod vcp;
 
 #[cfg(windows)]
-pub mod amd;
-#[cfg(windows)]
 pub mod ddc;
-#[cfg(windows)]
-pub mod nvapi;
 
 pub const CRATE: &str = "relay-display";

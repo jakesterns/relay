@@ -9,7 +9,7 @@
 //! - Registration itself is double-gated in `relay_vdevice::livereg`
 //!   (`RELAY_VDEVICE_ALLOW_LIVE_WRITE=1` + elevation via HKLM ACLs).
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Paths;
@@ -42,35 +42,6 @@ fn load(paths: &Paths) -> Result<InstalledFile> {
 fn save(paths: &Paths, file: &InstalledFile) -> Result<()> {
     installed::save(&paths.installed_file(), file)
         .with_context(|| format!("writing {}", paths.installed_file().display()))
-}
-
-#[cfg(windows)]
-pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
-    use relay_vdevice::detect;
-    let file = load(paths)?;
-    Ok(VdeviceStatus {
-        windows_build: detect::windows_build(),
-        camera_supported: detect::frameserver_supported(),
-        camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
-        obs_virtualcam: detect::obs_virtualcam(),
-        mic_targets: detect::mic_targets().unwrap_or_default(),
-        consent: file.consent,
-        elevated: crate::processes::is_elevated(),
-    })
-}
-
-#[cfg(not(windows))]
-pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
-    let file = load(paths)?;
-    Ok(VdeviceStatus {
-        windows_build: None,
-        camera_supported: false,
-        camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
-        obs_virtualcam: None,
-        mic_targets: Vec::new(),
-        consent: file.consent,
-        elevated: false,
-    })
 }
 
 /// Record the first-run decision. Never installs anything by itself.
@@ -123,82 +94,130 @@ fn camera_dll_path() -> Result<std::path::PathBuf> {
         .with_context(|| format!("{CAMERA_DLL} not found next to the running binary"))
 }
 
-/// Register the camera media source. Consent-checked, record-then-apply,
-/// idempotent refusal when already recorded.
+pub use imp::{install_camera_live, receive_routing, status, uninstall_camera_live};
+
 #[cfg(windows)]
-pub fn install_camera_live(paths: &Paths) -> Result<()> {
-    let mut file = load(paths)?;
-    if !file.consent.as_ref().is_some_and(|c| c.camera) {
-        bail!("no recorded consent for the virtual camera — opt in first");
-    }
-    if file.component(CAMERA_MEDIA_SOURCE).is_some() {
-        bail!("the camera media source is already recorded as registered; uninstall first");
-    }
-    let dll = camera_dll_path()?;
-    let plan = relay_vdevice::reg::plan_camera_install(&dll.to_string_lossy());
+mod imp {
+    use super::*;
+    use anyhow::bail;
 
-    // Record first: if the registry write dies half-way, uninstall still
-    // knows every key the plan would have created.
-    file.record(plan.record.clone());
-    save(paths, &file)?;
+    pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
+        use relay_vdevice::detect;
+        let file = load(paths)?;
+        Ok(VdeviceStatus {
+            windows_build: detect::windows_build(),
+            camera_supported: detect::frameserver_supported(),
+            camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
+            obs_virtualcam: detect::obs_virtualcam(),
+            mic_targets: detect::mic_targets().unwrap_or_default(),
+            consent: file.consent,
+            elevated: crate::processes::is_elevated(),
+        })
+    }
 
-    match relay_vdevice::livereg::apply(&plan.keys) {
-        Ok(()) => {
-            tracing::info!(dll = %dll.display(), "camera media source registered");
-            Ok(())
+    /// Register the camera media source. Consent-checked, record-then-apply,
+    /// idempotent refusal when already recorded.
+    pub fn install_camera_live(paths: &Paths) -> Result<()> {
+        let mut file = load(paths)?;
+        if !file.consent.as_ref().is_some_and(|c| c.camera) {
+            bail!("no recorded consent for the virtual camera — opt in first");
         }
-        Err(e) => {
-            // Roll the record back only for the pure refusals; a half-applied
-            // write keeps the record so uninstall can clean up.
-            if matches!(e, relay_vdevice::livereg::LiveRegError::WritesDisabled) {
-                file.remove(CAMERA_MEDIA_SOURCE);
-                save(paths, &file)?;
+        if file.component(CAMERA_MEDIA_SOURCE).is_some() {
+            bail!("the camera media source is already recorded as registered; uninstall first");
+        }
+        let dll = camera_dll_path()?;
+        let plan = relay_vdevice::reg::plan_camera_install(&dll.to_string_lossy());
+
+        // Record first: if the registry write dies half-way, uninstall still
+        // knows every key the plan would have created.
+        file.record(plan.record.clone());
+        save(paths, &file)?;
+
+        match relay_vdevice::livereg::apply(&plan.keys) {
+            Ok(()) => {
+                tracing::info!(dll = %dll.display(), "camera media source registered");
+                Ok(())
             }
-            Err(e).context("registering the camera media source (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)")
+            Err(e) => {
+                // Roll the record back only for the pure refusals; a half-applied
+                // write keeps the record so uninstall can clean up.
+                if matches!(e, relay_vdevice::livereg::LiveRegError::WritesDisabled) {
+                    file.remove(CAMERA_MEDIA_SOURCE);
+                    save(paths, &file)?;
+                }
+                Err(e).context("registering the camera media source (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)")
+            }
         }
+    }
+
+    /// Remove the recorded registration; on success the component leaves
+    /// `installed.json` (DoD: after a full opt-out the list is empty).
+    pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
+        let mut file = load(paths)?;
+        let Some(record) = file.component(CAMERA_MEDIA_SOURCE).cloned() else {
+            bail!("no camera registration recorded; nothing to uninstall");
+        };
+        let keys = relay_vdevice::reg::plan_camera_uninstall(&record);
+        relay_vdevice::livereg::remove(&keys).context(
+            "removing the camera media source keys (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)",
+        )?;
+        file.remove(CAMERA_MEDIA_SOURCE);
+        save(paths, &file)?;
+        tracing::info!("camera media source unregistered");
+        Ok(())
+    }
+
+    /// What the service passes to `relay-share recv`: camera on when consented
+    /// and registered; mic route to the first VB-Cable (preferred) or
+    /// VoiceMeeter input when the microphone opt-in is on.
+    pub fn receive_routing(paths: &Paths) -> (bool, Option<String>) {
+        let Ok(file) = load(paths) else { return (false, None) };
+        let camera = file.consent.as_ref().is_some_and(|c| c.camera)
+            && file.component(CAMERA_MEDIA_SOURCE).is_some()
+            && relay_vdevice::detect::frameserver_supported();
+        let mic = if file.consent.as_ref().is_some_and(|c| c.microphone) {
+            let mut targets = relay_vdevice::detect::mic_targets().unwrap_or_default();
+            targets.sort_by_key(|t| t.kind != relay_vdevice::detect::MicTargetKind::VbCable);
+            targets.into_iter().next().map(|t| t.endpoint_id)
+        } else {
+            None
+        };
+        (camera, mic)
     }
 }
 
-/// Remove the recorded registration; on success the component leaves
-/// `installed.json` (DoD: after a full opt-out the list is empty).
-#[cfg(windows)]
-pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
-    let mut file = load(paths)?;
-    let Some(record) = file.component(CAMERA_MEDIA_SOURCE).cloned() else {
-        bail!("no camera registration recorded; nothing to uninstall");
-    };
-    let keys = relay_vdevice::reg::plan_camera_uninstall(&record);
-    relay_vdevice::livereg::remove(&keys).context(
-        "removing the camera media source keys (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate + elevation)",
-    )?;
-    file.remove(CAMERA_MEDIA_SOURCE);
-    save(paths, &file)?;
-    tracing::info!("camera media source unregistered");
-    Ok(())
-}
-
-/// What the service passes to `relay-share recv`: camera on when consented
-/// and registered; mic route to the first VB-Cable (preferred) or
-/// VoiceMeeter input when the microphone opt-in is on.
-#[cfg(windows)]
-pub fn receive_routing(paths: &Paths) -> (bool, Option<String>) {
-    let Ok(file) = load(paths) else { return (false, None) };
-    let camera = file.consent.as_ref().is_some_and(|c| c.camera)
-        && file.component(CAMERA_MEDIA_SOURCE).is_some()
-        && relay_vdevice::detect::frameserver_supported();
-    let mic = if file.consent.as_ref().is_some_and(|c| c.microphone) {
-        let mut targets = relay_vdevice::detect::mic_targets().unwrap_or_default();
-        targets.sort_by_key(|t| t.kind != relay_vdevice::detect::MicTargetKind::VbCable);
-        targets.into_iter().next().map(|t| t.endpoint_id)
-    } else {
-        None
-    };
-    (camera, mic)
-}
-
+/// Stub: status reports what `installed.json` records and that no camera can
+/// be registered; install and uninstall refuse. A macOS port is a CoreMediaIO
+/// camera extension (a system extension, not a registry entry).
 #[cfg(not(windows))]
-pub fn receive_routing(_paths: &Paths) -> (bool, Option<String>) {
-    (false, None)
+mod imp {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+
+    pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
+        let file = load(paths)?;
+        Ok(VdeviceStatus {
+            windows_build: None,
+            camera_supported: false,
+            camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
+            obs_virtualcam: None,
+            mic_targets: Vec::new(),
+            consent: file.consent,
+            elevated: false,
+        })
+    }
+
+    pub fn install_camera_live(_paths: &Paths) -> Result<()> {
+        Err(unsupported(Capability::VirtualCamera))
+    }
+
+    pub fn uninstall_camera_live(_paths: &Paths) -> Result<()> {
+        Err(unsupported(Capability::VirtualCamera))
+    }
+
+    pub fn receive_routing(_paths: &Paths) -> (bool, Option<String>) {
+        (false, None)
+    }
 }
 
 #[cfg(test)]

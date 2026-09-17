@@ -102,7 +102,7 @@ mod imp {
         Ok(false)
     }
     pub fn set(_enabled: bool) -> Result<()> {
-        anyhow::bail!("autostart is Windows-only")
+        Err(crate::platform::unsupported(crate::platform::Capability::Autostart))
     }
 }
 

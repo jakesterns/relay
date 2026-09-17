@@ -73,7 +73,8 @@ fn main() -> std::process::ExitCode {
     #[cfg(not(windows))]
     {
         let _ = request;
-        log_to(None, "elevated installs are Windows-only");
+        let e = relay_core::platform::unsupported(relay_core::platform::Capability::Elevation);
+        log_to(None, &e.to_string());
         std::process::ExitCode::FAILURE
     }
 }

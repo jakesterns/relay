@@ -13,11 +13,6 @@
 //! restores on the way out (`Service::run`), so there is no way to leave a
 //! game profile applied by quitting from here.
 
-/// Sent to the winloop window when the icon is clicked. `WM_APP + 1`; the
-/// window class is ours alone, so no other message can collide with it.
-#[cfg(windows)]
-pub const WM_TRAY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
-
 /// Menu command ids. Non-zero because `TPM_RETURNCMD` reports 0 for "the menu
 /// was dismissed without choosing anything".
 pub const ID_OPEN: u32 = 1;
@@ -52,7 +47,7 @@ impl TrayCommand {
 pub const TOOLTIP: &str = "Relay is running in the background";
 
 #[cfg(windows)]
-pub use imp::Tray;
+pub use imp::{Tray, WM_TRAY};
 
 #[cfg(windows)]
 mod imp {
@@ -67,9 +62,13 @@ mod imp {
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
         SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING,
-        TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
-        WM_RBUTTONUP,
+        TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+        WM_NULL, WM_RBUTTONUP,
     };
+
+    /// Sent to the winloop window when the icon is clicked. `WM_APP + 1`; the
+    /// window class is ours alone, so no other message can collide with it.
+    pub const WM_TRAY: u32 = WM_APP + 1;
 
     /// One icon per process. Removing it on drop matters: an icon left behind
     /// by a dead process sticks in the notification area until the user hovers

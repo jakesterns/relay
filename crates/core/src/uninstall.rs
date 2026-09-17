@@ -32,7 +32,7 @@
 //! below it — the plan, its ordering, its rendering — is a pure function of
 //! that struct, which is what makes the promise testable without a VM.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -318,12 +318,13 @@ impl Report {
     }
 }
 
-#[cfg(windows)]
 pub use imp::{execute, probe};
+pub use installer::{finish_elevated, launch_uninstaller};
 
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use std::path::Path;
     use tracing::{info, warn};
 
     /// Read the machine, touching nothing.
@@ -512,112 +513,139 @@ mod imp {
     }
 }
 
-/// Finish the two HKLM steps in the elevated helper. One UAC prompt, and
-/// only when there is something left that needs it.
-///
-/// This used to re-launch `relay-core uninstall --components-only` under
-/// `runas`, which could not work: elevation starts the child from the user's
-/// logon environment block, not the parent's, so the live-write gates the
-/// parent set never reached it and both steps failed the gate check. The
-/// helper needs no inherited environment — it arms each gate itself, around
-/// one vetted call, and reports what it did.
+/// The Windows uninstaller (NSIS, found through Add/Remove Programs) and the
+/// elevated half of an in-app uninstall.
 #[cfg(windows)]
-pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
-    use crate::elevate::{ElevatedOp, LaunchError};
-    crate::elevate::run(
-        paths,
-        &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera, ElevatedOp::RemoveFirewall],
-    )
-    .map_err(|e| match e {
-        LaunchError::Declined => anyhow::anyhow!("{e}"),
-        LaunchError::Other(e) => e,
-    })
-}
+mod installer {
+    use super::*;
 
-#[cfg(not(windows))]
-pub fn finish_elevated(_paths: &Paths) -> Result<crate::elevate::Response> {
-    anyhow::bail!("elevation is Windows-only")
-}
-
-/// Registry name the NSIS bundle registers itself under, per-user. Tauri's
-/// NSIS template keys Add/Remove Programs on the product name.
-#[cfg(windows)]
-const ARP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Relay";
-
-/// Where the NSIS uninstaller lives, according to Add/Remove Programs. Falls
-/// back to `uninstall.exe` beside this exe, which is where the per-user NSIS
-/// template puts it.
-#[cfg(windows)]
-pub fn uninstaller_path() -> Option<PathBuf> {
-    read_arp_value("UninstallString")
-        .map(|s| PathBuf::from(s.trim_matches('"')))
-        .filter(|p| p.exists())
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.join("uninstall.exe")))
-                .filter(|p| p.exists())
-        })
-}
-
-#[cfg(windows)]
-fn read_arp_value(name: &str) -> Option<String> {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
-
-    let key: Vec<u16> = ARP_KEY.encode_utf16().chain(std::iter::once(0)).collect();
-    let val: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut buf = [0u16; 1024];
-    let mut len = std::mem::size_of_val(&buf) as u32;
-    // SAFETY: out-buffer and length are valid; RegGetValueW NUL-terminates
-    // and never writes past `len`.
-    let r = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            PCWSTR(key.as_ptr()),
-            PCWSTR(val.as_ptr()),
-            RRF_RT_REG_SZ,
-            None,
-            Some(buf.as_mut_ptr() as *mut _),
-            Some(&mut len),
+    /// Finish the two HKLM steps in the elevated helper. One UAC prompt, and
+    /// only when there is something left that needs it.
+    ///
+    /// This used to re-launch `relay-core uninstall --components-only` under
+    /// `runas`, which could not work: elevation starts the child from the user's
+    /// logon environment block, not the parent's, so the live-write gates the
+    /// parent set never reached it and both steps failed the gate check. The
+    /// helper needs no inherited environment — it arms each gate itself, around
+    /// one vetted call, and reports what it did.
+    pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
+        use crate::elevate::{ElevatedOp, LaunchError};
+        crate::elevate::run(
+            paths,
+            &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera, ElevatedOp::RemoveFirewall],
         )
-    };
-    r.ok().ok()?;
-    let chars = (len as usize / 2).saturating_sub(1);
-    Some(String::from_utf16_lossy(&buf[..chars]))
+        .map_err(|e| match e {
+            LaunchError::Declined => anyhow::anyhow!("{e}"),
+            LaunchError::Other(e) => e,
+        })
+    }
+
+    /// Registry name the NSIS bundle registers itself under, per-user. Tauri's
+    /// NSIS template keys Add/Remove Programs on the product name.
+    const ARP_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Relay";
+
+    /// Where the NSIS uninstaller lives, according to Add/Remove Programs. Falls
+    /// back to `uninstall.exe` beside this exe, which is where the per-user NSIS
+    /// template puts it.
+    pub fn uninstaller_path() -> Option<PathBuf> {
+        read_arp_value("UninstallString")
+            .map(|s| PathBuf::from(s.trim_matches('"')))
+            .filter(|p| p.exists())
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.parent().map(|d| d.join("uninstall.exe")))
+                    .filter(|p| p.exists())
+            })
+    }
+
+    fn read_arp_value(name: &str) -> Option<String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+
+        let key: Vec<u16> = ARP_KEY.encode_utf16().chain(std::iter::once(0)).collect();
+        let val: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut buf = [0u16; 1024];
+        let mut len = std::mem::size_of_val(&buf) as u32;
+        // SAFETY: out-buffer and length are valid; RegGetValueW NUL-terminates
+        // and never writes past `len`.
+        let r = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(val.as_ptr()),
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr() as *mut _),
+                Some(&mut len),
+            )
+        };
+        r.ok().ok()?;
+        let chars = (len as usize / 2).saturating_sub(1);
+        Some(String::from_utf16_lossy(&buf[..chars]))
+    }
+
+    /// Start the Windows uninstaller and return. The caller shuts the core down
+    /// afterwards so the uninstaller can replace the files it is holding.
+    pub fn launch_uninstaller() -> Result<PathBuf> {
+        use anyhow::Context;
+        let path = uninstaller_path().context(
+            "Relay's uninstaller was not found — this looks like a build run from the repo rather \
+             than an installed copy. Use `relay-core uninstall` instead.",
+        )?;
+        std::process::Command::new(&path)
+            .spawn()
+            .with_context(|| format!("launching {}", path.display()))?;
+        Ok(path)
+    }
 }
 
-/// Start the Windows uninstaller and return. The caller shuts the core down
-/// afterwards so the uninstaller can replace the files it is holding.
-#[cfg(windows)]
-pub fn launch_uninstaller() -> Result<PathBuf> {
-    use anyhow::Context;
-    let path = uninstaller_path().context(
-        "Relay's uninstaller was not found — this looks like a build run from the repo rather \
-         than an installed copy. Use `relay-core uninstall` instead.",
-    )?;
-    std::process::Command::new(&path)
-        .spawn()
-        .with_context(|| format!("launching {}", path.display()))?;
-    Ok(path)
-}
-
+/// Stub: what `probe` can see is the data root, so that is all the plan
+/// holds, and executing it refuses rather than reporting an empty success.
 #[cfg(not(windows))]
-pub fn launch_uninstaller() -> Result<PathBuf> {
-    anyhow::bail!("the Windows uninstaller is Windows-only")
-}
+mod imp {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
 
-#[cfg(not(windows))]
-pub fn probe(paths: &Paths) -> MachineState {
-    MachineState {
-        data_targets: paths.data_paths().into_iter().filter(|p| p.exists()).collect(),
-        ..Default::default()
+    pub fn probe(paths: &Paths) -> MachineState {
+        MachineState {
+            data_targets: paths.data_paths().into_iter().filter(|p| p.exists()).collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn execute(_paths: &Paths, plan: &Plan) -> Report {
+        let error = unsupported(Capability::Uninstall).to_string();
+        Report {
+            steps: plan
+                .steps
+                .iter()
+                .map(|s| StepReport {
+                    kind: s.kind,
+                    target: s.target.clone(),
+                    outcome: if s.present {
+                        Outcome::Failed { error: error.clone() }
+                    } else {
+                        Outcome::Skipped
+                    },
+                })
+                .collect(),
+        }
     }
 }
 
 #[cfg(not(windows))]
-pub fn execute(_paths: &Paths, _plan: &Plan) -> Report {
-    Report::default()
+mod installer {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+
+    pub fn finish_elevated(_paths: &Paths) -> Result<crate::elevate::Response> {
+        Err(unsupported(Capability::Elevation))
+    }
+
+    pub fn launch_uninstaller() -> Result<PathBuf> {
+        Err(unsupported(Capability::Uninstall))
+    }
 }
 
 /// The plan for this machine right now.
@@ -628,6 +656,7 @@ pub fn plan(paths: &Paths, keep_data: bool) -> Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// A machine where the user opted into both components and autostart.
     fn everything_installed() -> MachineState {

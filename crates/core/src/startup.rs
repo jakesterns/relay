@@ -134,10 +134,13 @@ pub async fn ensure_running() -> Result<Started, StartError> {
 
 #[cfg(not(windows))]
 pub async fn ensure_running() -> Result<Started, StartError> {
-    Err(StartError::SpawnRefused { reason: "Relay's core only runs on Windows".into() })
+    Err(StartError::SpawnRefused {
+        reason: crate::platform::unsupported(crate::platform::Capability::Ipc).to_string(),
+    })
 }
 
 /// Where to point someone at for the details. A folder, not a command.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn log_location() -> String {
     crate::config::Paths::default_for_user()
         .map(|p| p.log_dir().display().to_string())

@@ -231,10 +231,7 @@ async fn resolve_peer(peer: &Option<String>) -> Result<(SocketAddr, String)> {
     Ok((SocketAddr::new(pick.addr, pick.port), pick.name.clone()))
 }
 
-/// msid track ids for the two audio tracks. These are the wire contract the
-/// receiver classifies on; see [`super::audio_role`].
-pub const PROGRAM_TRACK_ID: &str = "relay-audio";
-pub const MIC_TRACK_ID: &str = "relay-audio-mic";
+pub use super::{MIC_TRACK_ID, PROGRAM_TRACK_ID};
 
 type AudioTrackPair = (Arc<TrackLocalStaticSample>, Arc<dyn webrtc::rtp_transceiver::RtpSender>);
 

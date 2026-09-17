@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual only: runs the native macOS job below as well.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -64,3 +66,126 @@ jobs:
       - name: Footprint gate (release relay-core, 30 s idle)
         shell: pwsh
         run: ./scripts/footprint.ps1
+
+  # Relay's bar on macOS today is "it compiles for the Apple targets", not "it
+  # runs": there is no Mac to run it on. This checks both targets from a Linux
+  # runner (1x minutes) with zig standing in for the Apple C toolchain, which
+  # only two build scripts need (ring, objc2-exception-helper). Nothing links.
+  # It also runs the platform seam rule and the stub tests on a non-Windows
+  # OS. docs/dev/porting.md.
+  macos-cross:
+    name: Compiles for macOS (cross-check from Linux)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      # tauri::generate_context! embeds ui/dist.
+      - name: UI install + build
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: macos-cross
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: zig + the apple-cc shim
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          python -m pip install --quiet --target "$RUNNER_TEMP/zig" ziglang==0.16.0
+          rustc -O --edition 2021 scripts/apple-cc/main.rs -o "$RUNNER_TEMP/apple-cc"
+          cp "$RUNNER_TEMP/apple-cc" "$RUNNER_TEMP/apple-cc-ar"
+          {
+            echo "ZIG=$RUNNER_TEMP/zig/ziglang/zig"
+            for t in aarch64_apple_darwin x86_64_apple_darwin; do
+              echo "CC_$t=$RUNNER_TEMP/apple-cc"
+              echo "AR_$t=$RUNNER_TEMP/apple-cc-ar"
+            done
+          } >> "$GITHUB_ENV"
+
+      - name: cargo clippy (aarch64-apple-darwin)
+        run: cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+
+      - name: cargo clippy (x86_64-apple-darwin)
+        run: cargo clippy --workspace --all-targets --target x86_64-apple-darwin -- -D warnings
+
+      - name: Platform seam rule and stubs (on Linux)
+        run: |
+          cargo test -p relay-core --test platform_seam
+          cargo test -p relay-core --lib platform::
+
+  # A real Mac runner. Manual only: macOS minutes on a private repo bill at a
+  # large multiple of Linux minutes, so this is not on every push. The cross
+  # job above is the gate; this is the first place the stubs actually run on
+  # macOS. The full test suite has never run on a non-Windows OS, so that
+  # step reports without failing the job.
+  macos-native:
+    name: macOS native (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - name: UI install + build
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          key: macos-native
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Platform seam rule and stubs
+        run: |
+          cargo test -p relay-core --test platform_seam
+          cargo test -p relay-core --lib platform::
+
+      - name: cargo test --workspace (informational)
+        continue-on-error: true
+        run: cargo test --workspace

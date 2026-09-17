@@ -110,6 +110,7 @@ relay-handoff/        original handoff bundle; do not edit
 - `service.rs` — wires the above; single-threaded tokio runtime. 1 s tick runs the WASAPI-exclusive watcher (only while a profile with audio processing is active) → `AudioChainState::ExclusiveBypassed`.
 - `firewall.rs` — the inbound Windows Firewall rule for `relay-share.exe`, the only Relay binary that listens (`relay-core` is named-pipe only, so it gets no rule). Reads are a pure parse of the firewall policy store's rule strings (no COM, no elevation, fixture-tested); writes go through `INetFwPolicy2` in the elevated helper only, gated on `RELAY_FIREWALL_ALLOW_LIVE_WRITE`, and only ever add one rule or remove rules by name. Scope is private + domain, never public. `status()` classifies the live state — `Blocked` is the one that otherwise looks like a dead network — and the Share/Receive `FirewallBanner` renders it. Recorded in `firewall.json`; removed by `uninstall::StepKind::RemoveFirewallRule`. `relay-core firewall` CLI.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.
+- `platform.rs` — the portability seam: `Capability` and `unsupported()`. Every `windows` crate call sits in a `#[cfg(windows)]` module with a `not(windows)` twin that returns `unsupported(cap)` for actions (`tests/platform_seam.rs` enforces the first half). macOS **compiles** (S28, 2026-09-16) and has never run; `docs/dev/porting.md` maps each capability to its macOS API and difficulty.
 
 ### Build & run
 ```
@@ -120,6 +121,7 @@ cargo run -p relay-core -- status   # human summary; --json for raw state
 cargo run -p relay-core -- autostart on|off
 cargo test -p relay-core --test crash_restore   # spawns a real core, taskkill /F, checks restore
 pwsh scripts/footprint.ps1          # release footprint gate (<=10 MB WS, <=0.5 % CPU); also in CI
+powershell -File scripts/check-macos.ps1   # clippy for both Apple targets from Windows (zig via pip); CI job macos-cross
 cd ui && pnpm install && pnpm tauri dev   # UI (needs the service running for live data; falls back to mock data otherwise)
 cd ui && pnpm test                  # UI component tests (Vitest + jsdom); also in CI
 ```

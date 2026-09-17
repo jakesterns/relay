@@ -302,10 +302,13 @@ pub fn elevate_dir(paths: &Paths) -> PathBuf {
     paths.data_dir().join("elevate")
 }
 
+// Only the Windows launch writes request files.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn request_path(paths: &Paths, nonce: &str) -> PathBuf {
     elevate_dir(paths).join(format!("{nonce}.request.json"))
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn response_path(paths: &Paths, nonce: &str) -> PathBuf {
     elevate_dir(paths).join(format!("{nonce}.result.json"))
 }
@@ -319,6 +322,7 @@ pub fn now_secs() -> u64 {
 
 /// A request id with no dependency on a RNG crate: time plus the pid plus the
 /// address of a stack local is plenty for "two requests never collide".
+#[cfg_attr(not(windows), allow(dead_code))]
 fn make_nonce() -> String {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -367,7 +371,7 @@ pub fn plan_lines(paths: &Paths, op: ElevatedOp) -> Vec<String> {
 
 #[cfg(not(windows))]
 pub fn plan_lines(_paths: &Paths, _op: ElevatedOp) -> Vec<String> {
-    vec!["Elevated installs are Windows-only.".into()]
+    vec![crate::platform::unsupported(crate::platform::Capability::Elevation).to_string()]
 }
 
 /// The uninstall plan, narrowed to one step kind and rendered by the
@@ -389,7 +393,8 @@ fn uninstall_step_lines(paths: &Paths, kind: crate::uninstall::StepKind) -> Vec<
 // ---------------------------------------------------------------------------
 
 #[cfg(windows)]
-pub use imp::{execute_request, helper_path, run, run_request_file};
+pub use imp::execute_request;
+pub use imp::{helper_path, run, run_request_file};
 
 #[cfg(windows)]
 mod imp {
@@ -750,6 +755,29 @@ mod imp {
             Ok(()) => OpOutcome::Done { detail: format!("{} keys removed", recorded.len()) },
             Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
         }
+    }
+}
+
+/// Stub: no helper to launch. There is no UAC on macOS; a port that needs
+/// privileges asks through `SMAppService` / an authorization prompt instead,
+/// and most of what the helper does today (HKLM, the Windows Firewall) has no
+/// counterpart to do.
+#[cfg(not(windows))]
+mod imp {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+    use anyhow::Result;
+
+    pub fn helper_path() -> Result<PathBuf> {
+        Err(unsupported(Capability::Elevation))
+    }
+
+    pub fn run(_paths: &Paths, _ops: &[ElevatedOp]) -> Result<Response, LaunchError> {
+        Err(LaunchError::Other(unsupported(Capability::Elevation)))
+    }
+
+    pub fn run_request_file(_path: &Path) -> Result<Response> {
+        Err(unsupported(Capability::Elevation))
     }
 }
 

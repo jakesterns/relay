@@ -232,7 +232,7 @@ fn http_get(url: &str) -> Result<String> {
 
 #[cfg(not(windows))]
 fn http_get(_url: &str) -> Result<String> {
-    bail!("fetching measurements is Windows-only")
+    Err(crate::platform::unsupported(crate::platform::Capability::CatalogFetch))
 }
 
 /// HTTPS GET over WinHTTP.

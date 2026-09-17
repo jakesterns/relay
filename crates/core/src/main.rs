@@ -424,28 +424,37 @@ fn run(args: Args) -> Result<()> {
     Service::run(args.paths, Backends::from_env())
 }
 
-/// Headless by default: when this process was given a fresh console (started
-/// from Explorer, the Run key or the installer rather than a terminal) hide
-/// that window. `GetConsoleProcessList` returning 1 means the console is ours
-/// alone, so hiding it cannot take a shell's window with it.
+use console::hide_own_console;
+
 #[cfg(windows)]
-fn hide_own_console() {
+mod console {
     use windows::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
     use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
-    let mut pids = [0u32; 2];
-    // SAFETY: plain queries on our own console.
-    unsafe {
-        if GetConsoleProcessList(&mut pids) == 1 {
-            let hwnd = GetConsoleWindow();
-            if !hwnd.is_invalid() {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+
+    /// Headless by default: when this process was given a fresh console
+    /// (started from Explorer, the Run key or the installer rather than a
+    /// terminal) hide that window. `GetConsoleProcessList` returning 1 means
+    /// the console is ours alone, so hiding it cannot take a shell's window
+    /// with it.
+    pub fn hide_own_console() {
+        let mut pids = [0u32; 2];
+        // SAFETY: plain queries on our own console.
+        unsafe {
+            if GetConsoleProcessList(&mut pids) == 1 {
+                let hwnd = GetConsoleWindow();
+                if !hwnd.is_invalid() {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                }
             }
         }
     }
 }
 
+/// Stub: there is no console window to hide outside Windows.
 #[cfg(not(windows))]
-fn hide_own_console() {}
+mod console {
+    pub fn hide_own_console() {}
+}
 
 const USAGE: &str = "\
 relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|autostart [on|off]]

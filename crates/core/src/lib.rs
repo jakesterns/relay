@@ -27,6 +27,7 @@ pub mod instance;
 pub mod ipc;
 pub mod launcher;
 pub mod logging;
+pub mod platform;
 pub mod presets;
 pub mod processes;
 pub mod profiles;

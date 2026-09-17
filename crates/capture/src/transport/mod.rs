@@ -11,6 +11,7 @@ pub mod discovery;
 pub mod netcheck;
 pub mod receiver;
 pub mod sei;
+#[cfg(windows)]
 pub mod sender;
 pub mod signal;
 
@@ -59,8 +60,13 @@ pub enum AudioRole {
     Mic,
 }
 
+/// msid track ids for the two audio tracks. These are the wire contract the
+/// receiver classifies on; see [`audio_role`].
+pub const PROGRAM_TRACK_ID: &str = "relay-audio";
+pub const MIC_TRACK_ID: &str = "relay-audio-mic";
+
 /// Classify an arriving audio track. `track_id` is the msid track id the
-/// sender set ([`sender::PROGRAM_TRACK_ID`] / [`sender::MIC_TRACK_ID`]);
+/// sender set ([`PROGRAM_TRACK_ID`] / [`MIC_TRACK_ID`]);
 /// `index` is how many audio tracks arrived before this one.
 ///
 /// The id is authoritative when we recognise it. Everything else falls back
@@ -69,8 +75,8 @@ pub enum AudioRole {
 /// track is the program mix, and there is nothing to confuse it with.
 pub fn audio_role(track_id: &str, index: usize) -> AudioRole {
     match track_id {
-        sender::MIC_TRACK_ID => AudioRole::Mic,
-        sender::PROGRAM_TRACK_ID => AudioRole::Program,
+        MIC_TRACK_ID => AudioRole::Mic,
+        PROGRAM_TRACK_ID => AudioRole::Program,
         _ if index == 0 => AudioRole::Program,
         _ => AudioRole::Mic,
     }
@@ -184,12 +190,12 @@ mod tests {
 
     #[test]
     fn named_tracks_classify_by_id_whatever_the_order() {
-        assert_eq!(audio_role(sender::PROGRAM_TRACK_ID, 0), AudioRole::Program);
-        assert_eq!(audio_role(sender::MIC_TRACK_ID, 1), AudioRole::Mic);
+        assert_eq!(audio_role(PROGRAM_TRACK_ID, 0), AudioRole::Program);
+        assert_eq!(audio_role(MIC_TRACK_ID, 1), AudioRole::Mic);
         // SDP m-line order is not guaranteed to survive the answer, so the
         // id has to win over the index when we recognise it.
-        assert_eq!(audio_role(sender::MIC_TRACK_ID, 0), AudioRole::Mic);
-        assert_eq!(audio_role(sender::PROGRAM_TRACK_ID, 1), AudioRole::Program);
+        assert_eq!(audio_role(MIC_TRACK_ID, 0), AudioRole::Mic);
+        assert_eq!(audio_role(PROGRAM_TRACK_ID, 1), AudioRole::Program);
     }
 
     /// An older sender ships one audio track with whatever msid it likes.

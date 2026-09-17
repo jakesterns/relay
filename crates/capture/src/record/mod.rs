@@ -440,38 +440,82 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     candidate
 }
 
-#[cfg(windows)]
-fn local_time_parts() -> (u16, u8, u8, u8, u8, u8) {
-    // SAFETY: plain struct out-parameter.
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    (t.wYear, t.wMonth as u8, t.wDay as u8, t.wHour as u8, t.wMinute as u8, t.wSecond as u8)
-}
-
-#[cfg(not(windows))]
-fn local_time_parts() -> (u16, u8, u8, u8, u8, u8) {
-    (1970, 1, 1, 0, 0, 0)
-}
+use os::{free_space, local_time_parts};
 
 #[cfg(windows)]
-fn free_space(dir: &Path) -> Option<u64> {
+mod os {
     use std::os::windows::ffi::OsStrExt;
+    use std::path::Path;
+
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
-    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let mut free = 0u64;
-    // SAFETY: NUL-terminated path, out-parameter for the caller-available bytes.
-    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), None, None) }.ok()?;
-    Some(free)
+    use windows::Win32::System::SystemInformation::GetLocalTime;
+
+    pub fn local_time_parts() -> (u16, u8, u8, u8, u8, u8) {
+        // SAFETY: plain struct out-parameter.
+        let t = unsafe { GetLocalTime() };
+        (t.wYear, t.wMonth as u8, t.wDay as u8, t.wHour as u8, t.wMinute as u8, t.wSecond as u8)
+    }
+
+    pub fn free_space(dir: &Path) -> Option<u64> {
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut free = 0u64;
+        // SAFETY: NUL-terminated path, out-parameter for the caller-available bytes.
+        unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut free), None, None) }.ok()?;
+        Some(free)
+    }
 }
 
+/// Unix seconds → (year, month, day, hour, minute, second) in UTC, by Howard
+/// Hinnant's days-to-civil. Only the non-Windows stub names files with it.
+#[cfg_attr(windows, allow(dead_code))]
+fn utc_parts(secs: u64) -> (u16, u8, u8, u8, u8, u8) {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u8;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u8;
+    let year = (yoe + era * 400 + i64::from(month <= 2)) as u16;
+    (year, month, day, (rem / 3_600) as u8, (rem / 60 % 60) as u8, (rem % 60) as u8)
+}
+
+/// Stub: file names use UTC (the standard library has no time-zone database)
+/// and free space is unknown, so only the budget's file-size rules apply, not
+/// its free-space floor. A port reads `localtime_r` and `statvfs`.
 #[cfg(not(windows))]
-fn free_space(_dir: &Path) -> Option<u64> {
-    None
+mod os {
+    use std::path::Path;
+
+    pub fn local_time_parts() -> (u16, u8, u8, u8, u8, u8) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        super::utc_parts(secs)
+    }
+
+    pub fn free_space(_dir: &Path) -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_parts_matches_known_instants() {
+        assert_eq!(utc_parts(0), (1970, 1, 1, 0, 0, 0));
+        // 2000-02-29T12:34:56Z: a leap day in a century leap year.
+        assert_eq!(utc_parts(951_827_696), (2000, 2, 29, 12, 34, 56));
+        // 2026-09-16T23:59:59Z.
+        assert_eq!(utc_parts(1_789_603_199), (2026, 9, 16, 23, 59, 59));
+    }
 
     #[test]
     fn file_names_are_sortable_and_explorer_safe() {

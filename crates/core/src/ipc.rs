@@ -724,6 +724,60 @@ pub mod client {
     }
 }
 
+/// Stub server: the named pipe is Windows-only. A macOS or Linux port serves
+/// the same newline-delimited JSON over a Unix domain socket in the data root
+/// (mode 0600 is the equivalent of the current-user-only DACL).
+#[cfg(not(windows))]
+pub mod server {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+    use anyhow::Result;
+    use std::future::Future;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    /// Handles one decoded request. Implemented by the service.
+    pub trait Handler: Send + Sync + 'static {
+        fn handle(&self, method: Method) -> impl Future<Output = Reply> + Send;
+    }
+
+    pub async fn serve<H: Handler>(
+        _handler: Arc<H>,
+        _events: broadcast::Sender<Event>,
+    ) -> Result<()> {
+        Err(unsupported(Capability::Ipc))
+    }
+}
+
+/// Stub client: every connect fails with "not supported", which the window
+/// and the CLI already treat as "the core is not running".
+#[cfg(not(windows))]
+pub mod client {
+    use super::*;
+    use crate::platform::{unsupported, Capability};
+    use anyhow::Result;
+
+    pub enum Client {}
+
+    impl Client {
+        pub async fn connect() -> Result<Self> {
+            Err(unsupported(Capability::Ipc))
+        }
+
+        pub async fn connect_to(_name: &str) -> Result<Self> {
+            Err(unsupported(Capability::Ipc))
+        }
+
+        pub async fn call(&mut self, _method: Method) -> Result<Reply> {
+            match *self {}
+        }
+
+        pub async fn next_event(&mut self) -> Result<Option<Event>> {
+            match *self {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

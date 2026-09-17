@@ -57,7 +57,7 @@ async fn call(method: Method) -> anyhow::Result<Reply> {
     #[cfg(not(windows))]
     {
         let _ = method;
-        anyhow::bail!("relay-core IPC is Windows-only")
+        Err(relay_core::platform::unsupported(relay_core::platform::Capability::Ipc))
     }
 }
 

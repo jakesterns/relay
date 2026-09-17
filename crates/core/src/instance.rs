@@ -5,21 +5,29 @@ use anyhow::Result;
 
 /// Held for the lifetime of the service. Dropping it releases the name.
 pub struct InstanceLock {
-    #[cfg(windows)]
-    handle: windows::Win32::Foundation::HANDLE,
+    _held: imp::Held,
 }
-
-// SAFETY: a mutex handle is a plain kernel handle; it is only closed in Drop.
-unsafe impl Send for InstanceLock {}
 
 impl InstanceLock {
     /// `Ok(None)` means another instance already holds the name.
-    #[cfg(windows)]
     pub fn acquire(name: &str) -> Result<Option<Self>> {
-        use windows::core::PCWSTR;
-        use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
-        use windows::Win32::System::Threading::CreateMutexW;
+        Ok(imp::acquire(name)?.map(|held| Self { _held: held }))
+    }
+}
 
+#[cfg(windows)]
+mod imp {
+    use anyhow::Result;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE};
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    pub struct Held(HANDLE);
+
+    // SAFETY: a mutex handle is a plain kernel handle; it is only closed in Drop.
+    unsafe impl Send for Held {}
+
+    pub fn acquire(name: &str) -> Result<Option<Held>> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: `wide` is NUL-terminated and outlives the call.
         let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr()))? };
@@ -31,22 +39,28 @@ impl InstanceLock {
             }
             return Ok(None);
         }
-        Ok(Some(Self { handle }))
+        Ok(Some(Held(handle)))
     }
 
-    #[cfg(not(windows))]
-    pub fn acquire(_name: &str) -> Result<Option<Self>> {
-        Ok(Some(Self {}))
+    impl Drop for Held {
+        fn drop(&mut self) {
+            // SAFETY: handle was returned by CreateMutexW and is closed exactly once.
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
     }
 }
 
-impl Drop for InstanceLock {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        // SAFETY: handle was returned by CreateMutexW and is closed exactly once.
-        unsafe {
-            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
-        }
+/// Stub: always acquires. Nothing that could run twice (the IPC server, the
+/// event loop) exists on this platform yet; a port uses a lock file
+/// (`flock`) in the data root.
+#[cfg(not(windows))]
+mod imp {
+    pub struct Held;
+
+    pub fn acquire(_name: &str) -> anyhow::Result<Option<Held>> {
+        Ok(Some(Held))
     }
 }
 
