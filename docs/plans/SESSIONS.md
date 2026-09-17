@@ -1099,7 +1099,9 @@ separate window". That is the thing to remove.
       recursively captures the user's screen — see
       `docs/dev/BUGS.md` B9 and the loopback note in memory.
 - [ ] Receive screen copy updated: no more "Playing in a separate window".
-- [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally.
+- [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
+      the exchange and its results written into `docs/dev/BUGS.md` — the second
+      PC is the only place several of these bugs have ever appeared.
 - [ ] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
       --workspace`, `pnpm build`, `pnpm test`, `scripts/footprint.ps1`.
 
@@ -1113,6 +1115,34 @@ separate window". That is the thing to remove.
 - Do not let the child window take focus; keyboard must keep working in the app.
 - macOS has no equivalent of any of this (S28). Keep the embedding behind the
   platform seam rather than assuming it.
+
+### Talking to the second PC
+Relay cannot be tested on one machine. A windowed receiver on the sending PC
+recursively captures the screen (B9), so every real check needs two, and the
+second PC is where the codec, firewall and freeze bugs actually surfaced.
+
+`relay-pc2` is a Claude Code session running on Jake's second PC, reachable with
+`SendMessage` (`ListAgents` shows it). Jake is physically at whichever machine he
+is at, so **that session is the only set of eyes on the receiver** — treat it as
+a testing partner, not a log-reading service.
+
+- Send it the installer path and SHA-256 for every build worth trying, plus what
+  you changed and what you expect it to see. It stays on the last known-good
+  build otherwise.
+- Say in advance what the run should look and sound like. A previous session
+  played a 440 Hz test tone without saying so, and the resulting "loud consistent
+  beeping" was filed as a bug and chased across both machines. Use speech or
+  music for audio checks, never a tone.
+- Announce start and stop times for every share. Jake's clock starts when he
+  clicks, not when the stream does, which is how a normal end-of-share got
+  reported as a freeze.
+- Ask for the receiver's `logs/` and the on-screen symptom separately. They have
+  disagreed before, and the symptom is the one that matters.
+- When its report contradicts yours, settle which run each of you is describing
+  before theorising. That one question has resolved more bugs here than any
+  amount of instrumentation.
+- Record the outcome in `docs/dev/BUGS.md` with the build hash. A result nobody
+  wrote down gets re-tested.
 
 ### Kickoff prompt
 ```
@@ -1128,7 +1158,19 @@ Constraints you cannot design around:
 
 Already done, do not redo: the receiver window sizes to the work area, gates on the first keyframe, closes on Esc, and closes cleanly when access units stop for 3 s (AU_IDLE_TIMEOUT, commit e967d60). That last one is why an embedded stream will not sit on a dead frame.
 
-Work to the Definition of Done in S29. relay-pc2 is a second physical PC with a Claude session on it, H.264-only, ready to test a real build -- send it the installer and its SHA-256 when you have something worth trying. Finish by updating docs/ROADMAP.md and summarising.
+Testing needs two PCs and you only have one. A windowed receiver on the sending PC recursively captures the screen, so you cannot check this alone. relay-pc2 is a Claude Code session on Jake's second physical PC, H.264-only, r4 installed, reachable with SendMessage -- run ListAgents to find it. It is the only set of eyes on the receiver. Work with it:
+
+- Message it when you start, so it knows a session is live and what you are changing.
+- For every build worth trying, send the installer path, its SHA-256, what changed, and what you expect it to see. It stays on the last known-good build otherwise.
+- Say in advance what each run should look and sound like. A previous session played a 440 Hz test tone without mentioning it; the resulting "loud consistent beeping" was filed as a bug and chased across both machines for a day. Use speech or music for audio checks, never a tone.
+- Announce the start and stop time of every share. Jake's clock starts when he clicks, not when the stream does -- that is how an ordinary end-of-share got reported as a freeze.
+- Ask for the receiver's logs and the on-screen symptom as separate answers. They have disagreed, and the symptom is the one that matters.
+- When its report contradicts yours, establish which run each of you means before theorising. That single question has resolved more bugs on this project than any instrumentation.
+- Write every result into docs/dev/BUGS.md against the build hash. Anything nobody recorded gets re-tested from scratch.
+
+It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to Jake rather than doing it on its behalf.
+
+Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ---
