@@ -979,7 +979,7 @@ Everything after it does, and that hardware is the gate.
 ---
 
 ## S27 — H.264 fallback: remove the paywall
-**Branch** `feat/h264-fallback` · **Worktree** main tree
+**Branch** `feat/h264-fallback` · **Worktree** `C:\Users\stern\Documents\Code\relay-h264`
 
 Relay sends HEVC only. On Windows without OEM codec entitlement the HEVC
 decoder cannot be installed for free — proven 2026-09-16 on a real Windows 10
