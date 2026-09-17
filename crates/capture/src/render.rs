@@ -36,7 +36,12 @@ pub struct RenderOpts {
     pub mic_route: Option<String>,
 }
 
+/// Hands a fatal error to the signalling task, which tells the sender and
+/// acknowledges on the oneshot once the message is written.
+pub type AbortTx = mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>;
+
 /// Entry point used by the transport when not headless.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     aus: mpsc::Receiver<AccessUnit>,
     opus: mpsc::Receiver<Vec<u8>>,
@@ -45,6 +50,7 @@ pub async fn run(
     mut closed: mpsc::Receiver<()>,
     pc: impl webrtc::peer_connection::PeerConnection,
     opts: RenderOpts,
+    abort: AbortTx,
 ) -> Result<()> {
     // Audio playback thread (best-effort; a decode failure must not kill video).
     let (audio_stop_tx, audio_stop_rx) = std::sync::mpsc::channel::<()>();
@@ -61,9 +67,12 @@ pub async fn run(
     let pl = present_latency.clone();
     let stats2 = stats.clone();
     let vcam = opts.vcam;
+    let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    let failure2 = failure.clone();
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
         if let Err(e) = video_thread(aus, stats2, pl, vcam) {
             warn!(error = %e, "render thread stopped");
+            *failure2.lock().unwrap() = Some(e.to_string());
             println!(
                 "{}",
                 serde_json::json!({ "event": "error", "where": "render", "message": e.to_string() })
@@ -87,6 +96,16 @@ pub async fn run(
             }
             _ = closed.recv() => { info!("connection closed"); break; }
             _ = tokio::signal::ctrl_c() => break,
+        }
+    }
+
+    // Tell the sender why before closing, or it only learns "connection lost"
+    // seconds later when ICE gives up (B3). Bounded: never hang the exit.
+    let reason = failure.lock().unwrap().take();
+    if let Some(reason) = reason {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if abort.send((reason, done_tx)).await.is_ok() {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), done_rx).await;
         }
     }
 

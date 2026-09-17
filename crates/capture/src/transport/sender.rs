@@ -424,7 +424,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     // Adaptive target bitrate, read by the pipeline each frame.
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
 
-    // Loss feedback from the receiver → AIMD bitrate control.
+    // Loss feedback from the receiver → AIMD bitrate control; and the
+    // receiver's reason, if it stops on a fatal error.
+    let (abort_tx, mut abort_rx) = mpsc::channel::<String>(1);
     {
         let target = target_bps.clone();
         let aimd = super::control::AimdBitrate::new(opts.bitrate_bps);
@@ -434,6 +436,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     Ok(signal::SigMsg::Loss { fraction }) => {
                         let cur = target.load(Ordering::Relaxed);
                         target.store(aimd.next(cur, fraction), Ordering::Relaxed);
+                    }
+                    Ok(signal::SigMsg::Abort { reason }) => {
+                        let _ = abort_tx.send(reason).await;
+                        break;
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -731,6 +737,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     _ => stdin_open = false,
                 }
             }
+            Some(reason) = abort_rx.recv() => {
+                warn!(%reason, "receiver stopped");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "error", "where": "receiver", "message": reason })
+                );
+                break Err(anyhow::anyhow!("receiver stopped: {reason}"));
+            }
             _ = events.closed.recv() => break Err(anyhow::anyhow!("peer connection lost")),
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c");
@@ -863,6 +877,7 @@ fn video_pipeline(
     // input size, and rebuilding from the frame keeps one code path.
     let mut preview = PreviewTap::new(preview_fps.clone());
     let mut crop: Option<(u32, u32, u32, u32)> = None;
+    let mut pacer = crate::pace::FramePacer::new(fps);
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
             EncoderEvent::NeedInput => {
@@ -885,6 +900,7 @@ fn video_pipeline(
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
                             preview.invalidate();
+                            pacer.reset();
                             let _ = enc.request_keyframe();
                             switcher.lock().unwrap().applied(t);
                             info!(target = ?t, w = conv_in.0, h = conv_in.1, "source switched");
@@ -907,7 +923,20 @@ fn video_pipeline(
                         }
                     }
                 }
-                let Some(frame) = src.next(Duration::from_millis(250))? else {
+                // Capture runs at display refresh; admit only frames on the
+                // share's fps schedule. A skipped frame is dropped here, before
+                // conversion, so its pool slot goes straight back (bug B1).
+                let frame = loop {
+                    let Some(f) = src.next(Duration::from_millis(250))? else { break None };
+                    if pacer.admit(f.qpc_100ns) {
+                        break Some(f);
+                    }
+                    drop(f);
+                    if stop.load(Ordering::Relaxed) {
+                        break None;
+                    }
+                };
+                let Some(frame) = frame else {
                     tracing::debug!("no capture frame in 250ms");
                     continue;
                 };
@@ -926,6 +955,7 @@ fn video_pipeline(
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
                             preview.invalidate();
+                            pacer.reset();
                             let _ = enc.request_keyframe();
                         }
                         Err(e) => warn!(error = %e, "rebuilding resized source failed"),

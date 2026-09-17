@@ -140,6 +140,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let clock_offset_ns = Arc::new(AtomicI64::new(0));
     // Loss fractions computed by the video loop, forwarded to the sender.
     let (loss_tx, mut loss_rx) = mpsc::channel::<f32>(4);
+    // A fatal render error, forwarded to the sender before we close (B3).
+    let (abort_tx, mut abort_rx) = mpsc::channel::<(String, tokio::sync::oneshot::Sender<()>)>(1);
     {
         let offset = clock_offset_ns.clone();
         let mut sig = sig;
@@ -174,6 +176,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         if sig.send(&signal::SigMsg::Loss { fraction }).await.is_err() {
                             break;
                         }
+                    }
+                    Some((reason, done)) = abort_rx.recv() => {
+                        let _ = sig.send(&signal::SigMsg::Abort { reason }).await;
+                        let _ = done.send(());
+                        break;
                     }
                 }
             }
@@ -295,7 +302,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Full receive mode is attached by the caller (decode + present + audio).
     let render_opts =
         crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
-    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts).await
+    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts, abort_tx)
+        .await
 }
 
 /// Depacketize one video track into access units (marker bit = AU boundary).
