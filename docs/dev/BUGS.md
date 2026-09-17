@@ -19,7 +19,7 @@ Matters because the 4K60 acceptance criterion is measured in exactly these
 units — we cannot currently prove or disprove it. Fix the measurement before
 trusting any fps number already recorded in the plans.
 
-### B2 — `relay-share` leaves no trace when it dies
+### B2 — ~~`relay-share` leaves no trace when it dies~~ FIXED 2026-09-17
 It writes no log file. When the core spawns it, stdout is a pipe the core reads
 for NDJSON, and anything that is not a recognised event shape is discarded;
 stderr goes nowhere. On the Windows 10 PC there was no log, no WER entry and no

@@ -116,6 +116,18 @@ impl<'a> MakeWriter<'a> for SharedWriter {
     }
 }
 
+impl SharedWriter {
+    /// A rotating log writer for a sibling binary.
+    ///
+    /// `relay-share` needs the same rotation policy and folder as the core
+    /// rather than a second logging scheme: it is spawned as a child with
+    /// stdout bound to an NDJSON pipe, so without this its diagnostics go
+    /// nowhere at all.
+    pub fn open(path: impl Into<PathBuf>, max_bytes: u64, keep: usize) -> Result<Self> {
+        Ok(Self(Arc::new(Mutex::new(RotatingFile::open(path, max_bytes, keep)?))))
+    }
+}
+
 /// `--verbose` selects debug; `RELAY_LOG=trace|debug|info|warn|error|off`
 /// overrides both. Deliberately a plain level filter, not an env filter: the
 /// regex engine behind the latter costs more code and memory than the

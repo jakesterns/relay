@@ -13,18 +13,53 @@
 
 use anyhow::{bail, Context as _, Result};
 
+/// A rotating `share.log` next to the core's own, or `None` if it cannot be
+/// opened. Honours `--data-dir`'s environment equivalent the same way the core
+/// does, so a test instance does not scribble into the real log.
+fn share_log_writer() -> Option<relay_core::logging::SharedWriter> {
+    let paths = relay_core::config::Paths::default_for_user().ok()?;
+    let _ = std::fs::create_dir_all(paths.log_dir());
+    relay_core::logging::SharedWriter::open(
+        paths.log_dir().join("share.log"),
+        relay_core::logging::MAX_BYTES,
+        relay_core::logging::KEEP,
+    )
+    .ok()
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
 
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_max_level(if std::env::var("RELAY_LOG").is_ok() {
-            tracing::Level::DEBUG
-        } else {
-            tracing::Level::INFO
-        })
-        .init();
+    let level = if std::env::var("RELAY_LOG").is_ok() {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
+
+    // Log to a file as well as stderr.
+    //
+    // The core spawns this process with stdout as a pipe it reads for NDJSON
+    // and stderr inherited, so in the installed app nothing here is kept. When
+    // the receiver died on a Windows 10 machine there was no log, no WER entry
+    // and no event-log record; the cause was only found by re-running the
+    // binary by hand in a console. The component doing the hardest work was
+    // the one that left nothing behind.
+    //
+    // Same rotating writer the core uses, so the format and the 1 MB x 3
+    // budget match, in the same folder the uninstaller already removes. A
+    // failure to open it is not worth refusing to run over -- stderr still
+    // works, and a share that will not start because of its own log file
+    // would be a worse bug than the one this fixes.
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+    match share_log_writer() {
+        Some(writer) => tracing_subscriber::fmt()
+            .with_writer(writer.and(std::io::stderr))
+            .with_ansi(false)
+            .with_max_level(level)
+            .init(),
+        None => tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(level).init(),
+    }
 
     match cmd {
         #[cfg(windows)]
