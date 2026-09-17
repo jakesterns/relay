@@ -164,6 +164,14 @@ pub async fn run(
     Ok(())
 }
 
+/// How long the picture may stand still before we call the share over.
+///
+/// Generous on purpose: a frame is ~33 ms at 30 fps and a bad LAN moment can
+/// swallow a second, so this only fires on a genuine end-of-stream. The cost of
+/// being wrong is asymmetric — closing a live share early is far worse than
+/// holding a dead one for another second.
+const AU_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Wait briefly for a worker, then give up and say so. A thread still parked
 /// on a channel at process exit costs nothing; a process that never exits
 /// costs the user a stuck window and a stray capture.
@@ -271,6 +279,7 @@ fn video_thread(
     // Nothing is decoded until the first keyframe: see the gate in the loop.
     let mut seen_keyframe = false;
     let mut skipped_pre_keyframe: u64 = 0;
+    let mut last_au_at = std::time::Instant::now();
 
     'outer: loop {
         // Pump window messages; quit on close.
@@ -290,13 +299,41 @@ fn video_thread(
             None => match aus.try_recv() {
                 Ok(a) => a,
                 Err(mpsc::error::TryRecvError::Empty) => {
+                    // The sender stopping does NOT close this channel.
+                    //
+                    // `au_tx` is held for the lifetime of the receiver task, so
+                    // `Err(Disconnected)` below effectively never fires: when a
+                    // share ended, this loop kept spinning on `Empty` and the
+                    // window sat on its last decoded frame forever. A user
+                    // watching that reported it as the receiver "freezing and
+                    // staying frozen" — the picture was simply the final frame
+                    // of a share that had already finished, with nothing on
+                    // screen saying so.
+                    //
+                    // So treat a long gap as the end of the stream. It is also
+                    // the right answer when the network drops: ICE takes
+                    // seconds to notice, and a still picture with no
+                    // explanation is the worst thing to show meanwhile.
+                    if last_au_at.elapsed() >= AU_IDLE_TIMEOUT {
+                        info!(
+                            after = ?last_au_at.elapsed(),
+                            presented = stats.video_presented.load(Ordering::Relaxed),
+                            "no access units; treating the share as ended"
+                        );
+                        break 'outer;
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(1));
                     continue;
                 }
                 Err(_) => break,
             },
         };
-        stats.video_aus.fetch_add(1, Ordering::Relaxed);
+        last_au_at = std::time::Instant::now();
+        // NB: `video_aus` is incremented by the depay loop in
+        // `transport::receiver` as each access unit is assembled. Counting it
+        // again here double-counted every frame and made `aus` exactly 2x
+        // `presented`, which read as though half of everything was being
+        // dropped. Nothing was being dropped.
 
         // Wait for a keyframe before decoding anything.
         //
