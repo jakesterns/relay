@@ -136,17 +136,17 @@ fn video_thread(
     // a structured exception on first call rather than returning an error —
     // this check, not the `Err` arm below, is what keeps Windows 10 safe.
     let vcam = vcam && {
-        let build = relay_vdevice::detect::windows_build();
-        let ok = build.is_some_and(|b| b >= relay_vdevice::detect::MIN_VCAM_BUILD);
+        let ok = relay_vdevice::detect::frameserver_supported();
         if !ok {
-            warn!(?build, "virtual camera needs Windows 11 22H2+; continuing without it");
+            let build = relay_vdevice::detect::windows_build();
+            warn!(?build, "MFCreateVirtualCamera not present; continuing without a camera");
             println!(
                 "{}",
                 serde_json::json!({
                     "event": "vcam_error",
                     "message": format!(
-                        "virtual camera needs Windows 11 build {}+, this PC is build {}",
-                        relay_vdevice::detect::MIN_VCAM_BUILD,
+                        "this PC has no virtual camera API (Windows build {}); \
+                         the share still plays in its own window",
                         build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
                     ),
                 })
