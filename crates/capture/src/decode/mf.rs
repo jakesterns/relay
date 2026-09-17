@@ -227,13 +227,22 @@ fn activate_hevc_decoder() -> Result<(IMFTransform, String)> {
         )
         .context("MFTEnumEx(HEVC decoder)")?;
         if activates.is_null() || count == 0 {
+            // Deliberately ASCII: this reaches a console, and on a Windows
+            // console still on the OEM code page a UTF-8 em dash renders as
+            // mojibake ("a-tilde-EUR-dash"). Seen for real on a Windows 10 box.
+            //
+            // Also deliberately does NOT name the "from Device Manufacturer"
+            // package or tell anyone to search the Store. Verified 2026-09-16
+            // on a real machine: that package is OEM-entitlement only and its
+            // Install button is greyed out, and a Store search surfaces paid
+            // and third-party apps instead. Sending a user there is worse than
+            // saying nothing.
             bail!(
                 "no HEVC decoder is registered on this PC, so it cannot receive a share. \
-                 Media Foundation gets HEVC decode from the Microsoft \"HEVC Video \
-                 Extensions from Device Manufacturer\" package — GPU drivers register only \
-                 encoders. Install it from the Microsoft Store (search for \"HEVC Video \
-                 Extensions\"), then start receiving again. Relay cannot bundle it: \
-                 Microsoft licenses it per-device to OEMs, not for redistribution by apps"
+                 Windows includes one for free only on PCs whose manufacturer licensed it; \
+                 GPU drivers register encoders only. Microsoft sells the decoder in the \
+                 Store as \"HEVC Video Extensions\" (ProductId 9NMZLZ57R3T7). Relay cannot \
+                 bundle it: Microsoft does not license that codec for redistribution by apps"
             );
         }
         let slice = std::slice::from_raw_parts(activates, count as usize);
