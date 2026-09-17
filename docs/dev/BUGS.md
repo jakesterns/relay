@@ -15,6 +15,12 @@ stays in the record — a wrong theory that looked right is worth remembering.
 58–62. Either the counter measures capture rate rather than encode rate, or the
 fps cap is not applied to the encoder at all. Seen on both two-PC runs.
 
+**S27 (branch `feat/h264-fallback`): cause found and fixed, verified on loopback
+only.** The counter was honest; nothing dropped frames, so the encoder ran at
+display refresh while told 30 fps. Reproduced on the pre-S27 binary on loopback
+(asked 30, encoded 24–58). `pace::FramePacer` now drops frames before
+conversion; loopback reads 30.0 on every tick. Still to see on the second PC.
+
 Matters because the 4K60 acceptance criterion is measured in exactly these
 units — we cannot currently prove or disprove it. Fix the measurement before
 trusting any fps number already recorded in the plans.
@@ -38,6 +44,11 @@ tell the peer.
 It should close the peer connection with a reason, so the sender can report
 "receiver: no HEVC decoder" immediately. Handed to S27, which is already in
 `sender.rs`/`receiver.rs` for codec negotiation.
+
+**S27: fix in the branch, not yet seen working.** The render thread's error now
+reaches the sender as `SigMsg::Abort { reason }` before the receiver closes, and
+the sender prints `{"event":"error","where":"receiver",...}`. A headless loopback
+cannot fail the render path, so the first real test is the second PC.
 
 ### B4 — Firewall rule policy misses a disabled Private profile
 S22 scopes Relay's rule to private + domain, never public — right for a
@@ -63,6 +74,10 @@ H.264 negotiation exists, a receiver without HEVC will work fine, and a red
 error claiming otherwise is worse than silence. It needs to degrade to an
 informational note — HEVC would give better quality per bit where available —
 rather than an error. Belongs with S27.
+
+**S27: fixed in the branch.** Red only when neither H.264 nor HEVC decodes;
+otherwise a plain note that shares use H.264. The paid-codec link is gone.
+Covered by UI tests; still to see on the Windows 10 PC.
 
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody

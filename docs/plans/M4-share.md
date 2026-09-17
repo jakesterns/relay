@@ -39,10 +39,10 @@ Receiver: same app, "Receive" screen; webrtc-rs ─► MF HW decode ─► D3D11
 ### Capture
 - [x] `relay-capture::source::wgc`: Windows.Graphics.Capture of a monitor (window later), `Direct3D11CaptureFramePool` with 2 buffers, cursor toggle via `IsCursorCaptureEnabled`, border suppression on Win11.
 - [x] `relay-capture::source::dxgi`: Desktop Duplication fallback when WGC is unavailable; same trait. (`RELAY_CAPTURE=dxgi` forces it for testing; verified: present→receive p50 0.10 ms.)
-- [x] Frame timing: capture at display refresh, drop to target fps without CPU copies (bounded channel; a busy consumer closes the frame, no copy); measure capture→encoder-input latency.
+- [x] Frame timing: capture at display refresh, drop to target fps without CPU copies (*untrue until S27 fixed B1: nothing dropped frames, so a 30 fps share encoded at display refresh; `pace::FramePacer` now does it*) (bounded channel; a busy consumer closes the frame, no copy); measure capture→encoder-input latency.
 
 ### Encode
-- [x] `relay-capture::encode::mf`: Media Foundation HEVC hardware MFT (NVENC / QSV / AMF via vendor MFTs) fed D3D11 textures (`MFCreateDXGISurfaceBuffer`), low-latency mode, CBR, B-frames off, keyframe on request. Software MFTs are never enumerated (`MFT_ENUM_FLAG_HARDWARE` only, bound to the capture adapter's LUID), so a software fallback is impossible by construction.
+- [x] `relay-capture::encode::mf`: Media Foundation HEVC (and, since S27, H.264) hardware MFT (NVENC / QSV / AMF via vendor MFTs) fed D3D11 textures (`MFCreateDXGISurfaceBuffer`), low-latency mode, CBR, B-frames off, keyframe on request. Software MFTs are never enumerated (`MFT_ENUM_FLAG_HARDWARE` only, bound to the capture adapter's LUID), so a software fallback is impossible by construction.
 - [x] Encoder benchmark: 4K60 sustained for 60 s (`relay-share bench-encode 60 4k`, GPU upscale 1440p→2160p because the sender monitor is 1440p): p50 10.2 ms, p99 10.8 ms, max 12.0 ms, 3601 frames at 60.0 fps, 0 drops, process CPU 2.1 %.
 - [x] Decision gate: capture + encode p99 ≈ 10.8 ms « 20 ms → **Media Foundation holds the budget; direct NVENC not needed.** (Sender: NVIDIA HEVC Encoder MFT on the RTX 3090.)
 
@@ -174,7 +174,7 @@ end-to-end — exercised by the bench commands and the loopback run instead.
 - **Live integration testing: two-PC wired glass-to-glass camera+stopwatch run and the 10-minute 4K60 zero-drop DoD run.** Moved to the future MVP validation pass (decision 2026-09-10: dual-PC testing not currently possible; unit coverage above stands in). Everything it needs is built and green on loopback (full capture→encode→transport→DXVA-decode→present pipeline, p50 5.6 ms capture→present, zero AU loss). Runbook: on PC-B `relay-share recv` (or the UI Receive screen) → note the code; on PC-A `RELAY_PEER=<PC-B> relay-core share-start <code>` (or the UI Share screen) → let it run 10 min at 4K60 and read the receiver's `capture_to_present_ms` p50/p99 plus a camera+stopwatch check for the absolute number.
 - ~~**Simultaneous microphone track.**~~ **Done 2026-09-14 (session S2).** The sender opens up to two Opus tracks — `relay-audio` (desktop endpoint loopback or one process tree) and `relay-audio-mic` — and the receiver decodes both and sums them one op before the WASAPI render buffer, so a plain call still hears a single stream while the two sources stay separable for the virtual mic and for S19's mix-minus. Decision record: `docs/dev/dual-audio-decision.md`. Presets carry an audio *source set* (`{desktop, mic}`), the pre-S2 four-way string still deserializes to the same meaning, and a peer sending one unnamed audio track still lands on the program mix (`transport::audio_role`, arrival-order fallback). Measured cost in Measurements below: +0.05 ms p50 / +0.6 ms p99 on capture→arrival, no change to encode. Harness: `scripts/dual-audio-check.ps1`.
 - ~~**In-webview preview surface.**~~ **Done 2026-09-14.** No second capture path: the video pipeline taps the frame it already has, the existing NV12 video processor scales it to 480×270 on the GPU (~200 KB readback), and WIC encodes a 24bppBGR JPEG that rides the engine's NDJSON to the Share screen. Ctrl+Alt+P sends a `preview` command all the way into the engine, so switching it off stops the readback rather than just hiding the picture. Measured on loopback (`scripts/preview-check.ps1 -Toggle`): 0 frames while off, 2 fps once on, ~21 KB per frame, ~41 KB/s.
-- ~~**HEVC Video Extension dependency on the receiver.**~~ **Closed 2026-09-14 (S7) — decision: keep detect-and-warn; do not bundle, do not build a DXVA-direct decoder.** Three options were on the table and only one survives.
+- ~~**HEVC Video Extension dependency on the receiver.**~~ **Superseded 2026-09-16 by S27: a receiver without HEVC decode now negotiates H.264, so there is nothing to install and nothing to warn about (see the S27 section at the end).** The S7 record below stays as history; its premise, that the free package is one Store install away, turned out to be false on a real Windows 10 PC. **Closed 2026-09-14 (S7) — decision: keep detect-and-warn; do not bundle, do not build a DXVA-direct decoder.** Three options were on the table and only one survives.
   - *Bundle the extension.* Not available to us. The free "HEVC Video Extensions from Device Manufacturer" is licensed by Microsoft per-device to PC makers; the generally available "HEVC Video Extensions" is a paid Store item. Neither may be redistributed inside a third-party installer, so this is a licensing wall, not an engineering one.
   - *Write a DXVA-direct decoder.* Rejected on cost against benefit. Skipping the MFT means owning HEVC bring-up: VPS/SPS/PPS and slice-header parsing, reference-picture-set management, and hand-filled DXVA2 picture/slice/quantisation buffers, with per-vendor quirks to chase on hardware we do not have. Weeks of work, and the failure mode of getting it subtly wrong is corrupt video rather than a clean error — strictly worse than the message we can print today. It buys nothing for a receiver that is one free Store install away from working.
   - *Detect and warn.* Kept and sharpened. `Method::ShareCapabilities` runs `relay-share probe` when the Receive or Share screen opens; the banner now links straight into the Store (`ms-windows-store://search/?query=HEVC Video Extensions` — the search rather than a product deep link, because the free package's product ID is not something we can verify from here) and says plainly why Relay cannot ship it for you. The decoder's own `bail!` carries the same explanation for anyone running the engine directly.
@@ -289,3 +289,161 @@ Note, not a defect: WASAPI desktop loopback delivers no packets at all while
 nothing is rendering, so `audio_packets` can sit at 0 or freeze on an idle
 machine. That is documented Windows behaviour and the receiver simply has no
 audio to play.
+
+## S27 — H.264 fallback: remove the paywall (2026-09-16)
+
+Relay sent HEVC only, and HEVC decode on Windows is free only where the PC's
+manufacturer licensed it. On a real Windows 10 PC the free package's Install
+button is greyed out, so a receiver could be asked to pay before Relay worked
+at all. That is incompatible with Relay being free. H.264 decode ships with
+every Windows install, and every GPU that encodes HEVC also encodes H.264.
+
+### What changed
+
+- **Negotiation, not a setting.** The sender offers every codec its capture
+  GPU encodes in hardware (`encode::mf::hardware_encoder_available`, enumeration
+  only) on one video m-line: HEVC pt 98 (unchanged, so an older HEVC-only peer
+  still negotiates) and H.264 pt 102 (High, level 5.2, packetization-mode 1).
+  The receiver registers only the codecs it can decode (`probe::decodable_codecs`).
+  The sender reads the answer and picks the first of `[HEVC, H.264]` both kept
+  (`codec::pick`). Answer order is ignored on purpose: on loopback the answerer
+  listed H.264 first even when it kept both.
+- **One webrtc-rs trap.** A track created with a codec narrows the offer's
+  m-line to that single codec, so the receiver could only take HEVC or reject
+  video. The video track is now created with an empty codec, which makes the
+  offer list every registered codec. After the answer it is re-described via
+  `replace_track` (same SSRC and ids) *before* `set_remote_description` starts
+  the senders, so the RTCP/NACK interceptors bind to the negotiated codec. The
+  sender packetizes itself with webrtc-rs's own payloader for that codec,
+  because `TrackLocalStaticSample` fixes its packetizer at construction.
+- **Per-codec bitstream.** RTP depacketization (RFC 6184: single NAL, STAP-A,
+  FU-A), the in-band SEI capture timestamp (NAL type 6), SPS dimension parsing
+  (with H.264's frame cropping: 1080p is coded as 1088 rows), the MF encoder
+  (`MfEncoder`, High profile) and decoder (`MfDecoder`, Microsoft H264 Video
+  Decoder MFT through DXVA). The presenter now blits only the picture rect, so
+  a coded-size decode texture never shows its padding. Recording writes
+  `avc1`/`avcC` in fMP4 and `V_MPEG4/ISO/AVC` in Matroska. The HEVC golden
+  fixtures are byte-identical.
+- **Capabilities and UI.** The probe reports H.264 encoders and decoders next
+  to HEVC. The core derives `share_codecs` / `receive_codecs`, and
+  `can_receive` is true on a PC that decodes only H.264. The Receive banner is
+  red only when neither codec decodes (an N edition without the Media Feature
+  Pack). Without HEVC decode it is a plain note that shares use H.264, and it no
+  longer links a paid codec (B6). The Receive screen's Codec row and the share
+  overlay name the codec the engine reports instead of asserting HEVC; while
+  idle the overlay names none, because the receiver decides.
+- **Test hook, not a setting:** `RELAY_VIDEO_CODECS=h264` narrows the codecs one
+  process will offer or accept. Used to simulate a receiver without HEVC decode
+  on one machine; nothing in the app sets it.
+
+Two bugs from `docs/dev/BUGS.md` were fixed on the way because they sat in the
+same files and one blocked the measurements:
+- **B1:** the fps cap was never applied. The pre-S27 binary asked for 30 fps
+  and encoded 24–58 fps on loopback while rate control budgeted for 30.
+  `pace::FramePacer` now admits frames against a running deadline and drops the
+  rest before conversion. Verified headless: 30.0 fps on every stats tick.
+- **B3:** a fatal render error now reaches the sender as
+  `SigMsg::Abort { reason }` instead of a lost connection seconds later. Not yet
+  exercised live: a headless loopback cannot fail the render path.
+
+### Measurements
+
+All on the dev machine (RTX 3090, NVIDIA HEVC / H.264 Encoder MFTs).
+
+**Bitrate for equivalent quality** (`scripts/codec-quality.ps1`). Raw 60 fps
+clips are encoded by the share's own encoder path (`relay-share bench-codec`:
+same MFT, low-latency CBR, no B-frames, paced at 60 fps). Each output is then
+decoded by ffmpeg and scored against the source with PSNR-Y, SSIM and VMAF.
+Quality is set against the bitrate the encoder *produced*, because CBR
+undershoots whenever content is easy. The H.264 bitrate matching each HEVC
+point is interpolated in log-bitrate and never extrapolated. Two clips:
+- *fractal*: a Mandelbrot zoom, dense detail in constant motion, a worst case
+  that behaves like fast game footage for an encoder.
+- *scroll*: source code scrolling at 420 px/s, i.e. screen-share content.
+
+Neither is real game capture; read the percentages as indicative, not universal.
+
+| 4K60 fractal: HEVC produced | HEVC VMAF | H.264 needed (VMAF match) | H.264 needed (PSNR-Y match) |
+|---|---|---|---|
+| 10.1 Mb/s | 59.3 | 17.0 Mb/s (+69 %) | 17.3 Mb/s (+72 %) |
+| 20.6 Mb/s | 69.9 | 23.8 Mb/s (+15 %) | 26.7 Mb/s (+29 %) |
+| 42.5 Mb/s | 82.3 | 47.0 Mb/s (+11 %) | 51.4 Mb/s (+21 %) |
+| 63.6 Mb/s | 88.5 | 69.3 Mb/s (+9 %) | 73.6 Mb/s (+16 %) |
+| 84.8 Mb/s | 91.9 | above the measured range (H.264 at 86.0 Mb/s: 91.6) | above the measured range |
+
+| 1440p60 fractal: HEVC produced | HEVC VMAF | H.264 needed (VMAF) | H.264 needed (PSNR-Y) |
+|---|---|---|---|
+| 8.3 Mb/s | 66.0 | 10.7 Mb/s (+29 %) | 11.4 Mb/s (+37 %) |
+| 17.1 Mb/s | 78.1 | 19.2 Mb/s (+12 %) | 20.4 Mb/s (+19 %) |
+| 34.7 Mb/s | 89.1 | above range (H.264 at 34.8 Mb/s: 88.4) | above range |
+| 1.1–4.0 Mb/s | 32–55 | not reachable: asked for 1, 2 and 4 Mb/s, NVENC H.264 produced 6.2–6.6 Mb/s and scored VMAF 5–16 | same |
+
+*Scroll* at 1440p60: both codecs stay under 1 Mb/s whatever the target (a
+32 Mb/s target produced 0.84 Mb/s HEVC, 0.75 Mb/s H.264), at VMAF 96.9–100 and
+PSNR-Y 42–66 dB. The produced bitrates are not monotonic in the target, so an
+equal-quality percentage there is noise. The honest reading is that text and
+UI content saturate both codecs, with no practical difference.
+
+**What that means for Relay.** The LAN target is 4K60 at 40–80 Mb/s. There,
+H.264 needs roughly **+9–11 % bitrate by VMAF, +16–21 % by PSNR-Y** for the
+same picture, well below the 30–50 % expected going in. The cost grows fast as
+bits get scarce: +15–29 % at 20 Mb/s 4K, +69 % at 10 Mb/s. And at 1440p,
+NVENC's H.264 stops holding CBR below about 6 Mb/s. So HEVC stays first
+preference, and the gap matters most on a constrained link (Wi-Fi AIMD
+step-down), not on wired LAN.
+
+**Encode latency.** H.264 is *faster* on this GPU, so the latency budget does
+not regress; it improves slightly.
+
+| | HEVC p50 / p99 | H.264 p50 / p99 | source |
+|---|---|---|---|
+| 1440p60 raw clip, 12 runs each | 5.3–5.5 / 5.7–6.2 ms | 4.0–4.1 / 4.1–4.7 ms | `bench-codec` |
+| 4K60 raw clip, 5 runs each | 11.4–11.7 / 12.8–13.2 ms | 8.5–9.3 / 9.8–10.4 ms | `bench-codec` |
+| 1440p60 live capture, 20 s | 4.95–4.98 / 5.3–5.8 ms (2 runs) | 3.97–4.14 / 4.8–5.5 ms (3 runs) | `bench-encode 20 native <codec>` |
+| 4K60 live capture (GPU upscale), 20 s | 10.26–10.34 / 10.6–11.5 ms (3 runs) | 8.05–8.53 / 8.6–9.5 ms (3 runs) | `bench-encode 20 4k <codec>` |
+
+The capture bench ran three alternating repetitions; one run (rep 2, HEVC
+1440p) printed no result and was not investigated.
+
+**CPU.** No separation between the codecs. `bench-encode` process CPU was
+1.6–2.9 % HEVC against 2.1–4.0 % H.264 at 1440p, and 2.6–3.8 % against
+3.1–3.8 % at 4K. Those ranges overlap, and so does the loopback figure below.
+Encoding is on the GPU either way.
+
+**Loopback share** (`scripts/dual-audio-check.ps1 -Compare codec -Secs 25
+-Reps 3`, headless receiver, 1440p60, 60 Mb/s CBR). A 440 Hz tone played
+throughout and every run carried 2,449–2,450 program-audio packets. The H.264
+leg restricts the receiver with `RELAY_VIDEO_CODECS=h264`, and each run asserts
+the codec it negotiated. Medians of three:
+
+| | HEVC | H.264 | delta |
+|---|---|---|---|
+| capture → arrival p50 | 4.01 ms | 3.02 ms | −0.99 ms |
+| capture → arrival p99 | 8.24 ms | 5.69 ms | −2.55 ms |
+| encode mean / max | 5.10 / 7.95 ms | 4.00 / 4.61 ms | −1.10 / −3.34 ms |
+| capture → send mean / max | 3.75 / 7.58 ms | 2.55 / 3.66 ms | −1.20 / −3.92 ms |
+| sender CPU | 8.7 % | 9.7 % | +1.0 pt, inside run-to-run noise |
+| fps / dropped | 51.5 / 0 | 54.8 / 0 | capture delivers only on desktop change, so fps tracks screen activity, not codec |
+
+Loopback content is whatever the desktop showed, so these runs' Mb/s
+(HEVC 19.8, H.264 20.6) is not a quality comparison; the clip sweep above is.
+
+**Recording.** A real NVENC H.264 stream (the 1440p fractal at 8 Mb/s) muxed by
+the production muxers via `examples/mux_from_annexb <in> <out> 2560 1440 h264`:
+fMP4 reads as `codec_name=h264 profile=High codec_tag_string=avc1`, 360/360
+frames, clean `ffmpeg -f null` decode; MKV likewise, 360/360 frames, clean
+decode.
+
+**Receive path on this machine.** Decode and present were exercised once,
+before the switch to headless-only loopback. Receiver restricted to H.264:
+`render_up` with Microsoft H264 Video Decoder MFT, capture → present 2.7 ms,
+1,136 AUs. A windowed receiver on the same PC captures its own window, so the
+remaining loopback runs were headless (`docs/dev/BUGS.md` B8/B9).
+
+### Still open
+
+- **The acceptance test.** A receiver with genuinely no HEVC decoder has not yet
+  completed a share end to end. Jake's Windows 10 PC (RTX 2080, HEVC encoder
+  MFT, no HEVC decoder) is that machine. `RELAY_VIDEO_CODECS` on one PC
+  simulates it; it does not substitute for it.
+- B3's `Abort` has not fired live.

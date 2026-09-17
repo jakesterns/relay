@@ -66,7 +66,8 @@ crates/audio/apo/     relay-apo — the endpoint APO cdylib (COM, feature "com" 
                       docs/dev/apo-testsign.md.
 crates/capture/       relay-capture — the share engine (`relay-share` child process, spawned
                       per share, torn down after). WGC + DXGI Desktop Duplication capture,
-                      Media Foundation HEVC hardware MFT (no CPU path), `resample` (any endpoint
+                      Media Foundation HEVC or H.264 hardware MFT, negotiated per share in
+                      `codec` (HEVC when both ends decode it; no CPU path), `resample` (any endpoint
                       rate/channels → Opus 48 kHz stereo, one track for desktop and one for mic),
                       webrtc-rs transport (mDNS, six-digit pairing, DTLS-SRTP, LAN only),
                       DXVA decode + D3D11 present on the receiver, fMP4/MKV recording + replay

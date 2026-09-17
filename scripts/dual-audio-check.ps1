@@ -11,11 +11,18 @@
 # program track read zero and measures nothing. Each run asserts it actually
 # carried the packets it should have.
 #
-# Usage: powershell -File scripts\dual-audio-check.ps1 [-Secs 30] [-Reps 2]
+# -Compare codec (S27) runs the same loopback with HEVC and with H.264
+# instead, alternating: the H.264 leg restricts the *receiver* to H.264 via
+# RELAY_VIDEO_CODECS, so the sender negotiates down exactly as it would to a
+# PC with no HEVC decoder. Each run asserts the codec it actually negotiated.
+# The audio benches are skipped in that mode; the tone still plays.
+#
+# Usage: powershell -File scripts\dual-audio-check.ps1 [-Secs 30] [-Reps 2] [-Compare mic|codec]
 param(
     [int]$Secs = 30,
     [int]$Reps = 2,
     [switch]$NoTone,
+    [ValidateSet('mic', 'codec')][string]$Compare = 'mic',
     [string]$OutDir = "$env:TEMP\relay-s2-dual-audio"
 )
 
@@ -53,7 +60,7 @@ function New-ToneFile {
 }
 
 function Invoke-Loopback {
-    param([string]$Tag, [bool]$Mic)
+    param([string]$Tag, [bool]$Mic, [string]$ReceiverCodecs = '', [string]$ExpectCodec = '')
 
     $recvPsi = New-Object System.Diagnostics.ProcessStartInfo
     $recvPsi.FileName = $exe
@@ -61,6 +68,7 @@ function Invoke-Loopback {
     $recvPsi.RedirectStandardOutput = $true
     $recvPsi.RedirectStandardError = $true
     $recvPsi.UseShellExecute = $false
+    if ($ReceiverCodecs) { $recvPsi.EnvironmentVariables['RELAY_VIDEO_CODECS'] = $ReceiverCodecs }
     $recv = [System.Diagnostics.Process]::Start($recvPsi)
     $waiting = $recv.StandardOutput.ReadLine()
     if ($waiting -notmatch '"port":(\d+)') { throw "receiver did not report a port: $waiting" }
@@ -104,8 +112,14 @@ function Invoke-Loopback {
     $stats = Get-Content $sendLog | Select-String '"event":"stats"' | ForEach-Object { $_.Line | ConvertFrom-Json }
     $steady = $stats | Select-Object -Skip 2
     $last = $steady | Select-Object -Last 1
+    $codecLine = (Get-Content $sendLog | Select-String '"event":"codec"' | Select-Object -Last 1).Line
+    $codec = if ($codecLine) { ($codecLine | ConvertFrom-Json).codec } else { '' }
+    if ($ExpectCodec -and $codec -ne $ExpectCodec) {
+        throw "$Tag negotiated '$codec', expected '$ExpectCodec'; see $sendLog"
+    }
     [pscustomobject]@{
         tag           = $Tag
+        codec         = $codec
         aus           = $s.aus
         arr_p50       = [math]::Round($s.capture_to_arrival_ms.p50, 2)
         arr_p99       = [math]::Round($s.capture_to_arrival_ms.p99, 2)
@@ -115,6 +129,7 @@ function Invoke-Loopback {
         cts_max       = [math]::Round((($steady | Measure-Object capture_to_send_ms -Maximum).Maximum), 2)
         fps           = [math]::Round((($steady | Measure-Object fps -Average).Average), 2)
         cpu           = [math]::Round((($steady | Measure-Object cpu_percent -Average).Average), 2)
+        mbps          = [math]::Round((($steady | Measure-Object bitrate_mbps -Average).Average), 2)
         dropped       = $last.dropped
         audio_packets = $last.audio_packets
         mic_packets   = $last.mic_packets
@@ -136,8 +151,8 @@ if (-not $NoTone) {
     Start-Sleep -Seconds 2
 }
 
-Write-Host '=== audio packetization benches ==='
-foreach ($mode in @('', 'mic', 'dual')) {
+if ($Compare -eq 'mic') { Write-Host '=== audio packetization benches ===' }
+foreach ($mode in @(if ($Compare -eq 'mic') { '', 'mic', 'dual' })) {
     $label = if ($mode) { $mode } else { 'desktop' }
     # An empty third argument would reach the exe as a source name, so only
     # pass one when there is one. And Windows PowerShell 5.1 turns a native
@@ -154,14 +169,27 @@ foreach ($mode in @('', 'mic', 'dual')) {
 }
 
 Write-Host ''
-Write-Host '=== loopback share, one track vs two ==='
 $rows = @()
-for ($r = 1; $r -le $Reps; $r++) {
-    Write-Host "rep $r of $Reps"
-    $rows += Invoke-Loopback -Tag "single-$r" -Mic $false
-    Start-Sleep -Seconds 2
-    $rows += Invoke-Loopback -Tag "dual-$r" -Mic $true
-    Start-Sleep -Seconds 2
+if ($Compare -eq 'codec') {
+    Write-Host '=== loopback share, HEVC vs H.264 ==='
+    $A = 'hevc'; $B = 'h264'
+    for ($r = 1; $r -le $Reps; $r++) {
+        Write-Host "rep $r of $Reps"
+        $rows += Invoke-Loopback -Tag "hevc-$r" -Mic $false -ExpectCodec 'hevc'
+        Start-Sleep -Seconds 2
+        $rows += Invoke-Loopback -Tag "h264-$r" -Mic $false -ReceiverCodecs 'h264' -ExpectCodec 'h264'
+        Start-Sleep -Seconds 2
+    }
+} else {
+    Write-Host '=== loopback share, one track vs two ==='
+    $A = 'single'; $B = 'dual'
+    for ($r = 1; $r -le $Reps; $r++) {
+        Write-Host "rep $r of $Reps"
+        $rows += Invoke-Loopback -Tag "single-$r" -Mic $false
+        Start-Sleep -Seconds 2
+        $rows += Invoke-Loopback -Tag "dual-$r" -Mic $true
+        Start-Sleep -Seconds 2
+    }
 }
 if ($player) { $player.Stop() }
 
@@ -176,21 +204,21 @@ foreach ($row in $rows) {
     if ($row.tag -like 'dual*' -and $row.mic_packets -lt $expected) {
         Write-Warning "$($row.tag): mic track carried $($row.mic_packets) packets, expected ~$($Secs * 100)"
     }
-    if ($row.tag -like 'single*' -and $row.mic_packets -ne 0) {
+    if ($Compare -eq 'mic' -and $row.tag -like 'single*' -and $row.mic_packets -ne 0) {
         Write-Warning "$($row.tag): single-track run reported $($row.mic_packets) mic packets"
     }
 }
 
 function Show-Median {
     param([string]$Field)
-    $s = @($rows | Where-Object { $_.tag -like 'single*' } | ForEach-Object { $_.$Field } | Sort-Object)
-    $d = @($rows | Where-Object { $_.tag -like 'dual*' } | ForEach-Object { $_.$Field } | Sort-Object)
+    $s = @($rows | Where-Object { $_.tag -like "$A*" } | ForEach-Object { $_.$Field } | Sort-Object)
+    $d = @($rows | Where-Object { $_.tag -like "$B*" } | ForEach-Object { $_.$Field } | Sort-Object)
     $sm = $s[[int]([math]::Floor($s.Count / 2))]
     $dm = $d[[int]([math]::Floor($d.Count / 2))]
-    Write-Host ("  {0,-9} single {1,8}   dual {2,8}   delta {3,8}" -f $Field, $sm, $dm, [math]::Round($dm - $sm, 2))
+    Write-Host ("  {0,-9} {1} {2,8}   {3} {4,8}   delta {5,8}" -f $Field, $A, $sm, $B, $dm, [math]::Round($dm - $sm, 2))
 }
 Write-Host 'medians across reps:'
-foreach ($f in @('arr_p50', 'arr_p99', 'enc_mean', 'enc_max', 'cts_mean', 'cts_max', 'cpu')) {
+foreach ($f in @('arr_p50', 'arr_p99', 'enc_mean', 'enc_max', 'cts_mean', 'cts_max', 'cpu', 'fps', 'mbps')) {
     Show-Median -Field $f
 }
 Write-Host "logs in $OutDir"

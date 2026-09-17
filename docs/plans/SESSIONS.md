@@ -994,14 +994,14 @@ H.264. The cost is bitrate, not capability.
 ### Definition of Ready
 - [x] `Method::ShareCapabilities` probes decoders via MFTEnumEx, not package names, so it sees any source.
 - [x] The encoder path enumerates hardware MFTs bound to the capture adapter's LUID.
-- [ ] Confirm the RTP/SDP layer can offer two video codecs. webrtc-rs registers HEVC pt98 today; H.264 needs its own payload type and the receiver must choose.
+- [x] Confirm the RTP/SDP layer can offer two video codecs. webrtc-rs registers HEVC pt98 today; H.264 needs its own payload type and the receiver must choose. *(2026-09-16: yes, with one trap: a track described with a codec narrows the offer to that codec. H.264 is pt 102; see M4-share.md, S27.)*
 
 ### Definition of Done
-- [ ] Sender offers H.264 **and** HEVC; the pair negotiates HEVC only when both ends decode it, H.264 otherwise. No user-visible codec setting — this is a capability, not a preference.
+- [x] Sender offers H.264 **and** HEVC; the pair negotiates HEVC only when both ends decode it, H.264 otherwise. No user-visible codec setting — this is a capability, not a preference. *(Verified on loopback with the receiver restricted to H.264 by a test hook.)*
 - [ ] A receiver with no HEVC decoder completes a share end to end. That is the acceptance test, run against a machine that genuinely lacks the codec (Jake's second PC).
-- [ ] Both codecs measured at the same resolution: bitrate for equivalent quality, encode latency, CPU. Expect ~30–50% more bitrate for H.264; record what it actually is.
-- [ ] The Receive banner stops being a paywall notice. Keep an honest line that HEVC gives better quality per bit where available, but never block on it.
-- [ ] `docs/plans/M4-share.md` updated; the HEVC Video Extension deferral there is closed by this.
+- [x] Both codecs measured at the same resolution: bitrate for equivalent quality, encode latency, CPU. Expect ~30–50% more bitrate for H.264; record what it actually is. *(Measured: +9–11 % by VMAF / +16–21 % by PSNR at 4K60 40–65 Mb/s, rising steeply below 20 Mb/s; H.264 encodes 1–3 ms faster; CPU indistinguishable. M4-share.md, S27.)*
+- [x] The Receive banner stops being a paywall notice. Keep an honest line that HEVC gives better quality per bit where available, but never block on it.
+- [x] `docs/plans/M4-share.md` updated; the HEVC Video Extension deferral there is closed by this.
 
 ### Kickoff prompt
 ```
