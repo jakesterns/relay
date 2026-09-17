@@ -110,16 +110,21 @@ pub async fn run(
                 // was no way to tell whether frames stopped arriving, stopped
                 // decoding, or stopped being presented. These three counters
                 // separate those cases.
+                let pts = stats.last_pts_100ns.load(Ordering::Relaxed);
+                let slice = stats.last_subresource.load(Ordering::Relaxed);
                 let stalled_aus = aus == last_aus;
                 let stalled_present = presented == last_presented;
-                if stalled_aus || stalled_present {
+                // Only warn once frames have started: two false alarms fired
+                // at connect before the video track existed, which is noise in
+                // the one log someone reads when things go wrong.
+                if presented > 0 && (stalled_aus || stalled_present) {
                     warn!(
-                        aus, presented, audio, latency_ms,
+                        aus, presented, audio, latency_ms, pts, slice,
                         arriving = !stalled_aus, presenting = !stalled_present,
                         "receiver stalled"
                     );
-                } else {
-                    info!(aus, presented, audio, latency_ms, "receiving");
+                } else if presented > 0 {
+                    info!(aus, presented, audio, latency_ms, pts, slice, "receiving");
                 }
                 last_aus = aus;
                 last_presented = presented;
@@ -263,6 +268,9 @@ fn video_thread(
 
     let mut pending: Option<AccessUnit> = Some(first);
     let mut msg = MSG::default();
+    // Nothing is decoded until the first keyframe: see the gate in the loop.
+    let mut seen_keyframe = false;
+    let mut skipped_pre_keyframe: u64 = 0;
 
     'outer: loop {
         // Pump window messages; quit on close.
@@ -289,7 +297,39 @@ fn video_thread(
             },
         };
         stats.video_aus.fetch_add(1, Ordering::Relaxed);
+
+        // Wait for a keyframe before decoding anything.
+        //
+        // Joining mid-GOP means the first access units reference frames we
+        // never had, so the decoder predicts from nothing and paints garbage.
+        // A user watching described it as "smeared paint" for the first moment
+        // of a share. Showing nothing until there is something real to show is
+        // the honest behaviour, and the sender sends an IDR on connect anyway,
+        // so the wait is short.
+        if !seen_keyframe {
+            if au.codec.is_keyframe(&au.data) {
+                seen_keyframe = true;
+                info!(
+                    skipped = skipped_pre_keyframe,
+                    codec = au.codec.label(),
+                    "first keyframe; decoding starts here"
+                );
+            } else {
+                skipped_pre_keyframe += 1;
+                continue;
+            }
+        }
+
         for frame in decoder.decode(&au.data, au.pts_or_zero())? {
+            // Diagnostics for B10, the freeze that logs no stall: `presented`
+            // kept climbing at 30/s while the user watched a still picture, so
+            // Present() is being called on something that is not changing.
+            // These two say which half is stuck. If `pts` stops advancing the
+            // decoder is handing back the same picture; if `pts` advances but
+            // `slice` never changes, we are being given one surface of the DXVA
+            // array repeatedly and presenting whatever is in it.
+            stats.last_pts_100ns.store(frame.pts_100ns, Ordering::Relaxed);
+            stats.last_subresource.store(frame.subresource as u64, Ordering::Relaxed);
             vp.present(&win, &frame)?;
             stats.video_presented.fetch_add(1, Ordering::Relaxed);
             if let Some(sink) = vcam_sink.as_mut() {

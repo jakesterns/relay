@@ -67,6 +67,13 @@ pub struct RecvStats {
     pub mic_packets: AtomicU64,
     /// network (+jitter) latency of the last AU: arrival − capture, in µs.
     pub arrival_latency_us_last: AtomicI64,
+    /// Presentation timestamp of the last decoded frame, and which slice of
+    /// the DXVA texture array it came from. Diagnostics for a freeze that
+    /// reports no stall: both counters can climb while the screen does not
+    /// change, and these two say whether the decoder stopped advancing or we
+    /// kept presenting one surface.
+    pub last_pts_100ns: AtomicI64,
+    pub last_subresource: AtomicU64,
 }
 
 pub async fn run(opts: RecvOpts) -> Result<()> {

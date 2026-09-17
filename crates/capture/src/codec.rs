@@ -134,6 +134,25 @@ impl VideoCodec {
         }
     }
 
+    /// Does this access unit start a decodable sequence?
+    ///
+    /// A decoder fed inter-coded frames before its first keyframe predicts
+    /// from nothing and paints garbage. On a real receiver that showed as a
+    /// smeared picture for the moment between the video track arriving and the
+    /// next keyframe — which, with a 10 s GOP, can be a long moment.
+    ///
+    /// H.264: NAL type 5 is an IDR slice. HEVC: 16..=21 covers BLA, IDR and
+    /// CRA, all of which are valid random-access points.
+    pub fn is_keyframe(self, au: &[u8]) -> bool {
+        split_nalus(au).into_iter().any(|n| {
+            let t = self.nal_type(n);
+            match self {
+                VideoCodec::H264 => t == 5,
+                VideoCodec::Hevc => (16..=21).contains(&t),
+            }
+        })
+    }
+
     /// The SEI NAL type Relay's timestamp rides in, and that NAL's header.
     pub fn sei_type(self) -> u8 {
         match self {
