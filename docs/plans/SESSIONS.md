@@ -1054,6 +1054,85 @@ Measured today: 80 of 139 Rust files touch Windows, 156 cfg(windows) sites, 134 
 
 ---
 
+## S29 — The stream lives inside the app
+**Branch** `feat/inapp-stream` · **Worktree** `C:\Users\stern\Documents\Code\relay-inapp`
+
+Requested by Jake directly, 2026-09-17, after the first real two-PC test: the
+received stream should render **inside the Relay window**, in the Receive
+screen's video area where the "Press Start receiving" placeholder sits, with an
+optional **pop-out** into a separate window like Discord's.
+
+Today `relay-share.exe` owns a top-level `HWND` and its own D3D11 swapchain, and
+the Receive screen paints an empty frame next to a caption reading "Playing in a
+separate window". That is the thing to remove.
+
+### Definition of Ready
+- [x] Receiver renders correctly in its own window: keyframe gate, work-area
+      sizing, `WDA_EXCLUDEFROMCAPTURE`, Esc to close (all shipped in r4).
+- [x] End-of-share is handled: `AU_IDLE_TIMEOUT` closes the receiver when access
+      units stop (`e967d60`). Without this, an embedded stream would sit on a
+      dead final frame *inside* the app, which is worse than doing so in a
+      window of its own.
+- [ ] Accept the constraint: the UI is Tauri/WebView2, so a D3D11 surface cannot
+      live in the DOM. The video area is a hole in the page that a native child
+      window sits over — not an element.
+
+### Definition of Done
+- [ ] Receiving with the Relay window open renders the stream in the Receive
+      screen's video area. No second top-level window appears.
+- [ ] The embedded surface tracks the video area through window move, resize,
+      DPI change, minimise/restore, and screen navigation. It never covers UI
+      chrome and never survives leaving the Receive screen.
+- [ ] A pop-out control reparents the surface to a top-level window and back,
+      without dropping the stream or re-negotiating anything. Closing the
+      popped-out window returns the stream to the app rather than ending it.
+- [ ] **Presentation no longer shares a thread with the message pump.** Decode
+      and present move off the window thread, or the window thread stops
+      blocking them. Verified: dragging and resizing the app window for 10 s
+      does not stall the picture, measured by `presented` continuing to climb.
+      This is a prerequisite, not a nicety — embedding makes the existing
+      ~500 ms modal-loop stall reachable from ordinary app resizing.
+- [ ] End of share is visible in the app: the video area says the share ended
+      and returns to its idle state. No frozen last frame anywhere.
+- [ ] `WDA_EXCLUDEFROMCAPTURE` still applies to whichever window hosts the
+      surface, in both embedded and popped-out states. A regression here
+      recursively captures the user's screen — see
+      `docs/dev/BUGS.md` B9 and the loopback note in memory.
+- [ ] Receive screen copy updated: no more "Playing in a separate window".
+- [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally.
+- [ ] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
+      --workspace`, `pnpm build`, `pnpm test`, `scripts/footprint.ps1`.
+
+### Notes for the implementer
+- Likely shape: `SetParent` the receiver `HWND` into the Tauri window, style
+  `WS_CHILD`, and drive its position from the UI, which knows where the video
+  area is. Pop-out is the same call in reverse. This keeps the render path
+  untouched, which is worth a lot — it works today.
+- The UI must send the video area's rect in physical pixels on every layout
+  change, and the receiver must apply it without blocking its own present.
+- Do not let the child window take focus; keyboard must keep working in the app.
+- macOS has no equivalent of any of this (S28). Keep the embedding behind the
+  platform seam rather than assuming it.
+
+### Kickoff prompt
+```
+You are starting session S29 (the stream lives inside the app) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (section S29). Create the worktree: git worktree add -b feat/inapp-stream ..\relay-inapp main, then cd into it and run pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+Jake asked for this directly after the first real two-PC test: the received stream must render INSIDE the Relay window, in the Receive screen's video area where the "Press Start receiving" placeholder is now, with an optional pop-out into a separate window like Discord's.
+
+Constraints you cannot design around:
+- The UI is Tauri/WebView2. A D3D11 surface cannot go into the DOM. The video area is a hole in the page with a native child window over it. The likely shape is SetParent on the receiver HWND with WS_CHILD, positioned from the UI, and pop-out is the same call in reverse. That leaves the render path alone, which matters because it works today.
+- crates/capture/src/render.rs pumps window messages on the SAME thread that decodes and presents. Today that stalls the picture whenever someone drags the receiver window; embedded, it would stall whenever anyone resizes the Relay window. Fixing that coupling is part of this session, not a follow-up.
+- SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) must stay applied to whichever window hosts the surface, embedded or popped out. If it lapses, Relay captures its own output and recursively smears the user's screen -- this has actually happened on Jake's main PC. See docs/dev/BUGS.md B9.
+- Never synthesise mouse or keyboard input to the desktop, and never write the registry. Do not block on a question: if a decision is genuinely ambiguous, pick the option that is easiest to reverse, write down why, and keep going.
+
+Already done, do not redo: the receiver window sizes to the work area, gates on the first keyframe, closes on Esc, and closes cleanly when access units stop for 3 s (AU_IDLE_TIMEOUT, commit e967d60). That last one is why an embedded stream will not sit on a dead frame.
+
+Work to the Definition of Done in S29. relay-pc2 is a second physical PC with a Claude session on it, H.264-only, ready to test a real build -- send it the installer and its SHA-256 when you have something worth trying. Finish by updating docs/ROADMAP.md and summarising.
+```
+
+---
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
