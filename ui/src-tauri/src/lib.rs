@@ -10,6 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+mod stream_host;
 mod window_state;
 
 #[derive(Debug, Serialize)]
@@ -274,12 +275,61 @@ async fn set_recording_settings(settings: relay_core::presets::RecordingSettings
     }
 }
 
+/// Start receiving. The request leaves the page without a host window; this
+/// window's handle is filled in here, so the engine creates the stream
+/// window embedded in it (S29). The page never sees an HWND.
 #[tauri::command]
-async fn start_receive(request: relay_core::share::ReceiveRequest) -> CmdResult<()> {
+async fn start_receive(
+    window: tauri::Window,
+    mut request: relay_core::share::ReceiveRequest,
+) -> CmdResult<()> {
+    request.host = host_hwnd(&window);
     match call(Method::StartReceive { request: Box::new(request) }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
+}
+
+/// This window's HWND as the engine wants it, or `None` off Windows.
+fn host_hwnd(window: &tauri::Window) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        window.hwnd().ok().map(|h| h.0 as isize as u64).filter(|h| *h != 0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        None
+    }
+}
+
+/// The page measured the Receive screen's video area (CSS px, viewport
+/// relative), or left the screen (`None`). The stream window follows.
+#[tauri::command]
+fn set_video_area(window: tauri::Window, area: Option<stream_host::Area>) {
+    stream_host::set_area(area);
+    stream_host::apply(&window);
+}
+
+/// Embed the stream in this window or pop it out into one of its own. The
+/// engine confirms with a `host` event; until then nothing here changes.
+#[tauri::command]
+async fn set_stream_mode(
+    window: tauri::Window,
+    mode: relay_core::share::HostMode,
+) -> CmdResult<()> {
+    let owner = host_hwnd(&window).unwrap_or(0);
+    match call(Method::HostReceive { mode, owner }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// Whether a stream window exists right now and how it is hosted, for a
+/// Receive screen that mounts mid-receive.
+#[tauri::command]
+fn stream_status() -> stream_host::StreamStatus {
+    stream_host::status()
 }
 
 #[tauri::command]
@@ -604,6 +654,34 @@ fn spawn_event_bridge(app: AppHandle) {
                                         }),
                                     );
                                 }
+                                Event::StreamWindow {
+                                    hwnd,
+                                    width,
+                                    height,
+                                    mode,
+                                    excluded_from_capture,
+                                } => {
+                                    stream_host::on_window(
+                                        hwnd,
+                                        width,
+                                        height,
+                                        &mode,
+                                        excluded_from_capture,
+                                    );
+                                    if let Some(w) = app.get_webview_window("main") {
+                                        stream_host::apply(&w.as_ref().window());
+                                    }
+                                    let _ = app.emit("core://stream", stream_host::status());
+                                }
+                                // Closing the popped-out window means "back into
+                                // the app", never "stop". The engine embeds itself
+                                // (it remembers the owner) and its `host` event
+                                // follows; nothing to ask for here. It used to be
+                                // asked for from here, and that round trip is what
+                                // took up to 47 s on the second PC.
+                                Event::StreamPopoutClosed => {
+                                    tracing::info!("popped-out stream window closed");
+                                }
                                 Event::ReceiveStatus {
                                     receiving,
                                     code,
@@ -611,6 +689,21 @@ fn spawn_event_bridge(app: AppHandle) {
                                     message,
                                     codec,
                                 } => {
+                                    tracing::info!(
+                                        receiving,
+                                        ?sender,
+                                        ?message,
+                                        "receive status from the core"
+                                    );
+                                    stream_host::on_receive_status(
+                                        receiving,
+                                        code.as_deref(),
+                                        sender.as_deref(),
+                                        codec.as_deref(),
+                                    );
+                                    if !receiving {
+                                        let _ = app.emit("core://stream", stream_host::status());
+                                    }
                                     let _ = app.emit(
                                         "core://receive-status",
                                         serde_json::json!({
@@ -707,12 +800,36 @@ fn single_instance() -> Option<Option<relay_core::instance::InstanceLock>> {
     }
 }
 
+/// A rotating `logs\ui.log` beside the core's, or `None` if it cannot be
+/// opened. The shell had no log at all until S29, which meant the one
+/// process that places the stream window could not say what it did with it.
+fn ui_log_writer() -> Option<relay_core::logging::SharedWriter> {
+    let paths = relay_core::config::Paths::default_for_user().ok()?;
+    let _ = std::fs::create_dir_all(paths.log_dir());
+    relay_core::logging::SharedWriter::open(
+        paths.log_dir().join("ui.log"),
+        relay_core::logging::MAX_BYTES,
+        relay_core::logging::KEEP,
+    )
+    .ok()
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
-        .compact()
-        .init();
+    match ui_log_writer() {
+        Some(file) => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_target(false)
+            .with_ansi(false)
+            .compact()
+            .with_writer(file)
+            .init(),
+        None => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_target(false)
+            .compact()
+            .init(),
+    }
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "relay-ui starting");
 
     // Held until the process ends; the OS releases the name then.
     #[cfg(windows)]
@@ -731,6 +848,17 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // The stream window is a separate native window sitting over the
+            // video area; every change to where this window is or how big it
+            // is has to be followed, or the picture is left behind.
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_)
+                    | tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::ScaleFactorChanged { .. }
+            ) {
+                stream_host::apply(window);
+            }
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // Act once. The `exit` on the quit path can raise this event
                 // again for the same window; re-entering would queue a second
@@ -798,6 +926,9 @@ pub fn run() {
             set_recording_settings,
             start_receive,
             stop_receive,
+            set_video_area,
+            set_stream_mode,
+            stream_status,
             discover_receivers,
             list_hardware,
             save_hardware,

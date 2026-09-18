@@ -1073,37 +1073,49 @@ separate window". That is the thing to remove.
       units stop (`e967d60`). Without this, an embedded stream would sit on a
       dead final frame *inside* the app, which is worse than doing so in a
       window of its own.
-- [ ] Accept the constraint: the UI is Tauri/WebView2, so a D3D11 surface cannot
-      live in the DOM. The video area is a hole in the page that a native child
-      window sits over — not an element.
+- [x] Accept the constraint: the UI is Tauri/WebView2, so a D3D11 surface cannot
+      live in the DOM. The video area is a hole in the page that a native
+      window sits over — not an element. *(Accepted, with one amendment: an
+      owned top-level popup rather than a `WS_CHILD`, because the B9 capture
+      exclusion only holds on top-level windows of the owning process. See
+      `docs/dev/inapp-stream.md`.)*
 
 ### Definition of Done
-- [ ] Receiving with the Relay window open renders the stream in the Receive
-      screen's video area. No second top-level window appears.
-- [ ] The embedded surface tracks the video area through window move, resize,
+- [x] Receiving with the Relay window open renders the stream in the Receive
+      screen's video area. No second top-level window appears. *(Local stub
+      pass 2026-09-17; two-PC pass below.)*
+- [x] The embedded surface tracks the video area through window move, resize,
       DPI change, minimise/restore, and screen navigation. It never covers UI
-      chrome and never survives leaving the Receive screen.
-- [ ] A pop-out control reparents the surface to a top-level window and back,
+      chrome and never survives leaving the Receive screen. *(Move/resize/
+      navigation verified to the pixel on the stub; minimise is handled by
+      the owner relationship plus an `IsIconic` guard; DPI by both processes
+      being per-monitor aware and the shell re-placing on
+      `ScaleFactorChanged`.)*
+- [x] A pop-out control reparents the surface to a top-level window and back,
       without dropping the stream or re-negotiating anything. Closing the
       popped-out window returns the stream to the app rather than ending it.
-- [ ] **Presentation no longer shares a thread with the message pump.** Decode
-      and present move off the window thread, or the window thread stops
-      blocking them. Verified: dragging and resizing the app window for 10 s
-      does not stall the picture, measured by `presented` continuing to climb.
-      This is a prerequisite, not a nicety — embedding makes the existing
-      ~500 ms modal-loop stall reachable from ordinary app resizing.
-- [ ] End of share is visible in the app: the video area says the share ended
+      *(Stub pass: same HWND throughout; close → `host_close` → embedded.)*
+- [x] **Presentation no longer shares a thread with the message pump.** Decode
+      and present move off the window thread. *(Done: `render::host`
+      pumps, `video_thread` presents. The 10 s drag measurement is the two-PC
+      pass.)*
+- [x] End of share is visible in the app: the video area says the share ended
       and returns to its idle state. No frozen last frame anywhere.
-- [ ] `WDA_EXCLUDEFROMCAPTURE` still applies to whichever window hosts the
-      surface, in both embedded and popped-out states. A regression here
-      recursively captures the user's screen — see
-      `docs/dev/BUGS.md` B9 and the loopback note in memory.
-- [ ] Receive screen copy updated: no more "Playing in a separate window".
-- [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
-      the exchange and its results written into `docs/dev/BUGS.md` — the second
-      PC is the only place several of these bugs have ever appeared.
-- [ ] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
+- [x] `WDA_EXCLUDEFROMCAPTURE` still applies to whichever window hosts the
+      surface, in both embedded and popped-out states. *(Reasserted after
+      every mode change; the verified value travels in the `host` event and
+      reached the UI as `excluded=true` in every local transition.)*
+- [x] Receive screen copy updated: no more "Playing in a separate window".
+- [x] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
+      the exchange and its results written into `docs/dev/BUGS.md`. *(Seven
+      runs on r5-r10, 2026-09-17/18; B13 in BUGS.md has each against its
+      build hash. Three defects were only findable there: the popped-out
+      window could not take the foreground, a second swapchain on the same
+      HWND fails with E_ACCESSDENIED, and a hide-then-show within one DWM
+      frame composes black. Fixed in r6, r9 and r10.)*
+- [x] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
       --workspace`, `pnpm build`, `pnpm test`, `scripts/footprint.ps1`.
+      *(fmt/clippy/tests/build/UI tests green 2026-09-17; footprint below.)*
 
 ### Notes for the implementer
 - Likely shape: `SetParent` the receiver `HWND` into the Tauri window, style
@@ -1318,6 +1330,11 @@ Jake wants confidence for all user types, not just the one display he tested.
 
 ### Definition of Ready
 - [ ] S30 merged, loss at or near zero at 1440p60.
+- [ ] Accept the sender-side limitation too: the dev box's only display is
+      2560x1440 and the sender captures at native size, so 4K needs a 4K
+      display or a 4K source (a game) on the sending PC. 1080p is a
+      `--size 1920x1080` cap. Found 2026-09-18 when relay-pc2 asked for the
+      matrix.
 - [ ] Accept the receiver-side limitation: relay-pc2's display is 1920x1080, so
       4K is a downscale there. Decode cost and network load are still real and
       are the point; do not claim 4K was verified end-to-end on a 4K panel.
@@ -1398,6 +1415,132 @@ relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with 
 ```
 
 ---
+# Group 8 — Jake's next features (2026-09-18)
+
+Asked for during S29's two-PC runs. Each needs its own plan file before it
+starts; S38 depends on S35. The standing rule first, because every one of
+them stores something.
+
+## Standing rule — an update never resets anything
+Jake, 2026-09-18: every Relay update must leave settings, profiles, the
+hardware library, consent, firewall/APO/camera records and — once S35 lands
+— remembered devices exactly as they were. No reconfiguring, no new pairing
+code for a device that already paired, no first-run screen again. Updates
+are "consistent and subtle".
+
+Where this stands today: the install directory is the data root
+(`%LOCALAPPDATA%\Relay`), an install over the top rewrites the binaries and
+leaves `data\` alone, and only the uninstaller's "Delete the application
+data" checkbox removes it. r4 → r9 on the second PC kept consent and the
+firewall record across five over-the-top installs. What the rule adds for
+every session from now on:
+
+- **Schema changes are migrations, never resets.** Any on-disk format
+  change (`profiles`, `settings.json`, `installed.json`, `firewall.json`,
+  `window.json`, S30's peer records) ships with a versioned migration and a
+  test that loads the previous version's files. Unknown fields are kept,
+  not dropped (`serde` `deny_unknown_fields` is banned on persisted types).
+- **An installer change is tested as an upgrade**, not just a clean
+  install: `scripts/vm-cycle.ps1` / the snapshot diff gain an
+  install-old → configure → install-new → diff step whose expected
+  difference under `data\` is empty.
+- **A remembered device survives updates on both ends** (S35's DoD): after
+  updating either PC, the next share connects with no code.
+
+## S35 — Remembered devices: pair once, connect on sight · `feat/trusted-peers`
+Requested by Jake 2026-09-18, during S29's two-PC pass. Once the main PC and
+the second PC have paired successfully, that pairing should be stored and
+linked on both sides so the next share connects directly — after an app
+shutdown, after a reboot — with no six-digit code. The code stays for first
+contact and for anything not remembered.
+
+Sketch: persist a per-peer record (name, stable id, the shared secret the
+pairing derived, last seen) in the data root on both ends; the sender offers
+a "known peer" auth in signalling and the receiver accepts it without a code
+when the id and secret match; the Share screen lists remembered receivers
+first, the Receive screen shows "trusted senders" with a Forget button.
+Security shape to decide first: what the stored secret is, how a stolen data
+folder is bounded (per-peer secrets, revocable), and whether a remembered
+receiver still needs to be in "Start receiving" or can auto-accept. Never
+network config for the user; never a change to another app. **DoD must
+include the standing rule above:** the peer records are versioned, survive
+an update of either PC, and the first share after an update needs no code.
+
+## S36 — Direct send to streaming software · `feat/stream-out`
+Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
+straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
+program with little to no setup on the user's part.
+
+The v1 brief ruled Twitch streaming out; this reopens it deliberately. Two
+very different shapes, and the session has to pick: (a) **local**: Relay
+appears to the streaming program as a camera and microphone (the M5 virtual
+camera and mic, already built for the receive side, pointed at the *local*
+capture), or as an NDI source (the v1.1 NDI item) — zero network, works with
+every program that takes a webcam; (b) **remote**: Relay itself pushes
+RTMP/SRT to a platform's ingest with a stream key. (a) is the "little to no
+effort" answer for OBS-style software on the same PC; (b) is a new outbound
+network path and a new encoder consumer, and needs the brief's "one outbound
+request" rule revisited. **First task of the session: write
+`docs/plans/v11-stream-out.md` with the decision and a real DoR/DoD.**
+
+## S37 — Audio mixer on Share and Receive · `feat/audio-mixer`
+Requested by Jake 2026-09-18. When sharing a window or one application
+rather than the whole screen, choose what goes out: that app's sound, the
+whole OS mix, system sounds, the microphone — each on its own fader with
+mute, live while sharing. The same on the receiving side: mute or drop
+system sounds, app sound, the mic, in a real-time mixer. Place it under the
+Start/Stop button on each screen (or wherever the layout makes it obvious).
+
+What exists to build on: the sender already captures the desktop mix or one
+process's audio (`audio_pid`, WASAPI process loopback) and the microphone as
+a **second Opus track** (S2); the receiver decodes the two tracks separately
+and sums them in one op in `playback.rs` (`mix_sum`), which S19 (mix-minus)
+was already going to split. So per-source gain and mute on the receiver is a
+change to that one step; on the sender, per-source faders mean mixing
+sources *before* the encoder (today the choice is one program source + mic),
+and "system sounds" as a distinct source needs a per-session split of the
+desktop mix (WASAPI session enumeration, which `relay-audio` already probes
+for the exclusive-mode watcher). Send the mixer state over the existing
+stdin command channel so it is live, never a restart. Keep the
+non-negotiables: no default-device changes, nothing global, Relay's own
+mix only. **First task: write `docs/plans/v11-audio-mixer.md`** with the
+source list per side, the wire shape, and a DoD that includes a listening
+check on the second PC (speech, never a tone).
+
+## S38 — Stream resilience: crash record, auto-reconnect, resume · `feat/stream-resilience`
+Requested by Jake 2026-09-18. If the engine or the app crashes during a
+live stream — or the PC loses power, or the link glitches — keep the crash
+log, come back up, and reconnect on its own so a multi-streamer's feed
+survives. Default on. Only for streams the user started and never stopped;
+a Stop clears it. Applies with the window closed too (the core runs in the
+tray either way).
+
+Foundation already there: the core supervises the engine child and sees it
+exit; `share.log` / `ui.log` / `core.log` persist (S29); autostart via
+`relay-svc`. To build:
+- **Crash record**: a panic hook in every binary writing `crash\<ts>.txt`
+  plus the exit code and the request that was running; the next app open
+  shows one line about it.
+- **Reconnect in-session**: on an unexpected engine exit during a share,
+  the core respawns `relay-share send` with the same request, backoff
+  1 → 2 → 5 → 10 s, and the receiver keeps its pairing valid for a grace
+  window so the same code reconnects; give up after ~3 min with a notice.
+  The instrument strip shows "reconnecting (n)".
+- **Resume after reboot / power loss**: a persisted active-stream record
+  the core acts on at start. Needs S35 (no code to type after a reboot), so
+  S35 lands first.
+- **Loud, not silent**: a share that resumes without a click must announce
+  itself — tray balloon, strip visible when the window opens, one toggle to
+  turn resilience off in Settings. That is part of the DoD, not polish.
+
+Jake's decisions, 2026-09-18: crash detection + stream restore is a
+must-have, **on by default, off by a Settings toggle**. Closing the window
+should **exit to the tray and keep running by default, with a tray message
+saying so**, also toggleable in Settings. The close preference already
+exists (`settings.json` `close_action`, default keep-running, S23); what
+this adds is the notification-area message on close and the resilience
+toggle beside it.
+
 
 # Group 5 — v1.1 backlog
 

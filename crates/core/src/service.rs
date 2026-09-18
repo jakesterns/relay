@@ -554,6 +554,18 @@ fn engine_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> R
     }
 }
 
+/// Like `engine_command`, for the receive engine.
+fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> Reply {
+    let mut g = inner.lock();
+    match g.receive.as_mut() {
+        Some(engine) => match engine.command(cmd) {
+            Ok(()) => Reply::Ok,
+            Err(e) => Reply::Error { message: e.to_string() },
+        },
+        None => Reply::Error { message: "not receiving".into() },
+    }
+}
+
 struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
@@ -735,7 +747,10 @@ fn spawn_share(
                 // The sender's stats lines carry the codec for the strip.
                 ShareEvent::Waiting { .. }
                 | ShareEvent::Paired { .. }
-                | ShareEvent::Codec { .. } => {}
+                | ShareEvent::Codec { .. }
+                | ShareEvent::RenderUp { .. }
+                | ShareEvent::Host { .. }
+                | ShareEvent::HostClose => {}
                 ShareEvent::Exited { ok, .. } => {
                     let mut ig = inner2.lock();
                     ig.share = None;
@@ -795,9 +810,11 @@ fn spawn_receive(
             // Why the engine stopped, carried to the final ReceiveStatus so a
             // failure is never reported as a plain return to idle.
             let mut last_failure: Option<String> = None;
+            let mut stream_size: (u32, u32) = (0, 0);
             crate::share::pump(rx, |ev| match ev {
-                // The receiver renders into its own window, so a preview from
-                // that side would be a picture of something already on screen.
+                // The receiver renders into the app (or its own window), so a
+                // preview from that side would be a picture of something
+                // already on screen.
                 ShareEvent::Preview { .. } => {}
                 ShareEvent::Waiting { code, .. } => {
                     let _ = events2.send(Event::ReceiveStatus {
@@ -853,6 +870,39 @@ fn spawn_receive(
                             None => "the receiver stopped unexpectedly".to_string(),
                         });
                     }
+                }
+                // S29: the stream window. Its size and mode are remembered so
+                // a later `host` line (which carries no size) still tells the
+                // shell everything it needs.
+                ShareEvent::RenderUp { hwnd, width, height, host, excluded_from_capture } => {
+                    stream_size = (width, height);
+                    if !excluded_from_capture {
+                        warn!("stream window is NOT excluded from capture (B9)");
+                    }
+                    let _ = events2.send(Event::StreamWindow {
+                        hwnd,
+                        width,
+                        height,
+                        mode: host,
+                        excluded_from_capture,
+                    });
+                }
+                ShareEvent::Host { mode, hwnd, excluded_from_capture } => {
+                    info!(mode, hwnd, excluded_from_capture, "stream window mode from the engine");
+                    if !excluded_from_capture {
+                        warn!(mode, "stream window is NOT excluded from capture (B9)");
+                    }
+                    let _ = events2.send(Event::StreamWindow {
+                        hwnd,
+                        width: stream_size.0,
+                        height: stream_size.1,
+                        mode,
+                        excluded_from_capture,
+                    });
+                }
+                ShareEvent::HostClose => {
+                    info!("receiver's popped-out window closed; it re-embeds itself");
+                    let _ = events2.send(Event::StreamPopoutClosed);
                 }
                 ShareEvent::Connected { .. }
                 | ShareEvent::Recording { .. }
@@ -1054,6 +1104,11 @@ impl IpcHandler {
             Method::StopReceive => {
                 drop(g);
                 kill_receive(&self.inner, &self.events)
+            }
+            Method::HostReceive { mode, owner } => {
+                drop(g);
+                info!(?mode, owner, "host command for the receiver");
+                receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner })
             }
             Method::DiscoverReceivers => {
                 drop(g);

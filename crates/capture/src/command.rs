@@ -36,6 +36,23 @@ pub enum EngineCmd {
     Preview {
         fps: u32,
     },
+    /// Receiver only: where the stream window lives. `owner` is the app
+    /// window's HWND (0 when popping out). See `render::host`.
+    Host {
+        mode: HostMode,
+        #[serde(default)]
+        owner: u64,
+    },
+}
+
+/// How the receiver's window is hosted. `Embedded` = a frameless popup owned
+/// by the app window, positioned by the app over its video area; `Popout` =
+/// an ordinary top-level window of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostMode {
+    Embedded,
+    Popout,
 }
 
 /// Parse one stdin line. `stop` (the M4 wire format) still works; everything
@@ -66,6 +83,19 @@ mod tests {
     fn leading_bom_is_stripped() {
         assert_eq!(parse_line("\u{feff}stop"), Some(EngineCmd::Stop));
         assert_eq!(parse_line("\u{feff}{\"cmd\":\"replay_save\"}"), Some(EngineCmd::ReplaySave));
+    }
+
+    #[test]
+    fn host_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host { mode: HostMode::Embedded, owner: 0x1234 })
+                .unwrap(),
+            r#"{"cmd":"host","mode":"embedded","owner":4660}"#
+        );
+        assert_eq!(
+            parse_line(r#"{"cmd":"host","mode":"popout"}"#),
+            Some(EngineCmd::Host { mode: HostMode::Popout, owner: 0 })
+        );
     }
 
     #[test]

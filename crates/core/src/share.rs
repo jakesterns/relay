@@ -115,6 +115,21 @@ pub enum EngineCmd {
     Preview {
         fps: u32,
     },
+    /// Receiver only: embed the stream window in the app window `owner`, or
+    /// pop it out into a window of its own (S29).
+    Host {
+        mode: HostMode,
+        #[serde(default)]
+        owner: u64,
+    },
+}
+
+/// Mirror of `relay_capture::command::HostMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostMode {
+    Embedded,
+    Popout,
 }
 
 fn default_bitrate() -> u32 {
@@ -144,6 +159,11 @@ pub struct ReceiveRequest {
     /// Also service-set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_route: Option<String>,
+    /// The app window's HWND. When set, the engine creates the stream window
+    /// embedded in it (S29) instead of as a window of its own. The Tauri
+    /// shell fills this in; the core passes it through as `--host`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<u64>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -172,6 +192,15 @@ pub enum ShareEvent {
     Preview { width: u32, height: u32, jpeg: String },
     /// The video codec the share negotiated: `"hevc"` or `"h264"`.
     Codec { codec: String },
+    /// The receiver's stream window exists (S29): its HWND, the stream size
+    /// it was made for, and how it is hosted (`embedded`, `popout`, `none`).
+    RenderUp { hwnd: u64, width: u32, height: u32, host: String, excluded_from_capture: bool },
+    /// The receiver's window changed hosting mode, and whether Windows
+    /// confirms it is excluded from screen capture (B9).
+    Host { mode: String, hwnd: u64, excluded_from_capture: bool },
+    /// The user closed (or pressed Esc in) the popped-out window. It is
+    /// hidden, not gone: the shell embeds it again.
+    HostClose,
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -307,7 +336,16 @@ impl ShareEngine {
             bin.display()
         );
         let mut cmd = Command::new(&bin);
-        cmd.args(recv_args(req));
+        // `RELAY_RECEIVE_STUB=1`: a receiver that paints a moving pattern in
+        // the real window with the real host commands and no stream. The
+        // only way to exercise in-app hosting on one PC, where a real
+        // receiver would capture itself (B9). Never set by the product.
+        if std::env::var_os("RELAY_RECEIVE_STUB").is_some_and(|v| v == "1") {
+            warn!("RELAY_RECEIVE_STUB is set: spawning the pattern stub, not a receiver");
+            cmd.args(stub_args(req));
+        } else {
+            cmd.args(recv_args(req));
+        }
         cmd.env("RELAY_SPAWNED", "1");
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         Self::spawn_with(cmd, tx)
@@ -449,6 +487,21 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--mic-route".into());
         args.push(ep.into());
     }
+    if let Some(h) = req.host.filter(|h| *h != 0) {
+        args.push("--host".into());
+        args.push(h.to_string());
+    }
+    args
+}
+
+/// The `relay-share host-stub` command line: the same flags as `recv`, on the
+/// stand-in that decodes nothing. Replaces the `recv` line entirely.
+fn stub_args(req: &ReceiveRequest) -> Vec<String> {
+    let mut args = vec!["host-stub".to_string()];
+    if let Some(h) = req.host.filter(|h| *h != 0) {
+        args.push("--host".into());
+        args.push(h.to_string());
+    }
     args
 }
 
@@ -486,6 +539,25 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         Some("codec") => {
             Some(ShareEvent::Codec { codec: v.get("codec").and_then(|c| c.as_str())?.to_string() })
         }
+        Some("render_up") => Some(ShareEvent::RenderUp {
+            hwnd: v.get("hwnd").and_then(|h| h.as_u64()).unwrap_or(0),
+            width: v.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32,
+            height: v.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32,
+            host: v.get("host").and_then(|h| h.as_str()).unwrap_or("none").to_string(),
+            excluded_from_capture: v
+                .get("excluded_from_capture")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
+        }),
+        Some("host") => Some(ShareEvent::Host {
+            mode: v.get("mode").and_then(|m| m.as_str()).unwrap_or("none").to_string(),
+            hwnd: v.get("hwnd").and_then(|h| h.as_u64()).unwrap_or(0),
+            excluded_from_capture: v
+                .get("excluded_from_capture")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false),
+        }),
+        Some("host_close") => Some(ShareEvent::HostClose),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");
@@ -800,6 +872,12 @@ mod tests {
         let req: ReceiveRequest =
             serde_json::from_str(r#"{"vcam":true,"mic_route":"{0.0.0.00000000}.{ep}"}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv", "--vcam", "--mic-route", "{0.0.0.00000000}.{ep}"]);
+        let req: ReceiveRequest = serde_json::from_str(r#"{"host":133742}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv", "--host", "133742"]);
+        assert_eq!(stub_args(&req), ["host-stub", "--host", "133742"]);
+        // A zero handle is "no window", not a window called 0.
+        let req: ReceiveRequest = serde_json::from_str(r#"{"host":0}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
         let req: ReceiveRequest = serde_json::from_str(r#"{"mic_route":""}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
     }

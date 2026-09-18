@@ -26,6 +26,8 @@ uuid.workspace = true
 tauri = { version = "2.11", features = ["protocol-asset"] }
 
 # Window placement (window_state.rs): the normal bounds Tauri does not expose.
+# And the stream window (stream_host.rs): positioning the engine's window
+# over the video area.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",

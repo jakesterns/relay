@@ -55,7 +55,7 @@ describe("pairing", () => {
     h.expectClean();
   });
 
-  it("names the sender once paired and says the stream is its own window", async () => {
+  it("names the sender once paired and waits for the first frame in the video area", async () => {
     const h = await mount();
     await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
     await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254", sender: "studio-pc" }));
@@ -65,8 +65,11 @@ describe("pairing", () => {
     expect(kv("Codec")).toBe("—");
     await push(() => tauri.emit("core://receive-status", { receiving: true, codec: "h264" }));
     expect(kv("Codec")).toBe("H.264");
-    expect(screen.getByText(/Playing in a separate window · studio-pc/)).toBeInTheDocument();
-    expect(screen.getByText(/The stream appears as a normal window\. Nothing on this PC is changed\./)).toBeInTheDocument();
+    expect(screen.getByText(/Connected to studio-pc — waiting for the first frame/)).toBeInTheDocument();
+    // S29: the stream plays inside the app. Nothing sends the user to look
+    // for another window.
+    expect(screen.queryByText(/separate window/)).not.toBeInTheDocument();
+    expect(screen.getByText(/The stream plays here, in this window\. Nothing on this PC is changed\./)).toBeInTheDocument();
     h.expectClean();
   });
 
@@ -84,6 +87,19 @@ describe("pairing", () => {
     expect(kv("Status")).toBe("Idle");
   });
 
+  it("says the share ended, in the video area, rather than snapping back to idle", async () => {
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254", sender: "studio-pc" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: false }));
+    expect(screen.getByText("The share from studio-pc ended.")).toBeInTheDocument();
+    expect(kv("Status")).toBe("Idle");
+    // Starting again clears it.
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await settle();
+    expect(screen.queryByText(/ended\./)).not.toBeInTheDocument();
+  });
+
   it("shows the core's message when a start fails", async () => {
     core.fail.set("start_receive", "another receiver already holds the port");
     const h = await mount();
@@ -91,6 +107,94 @@ describe("pairing", () => {
     await settle();
     expect(screen.getByText(/another receiver already holds the port/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start receiving" })).toBeInTheDocument();
+  });
+});
+
+/** S29: the stream is a native window the shell keeps over the video area.
+ *  The page's job is to say where that area is, offer the pop-out, and keep
+ *  the box empty while the picture covers it. */
+describe("the stream inside the app", () => {
+  const live = (mode: "embedded" | "popout", excluded = true) => ({
+    live: true, mode, width: 2560, height: 1440, excluded_from_capture: excluded,
+  });
+
+  it("reports the video area to the shell on mount and clears it on unmount", async () => {
+    const h = await mount();
+    // jsdom lays nothing out, so the box measures 0x0 and reads as "no area".
+    expect(tauri.lastCall("set_video_area")?.args).toEqual({ area: null });
+    h.unmount();
+    await settle();
+    expect(tauri.lastCall("set_video_area")?.args).toEqual({ area: null });
+    expect(tauri.calls.filter((c) => c.cmd === "set_video_area").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("keeps the video area empty while the stream is embedded, and offers the pop-out", async () => {
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
+    await push(() => tauri.emit("core://stream", live("embedded")));
+    const area = screen.getByTestId("video-area");
+    expect(area.dataset.stream).toBe("embedded");
+    expect(area.querySelector(".idlemsg")).toBeNull();
+    expect(kv("Stream")).toBe("2560×1440");
+
+    await h.user.click(screen.getByRole("button", { name: "Pop out into its own window" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "popout" });
+    // Nothing changes until the engine confirms.
+    expect(area.dataset.stream).toBe("embedded");
+
+    await push(() => tauri.emit("core://stream", live("popout")));
+    expect(area.dataset.stream).toBe("popout");
+    expect(screen.getByText(/Playing in its own window · studio-pc/)).toBeInTheDocument();
+    await h.user.click(screen.getByRole("button", { name: "Bring back into Relay" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "embedded" });
+    h.expectClean();
+  });
+
+  it("learns about a stream that was already playing when the screen opened", async () => {
+    core.stream = { ...live("embedded"), receiving: true, code: "418254", sender: "studio-pc", codec: "h264" };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(screen.getByTestId("video-area").dataset.stream).toBe("embedded");
+    expect(screen.getByRole("button", { name: "Pop out into its own window" })).toBeInTheDocument();
+    // And the rest of the screen agrees with the picture: this was the
+    // "Idle beside a playing stream" state after Settings-and-back.
+    expect(kv("Status")).toBe("Paired with studio-pc");
+    expect(kv("Codec")).toBe("H.264");
+    expect(code()).toBe("418254");
+    expect(screen.getByRole("button", { name: "Stop receiving" })).toBeInTheDocument();
+  });
+
+  it("learns about a receive that is still waiting for a sender when the screen opened", async () => {
+    core.stream = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: true, code: "990011" };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Status")).toBe("Advertising on the LAN");
+    expect(code()).toBe("990011");
+    expect(screen.getByText("Waiting for a sender to pair…")).toBeInTheDocument();
+  });
+
+  it("says so when Windows could not hide the stream from capture", async () => {
+    const h = await mount();
+    await push(() => tauri.emit("core://stream", live("embedded", false)));
+    expect(screen.getByText(/could not hide the stream from screen capture/)).toBeInTheDocument();
+    await push(() => tauri.emit("core://stream", live("embedded", true)));
+    expect(screen.queryByText(/could not hide the stream/)).not.toBeInTheDocument();
+    h.expectClean();
+  });
+
+  it("returns to the idle prompt when the stream and the receive end", async () => {
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
+    await push(() => tauri.emit("core://stream", live("embedded")));
+    await push(() => tauri.emit("core://stream", { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true }));
+    await push(() => tauri.emit("core://receive-status", { receiving: false }));
+    expect(screen.getByTestId("video-area").dataset.stream).toBe("none");
+    expect(screen.getByText("The share from studio-pc ended.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Pop out/ })).not.toBeInTheDocument();
   });
 });
 

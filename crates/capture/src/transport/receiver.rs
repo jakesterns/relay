@@ -31,6 +31,9 @@ pub struct RecvOpts {
     pub vcam: bool,
     /// Render decoded audio to this endpoint id (interim virtual-mic route).
     pub mic_route: Option<String>,
+    /// The app window's HWND: create the stream window embedded in it (S29)
+    /// rather than as a window of its own.
+    pub host: Option<u64>,
 }
 
 /// One depacketized video access unit.
@@ -74,6 +77,12 @@ pub struct RecvStats {
     /// kept presenting one surface.
     pub last_pts_100ns: AtomicI64,
     pub last_subresource: AtomicU64,
+    /// RTP sequence gaps seen on the video track, and the packets they
+    /// swallowed. A gap hands the decoder a damaged access unit; until the
+    /// next keyframe the picture smears (B15), while `presented` keeps
+    /// climbing as if nothing were wrong. These say when that happened.
+    pub video_gaps: AtomicU64,
+    pub video_lost_packets: AtomicU64,
 }
 
 pub async fn run(opts: RecvOpts) -> Result<()> {
@@ -312,8 +321,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    let render_opts =
-        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone() };
+    let render_opts = crate::render::RenderOpts {
+        vcam: opts.vcam,
+        mic_route: opts.mic_route.clone(),
+        host: opts.host,
+    };
     crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts, abort_tx)
         .await
 }
@@ -335,9 +347,28 @@ async fn video_track_loop(
     // RTP-sequence loss estimation over ~1 s windows.
     let mut loss = super::control::LossWindow::default();
     let mut window_start = std::time::Instant::now();
+    let mut last_seq: Option<u16> = None;
     while let Some(ev) = track.poll().await {
         let TrackRemoteEvent::OnRtpPacket(pkt) = ev else { continue };
-        loss.push(pkt.header.sequence_number);
+        let seq = pkt.header.sequence_number;
+        if let Some(prev) = last_seq {
+            let gap = seq.wrapping_sub(prev);
+            if gap > 1 && gap < 0x8000 {
+                let lost = (gap - 1) as u64;
+                stats.video_gaps.fetch_add(1, Ordering::Relaxed);
+                stats.video_lost_packets.fetch_add(lost, Ordering::Relaxed);
+                warn!(
+                    expected = prev.wrapping_add(1),
+                    got = seq,
+                    lost,
+                    "rtp sequence gap on the video track; the picture may be damaged until the next keyframe"
+                );
+            }
+        }
+        if last_seq.is_none_or(|p| seq.wrapping_sub(p) < 0x8000) {
+            last_seq = Some(seq);
+        }
+        loss.push(seq);
         if window_start.elapsed() >= std::time::Duration::from_secs(1) {
             let _ = loss_tx.try_send(loss.take_fraction());
             window_start = std::time::Instant::now();

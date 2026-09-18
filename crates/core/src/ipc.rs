@@ -104,6 +104,13 @@ pub enum Method {
     },
     /// Stop receiving.
     StopReceive,
+    /// Move the receiver's stream window between the app window (`owner`,
+    /// the shell's HWND) and a window of its own (S29).
+    HostReceive {
+        mode: crate::share::HostMode,
+        #[serde(default)]
+        owner: u64,
+    },
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
     /// The hardware library plus what is connected right now.
@@ -367,6 +374,21 @@ pub enum Event {
     SourceChanged {
         data: serde_json::Value,
     },
+    /// The receiver's stream window (S29): it exists, or changed hosting
+    /// mode. `mode` is `embedded`, `popout` or `none`; `excluded_from_capture`
+    /// is what Windows reports back for the B9 guard, not what was asked.
+    /// The shell positions the window from this; the webview only reads the
+    /// stream size and mode.
+    StreamWindow {
+        hwnd: u64,
+        width: u32,
+        height: u32,
+        mode: String,
+        excluded_from_capture: bool,
+    },
+    /// The user closed the popped-out stream window; it is hidden and waits
+    /// to be embedded again.
+    StreamPopoutClosed,
     /// The receive engine's state: advertising with a code, paired, or stopped.
     ReceiveStatus {
         receiving: bool,
