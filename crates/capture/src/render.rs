@@ -310,7 +310,9 @@ fn join_bounded<T: Send + 'static>(handle: std::thread::JoinHandle<T>, what: &st
 pub struct Surface {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    swapchain: IDXGISwapChain1,
+    /// `None` only between releasing an old chain and binding a new one; a
+    /// failed rebuild leaves it `None` until the retry succeeds.
+    swapchain: Option<IDXGISwapChain1>,
     vp_device: ID3D11VideoDevice,
     vp_context: ID3D11VideoContext,
     hwnd: HWND,
@@ -323,23 +325,35 @@ impl Surface {
     fn recreate_swapchain(&mut self) -> Result<()> {
         let (w, h) = self.size;
         let dxgi_device: IDXGIDevice = self.device.cast()?;
-        // SAFETY: live device; the old swapchain is released before the new
-        // one binds the window, and no view on its back buffer is alive
-        // between presents.
+        // SAFETY: live device. The old chain must be *gone* before the new
+        // one is created: a window carries one swapchain, and creating a
+        // second while the first is alive fails with E_ACCESSDENIED — which
+        // is what r8 did on the second PC, seven times out of seven, leaving
+        // the picture black after every pop-in. No view on the old back
+        // buffer is alive between presents; ClearState + Flush drops the
+        // context's own references.
         unsafe {
+            drop(self.swapchain.take());
+            self.context.ClearState();
+            self.context.Flush();
             let adapter = dxgi_device.GetAdapter()?;
             let factory: IDXGIFactory2 = adapter.GetParent()?;
             let desc = Self::desc(w, h);
-            let fresh =
-                factory.CreateSwapChainForHwnd(&self.device, self.hwnd, &desc, None, None)?;
+            let fresh = factory
+                .CreateSwapChainForHwnd(&self.device, self.hwnd, &desc, None, None)
+                .context("CreateSwapChainForHwnd after a hosting change")?;
             let _ = factory.MakeWindowAssociation(
                 self.hwnd,
                 DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER,
             );
-            self.swapchain = fresh;
+            self.swapchain = Some(fresh);
         }
         info!("swapchain recreated after a hosting change");
         Ok(())
+    }
+
+    fn swapchain(&self) -> Result<&IDXGISwapChain1> {
+        self.swapchain.as_ref().context("no swapchain: the last rebuild failed")
     }
 
     fn desc(w: u32, h: u32) -> DXGI_SWAP_CHAIN_DESC1 {
@@ -390,7 +404,15 @@ impl Surface {
         let vp_device: ID3D11VideoDevice = device.cast()?;
         let vp_context: ID3D11VideoContext = context.cast()?;
 
-        Ok(Self { device, context, swapchain, vp_device, vp_context, hwnd, size: (w, h) })
+        Ok(Self {
+            device,
+            context,
+            swapchain: Some(swapchain),
+            vp_device,
+            vp_context,
+            hwnd,
+            size: (w, h),
+        })
     }
 }
 
@@ -509,7 +531,11 @@ fn video_thread(
         if gen != surface_gen {
             surface_gen = gen;
             if let Err(e) = surface.recreate_swapchain() {
-                warn!(error = %e, "could not recreate the swapchain; presenting into the old one");
+                // Retry next frame rather than present into nothing.
+                warn!(error = %e, "could not recreate the swapchain; retrying");
+                surface_gen = gen.wrapping_sub(1);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
             }
         }
 
@@ -656,7 +682,8 @@ impl VideoPresent {
         // SAFETY: create views on the decoded texture and the back buffer,
         // blt (NV12→BGRA + scale), present. Views drop at scope end.
         unsafe {
-            let back: ID3D11Texture2D = win.swapchain.GetBuffer(0)?;
+            let swapchain = win.swapchain()?;
+            let back: ID3D11Texture2D = swapchain.GetBuffer(0)?;
 
             let in_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
                 FourCC: 0,
@@ -703,7 +730,7 @@ impl VideoPresent {
             res?;
             let _ = win.context;
             // Present with vsync off for lowest latency.
-            win.swapchain.Present(0, DXGI_PRESENT(0)).ok()?;
+            swapchain.Present(0, DXGI_PRESENT(0)).ok()?;
         }
         Ok(())
     }
@@ -805,7 +832,10 @@ fn stub_thread(
         if gen != surface_gen {
             surface_gen = gen;
             if let Err(e) = surface.recreate_swapchain() {
-                warn!(error = %e, "could not recreate the swapchain");
+                warn!(error = %e, "could not recreate the swapchain; retrying");
+                surface_gen = gen.wrapping_sub(1);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
             }
         }
         // A slow hue sweep with a bright bar marching across it: a stalled
@@ -814,7 +844,8 @@ fn stub_thread(
         let (r, g, b) = hue(t * 0.1);
         // SAFETY: back buffer of our own swapchain; the view drops at scope end.
         let presented_ok = unsafe {
-            let back: ID3D11Texture2D = surface.swapchain.GetBuffer(0)?;
+            let swapchain = surface.swapchain()?;
+            let back: ID3D11Texture2D = swapchain.GetBuffer(0)?;
             let mut rtv: Option<ID3D11RenderTargetView> = None;
             surface.device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
             let rtv = rtv.context("render target view")?;
@@ -824,7 +855,7 @@ fn stub_thread(
             ctx1.ClearView(&rtv, &[r, g, b, 1.0], Some(std::slice::from_ref(&bar)));
             let band = RECT { left: 0, top: 0, right: w as i32, bottom: 12 };
             ctx1.ClearView(&rtv, &[0.79, 0.66, 0.42, 1.0], Some(std::slice::from_ref(&band)));
-            surface.swapchain.Present(1, DXGI_PRESENT(0)).ok().is_ok()
+            swapchain.Present(1, DXGI_PRESENT(0)).ok().is_ok()
         };
         if !presented_ok && quit.load(Ordering::Acquire) {
             break;
