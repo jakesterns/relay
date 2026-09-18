@@ -37,9 +37,12 @@ every mode:
   it would for a click anywhere else in it.
 - **Popped out**: `WS_OVERLAPPEDWINDOW`, unowned (so the app can be brought
   in front of it), `WS_EX_APPWINDOW`, sized to 90 % of the work area of the
-  monitor the app is on. Close or Esc **hides** it and emits `host_close`;
-  the shell then asks for `embedded` again. Nothing ends the receive but
-  Stop, the sender stopping, or the connection dropping.
+  monitor the app is on. Close or Esc **re-embeds it on the spot**: the
+  engine remembers the app window it came from, restyles itself in place
+  (never hiding — see below), emits `host_close` then the `host` event, and
+  the app moves it into the video area. If the app window is gone, close
+  ends the receive. Nothing else ends the receive but Stop, the sender
+  stopping, or the connection dropping.
 - **Standalone** (`recv` from a console, no `--host`): the pre-S29 window.
   Close and Esc end the receive.
 
@@ -55,8 +58,10 @@ are rare. A round trip through the core for each move would put the picture
 visibly behind the frame. `SetWindowPos` on another process's window is an
 ordinary Win32 call; the shell does it directly from its `Moved`, `Resized`
 and `ScaleFactorChanged` handlers and from every page measurement. The shell
-**never shows the window until the engine has confirmed `embedded`**, so a
-framed window cannot flash at the video area during pop-in.
+acts only on the engine's confirmed mode (the `host` event), and the engine
+never hides the window across a mode change: a hide-then-show within one
+DWM frame composes the window black (run 5), so a popped-out window is
+restyled where it is and moved a moment later.
 
 Both processes are per-monitor-DPI-aware (the engine sets
 `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2` before creating its window), so
@@ -80,8 +85,13 @@ swapchain). Rules that keep them from deadlocking:
 - `MakeWindowAssociation(DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER)`
   so DXGI does not hook the window procedure from the render thread.
 - The render thread polls the AU channel (`try_recv` + 1 ms sleep) instead
-  of blocking on it, so a stop always lands within a frame. This is also what
-  finally cures B8: the receiver now reads `stop` on stdin and exits on it.
+  of blocking on it, so a stop always lands within a frame. The receiver now
+  reads `stop` on stdin, and its teardown is bounded to 3 s, after which it
+  prints `stopped` and exits — B8's hang (`pc.close()` outliving the AU
+  sender) is still there underneath and still owed.
+- The render thread rebuilds the swapchain after every mode change
+  (`HostLink::bump_surface`), releasing the old one first: two swapchains on
+  one HWND is `E_ACCESSDENIED`.
 
 ### If the app closes while embedded
 
