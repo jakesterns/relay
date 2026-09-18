@@ -12,8 +12,13 @@
 //!   the set of behaviours a piece of the app window should have.
 //! - **PoppedOut** — an ordinary top-level window again, unowned so the app
 //!   can be brought in front of it, sized to the work area of the monitor it
-//!   came from. Close or Esc here does not end the receive: it hides the
-//!   window and tells the app (`host_close`), which embeds it again.
+//!   came from. Close or Esc here does not end the receive: the window embeds
+//!   itself again into the app window it came from (it remembers the owner),
+//!   and tells the app so (`host_close`, then the `host` event). It used to
+//!   only hide and ask the app to re-embed it; on the second PC that
+//!   four-hop round trip took anywhere from 1.6 s to 47 s and Jake clicked
+//!   the close button several times waiting. If the app window is gone,
+//!   close ends the receive, as it does for a standalone window.
 //!
 //! Why a popup and not a `WS_CHILD`: `SetWindowDisplayAffinity` — the
 //! guard against Relay capturing its own output (B9) — is honoured only on
@@ -81,6 +86,9 @@ struct WinState {
     /// Ever hosted by the app. Decides what close and Esc mean: end the
     /// receive (standalone) or go back into the app (hosted).
     hosted: bool,
+    /// The app window this was last embedded in, so a popped-out window can
+    /// put itself back without a round trip through the app.
+    last_owner: Option<HWND>,
     quit: Arc<AtomicBool>,
     stream_w: u32,
     stream_h: u32,
@@ -112,6 +120,7 @@ impl WindowThread {
                 let state = Box::new(WinState {
                     mode: Mode::Standalone,
                     hosted: owner.is_some(),
+                    last_owner: owner.map(|o| HWND(o as *mut _)),
                     quit: quit2.clone(),
                     stream_w: w,
                     stream_h: h,
@@ -367,6 +376,7 @@ unsafe fn apply_mode(hwnd: HWND, state: &mut WinState, mode: HostMode, owner: u6
             );
             SetTimer(Some(hwnd), OWNER_TIMER, 1000, None);
             state.mode = Mode::Embedded { owner };
+            state.last_owner = Some(owner);
         }
         HostMode::Popout => {
             let _ = KillTimer(Some(hwnd), OWNER_TIMER);
@@ -408,15 +418,25 @@ unsafe fn apply_mode(hwnd: HWND, state: &mut WinState, mode: HostMode, owner: u6
     );
 }
 
-/// Close or Esc. Standalone: end the receive. Hosted: hide and tell the
-/// app, which embeds the stream again — closing the popped-out window is
-/// "put it back", never "stop".
-unsafe fn close_requested(hwnd: HWND, state: &mut WinState) {
-    if state.hosted {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        println!("{}", serde_json::json!({ "event": "host_close" }));
-    } else {
-        state.quit.store(true, Ordering::Release);
+/// Close or Esc. Standalone: end the receive. Popped out: put the stream
+/// back into the app window it came from — closing the popped-out window is
+/// "put it back", never "stop" — unless that window is gone, in which case
+/// there is nowhere to go back to and close means stop.
+unsafe fn close_requested(hwnd: HWND, state: &mut WinState, why: &str) {
+    let back_to = state.last_owner.filter(|o| IsWindow(Some(*o)).as_bool());
+    info!(
+        why,
+        mode = state.mode.label(),
+        hosted = state.hosted,
+        app_window_alive = back_to.is_some(),
+        "close requested"
+    );
+    match (state.hosted, back_to) {
+        (true, Some(owner)) => {
+            println!("{}", serde_json::json!({ "event": "host_close", "why": why }));
+            apply_mode(hwnd, state, HostMode::Embedded, owner.0 as isize as u64);
+        }
+        _ => state.quit.store(true, Ordering::Release),
     }
 }
 
@@ -438,6 +458,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             WM_APP_HOST => {
                 if let Some(state) = state_of(hwnd) {
                     let mode = if wp.0 == 0 { HostMode::Embedded } else { HostMode::Popout };
+                    info!(?mode, owner = lp.0, from = state.mode.label(), "host command");
                     apply_mode(hwnd, state, mode, lp.0 as u64);
                 }
                 LRESULT(0)
@@ -457,7 +478,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             }
             WM_CLOSE => {
                 if let Some(state) = state_of(hwnd) {
-                    close_requested(hwnd, state);
+                    close_requested(hwnd, state, "close");
                 }
                 LRESULT(0)
             }
@@ -466,7 +487,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRES
             // if the window is ever mis-sized again.
             WM_KEYDOWN if wp.0 as u32 == VK_ESCAPE.0 as u32 => {
                 if let Some(state) = state_of(hwnd) {
-                    close_requested(hwnd, state);
+                    close_requested(hwnd, state, "escape");
                 }
                 LRESULT(0)
             }

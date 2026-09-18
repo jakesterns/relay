@@ -674,18 +674,13 @@ fn spawn_event_bridge(app: AppHandle) {
                                     let _ = app.emit("core://stream", stream_host::status());
                                 }
                                 // Closing the popped-out window means "back into
-                                // the app", never "stop": ask the engine to embed
-                                // again. Its `host` event then shows it.
+                                // the app", never "stop". The engine embeds itself
+                                // (it remembers the owner) and its `host` event
+                                // follows; nothing to ask for here. It used to be
+                                // asked for from here, and that round trip is what
+                                // took up to 47 s on the second PC.
                                 Event::StreamPopoutClosed => {
-                                    let owner = app
-                                        .get_webview_window("main")
-                                        .and_then(|w| host_hwnd(&w.as_ref().window()))
-                                        .unwrap_or(0);
-                                    let _ = call(Method::HostReceive {
-                                        mode: relay_core::share::HostMode::Embedded,
-                                        owner,
-                                    })
-                                    .await;
+                                    tracing::info!("popped-out stream window closed");
                                 }
                                 Event::ReceiveStatus {
                                     receiving,

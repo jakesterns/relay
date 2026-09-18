@@ -201,7 +201,10 @@ pub async fn run(
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
                         Some(EngineCmd::Stop) => { info!("stop command received"); break; }
-                        Some(EngineCmd::Host { mode, owner }) => link.post(mode, owner),
+                        Some(EngineCmd::Host { mode, owner }) => {
+                            info!(?mode, owner, "host command received on stdin");
+                            link.post(mode, owner)
+                        }
                         Some(other) => tracing::debug!(?other, "command not for a receiver"),
                         None => tracing::debug!(line = %l, "unrecognised stdin line ignored"),
                     },

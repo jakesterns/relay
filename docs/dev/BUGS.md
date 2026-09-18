@@ -143,7 +143,16 @@ Two builds of the same commit from different worktrees ship different files:
 way — Rust's `.lines()` strips `\r`). Harmless today, but it must be fixed
 before anything is signed: a signature over a build nobody can reproduce is
 worth very little.
-### B13 — The received stream played in a window of its own  |  S29, local pass done, two-PC pass pending
+
+*S29, 2026-09-17:* a third instance. `pnpm tauri build` rewrote
+`target
+elease
+elay-ui.exe` 12 ms *after* writing the NSIS installer, so
+the exe inside the installer (`4A2E2BA4...910E`) differs from the one left on
+disk (`2E0B8748...45DB`). Hash the installer, or extract from it; never the
+loose `relay-ui.exe`.
+
+### B13 — The received stream played in a window of its own  |  S29, two-PC pass run 1 done, close-popout fix in r6
 Jake, after the first real two-PC test: the picture belongs *inside* the
 Relay window, in the Receive screen's video area, with a pop-out like
 Discord's. The old Receive screen painted an empty frame captioned "Playing
@@ -169,7 +178,39 @@ gone, "The share from host-stub ended."); `excluded_from_capture=true` after
 every transition; present counter climbing throughout. What the stub cannot
 show: a real modal drag of the app window, real decode and audio, Windows 10.
 
-**Two-PC pass:** see the S29 run log below once it has happened.
+**Two-PC pass, run 1, 2026-09-18 00:04-00:08 UTC, r5 = `256661b`, sender
+this dev box (main `3036081`), receiver the Windows 10 PC via relay-pc2:**
+- Embedded: picture clear and inside Relay, no second window; "little to no
+  latency" (Jake). `receiver window up mode="embedded" excluded=true`.
+- Drag/resize for ~10 s: no freeze; no "receiver stalled" line anywhere in
+  the run; `presented` climbed 30 per 500 ms throughout (60 fps).
+- Pop out and "Bring back into Relay": work.
+- **Closing the popped-out window (X/Esc) did not reliably re-embed.** Four
+  popout->embedded transitions took 7.2 s, 1.6 s, 46.8 s and 9.3 s; Jake
+  clicked several times. The failed attempts left no log line. The
+  re-embed was a four-hop chain (engine `host_close` -> core -> shell ->
+  core `HostReceive` -> engine), and the engine could not take the
+  foreground when popping out (`SetForegroundWindow` refused to a process
+  without the last input), so Esc went to the app. Fix in r6: the engine
+  re-embeds itself on close using the owner it remembers, the shell hands
+  the popped-out window the foreground, and every close/Esc and host command
+  is logged.
+- `aus == presented` all run (12604/12603): the double count is gone.
+- Audio: none playing, none heard, no beeping (B11 not reproduced).
+- Not reached: Settings navigation, minimise/restore (run 2).
+- Ended by Jake's Stop receiving at 00:08:31 (his clock); clean exit.
+
+### B14 — Receiver latency goes negative: the clock offset is measured once
+relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
+at 00:05:06 and reached -8.0 ms by 00:08:30; 312 of 538 samples negative.
+The two PCs' wall clocks also disagreed by 2.6 s at connect and 6.9 s four
+and a half minutes later, so one of them drifts about 1 s/min against the
+other. The sender/receiver offset (`clocks synced offset_ms=-2421`) is
+estimated once at connect and never again, so the "latency" readout is that
+drift. Pre-dates S29 (M4 measurement code). Fix: re-estimate periodically,
+or measure glass-to-glass against a monotonic clock. Also worth checking
+why a Windows 10 PC on the LAN drifts a second a minute (NTP off?).
+
 
 ## Fixed, verified on the second PC
 

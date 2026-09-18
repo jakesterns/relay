@@ -900,6 +900,7 @@ fn spawn_receive(
                     });
                 }
                 ShareEvent::HostClose => {
+                    info!("receiver's popped-out window closed; it re-embeds itself");
                     let _ = events2.send(Event::StreamPopoutClosed);
                 }
                 ShareEvent::Connected { .. }
@@ -1105,6 +1106,7 @@ impl IpcHandler {
             }
             Method::HostReceive { mode, owner } => {
                 drop(g);
+                info!(?mode, owner, "host command for the receiver");
                 receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner })
             }
             Method::DiscoverReceivers => {

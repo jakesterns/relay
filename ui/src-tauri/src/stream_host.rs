@@ -129,14 +129,26 @@ pub fn on_receive_status(
 
 /// The engine reported its window (created, or changed mode).
 pub fn on_window(hwnd: u64, width: u32, height: u32, mode: &str, excluded: bool) {
-    let mut g = HOST.lock().unwrap();
-    g.hwnd = hwnd;
-    if width > 0 && height > 0 {
-        g.width = width;
-        g.height = height;
+    let popped_out_now = {
+        let mut g = HOST.lock().unwrap();
+        g.hwnd = hwnd;
+        if width > 0 && height > 0 {
+            g.width = width;
+            g.height = height;
+        }
+        let was = std::mem::replace(&mut g.mode, mode.to_string());
+        g.excluded_from_capture = excluded;
+        mode == "popout" && was != "popout"
+    };
+    // The engine cannot bring its own window to the front: Windows refuses
+    // SetForegroundWindow to a process that did not get the last input. This
+    // process did (the user clicked Pop out here), so it can hand the
+    // foreground over. Without this the popped-out window sat behind the
+    // app and Esc went to the app instead of closing it.
+    if popped_out_now {
+        #[cfg(windows)]
+        win::bring_to_front(hwnd);
     }
-    g.mode = mode.to_string();
-    g.excluded_from_capture = excluded;
 }
 
 /// The webview measured the video area, or left the Receive screen (`None`).
@@ -183,11 +195,21 @@ mod win {
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, IsWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
-        SW_HIDE,
+        IsIconic, IsWindow, SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+        SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
     };
 
     use super::{fit, Area};
+
+    pub fn bring_to_front(hwnd: u64) {
+        let stream = HWND(hwnd as *mut _);
+        // SAFETY: a window handle the engine reported; a stale one fails.
+        unsafe {
+            if IsWindow(Some(stream)).as_bool() {
+                let _ = SetForegroundWindow(stream);
+            }
+        }
+    }
 
     pub fn place(window: &tauri::Window, hwnd: u64, size: (u32, u32), area: Option<Area>) {
         let stream = HWND(hwnd as *mut _);
