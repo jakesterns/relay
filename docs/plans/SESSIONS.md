@@ -1216,6 +1216,30 @@ network path and a new encoder consumer, and needs the brief's "one outbound
 request" rule revisited. **First task of the session: write
 `docs/plans/v11-stream-out.md` with the decision and a real DoR/DoD.**
 
+## S32 — Audio mixer on Share and Receive · `feat/audio-mixer`
+Requested by Jake 2026-09-18. When sharing a window or one application
+rather than the whole screen, choose what goes out: that app's sound, the
+whole OS mix, system sounds, the microphone — each on its own fader with
+mute, live while sharing. The same on the receiving side: mute or drop
+system sounds, app sound, the mic, in a real-time mixer. Place it under the
+Start/Stop button on each screen (or wherever the layout makes it obvious).
+
+What exists to build on: the sender already captures the desktop mix or one
+process's audio (`audio_pid`, WASAPI process loopback) and the microphone as
+a **second Opus track** (S2); the receiver decodes the two tracks separately
+and sums them in one op in `playback.rs` (`mix_sum`), which S19 (mix-minus)
+was already going to split. So per-source gain and mute on the receiver is a
+change to that one step; on the sender, per-source faders mean mixing
+sources *before* the encoder (today the choice is one program source + mic),
+and "system sounds" as a distinct source needs a per-session split of the
+desktop mix (WASAPI session enumeration, which `relay-audio` already probes
+for the exclusive-mode watcher). Send the mixer state over the existing
+stdin command channel so it is live, never a restart. Keep the
+non-negotiables: no default-device changes, nothing global, Relay's own
+mix only. **First task: write `docs/plans/v11-audio-mixer.md`** with the
+source list per side, the wire shape, and a DoD that includes a listening
+check on the second PC (speech, never a tone).
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
