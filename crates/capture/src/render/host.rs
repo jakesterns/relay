@@ -49,6 +49,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
+use windows::Win32::UI::Shell::ExtractIconW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use super::HostLink;
@@ -208,11 +209,13 @@ fn create(w: u32, h: u32, owner: Option<u64>, state: *mut WinState) -> Result<(H
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
+        let icon = app_icon();
         let class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
             lpszClassName: w!("RelayReceiver"),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: icon,
             // Black until the first frame: a white flash inside a dark app
             // is the kind of thing that reads as a fault.
             hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
@@ -250,6 +253,25 @@ fn create(w: u32, h: u32, owner: Option<u64>, state: *mut WinState) -> Result<(H
             Some(state as *const core::ffi::c_void),
         )?;
 
+        // The class icon covers a window created *after* registration; a
+        // class registered by an earlier window in this process keeps its
+        // own. Set it on the window too, so the popped-out title bar, the
+        // taskbar and Alt+Tab all show the Relay icon, the same one the tray
+        // and the app window use.
+        if !icon.is_invalid() {
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_BIG as usize)),
+                Some(LPARAM(icon.0 as isize)),
+            );
+            let _ = SendMessageW(
+                hwnd,
+                WM_SETICON,
+                Some(WPARAM(ICON_SMALL as usize)),
+                Some(LPARAM(icon.0 as isize)),
+            );
+        }
         if let Some(o) = owner {
             (*state).mode = Mode::Embedded { owner: HWND(o as *mut _) };
             SetTimer(Some(hwnd), OWNER_TIMER, 1000, None);
@@ -257,6 +279,29 @@ fn create(w: u32, h: u32, owner: Option<u64>, state: *mut WinState) -> Result<(H
         let excluded = exclude_from_capture(hwnd);
         info!(mode = (*state).mode.label(), excluded, "receiver window up");
         Ok((hwnd, excluded))
+    }
+}
+
+/// The Relay icon, taken from `relay-ui.exe` next to this binary — the one
+/// artwork the installer ships, and what the core's tray icon uses too, so
+/// the popped-out window matches the tray and the app. A tree without a
+/// built UI gets the generic icon.
+fn app_icon() -> HICON {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    // SAFETY: a path in, a shared icon handle out; null/1 mean "none".
+    unsafe {
+        std::env::current_exe()
+            .ok()
+            .and_then(|me| relay_core::launcher::sibling_of(&me, relay_core::launcher::UI_EXE))
+            .filter(|p| p.exists())
+            .and_then(|p| {
+                let wide: Vec<u16> =
+                    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                let h = ExtractIconW(None, PCWSTR(wide.as_ptr()), 0);
+                (!h.is_invalid() && h.0 as usize != 1).then_some(h)
+            })
+            .unwrap_or_else(|| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
     }
 }
 
