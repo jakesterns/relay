@@ -298,7 +298,10 @@ looks like something saturating at 40 Mb/s — the receiver's UDP socket
 buffer is the first suspect (log `SO_RCVBUF` and overruns; raising it may
 be the whole fix) — rather than random LAN loss. Next split: 60 fps at
 20 Mb/s, to separate frame rate from bitrate. The sender's periodic IDR is
-every ~10 s (18 in 3 min), which is how long a smear lasts today.
+every ~10 s (18 in 3 min), which is how long a smear lasts today. Jake saw
+**no smear at all in run 6**, the first corruption-free run, even with 246
+packets lost: single-packet gaps are covered by the 10 s cadence, and the
+visible damage comes from the bursts.
 
 ### B14 — Receiver latency goes negative: the clock offset is measured once
 relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
