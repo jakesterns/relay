@@ -1175,6 +1175,230 @@ Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and su
 
 ---
 
+# Group 6 — stream quality
+
+Jake's requirements after the r10 two-PC pass, 2026-09-18: packet loss must be
+rare and recovered from, the user must be told when it is happening, and 4K60
+must be proven rather than assumed.
+
+**These are ordered, not parallel.** S30 finds and fixes the loss; S31 displays
+what S30 measures; S32 measures across resolutions and is close to meaningless
+before S30 lands, since it would just re-measure the same defect at four sizes.
+S33 is independent and can run alongside any of them.
+
+**Before starting any of these, merge `feat/inapp-stream` (S29) into `main`.**
+As of 2026-09-18 it is verified on two PCs but exists only as a local branch at
+`4f05cb8`, unpushed. S31 renders into the in-app video area that branch created,
+and branching from `main` first would mean building the warning UI against a
+Receive screen that no longer exists.
+
+### What is already known, so no session re-derives it
+Read in the S29 worktree, 2026-09-18:
+- `transport/mod.rs:49` registers every video codec with `rtcp_feedback: vec![]`.
+  Nothing is negotiated: no `nack`, no `nack pli`, no `ccm fir`, no
+  `transport-cc`, no `goog-remb`. `register_default_interceptors` is called, but
+  its NACK generator and responder only act on codecs that negotiated the
+  feedback, so they are inert. **A lost packet is currently unrecoverable by
+  construction, and neither end can ask for a keyframe.** That is the whole
+  explanation for a single lost packet costing 10–15 s of smearing.
+- No `SO_RCVBUF` or `SettingEngine` anywhere in `crates/capture`, so the UDP
+  receive buffer is the Windows default. At 40 Mb/s the default holds single-digit
+  milliseconds of video, so one scheduling hiccup on the receive thread drops
+  packets. This fits the measured threshold exactly: 20 Mb/s survives, 40 Mb/s
+  does not, on a 0.2 ms RTT wired LAN where congestion is not a plausible cause.
+- With no congestion feedback negotiated, there is no signal to drive adaptive
+  bitrate from. Feedback has to come before adaptation.
+
+## S30 — Packet loss: find it, recover from it, back off
+**Branch** `feat/loss-recovery` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss`
+
+Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
+`60 fps / 40 Mb/s` → 209 gaps, 1420 packets lost in 4.5 min, visible smearing.
+`30 fps / 20 Mb/s` → 38 gaps, 246 lost in 3 min, no visible smearing.
+
+### Definition of Ready
+- [x] Reproducible on demand on real hardware, with a rate threshold between two
+      known-good and known-bad settings.
+- [x] Root-cause candidates identified in code (see above): empty
+      `rtcp_feedback`, untuned `SO_RCVBUF`.
+- [ ] Accept the order: measure the limiter first, then fix. Enabling NACK
+      before knowing whether the loss is socket overflow would mask a buffer bug
+      behind retransmissions and burn LAN bandwidth doing it.
+
+### Definition of Done
+- [ ] The real limiter is named with evidence, not inferred. Instrument the
+      receiver's UDP overrun counters and socket buffer occupancy, and the
+      sender's pacing and burst size. Say which one it was and show the numbers.
+- [ ] `SO_RCVBUF` sized deliberately for the worst supported rate, with the
+      chosen size justified in a comment in terms of milliseconds of video held,
+      and the effect measured before and after.
+- [ ] NACK negotiated and working: `rtcp_feedback` carries `nack`, and a lost
+      packet is retransmitted rather than lost. The `lost=1` gaps are the
+      majority and are exactly what NACK is for on a 0.2 ms RTT link, where a
+      retransmission arrives well within one frame.
+- [ ] **B15**: `nack pli` negotiated, and the receiver requests a keyframe when a
+      gap is unrecoverable. Turns 10–15 s of smearing into roughly 200 ms.
+- [ ] Adaptive bitrate: sustained loss backs the encoder off, recovery climbs
+      back. Needs congestion feedback (`transport-cc` or `goog-remb`) negotiated
+      first — it cannot be driven from nothing. Changes must be damped; a bitrate
+      that oscillates is worse than one that is merely too high.
+- [ ] Re-examine whether 40 Mb/s is a sane default for 1440p60 and state the
+      reasoning. The brief says 40–80 Mb/s for 4K60; 40 at 1440p60 may simply be
+      too high for the benefit.
+- [ ] Two-PC pass at the settings that failed, showing loss at or near zero and
+      no visible smearing, recorded in `docs/dev/BUGS.md` against the build hash.
+- [ ] All gates green.
+
+### Kickoff prompt
+```
+You are starting session S30 (packet loss: find it, recover from it, back off) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (Group 6 preamble and section S30). The preamble lists what has already been read in the code -- do not re-derive it.
+
+First: feat/inapp-stream (S29) must be merged into main before you branch. It is verified on two PCs but unpushed at 4f05cb8. Confirm it is on main, then: git worktree add -b feat/loss-recovery ..\relay-loss main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+relay-pc2 measured this on a quiet wired LAN, 0.2 ms RTT, 1440p: at 60 fps / 40 Mb/s, 209 gaps and 1420 packets lost in 4.5 minutes with visible smearing; at 30 fps / 20 Mb/s, 38 gaps and 246 lost in 3 minutes with no visible smearing at all. That is a rate threshold on a quiet network, not a flaky link.
+
+Two things are already established by reading the code, and they shape the work:
+- transport/mod.rs:49 registers every video codec with rtcp_feedback: vec![]. No nack, no pli, no fir, no transport-cc, no remb. register_default_interceptors is called but its NACK interceptors only act on codecs that negotiated the feedback, so they do nothing. A lost packet is unrecoverable by construction and neither end can ask for a keyframe. That is why one lost packet costs 10-15 seconds of smearing.
+- There is no SO_RCVBUF tuning or SettingEngine anywhere in crates/capture, so the UDP receive buffer is the Windows default, which holds single-digit milliseconds of video at 40 Mb/s.
+
+Measure before you fix. If this is socket-buffer overflow, enabling NACK first would hide a buffer bug behind retransmissions and spend LAN bandwidth doing it. Instrument the receiver's UDP overrun counters and buffer occupancy and the sender's pacing and burst size, and name the limiter with numbers before changing behaviour.
+
+Then work to the Definition of Done in S30: sized receive buffer, NACK, keyframe-request-on-gap (B15), and adaptive bitrate -- in that order, since adaptation needs congestion feedback negotiated before it has anything to act on. Damp the adaptation; an oscillating bitrate is worse than a steady one that is slightly too high.
+
+Testing needs two PCs and you only have one -- a windowed receiver on the sending PC recursively captures the screen. relay-pc2 is a Claude Code session on Jake's second physical PC (H.264 only, r10 installed, share.log and ui.log capture, Jake on hand), reachable with SendMessage; run ListAgents to find it. Serve builds as http://192.168.1.184:8099/<file> and send filename, size and SHA-256; each download needs Jake's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run, and say in advance what it should see. Ask for logs and the on-screen symptom as separate answers -- they have disagreed before. Record every result in docs/dev/BUGS.md against the build hash.
+
+It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to Jake rather than doing it on its behalf. Do not block on a question -- if a decision is ambiguous, take the most reversible option, write down why, and continue. Finish by updating docs/ROADMAP.md and summarising.
+```
+
+## S31 — Tell the user the picture is degraded
+**Branch** `feat/loss-visible` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss-ui`
+
+Jake: users should not have to guess why the picture looks wrong. Depends on
+S30, which produces the loss statistics this displays, and on S29, which created
+the in-app video area it renders into.
+
+### Definition of Ready
+- [ ] S30 has merged and exposes a loss rate both ends can read.
+- [ ] S29 has merged, so there is an in-app video area to overlay.
+
+### Definition of Done
+- [ ] Loss is visible **on both ends** while it is happening, showing the rate.
+- [ ] Threshold and hysteresis: a single lost packet never flashes anything. It
+      appears on sustained loss and clears itself on recovery, with the clear
+      slower than the trigger.
+- [ ] Honest wording. Say what is happening and what it means for the picture,
+      and do not blame the user's network unless the evidence actually says so —
+      on this LAN it was Relay's own defect.
+- [ ] Fits the instrument-strip language in the brief rather than introducing a
+      new visual idiom. It is a readout, not an alert.
+- [ ] Never obscures the picture it is describing.
+- [ ] Component tests in jsdom only — never drive a real window.
+- [ ] All gates green.
+
+### Kickoff prompt
+```
+You are starting session S31 (tell the user the picture is degraded) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (Group 6 preamble and section S31).
+
+Do not start until S30 and S29 have merged into main: S30 produces the loss statistics you display, and S29 created the in-app video area you render into. If either is missing, say so and stop rather than building against a Receive screen that is about to change.
+
+git worktree add -b feat/loss-visible ..\relay-loss-ui main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+Jake's requirement: users should not have to guess why the picture looks wrong. While loss is occurring, show it -- in Relay and/or as an overlay on the stream -- with the loss rate, visible on BOTH ends, clearing itself on recovery.
+
+The judgement in this session is entirely about restraint. A single lost packet must never flash anything: use a threshold with hysteresis, and make the clear slower than the trigger. It is a readout in the instrument-strip language the brief describes, not an alert; it must never obscure the picture it is describing. Be honest in the wording -- do not blame the user's network, because when this was measured the cause was Relay's own missing NACK and untuned socket buffer, on a LAN with 0.2 ms RTT.
+
+UI tests are component tests in jsdom only; nothing may move the user's cursor. Verify with relay-pc2 (a Claude session on Jake's second PC, reachable with SendMessage -- run ListAgents) that the indicator appears on the receiving end during real loss and clears afterwards, and record the result in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+```
+
+## S32 — Prove 4K60, and the resolution matrix
+**Branch** `feat/resolution-matrix` · **Worktree** `C:\Users\stern\Documents\Code\relay-matrix`
+
+Jake wants confidence for all user types, not just the one display he tested.
+**Run after S30** — before it, this would measure the same defect four times.
+
+### Definition of Ready
+- [ ] S30 merged, loss at or near zero at 1440p60.
+- [ ] Accept the receiver-side limitation: relay-pc2's display is 1920x1080, so
+      4K is a downscale there. Decode cost and network load are still real and
+      are the point; do not claim 4K was verified end-to-end on a 4K panel.
+
+### Definition of Done
+- [ ] Matrix run on two PCs: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080
+      at 60. For each: bitrate, fps held, packets lost, gaps, encode time,
+      decode time, end-to-end latency, CPU and GPU load on both ends.
+- [ ] A recommended default bitrate per resolution and frame rate, derived from
+      the measurements rather than from the brief's original guess.
+- [ ] 4K60 either works within the brief's targets (40–80 Mb/s, <50 ms) or the
+      exact limiter is named. Expect it to be the hardest case, since 1440p60
+      already lost packets before S30.
+- [ ] Results in `docs/dev/` as a table with the build hash, plus whatever Relay
+      should do differently as a result — if a setting cannot be sustained, the
+      UI should not offer it as though it can.
+- [ ] Any 4K-specific failure filed in `docs/dev/BUGS.md` with its evidence.
+
+### Kickoff prompt
+```
+You are starting session S32 (prove 4K60, and the resolution matrix) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (Group 6 preamble and section S32).
+
+Do not start until S30 has merged and loss is at or near zero at 1440p60. Before that, this session would measure the same defect at four resolutions and produce numbers that mean nothing.
+
+git worktree add -b feat/resolution-matrix ..\relay-matrix main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+Jake wants confidence for all user types, so measure the matrix on real hardware: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080 at 60. For each capture bitrate, fps actually held, packets lost, gaps, encode time, decode time, end-to-end latency, and CPU and GPU load on both ends.
+
+One honest limitation to state everywhere you report this: relay-pc2's display is 1920x1080, so 4K is a receiver-side downscale there. Decode cost and network load are real and are the point, but do not write or imply that 4K was verified end-to-end on a 4K panel.
+
+Expect 4K60 to be the hardest case -- 1440p60 was losing packets before S30. If it cannot meet the brief's targets (40-80 Mb/s, under 50 ms), name the exact limiter with evidence rather than reporting a pass.
+
+Produce a recommended default bitrate per resolution and frame rate from the measurements, not from the brief's original guess, and say what Relay should do differently as a result: if a setting cannot be sustained, the UI should not offer it as though it can.
+
+relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. Serve builds as http://192.168.1.184:8099/<file> with filename, size and SHA-256; each download needs Jake's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run. Record results in docs/dev/ as a table with the build hash, and file any 4K-specific failure in docs/dev/BUGS.md with its evidence. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+```
+
+## S33 — Time, teardown and reproducible builds
+**Branch** `feat/time-and-teardown` · **Worktree** `C:\Users\stern\Documents\Code\relay-time`
+
+The four bugs still owed from S29's list. Independent of S30–S32; can run
+alongside them.
+
+### Definition of Done
+- [ ] **B14**: clock offset is estimated once at connect, so `latency_ms` drifts
+      about 2 ms/min and eventually reports negative latency. Re-estimate
+      periodically and smooth it. A latency readout that goes negative teaches
+      the user to distrust the whole instrument strip.
+- [ ] **B16**: roughly 1 s of audio delay, likely out of sync with video.
+      Measure where the second goes before changing anything — capture, encode,
+      the Opus path, jitter buffer or playback — then fix the one that owns it.
+      A/V sync must be measured against video, not just reduced in isolation.
+- [ ] **B8**: teardown always takes the full 3 s deadline, meaning nothing is
+      actually finishing early and the grace period is doing all the work. Find
+      what holds it and make the common case fast.
+- [ ] **B12**: bundles are not byte-reproducible. Either make them so, or record
+      precisely which inputs vary and why, so a hash mismatch can be reasoned
+      about instead of guessed at.
+- [ ] Each fix verified with numbers, not by inspection. All gates green.
+
+### Kickoff prompt
+```
+You are starting session S33 (time, teardown and reproducible builds) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (section S33) and docs/dev/BUGS.md.
+
+git worktree add -b feat/time-and-teardown ..\relay-time main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes. This session is independent of S30-S32 and may run alongside them, but stay out of the packet-loss and RTCP code so you do not collide with S30.
+
+Four bugs, each verified with numbers rather than by inspection:
+
+B14: the clock offset is estimated once at connect, so latency_ms drifts about 2 ms/min and eventually reports negative latency. Re-estimate periodically and smooth the result. A readout that goes negative teaches the user to distrust the entire instrument strip, so this matters more than its size suggests.
+
+B16: roughly 1 second of audio delay, likely out of sync with video. Measure where the second actually goes -- capture, encode, the Opus path, the jitter buffer, playback -- before changing anything, then fix whichever owns it. Verify against video: A/V sync is the requirement, not merely lower audio latency.
+
+B8: teardown always takes the full 3 s deadline, which means nothing is finishing early and the grace period is doing all the work. Find what holds it and make the common case fast.
+
+B12: bundles are not byte-reproducible. Either make them reproducible, or document exactly which inputs vary and why, so that a future hash mismatch can be reasoned about instead of guessed at.
+
+relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. B16 and B14 both need it, since audio delay and clock drift only exist across two machines. Give it start/stop times for every run and record results in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+```
+
+---
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
