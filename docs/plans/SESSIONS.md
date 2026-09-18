@@ -1338,6 +1338,14 @@ Jake wants confidence for all user types, not just the one display he tested.
 - [ ] Accept the receiver-side limitation: relay-pc2's display is 1920x1080, so
       4K is a downscale there. Decode cost and network load are still real and
       are the point; do not claim 4K was verified end-to-end on a 4K panel.
+- [x] **4K source decided (Jake, 2026-09-18): NVIDIA DSR.** The sender captures
+      at the display's native size and the main PC's panel is 2560x1440, so
+      there was no 4K to capture. DSR runs a 3840x2160 desktop on that panel,
+      which costs nothing and is available immediately. It exercises capture,
+      encode, network and decode at genuine 4K; what it does not test is 4K
+      *viewing*, on either end. Say so wherever the results are reported — with
+      DSR on the sender and a 1080p receiver, neither end of this pair displays
+      a real 4K image, and the numbers are about cost, not fidelity.
 
 ### Definition of Done
 - [ ] Matrix run on two PCs: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080
@@ -1363,7 +1371,9 @@ git worktree add -b feat/resolution-matrix ..\relay-matrix main, cd into it, pnp
 
 Jake wants confidence for all user types, so measure the matrix on real hardware: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080 at 60. For each capture bitrate, fps actually held, packets lost, gaps, encode time, decode time, end-to-end latency, and CPU and GPU load on both ends.
 
-One honest limitation to state everywhere you report this: relay-pc2's display is 1920x1080, so 4K is a receiver-side downscale there. Decode cost and network load are real and are the point, but do not write or imply that 4K was verified end-to-end on a 4K panel.
+The 4K source is NVIDIA DSR, decided by Jake on 2026-09-18: the sender captures at the display's native size and his panel is 2560x1440, so DSR runs a 3840x2160 desktop on it. Ask relay-pc2 to have Jake enable DSR before the 4K runs; it is a Windows/NVIDIA control-panel change on his main PC, so he does it, not you.
+
+One honest limitation to state everywhere you report this: with DSR on the sender and a 1920x1080 display on the receiver, NEITHER end of this pair displays a real 4K image. Capture, encode, network and decode are genuine 4K and are what the session measures, but do not write or imply that 4K was verified end-to-end on a 4K panel, and do not describe the picture quality as 4K-verified.
 
 Expect 4K60 to be the hardest case -- 1440p60 was losing packets before S30. If it cannot meet the brief's targets (40-80 Mb/s, under 50 ms), name the exact limiter with evidence rather than reporting a pass.
 
