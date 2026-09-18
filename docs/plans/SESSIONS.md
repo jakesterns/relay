@@ -1308,8 +1308,8 @@ this adds is the notification-area message on close and the resilience
 toggle beside it.
 
 ## S34 — Loss must be rare: keyframe request, the real limiter, a visible warning, a resolution matrix · `feat/loss-control`
-Relayed by relay-pc2 as Jake's requirements 2026-09-18 after S29's runs
-(to be confirmed by Jake in the main tree before the session starts). The
+Jake's requirements, 2026-09-18, given on the second PC's session and
+confirmed by him in the main tree the same day. The
 numbers behind it: 60 fps / 40 Mb/s on a quiet wired LAN (0.2 ms RTT) lost
 1420 packets in 4.5 min with visible smear; 30 fps / 20 Mb/s lost 246 in
 3 min with none visible; the sender dropped nothing. A rate threshold, so
