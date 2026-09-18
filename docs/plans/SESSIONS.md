@@ -1307,6 +1307,39 @@ exists (`settings.json` `close_action`, default keep-running, S23); what
 this adds is the notification-area message on close and the resilience
 toggle beside it.
 
+## S34 — Loss must be rare: keyframe request, the real limiter, a visible warning, a resolution matrix · `feat/loss-control`
+Relayed by relay-pc2 as Jake's requirements 2026-09-18 after S29's runs
+(to be confirmed by Jake in the main tree before the session starts). The
+numbers behind it: 60 fps / 40 Mb/s on a quiet wired LAN (0.2 ms RTT) lost
+1420 packets in 4.5 min with visible smear; 30 fps / 20 Mb/s lost 246 in
+3 min with none visible; the sender dropped nothing. A rate threshold, so
+the sender is outrunning something, not fighting the network.
+
+Before any new feature:
+1. **Keyframe request on loss** (B15): a signalling message the sender
+   answers with `keyframe_wanted`, and discard-until-keyframe on the
+   receiver. Damage then lasts ~200 ms, not the 10-15 s to the next
+   periodic IDR. Both ends change, so both PCs update together.
+2. **Find the limiter**: log the receiver's UDP `SO_RCVBUF` and overruns,
+   and the sender's pacing/burst size. Socket-buffer overflow is a one-line
+   fix and stops this being a "network" problem.
+3. **Adaptive bitrate**: the loss controller already lowers the rate on
+   sustained loss; measure whether it engaged at 40 Mb/s and make it
+   recover when the link is clean.
+4. **NACK/retransmission or FEC for small gaps**: most gaps are `lost=1`,
+   which a NACK repairs invisibly.
+5. **Sanity-check the 40 Mb/s default** for 1440p60 if the path cannot
+   carry it.
+6. **User-visible warning on both ends**: "Connection trouble — picture may
+   be briefly distorted", with the loss rate, threshold + hysteresis so a
+   single-packet blip does not flash it, clearing itself when the link
+   recovers.
+7. **Resolution matrix to the second PC**: 1080p60, 1440p60, 4K30, 4K60,
+   each with fps/bitrate and start/stop times recorded. **Constraint found
+   2026-09-18: the dev box's only display is 2560x1440 and the sender
+   captures at native size, so 4K needs a 4K display (or a 4K source such
+   as a game) on the sending PC.** 1080p comes from `--size 1920x1080`.
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
