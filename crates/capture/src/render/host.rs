@@ -402,9 +402,14 @@ unsafe fn apply_mode(hwnd: HWND, state: &mut WinState, mode: HostMode, owner: u6
                 warn!(?owner, "embed requested into a window that does not exist; ignoring");
                 return;
             }
-            // Hide first: the app shows it again once it has positioned it,
-            // so a framed window never flashes at its old place.
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            // Do NOT hide it here. It used to be hidden so that the app could
+            // show it once positioned, and the app did so 2-3 ms later — and
+            // on the second PC that hide-then-show inside one DWM frame left
+            // the window composed black until something (minimise/restore)
+            // made DWM rebuild it. So the window keeps whatever visibility it
+            // has: a popped-out window is restyled in place and the app moves
+            // it into the video area a moment later; a window created hidden
+            // stays hidden until the app shows it.
             SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
             SetWindowLongPtrW(hwnd, GWL_STYLE, (embedded_style() | visible).0 as isize);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, embedded_exstyle().0 as isize);
@@ -415,12 +420,7 @@ unsafe fn apply_mode(hwnd: HWND, state: &mut WinState, mode: HostMode, owner: u6
                 0,
                 0,
                 0,
-                SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOZORDER
-                    | SWP_NOACTIVATE
-                    | SWP_FRAMECHANGED
-                    | SWP_HIDEWINDOW,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
             );
             SetTimer(Some(hwnd), OWNER_TIMER, 1000, None);
             state.mode = Mode::Embedded { owner };
