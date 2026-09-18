@@ -1268,6 +1268,32 @@ mix only. **First task: write `docs/plans/v11-audio-mixer.md`** with the
 source list per side, the wire shape, and a DoD that includes a listening
 check on the second PC (speech, never a tone).
 
+## S33 — Stream resilience: crash record, auto-reconnect, resume · `feat/stream-resilience`
+Requested by Jake 2026-09-18. If the engine or the app crashes during a
+live stream — or the PC loses power, or the link glitches — keep the crash
+log, come back up, and reconnect on its own so a multi-streamer's feed
+survives. Default on. Only for streams the user started and never stopped;
+a Stop clears it. Applies with the window closed too (the core runs in the
+tray either way).
+
+Foundation already there: the core supervises the engine child and sees it
+exit; `share.log` / `ui.log` / `core.log` persist (S29); autostart via
+`relay-svc`. To build:
+- **Crash record**: a panic hook in every binary writing `crash\<ts>.txt`
+  plus the exit code and the request that was running; the next app open
+  shows one line about it.
+- **Reconnect in-session**: on an unexpected engine exit during a share,
+  the core respawns `relay-share send` with the same request, backoff
+  1 → 2 → 5 → 10 s, and the receiver keeps its pairing valid for a grace
+  window so the same code reconnects; give up after ~3 min with a notice.
+  The instrument strip shows "reconnecting (n)".
+- **Resume after reboot / power loss**: a persisted active-stream record
+  the core acts on at start. Needs S30 (no code to type after a reboot), so
+  S30 lands first.
+- **Loud, not silent**: a share that resumes without a click must announce
+  itself — tray balloon, strip visible when the window opens, one toggle to
+  turn resilience off in Settings. That is part of the DoD, not polish.
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
