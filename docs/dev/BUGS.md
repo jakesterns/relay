@@ -162,7 +162,7 @@ mode change and reports the verified value. Full write-up:
 `docs/dev/inapp-stream.md`.
 
 **Local pass, 2026-09-17, dev box, pattern stub (`RELAY_RECEIVE_STUB=1`),
-worktree at the S29 commit:** embedded placement exact to the pixel;
+commit `256661b`:** embedded placement exact to the pixel;
 owner/styles as designed; pop-out, close-to-re-embed, two shell resizes,
 navigate-away (hidden) and back (shown, page state restored), stop (window
 gone, "The share from host-stub ended."); `excluded_from_capture=true` after
