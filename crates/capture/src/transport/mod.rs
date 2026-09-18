@@ -10,6 +10,7 @@ pub mod control;
 pub mod depay;
 pub mod discovery;
 pub mod netcheck;
+pub mod netio;
 pub mod receiver;
 pub mod sei;
 pub mod sender;
@@ -163,7 +164,8 @@ pub async fn build_pc(
         tracks: track_tx,
     });
 
-    let runtime = default_runtime().context("webrtc runtime")?;
+    let (runtime, net) = netio::TunedRuntime::new(default_runtime().context("webrtc runtime")?);
+    netio::log_every_second(&net);
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)
         .with_media_engine(media_engine)

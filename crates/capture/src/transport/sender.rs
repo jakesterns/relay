@@ -601,11 +601,23 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         break;
                     }
                 };
+                let burst = packets.len();
                 for p in packets {
                     if let Err(e) = track.write_rtp(p).await {
                         tracing::warn!(error = %e, "write_rtp failed");
                         break 'aus;
                     }
+                }
+                // Nothing paces this: the whole access unit is queued at once
+                // and leaves at line rate. Record the big ones (S30).
+                if burst >= 150 {
+                    tracing::info!(
+                        packets = burst,
+                        bytes = n,
+                        keyframe = au.keyframe,
+                        queue_us = t0.elapsed().as_micros() as u64,
+                        "large video burst"
+                    );
                 }
                 if t0.elapsed() > Duration::from_millis(30) {
                     tracing::debug!(ms = t0.elapsed().as_millis() as u64, "slow video write");
