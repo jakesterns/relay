@@ -79,7 +79,7 @@ rather than an error. Belongs with S27.
 otherwise a plain note that shares use H.264. The paid-codec link is gone.
 Covered by UI tests; still to see on the Windows 10 PC.
 
-### B8 — A windowed `relay-share recv` never exits  |  MITIGATED 2026-09-17, not cured
+### B8 — A windowed `relay-share recv` never exits  |  MITIGATED 2026-09-17, bounded 2026-09-18, not cured
 After the sender stops it logs "connection closed" and keeps running. Found by
 S27 during loopback work and reproduced against a pre-S27 binary, so it
 predates the codec work.
@@ -87,6 +87,15 @@ predates the codec work.
 Hidden in normal use because the core kills the child, which is exactly why it
 survived this long. Anyone running the binary by hand — as we did for the
 Windows 10 diagnosis — leaves a process holding an open render window.
+
+*S29, 2026-09-18:* it bit again on the second PC, in normal use: after the
+sender stopped, the receiver's render thread ended on the 3 s idle timeout
+but the process stayed resident, so the core never reported the end and the
+app kept a stale pairing code and a black window (run 3). `bef8617` adds a
+3 s deadline to the receiver's teardown, after which it prints `stopped`
+and exits; run 4 showed the deadline firing every time, i.e. the teardown
+still hangs (`pc.close()` / the AU sender outliving it) and every share end
+now costs 3 s. The cure is still owed.
 
 ### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, VERIFIED on hardware 2026-09-18
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
@@ -229,6 +238,22 @@ answers both: the render thread rebuilds its swapchain after every mode
 change, the teardown gets a 3 s deadline after which the engine exits, and
 the shell writes `logs/ui.log` so the app's side of a black area is on
 record for the first time.
+
+**Run 4, 2026-09-18 22:35-22:39 UTC, r8 = `bef8617`:** the app side is
+proven right by `ui.log` — every close produced "stream window event
+mode=embedded" then "apply: placed ... ok=true visible=true" at the correct
+rect — and the engine side was the fault: `CreateSwapChainForHwnd` failed
+with `E_ACCESSDENIED` on all seven mode changes because the *old* swapchain
+still held the window when the new one was created. Pop-in stayed black
+(X, Esc, Settings-and-back); minimise/restore fine (no rebuild involved);
+the Relay icon on the popped-out title bar confirmed. **End of share by
+sender stop now works**: "The share from jake ended.", Idle, code cleared,
+`relay-share.exe` gone — but only because the 3 s teardown deadline fired
+("teardown did not finish within 3 s; exiting now"), so B8's hang is still
+there underneath and costs every share end 3 s. Loss for the run at 60 fps
+/ 40 Mb/s: 70 gaps, 525 packets, two of 195 and 254 (B15). r9 (`600eeeb`)
+releases the old chain and flushes the context before creating the new one;
+on the stub every rebuild now succeeds in 2-10 ms.
 
 **Audio run, 00:29-00:31 UTC, r6:** Windows text-to-speech on the dev box,
 21 lines over 91 s. Clear on the second PC, no stutter, gap, dropped word or
