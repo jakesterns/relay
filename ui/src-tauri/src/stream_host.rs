@@ -129,6 +129,7 @@ pub fn on_receive_status(
 
 /// The engine reported its window (created, or changed mode).
 pub fn on_window(hwnd: u64, width: u32, height: u32, mode: &str, excluded: bool) {
+    tracing::info!(hwnd, width, height, mode, excluded, "stream window event");
     let popped_out_now = {
         let mut g = HOST.lock().unwrap();
         g.hwnd = hwnd;
@@ -153,6 +154,7 @@ pub fn on_window(hwnd: u64, width: u32, height: u32, mode: &str, excluded: bool)
 
 /// The webview measured the video area, or left the Receive screen (`None`).
 pub fn set_area(area: Option<Area>) {
+    tracing::info!(?area, "video area from the page");
     HOST.lock().unwrap().area = area;
 }
 
@@ -166,6 +168,7 @@ pub fn apply(window: &tauri::Window) {
     };
     if hwnd == 0 || mode != "embedded" {
         // Popped out: the engine owns its placement. None: nothing to place.
+        tracing::info!(hwnd, mode, "apply: nothing to place");
         return;
     }
     #[cfg(windows)]
@@ -195,8 +198,8 @@ mod win {
     use windows::Win32::Foundation::{HWND, POINT};
     use windows::Win32::Graphics::Gdi::ClientToScreen;
     use windows::Win32::UI::WindowsAndMessaging::{
-        IsIconic, IsWindow, SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-        SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+        IsIconic, IsWindow, IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow,
+        SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
     };
 
     use super::{fit, Area};
@@ -220,12 +223,19 @@ mod win {
         // harmlessly.
         unsafe {
             if !IsWindow(Some(stream)).as_bool() {
+                tracing::warn!(hwnd, "apply: the stream window handle is not a window");
                 return;
             }
             // Owned windows hide with a minimised owner; showing one now
             // would put it back on screen with the app gone.
             let Some(a) = area.filter(|_| !IsIconic(host).as_bool()) else {
                 let _ = ShowWindow(stream, SW_HIDE);
+                tracing::info!(
+                    hwnd,
+                    minimised = IsIconic(host).as_bool(),
+                    has_area = area.is_some(),
+                    "apply: hidden"
+                );
                 return;
             };
             let scale = window.scale_factor().unwrap_or(1.0);
@@ -235,19 +245,32 @@ mod win {
             let ah = (a.h * scale).round() as i32;
             if aw <= 0 || ah <= 0 {
                 let _ = ShowWindow(stream, SW_HIDE);
+                tracing::info!(hwnd, aw, ah, "apply: hidden, empty area");
                 return;
             }
             let (dx, dy, vw, vh) = fit(aw, ah, size);
             let mut origin = POINT { x: 0, y: 0 };
             let _ = ClientToScreen(host, &mut origin);
-            let _ = SetWindowPos(
+            let (x, y) = (origin.x + ax + dx, origin.y + ay + dy);
+            let placed = SetWindowPos(
                 stream,
                 None,
-                origin.x + ax + dx,
-                origin.y + ay + dy,
+                x,
+                y,
                 vw,
                 vh,
                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            tracing::info!(
+                hwnd,
+                x,
+                y,
+                w = vw,
+                h = vh,
+                scale,
+                ok = placed.is_ok(),
+                visible = IsWindowVisible(stream).as_bool(),
+                "apply: placed"
             );
         }
     }

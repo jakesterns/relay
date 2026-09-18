@@ -689,6 +689,12 @@ fn spawn_event_bridge(app: AppHandle) {
                                     message,
                                     codec,
                                 } => {
+                                    tracing::info!(
+                                        receiving,
+                                        ?sender,
+                                        ?message,
+                                        "receive status from the core"
+                                    );
                                     stream_host::on_receive_status(
                                         receiving,
                                         code.as_deref(),
@@ -794,12 +800,36 @@ fn single_instance() -> Option<Option<relay_core::instance::InstanceLock>> {
     }
 }
 
+/// A rotating `logs\ui.log` beside the core's, or `None` if it cannot be
+/// opened. The shell had no log at all until S29, which meant the one
+/// process that places the stream window could not say what it did with it.
+fn ui_log_writer() -> Option<relay_core::logging::SharedWriter> {
+    let paths = relay_core::config::Paths::default_for_user().ok()?;
+    let _ = std::fs::create_dir_all(paths.log_dir());
+    relay_core::logging::SharedWriter::open(
+        paths.log_dir().join("ui.log"),
+        relay_core::logging::MAX_BYTES,
+        relay_core::logging::KEEP,
+    )
+    .ok()
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
-        .compact()
-        .init();
+    match ui_log_writer() {
+        Some(file) => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_target(false)
+            .with_ansi(false)
+            .compact()
+            .with_writer(file)
+            .init(),
+        None => tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_target(false)
+            .compact()
+            .init(),
+    }
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "relay-ui starting");
 
     // Held until the process ends; the OS releases the name then.
     #[cfg(windows)]

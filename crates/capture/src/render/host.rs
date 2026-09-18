@@ -91,6 +91,8 @@ struct WinState {
     /// put itself back without a round trip through the app.
     last_owner: Option<HWND>,
     quit: Arc<AtomicBool>,
+    /// To tell the render thread the swapchain needs rebuilding.
+    link: Arc<HostLink>,
     stream_w: u32,
     stream_h: u32,
 }
@@ -123,6 +125,7 @@ impl WindowThread {
                     hosted: owner.is_some(),
                     last_owner: owner.map(|o| HWND(o as *mut _)),
                     quit: quit2.clone(),
+                    link: link.clone(),
                     stream_w: w,
                     stream_h: h,
                 });
@@ -451,6 +454,7 @@ unsafe fn apply_mode(hwnd: HWND, state: &mut WinState, mode: HostMode, owner: u6
     }
     state.hosted = true;
     let excluded = exclude_from_capture(hwnd);
+    state.link.bump_surface();
     info!(mode = state.mode.label(), excluded, "receiver window mode changed");
     println!(
         "{}",

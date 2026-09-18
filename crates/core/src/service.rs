@@ -888,6 +888,7 @@ fn spawn_receive(
                     });
                 }
                 ShareEvent::Host { mode, hwnd, excluded_from_capture } => {
+                    info!(mode, hwnd, excluded_from_capture, "stream window mode from the engine");
                     if !excluded_from_capture {
                         warn!(mode, "stream window is NOT excluded from capture (B9)");
                     }

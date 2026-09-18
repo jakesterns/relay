@@ -22,7 +22,7 @@
 //! The engine therefore keeps ownership of every style change and reasserts
 //! the affinity after each one; the app only moves the window about.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -65,11 +65,30 @@ pub type AbortTx = mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>;
 pub struct HostLink {
     hwnd: AtomicIsize,
     pending: Mutex<Option<(HostMode, u64)>>,
+    /// Bumped by the window thread after every hosting-mode change. The
+    /// render thread recreates its swapchain when it sees a new value: a
+    /// flip-model swapchain does not reliably keep presenting into a window
+    /// whose frame and owner just changed (the second PC showed black in
+    /// the app after every pop-in), and a fresh one costs nothing visible.
+    surface_gen: AtomicU64,
 }
 
 impl HostLink {
     fn new() -> Arc<Self> {
-        Arc::new(Self { hwnd: AtomicIsize::new(0), pending: Mutex::new(None) })
+        Arc::new(Self {
+            hwnd: AtomicIsize::new(0),
+            pending: Mutex::new(None),
+            surface_gen: AtomicU64::new(0),
+        })
+    }
+
+    /// The window changed mode; the swapchain should be rebuilt.
+    pub(crate) fn bump_surface(&self) {
+        self.surface_gen.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn surface_gen(&self) -> u64 {
+        self.surface_gen.load(Ordering::Acquire)
     }
 
     /// Ask the window thread to change hosting mode. Before the window
@@ -225,6 +244,21 @@ pub async fn run(
     // peer connection may never close.
     quit.store(true, Ordering::Release);
 
+    // And the process must end, whatever the teardown below does. On the
+    // second PC a share that ended by the sender stopping left relay-share
+    // resident after the render thread had finished; the core reports the
+    // end only when this process exits, so the app never said the share was
+    // over and the last window stayed on screen. Everything after this line
+    // is tidiness — the peer is gone or going, the picture has stopped — so
+    // it gets a deadline, and the exit says so. The core reads `stopped` off
+    // stdout before the pipe closes.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        warn!("teardown did not finish within 3 s; exiting now");
+        println!("{}", serde_json::json!({ "event": "stopped", "forced": true }));
+        std::process::exit(0);
+    });
+
     // Tell the sender why before closing, or it only learns "connection lost"
     // seconds later when ICE gives up (B3). Bounded: never hang the exit.
     let reason = failure.lock().unwrap().take();
@@ -279,9 +313,52 @@ pub struct Surface {
     swapchain: IDXGISwapChain1,
     vp_device: ID3D11VideoDevice,
     vp_context: ID3D11VideoContext,
+    hwnd: HWND,
+    size: (u32, u32),
 }
 
 impl Surface {
+    /// Replace the swapchain with a new one on the same window and device.
+    /// Called after the window's hosting mode changed; see `HostLink`.
+    fn recreate_swapchain(&mut self) -> Result<()> {
+        let (w, h) = self.size;
+        let dxgi_device: IDXGIDevice = self.device.cast()?;
+        // SAFETY: live device; the old swapchain is released before the new
+        // one binds the window, and no view on its back buffer is alive
+        // between presents.
+        unsafe {
+            let adapter = dxgi_device.GetAdapter()?;
+            let factory: IDXGIFactory2 = adapter.GetParent()?;
+            let desc = Self::desc(w, h);
+            let fresh =
+                factory.CreateSwapChainForHwnd(&self.device, self.hwnd, &desc, None, None)?;
+            let _ = factory.MakeWindowAssociation(
+                self.hwnd,
+                DXGI_MWA_NO_WINDOW_CHANGES | DXGI_MWA_NO_ALT_ENTER,
+            );
+            self.swapchain = fresh;
+        }
+        info!("swapchain recreated after a hosting change");
+        Ok(())
+    }
+
+    fn desc(w: u32, h: u32) -> DXGI_SWAP_CHAIN_DESC1 {
+        DXGI_SWAP_CHAIN_DESC1 {
+            Width: w,
+            Height: h,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            // The window is whatever size the app or the user makes it; the
+            // back buffer stays at stream size and DWM scales it.
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
+            ..Default::default()
+        }
+    }
+
     fn new(hwnd: HWND, w: u32, h: u32) -> Result<Self> {
         // Build the device on the primary monitor's adapter — the same GPU the
         // DXVA decoder runs on — so decode and present share one device with
@@ -295,20 +372,7 @@ impl Surface {
         let adapter = unsafe { dxgi_device.GetAdapter()? };
         let factory: IDXGIFactory2 = unsafe { adapter.GetParent()? };
 
-        let desc = DXGI_SWAP_CHAIN_DESC1 {
-            Width: w,
-            Height: h,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-            BufferCount: 2,
-            // The window is whatever size the app or the user makes it; the
-            // back buffer stays at stream size and DWM scales it.
-            Scaling: DXGI_SCALING_STRETCH,
-            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
-            AlphaMode: DXGI_ALPHA_MODE_IGNORE,
-            ..Default::default()
-        };
+        let desc = Self::desc(w, h);
         // SAFETY: valid device, hwnd and desc.
         let swapchain =
             unsafe { factory.CreateSwapChainForHwnd(&device, hwnd, &desc, None, None)? };
@@ -326,7 +390,7 @@ impl Surface {
         let vp_device: ID3D11VideoDevice = device.cast()?;
         let vp_context: ID3D11VideoContext = context.cast()?;
 
-        Ok(Self { device, context, swapchain, vp_device, vp_context })
+        Ok(Self { device, context, swapchain, vp_device, vp_context, hwnd, size: (w, h) })
     }
 }
 
@@ -363,8 +427,9 @@ fn video_thread(
     let (w, h) = crate::decode::probe_dimensions(codec, &first.data).unwrap_or((2560, 1440));
     info!(w, h, codec = codec.label(), "stream dimensions");
 
-    let win = host::WindowThread::start(w, h, host_owner, link, quit.clone())?;
-    let surface = Surface::new(win.hwnd, w, h)?;
+    let win = host::WindowThread::start(w, h, host_owner, link.clone(), quit.clone())?;
+    let mut surface = Surface::new(win.hwnd, w, h)?;
+    let mut surface_gen = link.surface_gen();
     let mut decoder = MfDecoder::new(&surface.device, codec, w, h)?;
     info!(decoder = %decoder.name, "decoder up");
     println!(
@@ -439,6 +504,13 @@ fn video_thread(
         // going away) and the transport does too (stop, connection closed).
         if quit.load(Ordering::Acquire) {
             break Ok(());
+        }
+        let gen = link.surface_gen();
+        if gen != surface_gen {
+            surface_gen = gen;
+            if let Err(e) = surface.recreate_swapchain() {
+                warn!(error = %e, "could not recreate the swapchain; presenting into the old one");
+            }
         }
 
         let au = match pending.take() {
@@ -713,8 +785,9 @@ fn stub_thread(
     // SAFETY: balanced below.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
     let (w, h) = (1920u32, 1080u32);
-    let win = host::WindowThread::start(w, h, host, link, quit.clone())?;
-    let surface = Surface::new(win.hwnd, w, h)?;
+    let win = host::WindowThread::start(w, h, host, link.clone(), quit.clone())?;
+    let mut surface = Surface::new(win.hwnd, w, h)?;
+    let mut surface_gen = link.surface_gen();
     // `ClearView` (a rect-bounded clear) is on the 11.1 context.
     let ctx1: ID3D11DeviceContext1 = surface.context.cast()?;
     println!(
@@ -728,6 +801,13 @@ fn stub_thread(
     );
     let started = std::time::Instant::now();
     while !quit.load(Ordering::Acquire) {
+        let gen = link.surface_gen();
+        if gen != surface_gen {
+            surface_gen = gen;
+            if let Err(e) = surface.recreate_swapchain() {
+                warn!(error = %e, "could not recreate the swapchain");
+            }
+        }
         // A slow hue sweep with a bright bar marching across it: a stalled
         // picture is unmistakable, and so is a torn or stretched one.
         let t = started.elapsed().as_secs_f32();
