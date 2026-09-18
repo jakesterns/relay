@@ -88,7 +88,7 @@ Hidden in normal use because the core kills the child, which is exactly why it
 survived this long. Anyone running the binary by hand — as we did for the
 Windows 10 diagnosis — leaves a process holding an open render window.
 
-### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, unverified on hardware
+### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, VERIFIED on hardware 2026-09-18
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
 the sender was capturing, so the capture contained the window showing the
 capture. Jake's description was "an infinite loop of whatever is on my screen,
@@ -105,6 +105,12 @@ doing this — `SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE)` on the
 receiver's render window, which makes it invisible to WGC and Desktop
 Duplication alike. Worth checking the preview thumbnail path for the same
 exposure.
+
+*Verified 2026-09-18 (S29 run 2):* while the dev box shared its desktop to
+the second PC, a pattern stub was drawing into the receiver window class on
+the dev box. Jake saw the Relay window in the stream but not the surface
+inside it; everything else on the desktop came through. The exclusion holds
+on a real capture, in the embedded (owned popup) state, at 60 fps.
 
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody
@@ -199,6 +205,31 @@ this dev box (main `3036081`), receiver the Windows 10 PC via relay-pc2:**
 - Audio: none playing, none heard, no beeping (B11 not reproduced).
 - Not reached: Settings navigation, minimise/restore (run 2).
 - Ended by Jake's Stop receiving at 00:08:31 (his clock); clean exit.
+
+**Run 2, 00:11-00:16 UTC, still r5:** X-close re-embedded fine (1.1 s,
+1.6 s); Esc came back as a *black* video area for ~11 s before the picture
+returned (10.9 s, 11.5 s), with `presented` climbing throughout — frames were
+presented to a window the app had shown before the engine restyled it, or
+that DWM had not yet re-composed. Settings-and-back and minimise/restore
+(embedded and popped out) both fine. Two new findings: a few-second
+"smeared paint" corruption mid-stream while frames kept arriving and
+presenting (B15), and the sender's capture showing the Relay window but not
+the pattern stub inside it, which is B9 working — see B9.
+
+### B15 — Mid-stream smear: a damaged access unit is decoded and nobody asks for a keyframe
+relay-pc2, run 2: "every now and then the stream shows a weird smeared-paint
+colour screen, almost as if it broke for a few seconds", while `aus ==
+presented` and no stall was logged. The receiver estimates packet loss over
+1 s windows and sends it to the sender as bitrate feedback, but on an RTP
+sequence gap it neither drops the partial access unit nor asks for a
+keyframe, so the decoder predicts from a hole until the sender's next
+periodic IDR. Fix needs both halves: discard-until-keyframe on the
+receiver (the keyframe gate already exists) and a keyframe request over
+the signalling channel that the sender answers with `keyframe_wanted`. A
+sender-side protocol change, so its own session — the sender on the dev box
+would otherwise break on an unknown message. `ac7b4c1` adds `rtp_gaps` /
+`rtp_lost` to the stats and a log line per gap so the next smear can be
+matched to one.
 
 ### B14 — Receiver latency goes negative: the clock offset is measured once
 relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero

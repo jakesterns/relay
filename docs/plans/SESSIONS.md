@@ -1182,6 +1182,40 @@ Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and su
 
 ---
 
+## S30 — Remembered devices: pair once, connect on sight · `feat/trusted-peers`
+Requested by Jake 2026-09-18, during S29's two-PC pass. Once the main PC and
+the second PC have paired successfully, that pairing should be stored and
+linked on both sides so the next share connects directly — after an app
+shutdown, after a reboot — with no six-digit code. The code stays for first
+contact and for anything not remembered.
+
+Sketch: persist a per-peer record (name, stable id, the shared secret the
+pairing derived, last seen) in the data root on both ends; the sender offers
+a "known peer" auth in signalling and the receiver accepts it without a code
+when the id and secret match; the Share screen lists remembered receivers
+first, the Receive screen shows "trusted senders" with a Forget button.
+Security shape to decide first: what the stored secret is, how a stolen data
+folder is bounded (per-peer secrets, revocable), and whether a remembered
+receiver still needs to be in "Start receiving" or can auto-accept. Never
+network config for the user; never a change to another app.
+
+## S31 — Direct send to streaming software · `feat/stream-out`
+Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
+straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
+program with little to no setup on the user's part.
+
+The v1 brief ruled Twitch streaming out; this reopens it deliberately. Two
+very different shapes, and the session has to pick: (a) **local**: Relay
+appears to the streaming program as a camera and microphone (the M5 virtual
+camera and mic, already built for the receive side, pointed at the *local*
+capture), or as an NDI source (the v1.1 NDI item) — zero network, works with
+every program that takes a webcam; (b) **remote**: Relay itself pushes
+RTMP/SRT to a platform's ingest with a stream key. (a) is the "little to no
+effort" answer for OBS-style software on the same PC; (b) is a new outbound
+network path and a new encoder consumer, and needs the brief's "one outbound
+request" rule revisited. **First task of the session: write
+`docs/plans/v11-stream-out.md` with the decision and a real DoR/DoD.**
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
