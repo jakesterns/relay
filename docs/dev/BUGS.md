@@ -284,6 +284,22 @@ would otherwise break on an unknown message. `ac7b4c1` adds `rtp_gaps` /
 `rtp_lost` to the stats and a log line per gap so the next smear can be
 matched to one.
 
+*Measured, 2026-09-18 (runs 5 and 6, same desktop, same wired LAN):*
+
+| run | rate | length | gaps | lost packets | per minute |
+|---|---|---|---|---|---|
+| 5 | 60 fps / 40 Mb/s | 4.5 min | 209 | 1420 | ~46 gaps, ~315 lost |
+| 6 | 30 fps / 20 Mb/s | 3.0 min | 38 | 246 | ~13 gaps, ~82 lost |
+
+Rate-dependent, ~3.7x less at half the rate, and bursty: run 6 sat at 23
+gaps / 24 lost for its first 2m10s, then one burst in the last 50 s added
+222 packets. The sender dropped nothing (5272 frames, 0 dropped). So this
+looks like something saturating at 40 Mb/s — the receiver's UDP socket
+buffer is the first suspect (log `SO_RCVBUF` and overruns; raising it may
+be the whole fix) — rather than random LAN loss. Next split: 60 fps at
+20 Mb/s, to separate frame rate from bitrate. The sender's periodic IDR is
+every ~10 s (18 in 3 min), which is how long a smear lasts today.
+
 ### B14 — Receiver latency goes negative: the clock offset is measured once
 relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
 at 00:05:06 and reached -8.0 ms by 00:08:30; 312 of 538 samples negative.
