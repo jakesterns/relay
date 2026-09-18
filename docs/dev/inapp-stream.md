@@ -137,3 +137,27 @@ not the core's `--data-dir`.
 Not verifiable on one PC: a real modal drag of the app window (needs a
 mouse), real decode, audio, and the second PC's Windows 10 build. Those are
 the two-PC pass in `BUGS.md`.
+
+## What the second PC taught (r5 -> r10, 2026-09-17/18)
+
+Three rules, each learned from a black video area that the stub could not
+show because nobody could see the stub:
+
+1. **Never hide-then-show the stream window within a DWM frame.** The
+   engine used to hide on re-embed and the app showed it 2-3 ms later; DWM
+   composed the window black until something (minimise/restore) made it
+   rebuild the visual. The window now keeps its visibility through a mode
+   change: a popped-out window is restyled in place and moved.
+2. **Release the old swapchain before creating a new one on the same
+   HWND**, or `CreateSwapChainForHwnd` fails with `E_ACCESSDENIED`. The
+   swapchain is rebuilt after every mode change (`HostLink::bump_surface`),
+   on the render thread, after `ClearState` + `Flush`.
+3. **The engine cannot take the foreground.** `SetForegroundWindow` is
+   refused to a process without the last input, so the popped-out window
+   sat behind the app and Esc went to the app. The shell, which has the
+   input, hands the foreground over on the popout event.
+
+And two about the process: the receiver's teardown is bounded to 3 s so the
+share end always reaches the app (B8's hang is still there underneath), and
+the shell now writes `logs\ui.log`, without which run 4's "the app placed
+it correctly, the pixels are wrong" could not have been said.

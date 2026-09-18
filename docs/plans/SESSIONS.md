@@ -1106,8 +1106,13 @@ separate window". That is the thing to remove.
       every mode change; the verified value travels in the `host` event and
       reached the UI as `excluded=true` in every local transition.)*
 - [x] Receive screen copy updated: no more "Playing in a separate window".
-- [ ] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
-      the exchange and its results written into `docs/dev/BUGS.md`.
+- [x] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
+      the exchange and its results written into `docs/dev/BUGS.md`. *(Seven
+      runs on r5-r10, 2026-09-17/18; B13 in BUGS.md has each against its
+      build hash. Three defects were only findable there: the popped-out
+      window could not take the foreground, a second swapchain on the same
+      HWND fails with E_ACCESSDENIED, and a hide-then-show within one DWM
+      frame composes black. Fixed in r6, r9 and r10.)*
 - [x] All gates green: `cargo fmt`, `clippy -D warnings`, `cargo test
       --workspace`, `pnpm build`, `pnpm test`, `scripts/footprint.ps1`.
       *(fmt/clippy/tests/build/UI tests green 2026-09-17; footprint below.)*
@@ -1293,6 +1298,14 @@ exit; `share.log` / `ui.log` / `core.log` persist (S29); autostart via
 - **Loud, not silent**: a share that resumes without a click must announce
   itself — tray balloon, strip visible when the window opens, one toggle to
   turn resilience off in Settings. That is part of the DoD, not polish.
+
+Jake's decisions, 2026-09-18: crash detection + stream restore is a
+must-have, **on by default, off by a Settings toggle**. Closing the window
+should **exit to the tray and keep running by default, with a tray message
+saying so**, also toggleable in Settings. The close preference already
+exists (`settings.json` `close_action`, default keep-running, S23); what
+this adds is the notification-area message on close and the resilience
+toggle beside it.
 
 # Group 5 — v1.1 backlog
 

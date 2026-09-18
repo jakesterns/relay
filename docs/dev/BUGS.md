@@ -167,7 +167,7 @@ the exe inside the installer (`4A2E2BA4...910E`) differs from the one left on
 disk (`2E0B8748...45DB`). Hash the installer, or extract from it; never the
 loose `relay-ui.exe`.
 
-### B13 — The received stream played in a window of its own  |  S29, two-PC pass run 1 done, close-popout fix in r6
+### B13 — The received stream played in a window of its own  |  FIXED, verified on the second PC 2026-09-18 (r10 = `5cb414b`)
 Jake, after the first real two-PC test: the picture belongs *inside* the
 Relay window, in the Receive screen's video area, with a pop-out like
 Discord's. The old Receive screen painted an empty frame captioned "Playing
@@ -254,6 +254,26 @@ there underneath and costs every share end 3 s. Loss for the run at 60 fps
 / 40 Mb/s: 70 gaps, 525 packets, two of 195 and 254 (B15). r9 (`600eeeb`)
 releases the old chain and flushes the context before creating the new one;
 on the stub every rebuild now succeeds in 2-10 ms.
+
+**Run 5, 22:47-22:52 UTC, r9 = `600eeeb`:** the swapchain now rebuilt
+cleanly after all four mode changes ("swapchain recreated after a hosting
+change", no failures) and the picture was *still* black after X, Esc and
+Settings-and-back, while minimise/restore brought it back. The common
+factor of every black path, and of none of the working ones: the engine
+hid the window on re-embed and the app showed it again 2-3 ms later; r5's
+slow round trip (hidden for ~1 s) and minimise/restore (hidden for as long
+as the app is minimised) never went black. DWM composed the window black
+after a hide-then-show inside one frame. Affinity was cleared as a cause:
+`excluded=true` is `GetWindowDisplayAffinity`'s answer after every change.
+End of share clean again. Loss at 60/40: 209 gaps, 1420 packets (B15).
+
+**Run 7, 23:01-23:04 UTC, r10 = `5cb414b`, the fix:** the engine no
+longer hides its window on re-embed; it is restyled in place and the app
+moves it. **Picture back on every path**: pop-out + X, pop-out + Esc,
+Settings-and-back, minimise/restore; four mode changes each followed by a
+swapchain rebuild within 2-5 ms; end of share clean. One loss burst of 235
+packets across the RTP sequence wrap smeared the lower half for 10-15 s and
+outlived a periodic keyframe (B15); 34 gaps / 272 packets for the run.
 
 **Audio run, 00:29-00:31 UTC, r6:** Windows text-to-speech on the dev box,
 21 lines over 91 s. Clear on the second PC, no stutter, gap, dropped word or
