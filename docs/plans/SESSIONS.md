@@ -1182,6 +1182,32 @@ Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and su
 
 ---
 
+## Standing rule — an update never resets anything
+Jake, 2026-09-18: every Relay update must leave settings, profiles, the
+hardware library, consent, firewall/APO/camera records and — once S30 lands
+— remembered devices exactly as they were. No reconfiguring, no new pairing
+code for a device that already paired, no first-run screen again. Updates
+are "consistent and subtle".
+
+Where this stands today: the install directory is the data root
+(`%LOCALAPPDATA%\Relay`), an install over the top rewrites the binaries and
+leaves `data\` alone, and only the uninstaller's "Delete the application
+data" checkbox removes it. r4 → r9 on the second PC kept consent and the
+firewall record across five over-the-top installs. What the rule adds for
+every session from now on:
+
+- **Schema changes are migrations, never resets.** Any on-disk format
+  change (`profiles`, `settings.json`, `installed.json`, `firewall.json`,
+  `window.json`, S30's peer records) ships with a versioned migration and a
+  test that loads the previous version's files. Unknown fields are kept,
+  not dropped (`serde` `deny_unknown_fields` is banned on persisted types).
+- **An installer change is tested as an upgrade**, not just a clean
+  install: `scripts/vm-cycle.ps1` / the snapshot diff gain an
+  install-old → configure → install-new → diff step whose expected
+  difference under `data\` is empty.
+- **A remembered device survives updates on both ends** (S30's DoD): after
+  updating either PC, the next share connects with no code.
+
 ## S30 — Remembered devices: pair once, connect on sight · `feat/trusted-peers`
 Requested by Jake 2026-09-18, during S29's two-PC pass. Once the main PC and
 the second PC have paired successfully, that pairing should be stored and
@@ -1197,7 +1223,9 @@ first, the Receive screen shows "trusted senders" with a Forget button.
 Security shape to decide first: what the stored secret is, how a stolen data
 folder is bounded (per-peer secrets, revocable), and whether a remembered
 receiver still needs to be in "Start receiving" or can auto-accept. Never
-network config for the user; never a change to another app.
+network config for the user; never a change to another app. **DoD must
+include the standing rule above:** the peer records are versioned, survive
+an update of either PC, and the first share after an update needs no code.
 
 ## S31 — Direct send to streaming software · `feat/stream-out`
 Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
