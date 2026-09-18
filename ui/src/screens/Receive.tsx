@@ -238,19 +238,26 @@ function VirtualDeviceCard() {
  *  over a screen that no longer shows a video area. */
 function useVideoArea(deps: unknown[]) {
   const ref = useRef<HTMLDivElement | null>(null);
+  const report = () => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Clip to the viewport: the window must never cover chrome outside
+    // the client area, and an off-screen slice has nothing to show.
+    const x = Math.max(r.left, 0), y = Math.max(r.top, 0);
+    const w = Math.min(r.right, window.innerWidth) - x;
+    const h = Math.min(r.bottom, window.innerHeight) - y;
+    const area: VideoArea | null = w > 0 && h > 0 ? { x, y, w, h } : null;
+    void api.setVideoArea(area).catch(() => {});
+  };
+  // Observers live for the screen's lifetime; `null` goes out only when it
+  // unmounts. Re-running this on every render dependency used to send a
+  // `null` and then the rect a millisecond apart, which the shell dutifully
+  // turned into a hide and a show of the stream window (seen in ui.log on
+  // the second PC).
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    const report = () => {
-      const r = el.getBoundingClientRect();
-      // Clip to the viewport: the window must never cover chrome outside
-      // the client area, and an off-screen slice has nothing to show.
-      const x = Math.max(r.left, 0), y = Math.max(r.top, 0);
-      const w = Math.min(r.right, window.innerWidth) - x;
-      const h = Math.min(r.bottom, window.innerHeight) - y;
-      const area: VideoArea | null = w > 0 && h > 0 ? { x, y, w, h } : null;
-      void api.setVideoArea(area).catch(() => {});
-    };
     report();
     // jsdom has no ResizeObserver; the mount report above still runs there.
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(report) : null;
@@ -263,7 +270,10 @@ function useVideoArea(deps: unknown[]) {
       void api.setVideoArea(null).catch(() => {});
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, []);
+  // Anything around the video area that can move it: re-measure only.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(report, deps);
   return ref;
 }
 
