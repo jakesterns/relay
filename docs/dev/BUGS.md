@@ -216,6 +216,34 @@ that DWM had not yet re-composed. Settings-and-back and minimise/restore
 presenting (B15), and the sender's capture showing the Relay window but not
 the pattern stub inside it, which is B9 working — see B9.
 
+**Run 3, 00:21-00:26 UTC, r6 = `44e6be7`:** every close re-embedded on
+the engine side in 6.6-11 ms (X and Esc alike, all logged), yet the video
+area stayed *pure black* — no text, not even the popped-out caption — on
+every attempt, and tab-switching did not recover it. `presented` kept
+climbing throughout. When the sender stopped, the engine logged the 3 s
+idle end correctly but `relay-share.exe` stayed resident, so the core never
+reported the end: no "share ended" text, and the *old pairing code stayed
+on screen* until Jake stopped and started receiving again. Video verdict
+otherwise: "super clear, little to no latency" 1440p->1080p. r8 (`bef8617`)
+answers both: the render thread rebuilds its swapchain after every mode
+change, the teardown gets a 3 s deadline after which the engine exits, and
+the shell writes `logs/ui.log` so the app's side of a black area is on
+record for the first time.
+
+**Audio run, 00:29-00:31 UTC, r6:** Windows text-to-speech on the dev box,
+21 lines over 91 s. Clear on the second PC, no stutter, gap, dropped word or
+pitch change; 100 packets/s steady, `aus == presented`, zero stalls. Jake
+hears it about 1 s behind the dev box's own speakers: B16.
+
+### B16 — Audio arrives about a second late, and nothing measures it
+relay-pc2, audio run: intelligible and steady, but ~1 s behind the sender's
+own speakers while the video reads as near-instant, so A/V sync is off by
+about that much. The receiver logs no audio latency at all. Candidates: a
+fixed jitter/depacketiser target, the WASAPI render buffer, Opus frame
+accumulation before playback starts. Needs: audio arrival-to-render time
+and render-buffer depth in the stats line, then a lip-sync check with
+something on screen that flashes when a sound plays. Own session.
+
 ### B15 — Mid-stream smear: a damaged access unit is decoded and nobody asks for a keyframe
 relay-pc2, run 2: "every now and then the stream shows a weird smeared-paint
 colour screen, almost as if it broke for a few seconds", while `aus ==
