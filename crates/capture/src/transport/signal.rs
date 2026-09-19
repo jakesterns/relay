@@ -131,8 +131,28 @@ pub fn pairing_code() -> String {
     format!("{:06}", rand::rng().random_range(0..1_000_000u32))
 }
 
+/// Unix nanoseconds for latency math: the wall clock read *once*, then
+/// advanced by the monotonic clock. Every stamp that crosses the wire and
+/// every ping comes from here, so an NTP step or a user changing the time
+/// mid-share cannot move the latency readout; what is left between two PCs is
+/// a constant plus crystal drift, which [`ClockFilter`] follows (B14).
+///
+/// `RELAY_CLOCK_SKEW_PPM` makes this process's clock run fast or slow by that
+/// much. Test hook: two processes on one PC share a crystal, so drift has to
+/// be manufactured to be measured.
 pub fn unix_now_ns() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
+    static ANCHOR: std::sync::OnceLock<(std::time::Instant, i64, f64)> = std::sync::OnceLock::new();
+    let (t0, wall0, skew) = ANCHOR.get_or_init(|| {
+        let wall =
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0);
+        let ppm = std::env::var("RELAY_CLOCK_SKEW_PPM")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        (std::time::Instant::now(), wall, ppm / 1e6)
+    });
+    let elapsed = t0.elapsed().as_nanos() as i64;
+    wall0 + elapsed + (elapsed as f64 * skew) as i64
 }
 
 /// `a=fingerprint:` line of an SDP (the DTLS certificate fingerprint).
@@ -183,18 +203,73 @@ pub fn remember_peer_at(path: &std::path::Path, name: &str, fingerprint: &str) -
     Ok(())
 }
 
-/// Sender side: run `n` pings, compute the median clock offset and push it to
-/// the receiver. Returns (offset_ns, rtt_ns).
+/// How often the sender re-measures the offset during a share. Two crystals
+/// 50 ppm apart move 0.1 ms in this long, which is inside the ping's noise.
+pub const CLOCK_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One NTP-style exchange → (offset, rtt), both ns. Offset is
+/// receiver clock − sender clock.
+pub fn clock_sample(t1_ns: i64, t2_ns: i64, t3_ns: i64, t4_ns: i64) -> (i64, i64) {
+    (((t2_ns - t1_ns) + (t3_ns - t4_ns)) / 2, (t4_ns - t1_ns) - (t3_ns - t2_ns))
+}
+
+/// Turns a stream of noisy (offset, rtt) samples into the offset the receiver
+/// should use. A sample whose round trip was much longer than the recent best
+/// sat in a queue somewhere, and half of that wait lands in its offset, so it
+/// is ignored; the rest are smoothed so the readout does not twitch. A jump
+/// far outside the noise is taken at once rather than chased.
+#[derive(Debug, Default)]
+pub struct ClockFilter {
+    estimate_ns: Option<f64>,
+    recent_rtt_ns: std::collections::VecDeque<i64>,
+    pub accepted: u64,
+    pub rejected: u64,
+}
+
+impl ClockFilter {
+    const RTT_WINDOW: usize = 16;
+    const SMOOTHING: f64 = 0.5;
+    const STEP_NS: f64 = 20e6;
+
+    pub fn seeded(offset_ns: i64, rtt_ns: i64) -> Self {
+        let mut f = Self::default();
+        f.push(offset_ns, rtt_ns);
+        f
+    }
+
+    /// Feed one sample; returns the new estimate when the sample was used.
+    pub fn push(&mut self, offset_ns: i64, rtt_ns: i64) -> Option<i64> {
+        let best = self.recent_rtt_ns.iter().copied().min();
+        if self.recent_rtt_ns.len() == Self::RTT_WINDOW {
+            self.recent_rtt_ns.pop_front();
+        }
+        self.recent_rtt_ns.push_back(rtt_ns);
+        if best.is_some_and(|best| rtt_ns > best * 2 + 200_000) {
+            self.rejected += 1;
+            return None;
+        }
+        let sample = offset_ns as f64;
+        let next = match self.estimate_ns {
+            Some(est) if (sample - est).abs() < Self::STEP_NS => {
+                est + Self::SMOOTHING * (sample - est)
+            }
+            _ => sample,
+        };
+        self.estimate_ns = Some(next);
+        self.accepted += 1;
+        Some(next as i64)
+    }
+}
+
+/// Sender side: run `n` pings, take the clock offset from the quickest one
+/// and push it to the receiver. Returns (offset_ns, rtt_ns).
 pub async fn clock_sync(sig: &mut SigStream, n: u32) -> Result<(i64, i64)> {
     let mut samples: Vec<(i64, i64)> = Vec::new(); // (offset, rtt)
     for seq in 0..n {
         sig.send(&SigMsg::Ping { seq, t1_ns: unix_now_ns() }).await?;
         match sig.recv().await? {
             SigMsg::Pong { t1_ns, t2_ns, t3_ns, .. } => {
-                let t4 = unix_now_ns();
-                let offset = ((t2_ns - t1_ns) + (t3_ns - t4)) / 2;
-                let rtt = (t4 - t1_ns) - (t3_ns - t2_ns);
-                samples.push((offset, rtt));
+                samples.push(clock_sample(t1_ns, t2_ns, t3_ns, unix_now_ns()));
             }
             other => bail!("expected pong, got {other:?}"),
         }
@@ -216,6 +291,62 @@ mod tests {
         assert!(!verify_mac("123457", "sdp-payload", &m));
         assert!(!verify_mac("123456", "other", &m));
         assert!(!verify_mac("123456", "sdp-payload", "zz"));
+    }
+
+    #[test]
+    fn clock_sample_recovers_offset_and_rtt() {
+        // Receiver 5 s ahead, 1 ms each way, 2 ms turnaround.
+        let (t1, t2) = (1_000_000_000, 6_001_000_000);
+        let (t3, t4) = (6_003_000_000, 1_004_000_000);
+        assert_eq!(clock_sample(t1, t2, t3, t4), (5_000_000_000, 2_000_000));
+    }
+
+    #[test]
+    fn filter_follows_drift_and_never_trails_far() {
+        // 100 ppm for ten minutes at the resync interval: 60 ms of drift.
+        let mut f = ClockFilter::seeded(0, 250_000);
+        let mut worst = 0i64;
+        for k in 1..=300i64 {
+            let truth = k * 200_000; // 0.2 ms per 2 s
+            let noise = if k % 2 == 0 { 60_000 } else { -60_000 };
+            let est = f.push(truth + noise, 250_000).unwrap();
+            worst = worst.max((est - truth).abs());
+        }
+        assert!(worst < 300_000, "estimate trailed the truth by {worst} ns");
+        assert_eq!(f.rejected, 0);
+    }
+
+    #[test]
+    fn filter_ignores_a_sample_that_queued() {
+        let mut f = ClockFilter::seeded(1_000_000, 250_000);
+        // 40 ms round trip: its offset is off by up to 20 ms.
+        assert_eq!(f.push(19_000_000, 40_000_000), None);
+        assert_eq!(f.push(1_000_000, 260_000), Some(1_000_000));
+        assert_eq!((f.accepted, f.rejected), (2, 1));
+    }
+
+    #[test]
+    fn filter_takes_a_real_step_at_once() {
+        let mut f = ClockFilter::seeded(0, 250_000);
+        assert_eq!(f.push(3_000_000_000, 250_000), Some(3_000_000_000));
+    }
+
+    #[test]
+    fn a_slow_link_is_not_rejected_forever() {
+        // Wi-Fi: every round trip is 8-12 ms. Nothing here is an outlier.
+        let mut f = ClockFilter::default();
+        for k in 0..50i64 {
+            assert!(f.push(0, 8_000_000 + (k % 5) * 1_000_000).is_some());
+        }
+    }
+
+    #[test]
+    fn latency_clock_is_monotonic_and_near_the_wall_clock() {
+        let a = unix_now_ns();
+        let b = unix_now_ns();
+        assert!(b >= a);
+        let wall = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as i64;
+        assert!((wall - b).abs() < 5_000_000_000, "anchored to the wall clock at start");
     }
 
     #[test]

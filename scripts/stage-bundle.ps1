@@ -64,6 +64,11 @@ function Invoke-Cargo {
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($What)" }
 }
 
+# B12: build so the bytes do not depend on which folder this is or when the
+# linker ran. See docs/dev/reproducible-builds.md.
+. (Join-Path $repo 'scripts\repro-flags.ps1')
+$env:CARGO_ENCODED_RUSTFLAGS = Get-ReproRustFlags -Repo $repo
+
 if (-not $SkipBuild) {
     Write-Host 'building relay-core and relay-share (release)'
     Invoke-Cargo @('build', '--release', '-p', 'relay-core', '-p', 'relay-capture', '--bins') 'core/capture'
@@ -112,7 +117,11 @@ foreach ($src in $resources) {
 # scripts/build-catalog.ps1 when the upstream index moves on.
 $catalog = Join-Path $repo 'crates\core\catalog\autoeq-index.tsv'
 if (-not (Test-Path $catalog)) { throw "missing $catalog - run scripts/build-catalog.ps1" }
-Copy-Item $catalog (Join-Path $staging 'autoeq-index.tsv') -Force
+# Staged with LF line endings whatever the working tree has (B12): a tree
+# checked out before .gitattributes existed still carries CRLF, git does not
+# call that a change, and the installer shipped 8,849 extra bytes from it.
+$text = [System.IO.File]::ReadAllText($catalog).Replace("`r`n", "`n")
+[System.IO.File]::WriteAllText((Join-Path $staging 'autoeq-index.tsv'), $text, (New-Object System.Text.UTF8Encoding $false))
 Write-Host ("  resource autoeq-index.tsv ({0:N0} models, {1:N0} KB)" -f `
     (Get-Content $catalog).Count, ((Get-Item $catalog).Length / 1KB))
 
