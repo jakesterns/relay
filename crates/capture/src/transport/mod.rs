@@ -214,7 +214,7 @@ pub async fn build_pc(
         tracks: track_tx,
     });
 
-    let (runtime, net) = netio::TunedRuntime::new(default_runtime().context("webrtc runtime")?);
+    let (runtime, net) = netio::TunedRuntime::wrap(default_runtime().context("webrtc runtime")?);
     netio::log_every_second(&net);
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)

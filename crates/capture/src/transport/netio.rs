@@ -28,15 +28,19 @@ use webrtc::runtime::{
 /// `SO_RCVBUF` for the media socket.
 ///
 /// The sender does not pace: an access unit leaves as one back-to-back burst
-/// at line rate, and a keyframe is the worst case. Measured on the r10 build a
-/// 1440p keyframe at 40 Mb/s is ~0.5 MB; at the brief's ceiling (4K60,
-/// 80 Mb/s) budget 2 MB. The buffer has to hold a whole keyframe burst plus
-/// whatever arrives while the receive task is descheduled — one 15.6 ms
-/// Windows scheduler quantum at 80 Mb/s is another 160 KB. 4 MB holds two
-/// worst-case keyframes, i.e. 400 ms of video at 80 Mb/s and 800 ms at 40,
-/// against a Windows default of 64 KB (13 ms at 40 Mb/s, and less than one
-/// ordinary 83 KB frame). It is only a ceiling on queued bytes: the kernel
-/// does not commit it up front, so an idle receiver pays nothing.
+/// at line rate, and a keyframe is the worst case. Measured in S30, a 1440p
+/// keyframe is 446-589 packets (526-697 KB) handed to the wire in 3.6-5.4 ms;
+/// budget 2 MB for 4K. The Windows default is 65,536 bytes, less than one
+/// ordinary 83 KB frame at 40 Mb/s, and on the two-PC run the queue sat at
+/// that ceiling in 51 seconds of 185. With 4 MB the same traffic peaked at
+/// 316 KB. 4 MB holds two worst-case 4K keyframes, or 400 ms of video at the
+/// 80 Mb/s ceiling, which is room for the receive task to lose a scheduler
+/// quantum mid-burst. It is a ceiling on queued bytes, not an allocation: an
+/// idle receiver pays nothing.
+///
+/// For the record, this was not what was losing packets (see `reorder` and
+/// the track loop in `receiver`); it is sized because a buffer smaller than
+/// one frame leaves no margin at all, not because overflow was observed.
 pub const RECV_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 /// `SO_SNDBUF`. The sender's burst is handed to the kernel in GSO batches; a
@@ -194,7 +198,7 @@ pub struct TunedRuntime {
 }
 
 impl TunedRuntime {
-    pub fn new(inner: Arc<dyn Runtime>) -> (Arc<dyn Runtime>, Arc<NetStats>) {
+    pub fn wrap(inner: Arc<dyn Runtime>) -> (Arc<dyn Runtime>, Arc<NetStats>) {
         let stats = Arc::new(NetStats::default());
         (Arc::new(Self { inner, stats: stats.clone() }), stats)
     }
