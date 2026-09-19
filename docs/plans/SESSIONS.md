@@ -1205,6 +1205,15 @@ and branching from `main` first would mean building the warning UI against a
 Receive screen that no longer exists.
 
 ### What is already known, so no session re-derives it
+**Corrected by S30's measurements, 2026-09-18 — the first two bullets below
+were read from the code and are wrong.** `nack`, `nack pli` and `transport-cc`
+were negotiated all along (`register_default_interceptors` appends them to
+codecs registered before it runs), and the socket buffer, though only 64 KB,
+did not predict loss. Nothing was lost on the wire; the receiver process lost
+it (a track loop that waited on the decoder, and no reorder buffer for NACK
+retransmissions). Numbers in `docs/dev/BUGS.md` B15. Left in place as the
+record of why measuring came first.
+
 Read in the S29 worktree, 2026-09-18:
 - `transport/mod.rs:49` registers every video codec with `rtcp_feedback: vec![]`.
   Nothing is negotiated: no `nack`, no `nack pli`, no `ccm fir`, no
@@ -1233,24 +1242,30 @@ Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
       known-good and known-bad settings.
 - [x] Root-cause candidates identified in code (see above): empty
       `rtcp_feedback`, untuned `SO_RCVBUF`.
-- [ ] Accept the order: measure the limiter first, then fix. Enabling NACK
+- [x] Accept the order: measure the limiter first, then fix. Enabling NACK
       before knowing whether the loss is socket overflow would mask a buffer bug
       behind retransmissions and burn LAN bandwidth doing it.
 
 ### Definition of Done
-- [ ] The real limiter is named with evidence, not inferred. Instrument the
+- [x] The real limiter is named with evidence, not inferred (in-process: webrtc-rs's
+      256-slot track queue overflowing behind a loop that awaited the decoder, plus no
+      reorder buffer; wire loss 0 of 708,602. BUGS.md B15). Instrument the
       receiver's UDP overrun counters and socket buffer occupancy, and the
       sender's pacing and burst size. Say which one it was and show the numbers.
-- [ ] `SO_RCVBUF` sized deliberately for the worst supported rate, with the
+- [x] `SO_RCVBUF` sized deliberately (4 MB, `transport/netio.rs`; before/after at equal
+      load is run C vs D)
+      — for the worst supported rate, with the
       chosen size justified in a comment in terms of milliseconds of video held,
       and the effect measured before and after.
-- [ ] NACK negotiated and working: `rtcp_feedback` carries `nack`, and a lost
+- [x] NACK negotiated and working (it was negotiated already; what was missing was a
+      reorder buffer and a LAN-scale timer, 10 ms not 100): `rtcp_feedback` carries `nack`, and a lost
       packet is retransmitted rather than lost. The `lost=1` gaps are the
       majority and are exactly what NACK is for on a 0.2 ms RTT link, where a
       retransmission arrives well within one frame.
-- [ ] **B15**: `nack pli` negotiated, and the receiver requests a keyframe when a
+- [x] **B15**: `nack pli` negotiated, and the receiver requests a keyframe when a
       gap is unrecoverable. Turns 10–15 s of smearing into roughly 200 ms.
-- [ ] Adaptive bitrate: sustained loss backs the encoder off, recovery climbs
+- [x] Adaptive bitrate (`control::BitrateControl`, fed unrepaired loss over the
+      signalling channel; oscillation test in the unit suite): sustained loss backs the encoder off, recovery climbs
       back. Needs congestion feedback (`transport-cc` or `goog-remb`) negotiated
       first — it cannot be driven from nothing. Changes must be damped; a bitrate
       that oscillates is worse than one that is merely too high.
