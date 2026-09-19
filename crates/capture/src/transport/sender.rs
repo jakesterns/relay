@@ -429,13 +429,22 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let (abort_tx, mut abort_rx) = mpsc::channel::<String>(1);
     {
         let target = target_bps.clone();
-        let aimd = super::control::AimdBitrate::new(opts.bitrate_bps);
+        let mut control = super::control::BitrateControl::new(opts.bitrate_bps);
         runtime.spawn(Box::pin(async move {
             loop {
                 match sig.recv().await {
                     Ok(signal::SigMsg::Loss { fraction }) => {
-                        let cur = target.load(Ordering::Relaxed);
-                        target.store(aimd.next(cur, fraction), Ordering::Relaxed);
+                        let was = target.load(Ordering::Relaxed);
+                        let now = control.on_window(fraction);
+                        if now != was {
+                            target.store(now, Ordering::Relaxed);
+                            info!(
+                                from_mbps = was as f64 / 1e6,
+                                to_mbps = now as f64 / 1e6,
+                                loss_percent = fraction as f64 * 100.0,
+                                "bitrate target changed"
+                            );
+                        }
                     }
                     Ok(signal::SigMsg::Abort { reason }) => {
                         let _ = abort_tx.send(reason).await;
@@ -460,6 +469,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         .downcast_ref::<rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
                         .is_some()
                     {
+                        info!("the receiver asked for a keyframe");
                         kf.store(true, Ordering::Relaxed);
                     }
                 }

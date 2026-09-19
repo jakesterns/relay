@@ -1,0 +1,42 @@
+<!doctype html>
+<!-- Full-motion source for share bitrate tests (S30). A static desktop encodes
+     at ~2 Mb/s and never stresses the link; this keeps the encoder at its
+     target. Open full screen (F11) on the sending PC. Scrolling detail plus a
+     noise band: hard to compress, and a smear is obvious on the moving bars. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Relay motion test</title>
+<style>html,body{margin:0;height:100%;background:#0E0D0C;overflow:hidden}canvas{width:100%;height:100%;display:block}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const c = document.getElementById("c"), g = c.getContext("2d");
+function size() { c.width = innerWidth * devicePixelRatio; c.height = innerHeight * devicePixelRatio; }
+addEventListener("resize", size); size();
+const noise = document.createElement("canvas"); noise.width = 512; noise.height = 512;
+const ng = noise.getContext("2d"), img = ng.createImageData(512, 512);
+let f = 0;
+function frame() {
+  const w = c.width, h = c.height;
+  // Diagonal colour bars, scrolling 6 px a frame.
+  for (let i = -1; i < 26; i++) {
+    g.fillStyle = `hsl(${(i * 47) % 360} 55% ${30 + (i % 3) * 12}%)`;
+    const x = ((i * w / 24) + f * 6) % (w + w / 24) - w / 24;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x + w / 24, 0); g.lineTo(x + w / 24 - h / 4, h); g.lineTo(x - h / 4, h); g.fill();
+  }
+  // Fresh noise every frame across the middle third.
+  const d = img.data;
+  for (let p = 0; p < d.length; p += 4) { const v = Math.random() * 255; d[p] = v; d[p + 1] = v * 0.9; d[p + 2] = v * 0.8; d[p + 3] = 255; }
+  ng.putImageData(img, 0, 0);
+  g.drawImage(noise, 0, h / 3, w, h / 3);
+  // Frame counter: a frozen or repeated frame is readable on the receiver.
+  g.fillStyle = "#0E0D0C"; g.fillRect(40, 40, 420, 110);
+  g.fillStyle = "#ECE6DC"; g.font = "80px monospace"; g.fillText(String(f).padStart(7, "0"), 60, 125);
+  f++; requestAnimationFrame(frame);
+}
+frame();
+</script>
+</body>
+</html>

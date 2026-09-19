@@ -83,6 +83,13 @@ pub struct RecvStats {
     /// climbing as if nothing were wrong. These say when that happened.
     pub video_gaps: AtomicU64,
     pub video_lost_packets: AtomicU64,
+    /// Since S30 the two above count only what the reorder buffer gave up
+    /// on. This is the other side: holes a retransmission filled in time.
+    pub video_recovered: AtomicU64,
+    /// Keyframe requests (PLI) sent, and whole frames withheld from the
+    /// decoder while waiting for one or because it fell behind.
+    pub keyframe_requests: AtomicU64,
+    pub video_aus_dropped: AtomicU64,
 }
 
 pub async fn run(opts: RecvOpts) -> Result<()> {
@@ -212,7 +219,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
 
     // Track fan-out: video AUs and audio packets land on channels.
     let stats = Arc::new(RecvStats::default());
-    let (au_tx, mut au_rx) = mpsc::channel::<AccessUnit>(8);
+    // Deep enough to ride out decoder start-up (a few hundred ms) without
+    // the track loop dropping units; see `video_track_loop` for why it must
+    // never wait here.
+    let (au_tx, mut au_rx) = mpsc::channel::<AccessUnit>(64);
     let (opus_tx, mut opus_rx) = mpsc::channel::<Vec<u8>>(64);
     let (mic_tx, mut mic_rx) = mpsc::channel::<Vec<u8>>(64);
     {
@@ -296,6 +306,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         "video_bytes": stats2.video_bytes.load(Ordering::Relaxed),
                         "audio_packets": stats2.audio_packets.load(Ordering::Relaxed),
                         "mic_packets": stats2.mic_packets.load(Ordering::Relaxed),
+                        "rtp_gaps": stats2.video_gaps.load(Ordering::Relaxed),
+                        "rtp_lost": stats2.video_lost_packets.load(Ordering::Relaxed),
+                        "rtp_recovered": stats2.video_recovered.load(Ordering::Relaxed),
+                        "keyframe_requests": stats2.keyframe_requests.load(Ordering::Relaxed),
+                        "frames_withheld": stats2.video_aus_dropped.load(Ordering::Relaxed),
                         "capture_to_arrival_ms": { "p50": p50, "p99": p99, "max": max },
                     }));
                     last_aus = aus;
@@ -330,7 +345,108 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         .await
 }
 
-/// Depacketize one video track into access units (marker bit = AU boundary).
+/// What the reorder buffer's output does to the access unit being built.
+/// Pure, so the loss rules are testable without a peer connection.
+struct Assembler {
+    depkt: Option<(VideoCodec, super::depay::VideoDepay)>,
+    au: Vec<u8>,
+    /// Packets with this RTP timestamp belong to a unit that lost a packet.
+    discard_ts: Option<u32>,
+    /// The first packet after a loss names the unit to discard.
+    after_loss: bool,
+    /// The reference chain is broken: drop units until a keyframe arrives.
+    /// Showing them is what smears the picture; holding the last good frame
+    /// for the ~100-200 ms a keyframe takes is the lesser evil.
+    await_keyframe: bool,
+}
+
+struct Unit {
+    codec: VideoCodec,
+    data: Vec<u8>,
+    rtp_timestamp: u32,
+}
+
+/// A whole unit withheld because the stream is waiting for a keyframe.
+struct Withheld;
+
+impl Assembler {
+    fn new() -> Self {
+        Self {
+            depkt: None,
+            au: Vec::with_capacity(256 * 1024),
+            discard_ts: None,
+            after_loss: false,
+            await_keyframe: false,
+        }
+    }
+
+    /// Packets were given up on: whatever is half-built is damaged.
+    fn lost(&mut self) {
+        self.au.clear();
+        if let Some((codec, d)) = self.depkt.as_mut() {
+            *d = super::depay::VideoDepay::new(*codec);
+        }
+        self.after_loss = true;
+        self.await_keyframe = true;
+    }
+
+    /// The consumer could not take a unit: same consequence as a loss.
+    fn unit_dropped(&mut self) {
+        self.await_keyframe = true;
+    }
+
+    fn packet(
+        &mut self,
+        codec: VideoCodec,
+        timestamp: u32,
+        marker: bool,
+        payload: &[u8],
+    ) -> Result<Option<Unit>, Withheld> {
+        if self.after_loss {
+            // Either the rest of the unit the loss hit, or a unit whose head
+            // may have been in the loss. Both are unusable.
+            self.after_loss = false;
+            self.discard_ts = Some(timestamp);
+        }
+        if self.discard_ts == Some(timestamp) {
+            return Ok(None);
+        }
+        self.discard_ts = None;
+        if self.depkt.as_ref().map(|(c, _)| *c) != Some(codec) {
+            info!(codec = codec.label(), "video codec");
+            println!("{}", serde_json::json!({ "event": "codec", "codec": codec }));
+            self.au.clear();
+            self.depkt = Some((codec, super::depay::VideoDepay::new(codec)));
+        }
+        let Some((_, d)) = self.depkt.as_mut() else { return Ok(None) };
+        d.push(payload, &mut self.au);
+        if !marker || self.au.is_empty() {
+            return Ok(None);
+        }
+        if self.await_keyframe {
+            if !codec.is_keyframe(&self.au) {
+                self.au.clear();
+                return Err(Withheld);
+            }
+            self.await_keyframe = false;
+        }
+        Ok(Some(Unit { codec, data: std::mem::take(&mut self.au), rtp_timestamp: timestamp }))
+    }
+}
+
+/// While waiting for a keyframe, ask again this often: the request is one
+/// unacknowledged RTCP packet and can be lost like anything else.
+const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+
+/// Reorder, depacketize into access units (marker bit = AU boundary), and ask
+/// for a keyframe when a loss could not be repaired (B15).
+///
+/// This loop must never wait on the decoder. webrtc-rs hands packets over
+/// through a 256-slot queue with `try_send`, so while this task is parked the
+/// driver silently drops everything past the 256th packet. On the S30 two-PC
+/// run that was the actual source of loss, with zero packets lost on the
+/// wire. Units go out with `try_send`; a full channel drops the unit and
+/// costs a keyframe, which is cheaper than losing half a keyframe of packets.
 async fn video_track_loop(
     track: Arc<dyn TrackRemote>,
     stats: Arc<RecvStats>,
@@ -338,75 +454,119 @@ async fn video_track_loop(
     au_tx: mpsc::Sender<AccessUnit>,
     loss_tx: mpsc::Sender<f32>,
 ) {
-    use super::depay::VideoDepay;
+    use super::reorder::{Reorder, Step};
+    use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    use std::time::Instant;
 
-    // Built from the first packet's payload type, and rebuilt if it changes.
-    let mut depkt: Option<(VideoCodec, VideoDepay)> = None;
+    let mut reorder = Reorder::new();
+    let mut steps = Vec::new();
+    let mut asm = Assembler::new();
     let mut unknown_pt_logged = false;
-    let mut au: Vec<u8> = Vec::with_capacity(256 * 1024);
-    // RTP-sequence loss estimation over ~1 s windows.
-    let mut loss = super::control::LossWindow::default();
-    let mut window_start = std::time::Instant::now();
-    let mut last_seq: Option<u16> = None;
-    while let Some(ev) = track.poll().await {
-        let TrackRemoteEvent::OnRtpPacket(pkt) = ev else { continue };
-        let seq = pkt.header.sequence_number;
-        if let Some(prev) = last_seq {
-            let gap = seq.wrapping_sub(prev);
-            if gap > 1 && gap < 0x8000 {
-                let lost = (gap - 1) as u64;
-                stats.video_gaps.fetch_add(1, Ordering::Relaxed);
-                stats.video_lost_packets.fetch_add(lost, Ordering::Relaxed);
-                warn!(
-                    expected = prev.wrapping_add(1),
-                    got = seq,
-                    lost,
-                    "rtp sequence gap on the video track; the picture may be damaged until the next keyframe"
-                );
-            }
-        }
-        if last_seq.is_none_or(|p| seq.wrapping_sub(p) < 0x8000) {
-            last_seq = Some(seq);
-        }
-        loss.push(seq);
-        if window_start.elapsed() >= std::time::Duration::from_secs(1) {
-            let _ = loss_tx.try_send(loss.take_fraction());
-            window_start = std::time::Instant::now();
-        }
-        let Some(codec) = VideoCodec::from_payload_type(pkt.header.payload_type) else {
-            if !unknown_pt_logged {
-                warn!(pt = pkt.header.payload_type, "video packet with an unknown payload type");
-                unknown_pt_logged = true;
-            }
-            continue;
+    let mut media_ssrc = 0u32;
+    let mut last_keyframe_request: Option<Instant> = None;
+    // Unrepaired loss over ~1 s windows, for the sender's bitrate control.
+    let mut window_start = Instant::now();
+    let (mut window_lost, mut window_delivered) = (0u64, 0u64);
+
+    loop {
+        let deadline = reorder.deadline();
+        let ev = tokio::select! {
+            ev = track.poll() => match ev {
+                Some(ev) => Some(ev),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now).into()),
+                if deadline.is_some() => None,
         };
-        if depkt.as_ref().map(|(c, _)| *c) != Some(codec) {
-            info!(codec = codec.label(), "video codec");
-            println!("{}", serde_json::json!({ "event": "codec", "codec": codec }));
-            au.clear();
-            depkt = Some((codec, VideoDepay::new(codec)));
-        }
-        let Some((_, d)) = depkt.as_mut() else { continue };
-        d.push(&pkt.payload, &mut au);
-        if pkt.header.marker && !au.is_empty() {
-            stats.video_bytes.fetch_add(au.len() as u64, Ordering::Relaxed);
-            stats.video_aus.fetch_add(1, Ordering::Relaxed);
-            let capture_local_ns = sei::extract_timestamp(codec, &au).map(|sender_ns| {
-                let local = sender_ns + clock_offset_ns.load(Ordering::Relaxed);
-                stats
-                    .arrival_latency_us_last
-                    .store((signal::unix_now_ns() - local) / 1_000, Ordering::Relaxed);
-                local
-            });
-            let unit = AccessUnit {
-                codec,
-                data: std::mem::take(&mut au),
-                capture_local_ns,
-                rtp_timestamp: pkt.header.timestamp,
-            };
-            if au_tx.send(unit).await.is_err() {
-                break;
+        let now = Instant::now();
+        match ev {
+            Some(TrackRemoteEvent::OnRtpPacket(pkt)) => {
+                media_ssrc = pkt.header.ssrc;
+                reorder.push(pkt.header.sequence_number, pkt, now, &mut steps);
             }
+            Some(_) => continue,
+            None => reorder.poll(now, &mut steps),
+        }
+
+        for step in steps.drain(..) {
+            let pkt = match step {
+                Step::Packet(pkt) => pkt,
+                Step::Lost(lost) => {
+                    window_lost += u64::from(lost);
+                    stats.video_gaps.fetch_add(1, Ordering::Relaxed);
+                    stats.video_lost_packets.fetch_add(u64::from(lost), Ordering::Relaxed);
+                    warn!(lost, "video packets not recovered in time; waiting for a keyframe");
+                    asm.lost();
+                    continue;
+                }
+            };
+            window_delivered += 1;
+            let Some(codec) = VideoCodec::from_payload_type(pkt.header.payload_type) else {
+                if !unknown_pt_logged {
+                    warn!(
+                        pt = pkt.header.payload_type,
+                        "video packet with an unknown payload type"
+                    );
+                    unknown_pt_logged = true;
+                }
+                continue;
+            };
+            let unit =
+                match asm.packet(codec, pkt.header.timestamp, pkt.header.marker, &pkt.payload) {
+                    Ok(Some(unit)) => unit,
+                    Ok(None) => continue,
+                    Err(Withheld) => {
+                        stats.video_aus_dropped.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
+            stats.video_bytes.fetch_add(unit.data.len() as u64, Ordering::Relaxed);
+            stats.video_aus.fetch_add(1, Ordering::Relaxed);
+            let capture_local_ns =
+                sei::extract_timestamp(unit.codec, &unit.data).map(|sender_ns| {
+                    let local = sender_ns + clock_offset_ns.load(Ordering::Relaxed);
+                    stats
+                        .arrival_latency_us_last
+                        .store((signal::unix_now_ns() - local) / 1_000, Ordering::Relaxed);
+                    local
+                });
+            let unit = AccessUnit {
+                codec: unit.codec,
+                data: unit.data,
+                capture_local_ns,
+                rtp_timestamp: unit.rtp_timestamp,
+            };
+            match au_tx.try_send(unit) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    stats.video_aus_dropped.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "the decoder is not keeping up; dropped a frame and asked for a keyframe"
+                    );
+                    asm.unit_dropped();
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
+            }
+        }
+        stats.video_recovered.store(reorder.stats.recovered, Ordering::Relaxed);
+
+        if !asm.await_keyframe {
+            last_keyframe_request = None;
+        } else if last_keyframe_request.is_none_or(|t| now.duration_since(t) >= KEYFRAME_RETRY) {
+            last_keyframe_request = Some(now);
+            stats.keyframe_requests.fetch_add(1, Ordering::Relaxed);
+            let pli = PictureLossIndication { sender_ssrc: 0, media_ssrc };
+            if let Err(e) = track.write_rtcp(vec![Box::new(pli)]).await {
+                warn!(error = %e, "could not send the keyframe request");
+            }
+        }
+
+        if window_start.elapsed() >= Duration::from_secs(1) {
+            let total = window_lost + window_delivered;
+            let fraction = if total > 0 { window_lost as f32 / total as f32 } else { 0.0 };
+            let _ = loss_tx.try_send(fraction);
+            (window_lost, window_delivered) = (0, 0);
+            window_start = Instant::now();
         }
     }
 }
@@ -414,6 +574,59 @@ async fn video_track_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One single-NAL H.264 packet: type 5 is an IDR slice, type 1 is not.
+    fn nal(idr: bool) -> [u8; 4] {
+        [if idr { 0x65 } else { 0x41 }, 1, 2, 3]
+    }
+
+    /// Feed a one-packet unit; `Some(true)` delivered, `Some(false)` withheld.
+    fn unit(a: &mut Assembler, ts: u32, idr: bool) -> Option<bool> {
+        match a.packet(VideoCodec::H264, ts, true, &nal(idr)) {
+            Ok(Some(_)) => Some(true),
+            Ok(None) => None,
+            Err(Withheld) => Some(false),
+        }
+    }
+
+    #[test]
+    fn after_a_loss_nothing_reaches_the_decoder_until_a_keyframe() {
+        let mut a = Assembler::new();
+        assert_eq!(unit(&mut a, 1000, true), Some(true));
+        assert_eq!(unit(&mut a, 2000, false), Some(true));
+        // First half of unit 3000 arrives, then the hole is given up on.
+        assert!(matches!(a.packet(VideoCodec::H264, 3000, false, &nal(false)), Ok(None)));
+        a.lost();
+        assert!(a.await_keyframe);
+        // The tail of 3000 — marker and all — is part of the damaged unit.
+        assert_eq!(unit(&mut a, 3000, false), None);
+        // Whole, but it references the damaged one: withheld, not shown.
+        assert_eq!(unit(&mut a, 4000, false), Some(false));
+        assert_eq!(unit(&mut a, 5000, true), Some(true), "the keyframe ends it");
+        assert!(!a.await_keyframe);
+        assert_eq!(unit(&mut a, 6000, false), Some(true));
+    }
+
+    #[test]
+    fn a_unit_whose_head_may_have_been_lost_is_discarded_even_if_it_is_a_keyframe() {
+        let mut a = Assembler::new();
+        assert_eq!(unit(&mut a, 1000, true), Some(true));
+        a.lost();
+        // The loss may have eaten the first packets of this unit; its tail
+        // alone would parse as a keyframe and decode as garbage.
+        assert_eq!(unit(&mut a, 2000, true), None);
+        assert!(a.await_keyframe, "still waiting: the retry timer asks again");
+        assert_eq!(unit(&mut a, 3000, true), Some(true));
+    }
+
+    #[test]
+    fn a_frame_the_decoder_could_not_take_also_waits_for_a_keyframe() {
+        let mut a = Assembler::new();
+        assert_eq!(unit(&mut a, 1000, true), Some(true));
+        a.unit_dropped();
+        assert_eq!(unit(&mut a, 2000, false), Some(false));
+        assert_eq!(unit(&mut a, 3000, true), Some(true));
+    }
 
     #[test]
     fn pts_converts_90khz_to_100ns_ticks() {

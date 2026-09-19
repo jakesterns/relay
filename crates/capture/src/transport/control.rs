@@ -1,33 +1,65 @@
-//! Feedback control for the share: AIMD bitrate adaptation on the sender and
-//! RTP-sequence loss accounting on the receiver. Pure logic, no I/O — the
-//! sender/receiver loops own the sockets and timers.
+//! Feedback control for the share: damped bitrate adaptation on the sender.
+//! Pure logic, no I/O — the sender loop owns the socket and the timer. The
+//! loss figure it is fed comes from the receiver's `reorder` buffer.
 
-/// AIMD bitrate controller. Multiplicative decrease on sustained loss,
-/// additive increase when the window is clean, always clamped to
-/// `[floor, ceiling]`.
-#[derive(Debug, Clone, Copy)]
-pub struct AimdBitrate {
+/// Bitrate controller driven by the receiver's once-a-second report of
+/// *unrepaired* loss: what NACK could not fix in time.
+///
+/// Damped on purpose. A bitrate that hunts is worse to watch than one that is
+/// steadily a little too high, because every step is a visible quality change
+/// and every overshoot is another keyframe. So:
+///
+/// * one bad second changes nothing — a step down needs [`LOSSY_TO_DROP`]
+///   consecutive lossy windows;
+/// * after any loss the rate holds for [`CLEAN_TO_CLIMB`] clean windows before
+///   it climbs at all, then climbs slowly ([`INCREASE_BPS`] every other window);
+/// * the rate that failed is remembered: for [`MEMORY_WINDOWS`] the climb
+///   stops at 90 % of it instead of walking straight back into the loss, and
+///   each further failure doubles how long it is remembered (to
+///   [`MEMORY_MAX_WINDOWS`]), so a link with a hard limit is probed ever more
+///   rarely rather than every minute and a half for the whole share.
+#[derive(Debug, Clone)]
+pub struct BitrateControl {
     floor: u32,
     ceiling: u32,
+    current: u32,
+    lossy_run: u32,
+    clean_run: u32,
+    /// (cap, windows left) while a failed rate is remembered.
+    soft_cap: Option<(u32, u32)>,
+    /// How long the next failure is remembered for.
+    memory: u32,
 }
 
-/// Loss above this fraction in a window triggers a step-down.
-const LOSS_THRESHOLD: f32 = 0.02;
-/// Multiplicative decrease factor.
+/// Unrepaired loss above this fraction makes a window lossy. Low, because
+/// after NACK any residue costs a keyframe; not zero, so one stray packet in
+/// a second of 4,000 does not count.
+const LOSS_THRESHOLD: f32 = 0.005;
+const LOSSY_TO_DROP: u32 = 2;
 const DECREASE: f32 = 0.8;
-/// Additive increase per clean window.
-const INCREASE_BPS: u32 = 2_000_000;
-/// Never step below this rate (unless the user's ceiling is lower).
+const CLEAN_TO_CLIMB: u32 = 10;
+const INCREASE_BPS: u32 = 1_000_000;
+const MEMORY_WINDOWS: u32 = 60;
+const MEMORY_MAX_WINDOWS: u32 = 960;
+/// Never step below this rate (unless the requested ceiling is lower).
 const MIN_FLOOR_BPS: u32 = 8_000_000;
 
-impl AimdBitrate {
-    /// `initial_bps` is the user's requested bitrate and the ceiling. The
-    /// floor is 1/6 of that, but at least 8 Mb/s — capped at the ceiling so a
+impl BitrateControl {
+    /// `initial_bps` is the requested bitrate and the ceiling. The floor is
+    /// 1/6 of that, but at least 8 Mb/s — capped at the ceiling so a
     /// sub-8 Mb/s request still yields a valid (degenerate) range.
     pub fn new(initial_bps: u32) -> Self {
         let ceiling = initial_bps;
         let floor = (initial_bps / 6).max(MIN_FLOOR_BPS).min(ceiling);
-        Self { floor, ceiling }
+        Self {
+            floor,
+            ceiling,
+            current: ceiling,
+            lossy_run: 0,
+            clean_run: 0,
+            soft_cap: None,
+            memory: MEMORY_WINDOWS,
+        }
     }
 
     pub fn floor(&self) -> u32 {
@@ -38,51 +70,39 @@ impl AimdBitrate {
         self.ceiling
     }
 
-    /// Next target given the current target and the last window's loss.
-    pub fn next(&self, current_bps: u32, loss_fraction: f32) -> u32 {
-        let next = if loss_fraction > LOSS_THRESHOLD {
-            (current_bps as f32 * DECREASE) as u32
-        } else {
-            current_bps.saturating_add(INCREASE_BPS)
-        };
-        next.clamp(self.floor, self.ceiling)
+    pub fn current(&self) -> u32 {
+        self.current
     }
-}
 
-/// RTP-sequence loss accounting over a window. Feed every arriving sequence
-/// number; `take_fraction` reports the missing fraction and starts a new
-/// window. Sequence numbers are u16 and wrap; a backwards jump (reordered or
-/// duplicate packet) is ignored rather than counted as ~65 k losses.
-#[derive(Debug, Default)]
-pub struct LossWindow {
-    last_seq: Option<u16>,
-    expected: u64,
-    lost: u64,
-}
-
-impl LossWindow {
-    pub fn push(&mut self, seq: u16) {
-        if let Some(prev) = self.last_seq {
-            let gap = seq.wrapping_sub(prev);
-            if gap == 0 || gap >= 0x8000 {
-                // Duplicate or reordered-late packet: not new loss. Keep
-                // `last_seq` at the newest sequence we have seen.
-                return;
-            }
-            self.expected += gap as u64;
-            self.lost += (gap - 1) as u64;
+    /// Feed one window of loss; returns the target bitrate.
+    pub fn on_window(&mut self, loss_fraction: f32) -> u32 {
+        if let Some((cap, left)) = self.soft_cap {
+            self.soft_cap = (left > 1).then_some((cap, left - 1));
         }
-        self.last_seq = Some(seq);
-    }
-
-    /// Missing fraction of the current window (0.0 when nothing arrived),
-    /// then reset for the next window. Continuity across windows is kept.
-    pub fn take_fraction(&mut self) -> f32 {
-        let fraction =
-            if self.expected > 0 { self.lost as f32 / self.expected as f32 } else { 0.0 };
-        self.expected = 0;
-        self.lost = 0;
-        fraction
+        if loss_fraction > LOSS_THRESHOLD {
+            self.clean_run = 0;
+            self.lossy_run += 1;
+            if self.lossy_run >= LOSSY_TO_DROP {
+                self.lossy_run = 0;
+                let failed = self.current;
+                self.current = ((failed as f32 * DECREASE) as u32).clamp(self.floor, self.ceiling);
+                let cap = ((failed as f32 * 0.9) as u32).max(self.current);
+                self.soft_cap = Some((cap, self.memory));
+                self.memory = (self.memory * 2).min(MEMORY_MAX_WINDOWS);
+            }
+        } else {
+            self.lossy_run = 0;
+            self.clean_run += 1;
+            if self.clean_run >= CLEAN_TO_CLIMB && self.clean_run % 2 == 0 {
+                let cap = self.soft_cap.map_or(self.ceiling, |(cap, _)| cap.min(self.ceiling));
+                self.current = self.current.saturating_add(INCREASE_BPS).min(cap).max(self.current);
+                if self.current == self.ceiling {
+                    // Back at the requested rate and clean: the trouble is over.
+                    self.memory = MEMORY_WINDOWS;
+                }
+            }
+        }
+        self.current
     }
 }
 
@@ -91,116 +111,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn aimd_increases_when_clean() {
-        let c = AimdBitrate::new(60_000_000);
-        assert_eq!(c.next(40_000_000, 0.0), 42_000_000);
-        assert_eq!(c.next(40_000_000, LOSS_THRESHOLD), 42_000_000, "threshold is exclusive");
+    fn one_bad_second_changes_nothing() {
+        let mut c = BitrateControl::new(40_000_000);
+        assert_eq!(c.on_window(0.05), 40_000_000);
+        assert_eq!(c.on_window(0.0), 40_000_000);
+        assert_eq!(c.on_window(0.05), 40_000_000, "not consecutive");
     }
 
     #[test]
-    fn aimd_decreases_on_loss() {
-        let c = AimdBitrate::new(60_000_000);
-        assert_eq!(c.next(50_000_000, 0.05), 40_000_000);
+    fn sustained_loss_steps_down_once_per_two_windows() {
+        let mut c = BitrateControl::new(40_000_000);
+        c.on_window(0.05);
+        assert_eq!(c.on_window(0.05), 32_000_000);
+        assert_eq!(c.on_window(0.05), 32_000_000);
+        assert_eq!(c.on_window(0.05), 25_600_000);
     }
 
     #[test]
-    fn aimd_clamps_to_ceiling_and_floor() {
-        let c = AimdBitrate::new(60_000_000);
-        assert_eq!(c.floor(), 10_000_000);
-        assert_eq!(c.ceiling(), 60_000_000);
-        // At the ceiling, a clean window stays at the ceiling.
-        assert_eq!(c.next(60_000_000, 0.0), 60_000_000);
-        // Repeated loss converges to the floor and stops there.
-        let mut bps = 60_000_000;
+    fn loss_at_the_threshold_is_clean() {
+        let mut c = BitrateControl::new(40_000_000);
+        for _ in 0..10 {
+            assert_eq!(c.on_window(LOSS_THRESHOLD), 40_000_000, "threshold is exclusive");
+        }
+    }
+
+    #[test]
+    fn recovery_holds_then_climbs_slowly_and_stops_short_of_the_failed_rate() {
+        let mut c = BitrateControl::new(40_000_000);
+        c.on_window(0.05);
+        c.on_window(0.05); // 32 Mb/s; 40 failed, so the cap is 36.
+        for i in 1..CLEAN_TO_CLIMB {
+            assert_eq!(c.on_window(0.0), 32_000_000, "holding, clean window {i}");
+        }
+        assert_eq!(c.on_window(0.0), 33_000_000);
+        assert_eq!(c.on_window(0.0), 33_000_000, "every other window");
+        assert_eq!(c.on_window(0.0), 34_000_000);
+        let mut bps = 0;
+        for _ in 0..30 {
+            bps = c.on_window(0.0);
+        }
+        assert_eq!(bps, 36_000_000, "90 % of the rate that failed, while remembered");
+        // The memory runs out; the climb finishes.
         for _ in 0..40 {
-            bps = c.next(bps, 0.5);
+            bps = c.on_window(0.0);
         }
-        assert_eq!(bps, c.floor());
+        assert_eq!(bps, 40_000_000);
     }
 
     #[test]
-    fn aimd_low_ceiling_never_panics_or_exceeds() {
-        // A 5 Mb/s request: the 8 Mb/s minimum floor must cap at the ceiling
+    fn it_does_not_oscillate_on_a_link_that_fails_at_a_fixed_rate() {
+        // A link that loses packets above 35 Mb/s. Count direction changes
+        // over five minutes: stepping every window flips every few seconds.
+        let mut c = BitrateControl::new(40_000_000);
+        let (mut last, mut dir, mut flips) = (40_000_000u32, 0i8, 0u32);
+        for _ in 0..300 {
+            let loss = if c.current() > 35_000_000 { 0.03 } else { 0.0 };
+            let bps = c.on_window(loss);
+            let d = (bps as i64 - last as i64).signum() as i8;
+            if d != 0 && d != dir {
+                flips += 1;
+                dir = d;
+            }
+            last = bps;
+        }
+        assert!(flips <= 8, "{flips} direction changes in 5 minutes");
+        assert!(last >= 28_000_000, "and it has not collapsed: {last}");
+    }
+
+    #[test]
+    fn clamps_to_floor_and_survives_degenerate_ranges() {
+        let mut c = BitrateControl::new(60_000_000);
+        assert_eq!(c.floor(), 10_000_000);
+        for _ in 0..100 {
+            c.on_window(0.5);
+        }
+        assert_eq!(c.current(), c.floor());
+        // A 5 Mb/s request: the 8 Mb/s minimum floor caps at the ceiling
         // instead of producing floor > ceiling (which would panic in clamp).
-        let c = AimdBitrate::new(5_000_000);
-        assert_eq!(c.floor(), 5_000_000);
-        assert_eq!(c.ceiling(), 5_000_000);
-        assert_eq!(c.next(5_000_000, 0.5), 5_000_000);
-        assert_eq!(c.next(5_000_000, 0.0), 5_000_000);
-    }
-
-    #[test]
-    fn aimd_zero_bitrate_is_degenerate_but_safe() {
-        let c = AimdBitrate::new(0);
-        assert_eq!(c.next(0, 0.0), 0);
-        assert_eq!(c.next(0, 1.0), 0);
-    }
-
-    #[test]
-    fn loss_window_clean_sequence_is_zero() {
-        let mut w = LossWindow::default();
-        for seq in 100u16..200 {
-            w.push(seq);
+        let mut c = BitrateControl::new(5_000_000);
+        assert_eq!((c.floor(), c.ceiling()), (5_000_000, 5_000_000));
+        for loss in [0.5, 0.5, 0.0, 0.5] {
+            assert_eq!(c.on_window(loss), 5_000_000);
         }
-        assert_eq!(w.take_fraction(), 0.0);
-    }
-
-    #[test]
-    fn loss_window_counts_gaps() {
-        let mut w = LossWindow::default();
-        w.push(1);
-        w.push(2);
-        w.push(5); // 3 and 4 lost
-        w.push(6);
-        // expected 5 (seqs 2..=6), lost 2.
-        assert!((w.take_fraction() - 0.4).abs() < 1e-6);
-        // Window reset; the next clean packet reports zero.
-        w.push(7);
-        assert_eq!(w.take_fraction(), 0.0);
-    }
-
-    #[test]
-    fn loss_window_wraps_u16() {
-        let mut w = LossWindow::default();
-        w.push(65_534);
-        w.push(65_535);
-        w.push(0);
-        w.push(1);
-        assert_eq!(w.take_fraction(), 0.0, "wraparound is not loss");
-        // A gap across the wrap still counts.
-        let mut w = LossWindow::default();
-        w.push(65_535);
-        w.push(2); // 0 and 1 lost
-        assert!((w.take_fraction() - 2.0 / 3.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn loss_window_ignores_reorder_and_duplicates() {
-        let mut w = LossWindow::default();
-        w.push(10);
-        w.push(12); // 11 momentarily missing
-        w.push(11); // …arrives late: must not add ~65 k losses
-        w.push(12); // duplicate
-        w.push(13);
-        let f = w.take_fraction();
-        // Only the original gap (1 of 3) remains counted.
-        assert!((f - 1.0 / 3.0).abs() < 1e-6, "fraction {f}");
-    }
-
-    #[test]
-    fn loss_window_empty_is_zero() {
-        let mut w = LossWindow::default();
-        assert_eq!(w.take_fraction(), 0.0);
-        w.push(42); // first packet alone: no expectations yet
-        assert_eq!(w.take_fraction(), 0.0);
-    }
-
-    #[test]
-    fn loss_window_total_loss_capped_at_one() {
-        let mut w = LossWindow::default();
-        w.push(0);
-        w.push(30_000);
-        let f = w.take_fraction();
-        assert!(f < 1.0 && f > 0.99, "fraction {f}");
+        let mut c = BitrateControl::new(0);
+        assert_eq!(c.on_window(1.0), 0);
+        assert_eq!(c.on_window(0.0), 0);
     }
 }
