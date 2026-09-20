@@ -9,6 +9,7 @@
 pub mod control;
 pub mod depay;
 pub mod discovery;
+pub mod feedback;
 pub mod netcheck;
 pub mod netio;
 pub mod receiver;
@@ -29,6 +30,7 @@ use rtc::peer_connection::configuration::interceptor_registry::{
     configure_rtcp_reports, configure_simulcast_extension_headers, configure_twcc_receiver_only,
 };
 use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
@@ -58,6 +60,16 @@ pub const NACK_INTERVAL: Duration = Duration::from_millis(10);
 /// on and asked for a keyframe; anything the sender retransmits past that is
 /// wasted bandwidth, and unlimited is the library default.
 const NACKS_PER_PACKET: u16 = 4;
+
+/// SRTP anti-replay window, in packets. The library default is 64, which at
+/// 4,000 packets a second is 16 ms: every NACK retransmission of a video
+/// packet is older than that by the time it arrives, and SRTP rejects it as a
+/// replay ("duplicated") before anything above sees it. Measured in S30 —
+/// 1,627 rejections in 6.6 s, 14 holes repaired out of 124. It has to cover
+/// [`reorder::HOLD`] at the highest rate plus a keyframe burst: 40 ms at
+/// 80 Mb/s is ~340 packets, a 4K keyframe up to ~2,000. 4096 is a 512-byte
+/// bitmask and still rejects true replays.
+const SRTP_REPLAY_WINDOW: usize = 4096;
 
 /// Packets each end remembers for NACK: the receiver's arrival log and the
 /// sender's retransmission buffer. 2048 is 250 ms at 80 Mb/s and four
@@ -188,6 +200,7 @@ pub async fn build_pc(
         );
     }
     let registry = Registry::new()
+        .with(feedback::keyframe_request_forwarder())
         .with(
             NackGeneratorBuilder::new()
                 .with_size(NACK_HISTORY)
@@ -216,8 +229,11 @@ pub async fn build_pc(
 
     let (runtime, net) = netio::TunedRuntime::wrap(default_runtime().context("webrtc runtime")?);
     netio::log_every_second(&net);
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_srtp_replay_protection_window(SRTP_REPLAY_WINDOW);
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)
+        .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)

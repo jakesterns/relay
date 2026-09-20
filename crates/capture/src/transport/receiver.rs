@@ -358,6 +358,10 @@ struct Assembler {
     /// Showing them is what smears the picture; holding the last good frame
     /// for the ~100-200 ms a keyframe takes is the lesser evil.
     await_keyframe: bool,
+    /// A keyframe has been asked for and has not arrived. Outlives
+    /// `await_keyframe` when the withholding limit is hit: the picture is
+    /// shown again, damaged, but the asking goes on.
+    need_keyframe: bool,
 }
 
 struct Unit {
@@ -377,6 +381,7 @@ impl Assembler {
             discard_ts: None,
             after_loss: false,
             await_keyframe: false,
+            need_keyframe: false,
         }
     }
 
@@ -387,12 +392,31 @@ impl Assembler {
             *d = super::depay::VideoDepay::new(*codec);
         }
         self.after_loss = true;
-        self.await_keyframe = true;
+        self.break_chain();
+    }
+
+    /// The reference chain is broken. Withhold — unless withholding was
+    /// already called off while waiting for this same keyframe: on a link bad
+    /// enough for that, every further loss would otherwise buy another second
+    /// of frozen picture, and the share would be still more often than not.
+    fn break_chain(&mut self) {
+        if !self.need_keyframe {
+            self.await_keyframe = true;
+            self.need_keyframe = true;
+        }
     }
 
     /// The consumer could not take a unit: same consequence as a loss.
     fn unit_dropped(&mut self) {
-        self.await_keyframe = true;
+        self.break_chain();
+    }
+
+    /// The keyframe is not coming soon enough: show what arrives. A smear
+    /// is bad; a picture that has stopped is worse, and on the first two-PC
+    /// run of this code it also tripped the no-frames-for-3-s rule and ended
+    /// the share.
+    fn stop_withholding(&mut self) {
+        self.await_keyframe = false;
     }
 
     fn packet(
@@ -423,12 +447,13 @@ impl Assembler {
         if !marker || self.au.is_empty() {
             return Ok(None);
         }
-        if self.await_keyframe {
-            if !codec.is_keyframe(&self.au) {
-                self.au.clear();
-                return Err(Withheld);
-            }
+        if self.need_keyframe && codec.is_keyframe(&self.au) {
             self.await_keyframe = false;
+            self.need_keyframe = false;
+        }
+        if self.await_keyframe {
+            self.au.clear();
+            return Err(Withheld);
         }
         Ok(Some(Unit { codec, data: std::mem::take(&mut self.au), rtp_timestamp: timestamp }))
     }
@@ -437,6 +462,12 @@ impl Assembler {
 /// While waiting for a keyframe, ask again this often: the request is one
 /// unacknowledged RTCP packet and can be lost like anything else.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
+
+/// Longest the picture is held still waiting for a keyframe. A request is
+/// normally answered in well under 200 ms; a second covers one lost request
+/// and its retry. Past that the link is in worse trouble than a freeze can
+/// hide, so frames are shown again while the requests continue.
+const MAX_WITHHOLD: Duration = Duration::from_secs(1);
 
 /// Reorder, depacketize into access units (marker bit = AU boundary), and ask
 /// for a keyframe when a loss could not be repaired (B15).
@@ -464,6 +495,7 @@ async fn video_track_loop(
     let mut unknown_pt_logged = false;
     let mut media_ssrc = 0u32;
     let mut last_keyframe_request: Option<Instant> = None;
+    let mut withholding_since: Option<Instant> = None;
     // Unrepaired loss over ~1 s windows, for the sender's bitrate control.
     let mut window_start = Instant::now();
     let (mut window_lost, mut window_delivered) = (0u64, 0u64);
@@ -550,7 +582,17 @@ async fn video_track_loop(
         }
         stats.video_recovered.store(reorder.stats.recovered, Ordering::Relaxed);
 
-        if !asm.await_keyframe {
+        if asm.await_keyframe {
+            let since = *withholding_since.get_or_insert(now);
+            if now.duration_since(since) >= MAX_WITHHOLD {
+                warn!("no keyframe after a second of asking; showing frames again");
+                asm.stop_withholding();
+            }
+        } else {
+            withholding_since = None;
+        }
+
+        if !asm.need_keyframe {
             last_keyframe_request = None;
         } else if last_keyframe_request.is_none_or(|t| now.duration_since(t) >= KEYFRAME_RETRY) {
             last_keyframe_request = Some(now);
@@ -626,6 +668,22 @@ mod tests {
         a.unit_dropped();
         assert_eq!(unit(&mut a, 2000, false), Some(false));
         assert_eq!(unit(&mut a, 3000, true), Some(true));
+    }
+
+    #[test]
+    fn withholding_can_be_called_off_without_forgetting_the_keyframe() {
+        let mut a = Assembler::new();
+        assert_eq!(unit(&mut a, 1000, true), Some(true));
+        a.unit_dropped();
+        assert_eq!(unit(&mut a, 2000, false), Some(false));
+        a.stop_withholding();
+        assert_eq!(unit(&mut a, 3000, false), Some(true), "shown, damaged or not");
+        assert!(a.need_keyframe, "and the requests go on");
+        a.lost();
+        assert!(!a.await_keyframe, "a further loss does not freeze the picture again");
+        assert_eq!(unit(&mut a, 3500, false), None, "though the damaged unit still goes");
+        assert_eq!(unit(&mut a, 4000, true), Some(true));
+        assert!(!a.need_keyframe);
     }
 
     #[test]

@@ -168,11 +168,11 @@ pub fn log_every_second(stats: &Arc<NetStats>) {
 /// dropped because the track's 256-slot queue was full — went nowhere. Forward
 /// warnings and errors into tracing. (Not `tracing-log`: a level cap and one
 /// match is all that is needed, and debug formatting upstream stays free.)
-pub fn forward_log_crate() {
+pub fn forward_log_crate(debug: bool) {
     struct Forward;
     impl log::Log for Forward {
         fn enabled(&self, m: &log::Metadata<'_>) -> bool {
-            m.level() <= log::Level::Warn
+            m.level() <= log::max_level()
         }
         fn log(&self, r: &log::Record<'_>) {
             if !self.enabled(r.metadata()) {
@@ -180,14 +180,17 @@ pub fn forward_log_crate() {
             }
             if r.level() == log::Level::Error {
                 tracing::error!(from = r.target(), "{}", r.args());
-            } else {
+            } else if r.level() == log::Level::Warn {
                 tracing::warn!(from = r.target(), "{}", r.args());
+            } else {
+                tracing::debug!(from = r.target(), "{}", r.args());
             }
         }
         fn flush(&self) {}
     }
     if log::set_logger(&Forward).is_ok() {
-        log::set_max_level(log::LevelFilter::Warn);
+        // Debug only on request (`RELAY_LOG`): upstream logs per packet there.
+        log::set_max_level(if debug { log::LevelFilter::Debug } else { log::LevelFilter::Warn });
     }
 }
 
@@ -248,7 +251,15 @@ impl Runtime for TunedRuntime {
         // A second handle to the same kernel socket, kept for FIONREAD.
         let probe = socket.try_clone()?;
         let inner = self.inner.wrap_udp_socket(socket)?;
-        Ok(Arc::new(CountedSocket { inner, probe, stats: self.stats.clone() }))
+        let loss = LossInjection::from_env();
+        if let Some(l) = &loss {
+            tracing::warn!(
+                every = l.every,
+                retransmissions_too = l.retransmissions_too,
+                "TEST: injecting video packet loss"
+            );
+        }
+        Ok(Arc::new(CountedSocket { inner, probe, stats: self.stats.clone(), loss }))
     }
 
     fn wrap_tcp_listener(
@@ -297,6 +308,65 @@ struct CountedSocket {
     inner: Arc<dyn AsyncUdpSocket>,
     probe: std::net::UdpSocket,
     stats: Arc<NetStats>,
+    loss: Option<LossInjection>,
+}
+
+/// Test hook: lose chosen incoming video packets, so NACK, the reorder buffer
+/// and the keyframe request can be exercised on one PC over loopback, where
+/// nothing is ever lost by itself.
+///
+/// `RELAY_TEST_LOSS=every=N` loses the first arrival of every video packet
+/// whose RTP sequence number is a multiple of N and lets the retransmission
+/// through (the NACK path). `every=N,retx` loses the retransmissions as well
+/// (the give-up / keyframe path). The packet is not removed — a poll-based
+/// socket has no clean way to un-receive — it is corrupted, so SRTP
+/// authentication rejects it before any interceptor sees it. SRTP leaves the
+/// RTP header in the clear, which is how the sequence number is read here.
+struct LossInjection {
+    every: u16,
+    retransmissions_too: bool,
+    recently_lost: std::sync::Mutex<std::collections::VecDeque<u16>>,
+}
+
+impl LossInjection {
+    fn from_env() -> Option<Self> {
+        let spec = std::env::var("RELAY_TEST_LOSS").ok()?;
+        let every = spec.split(',').find_map(|p| p.strip_prefix("every="))?.parse().ok()?;
+        (every > 0).then(|| Self {
+            every,
+            retransmissions_too: spec.split(',').any(|p| p == "retx"),
+            recently_lost: Default::default(),
+        })
+    }
+
+    fn apply(&self, datagram: &mut [u8]) {
+        // RTP version 2, a dynamic video payload type (not RTCP 200-207, which
+        // reads as 72-79 here, and not Opus), and big enough to be video.
+        let pt = datagram.get(1).map_or(0, |b| b & 0x7F);
+        if datagram.len() < 200 || datagram[0] >> 6 != 2 || !(96..=127).contains(&pt) {
+            return;
+        }
+        if pt == super::AUDIO_PT {
+            return;
+        }
+        let seq = u16::from_be_bytes([datagram[2], datagram[3]]);
+        if seq % self.every != 0 {
+            return;
+        }
+        if !self.retransmissions_too {
+            let mut recent = self.recently_lost.lock().unwrap();
+            if recent.contains(&seq) {
+                return;
+            }
+            if recent.len() == 64 {
+                recent.pop_front();
+            }
+            recent.push_back(seq);
+        }
+        if let Some(last) = datagram.last_mut() {
+            *last ^= 0xFF;
+        }
+    }
 }
 
 impl fmt::Debug for CountedSocket {
@@ -349,6 +419,13 @@ impl AsyncUdpSocket for CountedSocket {
         if let Poll::Ready(Ok(n)) = &r {
             let s = &self.stats;
             s.recv_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some(loss) = &self.loss {
+                for (buf, m) in bufs.iter_mut().zip(&meta[..*n]) {
+                    if m.len <= m.stride {
+                        loss.apply(&mut buf[..m.len]);
+                    }
+                }
+            }
             for m in &meta[..*n] {
                 let datagrams = m.len.div_ceil(m.stride.max(1)).max(1) as u64;
                 s.recv_datagrams.fetch_add(datagrams, Ordering::Relaxed);
