@@ -118,3 +118,12 @@ Consequences worth knowing:
 - **It builds the working tree, not the commit.** Editing files while a
   background install runs compiles a half-finished tree and fails. The failure
   now names the commit that is still installed.
+
+## Never kill Relay processes by name
+
+Two sessions testing on one PC share the process list. `taskkill /IM
+relay-share.exe` (or `Get-Process relay-share | Stop-Process`) in one session
+ends the other's loopback run with exit code 1 and no log line, which reads
+exactly like a crash in the engine; S33 lost an hour to that on 2026-09-18
+(`docs/dev/BUGS.md`, B8). Kill the PIDs you started, and set `RELAY_INSTANCE`
+so pipes and mutexes do not collide either.

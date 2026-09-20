@@ -22,6 +22,8 @@ param(
     [switch]$Flags
 )
 $ErrorActionPreference = 'Stop'
+# `powershell -File` hands an array over as one comma-joined string.
+$Packages = @($Packages | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $other = Join-Path (Split-Path -Parent $repo) 'relay-repro-tmp'
 $env:RELAY_NO_INSTALL = '1'
@@ -30,9 +32,13 @@ function Invoke-Native {
     param([scriptblock]$Block, [string]$What)
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { & $Block 2>&1 | ForEach-Object { Write-Verbose "$_" } }
+    $lines = @()
+    try { & $Block 2>&1 | ForEach-Object { $lines += "$_"; Write-Verbose "$_" } }
     finally { $ErrorActionPreference = $prev }
-    if ($LASTEXITCODE -ne 0) { throw "$What failed ($LASTEXITCODE)" }
+    if ($LASTEXITCODE -ne 0) {
+        $lines | Select-Object -Last 15 | ForEach-Object { Write-Host "  $_" }
+        throw "$What failed ($LASTEXITCODE)"
+    }
 }
 
 function Build-Tree {

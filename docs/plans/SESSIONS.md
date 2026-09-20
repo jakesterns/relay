@@ -1389,21 +1389,31 @@ The four bugs still owed from S29's list. Independent of S30–S32; can run
 alongside them.
 
 ### Definition of Done
-- [ ] **B14**: clock offset is estimated once at connect, so `latency_ms` drifts
+- [x] **B14**: clock offset is estimated once at connect, so `latency_ms` drifts
       about 2 ms/min and eventually reports negative latency. Re-estimate
       periodically and smooth it. A latency readout that goes negative teaches
       the user to distrust the whole instrument strip.
-- [ ] **B16**: roughly 1 s of audio delay, likely out of sync with video.
+- [x] **B16**: roughly 1 s of audio delay, likely out of sync with video.
       Measure where the second goes before changing anything — capture, encode,
       the Opus path, jitter buffer or playback — then fix the one that owns it.
       A/V sync must be measured against video, not just reduced in isolation.
-- [ ] **B8**: teardown always takes the full 3 s deadline, meaning nothing is
+- [x] **B8**: teardown always takes the full 3 s deadline, meaning nothing is
       actually finishing early and the grace period is doing all the work. Find
       what holds it and make the common case fast.
-- [ ] **B12**: bundles are not byte-reproducible. Either make them so, or record
+- [x] **B12**: bundles are not byte-reproducible. Either make them so, or record
       precisely which inputs vary and why, so a hash mismatch can be reasoned
       about instead of guessed at.
-- [ ] Each fix verified with numbers, not by inspection. All gates green.
+- [x] Each fix verified with numbers, not by inspection. All gates green.
+      *(One-PC numbers for all four are in `docs/dev/BUGS.md`; B12 in
+      `docs/dev/reproducible-builds.md`.)*
+- [ ] **Two-PC confirmation with relay-pc2** of B14 (real drift), B16 (A/V
+      sync by eye and `audio.buffered_ms`) and B8 (windowed share end without
+      the 3 s deadline line). Not run: serving the build to the second PC was
+      blocked by this session's permission policy, 2026-09-18. The release
+      engine for it is `relay-share.exe` built by
+      `scripts/repro-check.ps1 -Flags` at `ebc0c72`,
+      SHA-256 `25dff88bcec2d890654f25d4bc306374a09d4d760bc4f18acc8706a26ff09fc4`.
+
 
 ### Kickoff prompt
 ```
