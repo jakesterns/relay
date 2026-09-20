@@ -1205,14 +1205,15 @@ and branching from `main` first would mean building the warning UI against a
 Receive screen that no longer exists.
 
 ### What is already known, so no session re-derives it
-**Corrected by S30's measurements, 2026-09-18 — the first two bullets below
-were read from the code and are wrong.** `nack`, `nack pli` and `transport-cc`
-were negotiated all along (`register_default_interceptors` appends them to
-codecs registered before it runs), and the socket buffer, though only 64 KB,
-did not predict loss. Nothing was lost on the wire; the receiver process lost
-it (a track loop that waited on the decoder, and no reorder buffer for NACK
-retransmissions). Numbers in `docs/dev/BUGS.md` B15. Left in place as the
-record of why measuring came first.
+**Checked by S30's measurements, 2026-09-20.** The second bullet was right:
+the 64 KB socket buffer was the limiter (64 KB: 746 lost and a dead picture;
+4 MB: 0 lost, same load). The first was wrong as written — `nack`, `nack pli`
+and `transport-cc` were negotiated all along, because
+`register_default_interceptors` appends them to codecs registered before it
+runs — but right in effect: recovery never worked, for three library defaults
+nobody had seen (64-packet SRTP replay window, received RTCP dropped before
+the application, no reorder buffer). Numbers and the wrong turn S30 took on
+the way are in `docs/dev/BUGS.md` B15.
 
 Read in the S29 worktree, 2026-09-18:
 - `transport/mod.rs:49` registers every video codec with `rtcp_feedback: vec![]`.
@@ -1247,18 +1248,18 @@ Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
       behind retransmissions and burn LAN bandwidth doing it.
 
 ### Definition of Done
-- [x] The real limiter is named with evidence, not inferred (in-process: webrtc-rs's
-      256-slot track queue overflowing behind a loop that awaited the decoder, plus no
-      reorder buffer; wire loss 0 of 708,602. BUGS.md B15). Instrument the
+- [x] The real limiter is named with evidence, not inferred (the 64 KB socket buffer:
+      runs C and D differ only in it. BUGS.md B15). Instrument the
       receiver's UDP overrun counters and socket buffer occupancy, and the
       sender's pacing and burst size. Say which one it was and show the numbers.
 - [x] `SO_RCVBUF` sized deliberately (4 MB, `transport/netio.rs`; before/after at equal
-      load is run C vs D)
+      load: run C 746 lost, run D 0)
       — for the worst supported rate, with the
       chosen size justified in a comment in terms of milliseconds of video held,
       and the effect measured before and after.
-- [x] NACK negotiated and working (it was negotiated already; what was missing was a
-      reorder buffer and a LAN-scale timer, 10 ms not 100): `rtcp_feedback` carries `nack`, and a lost
+- [x] NACK negotiated and working (negotiated already; it needed a 4096-packet SRTP
+      replay window, a reorder buffer and a 10 ms timer. 597 repairs in run D; 110 of
+      110 under injected loss): `rtcp_feedback` carries `nack`, and a lost
       packet is retransmitted rather than lost. The `lost=1` gaps are the
       majority and are exactly what NACK is for on a 0.2 ms RTT link, where a
       retransmission arrives well within one frame.

@@ -323,61 +323,85 @@ every ~10 s (18 in 3 min), which is how long a smear lasts today. Jake saw
 packets lost: single-packet gaps are covered by the 10 s cadence, and the
 visible damage comes from the bursts.
 
-*S30, 2026-09-18 — the limiter named, and both suspects above were wrong.*
-Two things the plan took as read did not survive measurement:
+*S30, 2026-09-18 to 09-20 — the limiter named. Four two-PC runs, one wrong
+turn, recorded as it happened.* All at 1440p H.264, 60 fps / 40 Mb/s requested,
+full-motion page (`scripts/motion-test.html`), wired LAN, RTT 0.25 ms.
 
-- **NACK, `nack pli` and `transport-cc` were negotiated all along.**
-  `register_default_interceptors` appends them to every codec already
-  registered on the media engine, and `build_pc` registers codecs first; the
-  `rtcp_feedback: vec![]` in `video_codec` never reached the SDP empty. Read
-  from the real offer/answer (`RELAY_LOG=1`, "sdp exchange").
-- **The socket buffer is small but was not the limiter.** Windows default
-  `SO_RCVBUF` is 65,536 bytes and the sender does not pace — a 1440p keyframe
-  leaves as one burst of 446–589 packets (526–697 KB) in 3.6–5.4 ms — so the
-  queue does hit the ceiling. But it did not predict loss.
+| run | build | `SO_RCVBUF` | actual rate | result |
+|---|---|---|---|---|
+| A | `db4936c` (counters only) | 65,536 (OS default) | 38 Mb/s | 370 gaps / 1409 "lost" by the old accounting, 17 track-queue drops, smearing |
+| B | `db4936c` | 4 MB | 2.4 Mb/s | **void** — the motion page was covered and not animating |
+| C | `4f49de0` (first fix build) | 65,536 | 45 Mb/s | 110 gaps / 746 lost, 14 repaired, 593 frames withheld, 9 shown, 1,627 SRTP "duplicated", share ended itself at 14 s |
+| D | `4f49de0` | 4 MB | 38–42 Mb/s | **0 gaps, 0 lost, 597 repaired, 0 withheld, 10,351 frames, latency p50 1.6 / p95 4.9 / max 31 ms** |
 
-Run A, measurement build `db4936c`, 60 fps / 40 Mb/s (38 actual), full-motion
-page, 1440p H.264, OS-default buffer, 23:30:07–23:33:12 UTC:
+**The limiter was the receiver's UDP socket buffer.** Windows defaults
+`SO_RCVBUF` to 65,536 bytes; the sender does not pace, so a 1440p keyframe
+leaves as one burst of 446–589 packets (526–697 KB) in 3.6–5.4 ms, and even an
+ordinary 83 KB frame is bigger than the buffer. Run D's queue ran at a median
+of 48,640 bytes with peaks to 599,394 — the old buffer sat at the median and
+was blown through by every keyframe. C and D differ in that one setting.
 
-| measure | value |
-|---|---|
-| datagrams sent / received at pc2's socket | 708,602 / 711,228 (the surplus is STUN/DTLS/RTCP) |
-| UDP Receive Errors delta, `udp_in_errors` | +0, 0 in every sample |
-| sender `send_errors` / `send_blocked` | 0 / 9 |
-| "gaps" logged by the old accounting | 370, 1409 "lost" (220 of them lost=1) |
-| seconds with a gap: queue ≥ 60 KB vs well below | 32 vs 62 |
-| seconds with no gap: max queue peak | 65,536 (also full) |
-| `Failed to send RtpPacket to track remote: Full` | 17, consecutive seqs inside 0.7 ms |
-| NIC ReceivedDiscardedPackets delta | +3,025 (counts every discard on the NIC; ~+32k arrived with no share running) |
+*The wrong turn.* After run A this file said the buffer was **not** the
+limiter: pc2's socket had received 711,228 datagrams for 708,602 sent, UDP
+Receive Errors had not moved, and seconds with gaps did not line up with
+seconds where the queue was full. All three arguments were unsound. The
+receive count includes NACK retransmissions (the surplus is about what
+re-sending 1,409 packets adds). Windows does not count socket-overflow drops
+anywhere — `netio::tests` overflows a socket and watches UDP InErrors stay
+put, and NIC discards were +0 across run C, which lost 746. And the per-second
+gap log was dominated by reordering, not loss. Run C, by failing badly at
+64 KB, and run D, by not failing at 4 MB, settled it. The only overflow
+evidence Windows offers is `queue_peak_bytes == rcvbuf` in the `media socket`
+log line.
 
-**Nothing was lost on the wire.** The loss was inside the receiver process,
-two ways. (1) webrtc-rs hands each RTP packet to the track through a 256-slot
-queue with `try_send` and drops on full; our track loop `await`ed the 8-deep
-decoder channel, so whenever the decoder stalled (start-up, a keyframe) the
-loop parked and the driver threw packets away. That is the 190–470-packet
-bursts and the "shredded interval" after them. (2) There was no reorder
-buffer. The NACK generator's default timer is 100 ms, so a retransmission
-arrived six frames late, was counted as a gap when first missed, and was then
-appended to whatever access unit was being built — recovery damaged a second
-frame. That is the lost=1 majority. webrtc-rs logs through the `log` crate,
-which nothing was listening to, so (1) had never been visible.
+**Why loss then smeared for 10–15 s: recovery never worked, for three reasons,
+all library defaults.** `nack`, `nack pli` and `transport-cc` were negotiated
+all along — `register_default_interceptors` appends them to codecs registered
+before it runs, so `rtcp_feedback: vec![]` never reached the SDP empty (the
+plan's first premise was wrong). But:
 
-Also learned: Windows has no per-socket drop counter, and UDP InErrors did
-not move when a test overflowed a loopback socket
-(`netio::tests`), so a queue peak equal to `SO_RCVBUF` is the only overflow
-evidence available. Run B (4 MB buffer, 23:35:25–23:38:30) is **void as a
-comparison**: the motion page was not rendering and the sender produced
-2.4 Mb/s. It shows only that the 4 MB request is granted and that the queue
-peaked at 316,160 bytes — 4.8× the old ceiling — on static-desktop keyframes.
+1. *SRTP's replay window defaults to 64 packets* — 16 ms at 4,000 packets/s.
+   Every retransmission is older than that when it arrives and is rejected as
+   a replay before anything above SRTP sees it. Run C: 1,627 rejections over
+   685 packets in 6.6 s, 14 holes repaired.
+2. *The interceptor chain's terminal drops all received RTCP* (its source
+   says so, and says to add an interceptor if the application needs any). The
+   sender has polled its track for PLI since M4 and never received one.
+   Run C: 21 sent, 0 seen.
+3. *There was no reorder buffer*, so even an accepted retransmission was
+   counted as a gap when first missed and then appended to the wrong access
+   unit. Packets also arrive slightly out of order routinely — 597 holes
+   filled in run D with nothing lost.
 
-Fix, `4f49de0`: reorder buffer with a 40 ms hold (`transport/reorder.rs`),
-NACK every 10 ms × 4 with 2048-packet history, frames withheld + PLI (retried
-every 500 ms) on an unrecoverable hole or a decoder overrun, a track loop
-that never awaits the decoder, `SO_RCVBUF` 4 MB / `SO_SNDBUF` 2 MB through a
-runtime wrapper (`transport/netio.rs`), damped bitrate control on unrepaired
-loss. `rtp_gaps` / `rtp_lost` now count only what was given up on;
+Separately, webrtc-rs hands packets to a track through a 256-slot queue with
+`try_send`; our loop awaited the 8-deep decoder channel, so a decoder stall
+dropped the tail of a keyframe (17 in run A). None of this had ever been
+visible: webrtc-rs logs through the `log` crate and nothing was listening.
+
+**Fix** (`53642d2`): `SO_RCVBUF` 4 MB / `SO_SNDBUF` 2 MB through a runtime
+wrapper at webrtc-rs's one socket seam (`transport/netio.rs`); SRTP replay
+window 4096; reorder buffer with a 40 ms hold (`reorder.rs`); NACK every
+10 ms × 4 with 2048-packet history; PLI/FIR forwarded to the track
+(`feedback.rs`); on an unrepairable hole or a decoder overrun, frames are
+withheld and a keyframe requested every 500 ms — for at most 1 s, after
+which frames are shown again and the asking continues (run C's dead picture
+is what an unbounded version does); a track loop that never awaits the
+decoder; damped bitrate control on unrepaired loss; webrtc-rs warnings in
+`share.log`. `rtp_gaps` / `rtp_lost` now count only what was given up on;
 `rtp_recovered`, `keyframe_requests`, `frames_withheld` are new.
-Headless loopback, 40 s, 64 KB buffer, 589-packet keyframes: 0 / 0 / 0.
+
+`RELAY_TEST_LOSS` injects loss at the socket wrapper (corrupts chosen video
+datagrams so SRTP rejects them), which makes every recovery path testable on
+one PC. Headless loopback on `53642d2`: `every=50` → 110 lost, 110 repaired,
+0 replay rejections, 0 keyframe requests; `every=200,retx` (no keyframe can
+ever complete) → 42 requests sent, 42 received, the limit fires once, 1,163
+frames shown, 58 withheld.
+
+*Still owed:* a two-PC pass of `53642d2` itself (run D was `4f49de0`, which
+has the buffer and the reorder buffer but not the three recovery fixes), and
+Jake's on-screen verdict — none was reported for runs C or D. The sender still
+does not pace; with a 4 MB receive buffer that is tolerable on a LAN and is
+the first thing to revisit for Wi-Fi.
 
 ### B14 — Receiver latency goes negative: the clock offset is measured once
 relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
