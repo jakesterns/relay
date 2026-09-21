@@ -47,6 +47,7 @@ function Build-Tree {
     $env:CARGO_TARGET_DIR = $target
     if ($Flags) {
         . (Join-Path $repo 'scripts\repro-flags.ps1')
+        Add-CMakeToPath | Out-Null
         $env:CARGO_ENCODED_RUSTFLAGS = Get-ReproRustFlags -Repo $Tree
     } else {
         Remove-Item Env:CARGO_ENCODED_RUSTFLAGS -ErrorAction SilentlyContinue

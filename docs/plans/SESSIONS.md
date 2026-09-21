@@ -1323,9 +1323,26 @@ Jake: users should not have to guess why the picture looks wrong. Depends on
 S30, which produces the loss statistics this displays, and on S29, which created
 the in-app video area it renders into.
 
+**Widened by Jake, 2026-09-20**, from "show the loss rate" to **every
+stream-health state the user can act on** — he asked for in-stream notification
+of issues in the same breath as crash restore. Three real incidents on the
+second PC, none of which a loss indicator alone would have covered:
+- the receiver ended a share by itself twice (the 3 s no-access-units rule) with
+  nothing on screen explaining why;
+- the app kept a stale pairing code and a "Paired" status long after the share
+  was dead;
+- every number used to debug those nights existed only in `share.log`.
+
+**Design the notification vocabulary jointly with S38 (crash restore), not
+twice.** "Degraded", "ended", and "died and is coming back" are one vocabulary;
+two sessions inventing it separately will produce two idioms in one app.
+Whichever session starts first writes it down; the other adopts it.
+
 ### Definition of Ready
-- [ ] S30 has merged and exposes a loss rate both ends can read.
-- [ ] S29 has merged, so there is an in-app video area to overlay.
+- [x] S30 has merged and exposes a loss rate both ends can read (`df525fe`).
+- [x] S29 has merged, so there is an in-app video area to overlay (`df525fe`).
+- [x] B14 is fixed and merged, so latency may now be shown — S30's handover note
+      above predates that and its "do not show latency" caveat no longer holds.
 
 ### Definition of Done
 - [ ] Loss is visible **on both ends** while it is happening, showing the rate.
@@ -1338,6 +1355,16 @@ the in-app video area it renders into.
 - [ ] Fits the instrument-strip language in the brief rather than introducing a
       new visual idiom. It is a readout, not an alert.
 - [ ] Never obscures the picture it is describing.
+- [ ] **The share ending says so**, on both ends, wherever it ends: the 3 s
+      no-access-units rule, a stop from the other side, and a connection that
+      died all produce a visible, distinguishable state rather than a frozen
+      final frame or a silent return to idle.
+- [ ] **No stale state.** When a share ends the pairing code and "Paired"
+      status go with it. The app never shows a code that will not work or a
+      peer that is not there.
+- [ ] An opt-in stream-health readout on the Receive screen -- fps, bitrate,
+      resolution, codec, repaired vs lost, latency -- in the instrument strip,
+      so the numbers that only existed in `share.log` are reachable without it.
 - [ ] Component tests in jsdom only — never drive a real window.
 - [ ] All gates green.
 
@@ -1469,6 +1496,27 @@ relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with 
 ```
 
 ---
+
+## Standing rule — one main, one build, stated contents
+Jake, 2026-09-20, after being handed installers built from three different
+branches in one day. The second PC is the only place most bugs appear, and a
+build whose contents nobody can state wastes that PC's time.
+
+- **Ship from `main`, never from a feature branch.** A branch build is for the
+  session that owns the branch. Anything the second PC installs comes from
+  `main` with everything merged.
+- **The main-tree session owns the merge order.** Feature sessions merge *into*
+  main through it rather than shipping around it, so there is one answer to
+  "what is in this build".
+- **Every build is announced with its contents**: the commit on `main`, which
+  sessions are merged into it, the filename, size and SHA-256. "Latest build" is
+  not a description.
+- **Features that have never run in the same binary are not proven.** S29 and
+  S30 were each verified alone on the second PC and had never been in one build
+  until `df525fe`. Say which combinations are actually tested.
+- The `:8099` file server is started by whoever ships the build, and stops when
+  they do. Check it is up before sending a URL.
+
 # Group 8 — Jake's next features (2026-09-18)
 
 Asked for during S29's two-PC runs. Each needs its own plan file before it
@@ -1519,6 +1567,62 @@ receiver still needs to be in "Start receiving" or can auto-accept. Never
 network config for the user; never a change to another app. **DoD must
 include the standing rule above:** the peer records are versioned, survive
 an update of either PC, and the first share after an update needs no code.
+
+**Branch** `feat/trusted-peers` · **Worktree** `C:\Users\stern\Documents\Code\relay-peers`
+
+### Definition of Ready
+- [x] Pairing works and is proven across two PCs: six-digit code, HMAC over the
+      SDP, DTLS fingerprint pinned.
+- [x] The data root survives updates — r4 → r11 kept consent and the firewall
+      record across six over-the-top installs.
+- [ ] Accept that the trust model is the first deliverable, not the last. Write
+      it down before writing code; the whole feature is a security decision
+      wearing a convenience feature's clothes.
+
+### Definition of Done
+- [ ] **The trust model is written down first**, in `docs/dev/trusted-peers.md`,
+      and answers at minimum: what the stored secret is and what it authorises;
+      what an attacker who copies the data folder can do; whether a remembered
+      sender can connect while the receiver is *not* in "Start receiving", and
+      the argument for whichever answer is chosen; how a peer is revoked; and
+      what happens when the same secret appears from a new address. "Any machine
+      that once paired may reconnect silently forever" is the failure to design
+      against.
+- [ ] Per-peer records in `%LOCALAPPDATA%\Relay`, versioned, with a migration
+      test that loads the previous version. Secrets are per-peer and revocable,
+      never one global key.
+- [ ] One-click reconnect with no code, on both ends, after an app restart and
+      after a reboot of either PC.
+- [ ] The Share screen lists remembered receivers; the Receive screen lists
+      trusted senders. Both show a name and last-connected time, support
+      favourites, and have an obvious **Forget** that actually revokes rather
+      than hiding the row.
+- [ ] The six-digit code still works for first contact and for anything not
+      remembered. Nothing here removes it.
+- [ ] Survives an update on both ends: install over the top on each PC, then
+      share with no code. This is the standing rule and is the single most
+      likely thing to regress.
+- [ ] Two-PC pass with relay-pc2, recorded in `docs/dev/BUGS.md` with the hash.
+- [ ] All gates green.
+
+### Kickoff prompt
+```
+You are starting session S35 (remembered devices: pair once, connect on sight) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S35, the standing rule "one main, one build, stated contents", and the standing rule "an update never resets anything").
+
+git worktree add -b feat/trusted-peers ..\relay-peers main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
+
+Jake's requirement, given after every single two-PC run so far needed a fresh six-digit code read aloud between two machines: Relay must remember previously-connected devices so reconnecting is one click. It must survive updates and crashes -- no reconfiguring after every new build.
+
+Write the trust model BEFORE any code, in docs/dev/trusted-peers.md. This is a security decision dressed as a convenience feature, and the thing to design against is "any machine that once paired can reconnect silently forever". Answer at least: what the stored secret is and what it authorises; what someone who copies the %LOCALAPPDATA%\Relay folder can do with it; whether a remembered sender may connect while the receiver is NOT in "Start receiving", with your argument for whichever you choose; how a peer is revoked; and what happens when a known secret arrives from a new address. Bring that document to Jake before building on it -- he should see the trust model, not just the feature.
+
+Then: per-peer, revocable secrets in versioned records under the data root with a migration test that loads the previous version's files; one-click reconnect on both ends after an app restart and after a reboot; remembered receivers on the Share screen and trusted senders on Receive, each with name, last-connected time, favourites and a Forget that genuinely revokes. The six-digit code stays for first contact and anything not remembered.
+
+The likeliest regression is the standing rule: install over the top on BOTH PCs, then share with no code. Test that explicitly rather than assuming it.
+
+relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. This feature cannot be verified on one machine. Do not ship it a branch build: builds come from main through the main-tree session, announced with commit, contents and SHA-256. Record results in docs/dev/BUGS.md against the build hash.
+
+Never write the registry; the data root only. Raise questions and failure points with Jake directly in this session rather than routing them through relay-pc2. Finish by updating docs/ROADMAP.md and summarising.
+```
 
 ## S36 — Direct send to streaming software · `feat/stream-out`
 Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio

@@ -67,6 +67,7 @@ function Invoke-Cargo {
 # B12: build so the bytes do not depend on which folder this is or when the
 # linker ran. See docs/dev/reproducible-builds.md.
 . (Join-Path $repo 'scripts\repro-flags.ps1')
+Add-CMakeToPath | Out-Null
 $env:CARGO_ENCODED_RUSTFLAGS = Get-ReproRustFlags -Repo $repo
 
 if (-not $SkipBuild) {

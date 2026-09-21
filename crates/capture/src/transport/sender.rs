@@ -424,7 +424,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     // Adaptive target bitrate, read by the pipeline each frame.
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
 
-    // Loss feedback from the receiver → AIMD bitrate control; and the
+    // Loss feedback from the receiver → the damped bitrate control; and the
     // receiver's reason, if it stops on a fatal error. The same task owns the
     // signalling socket, so it also keeps the clock offset current (B14): one
     // ping every `CLOCK_RESYNC_INTERVAL`, filtered, pushed to the receiver.
