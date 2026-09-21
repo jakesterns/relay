@@ -1,0 +1,273 @@
+//! Put the video packets back in order, and say when that is impossible.
+//!
+//! NACK was always negotiated — the default interceptors add it — but the
+//! receive loop fed packets to the depacketizer in arrival order. A
+//! retransmission arrives after the packets that followed the hole, so the
+//! access unit had already gone to the decoder damaged, and the late packet
+//! was then appended to whichever unit was being built. Recovery made the
+//! picture worse. (S30; this is the mechanism behind B15's 10–15 s smears.)
+//!
+//! [`Reorder`] holds packets that arrive past a hole until the hole is filled
+//! or [`HOLD`] runs out. In order, nothing is held and nothing is copied: the
+//! packet goes straight through. When a hole times out the buffer skips it and
+//! reports [`Step::Lost`], which is the receiver's cue to drop the damaged
+//! unit, stop feeding the decoder, and ask for a keyframe.
+//!
+//! Pure: packets and instants in, packets out.
+
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+/// How long to wait for a retransmission before giving a packet up.
+///
+/// The NACK generator runs every [`super::NACK_INTERVAL`] (10 ms) and the LAN
+/// round trip is under a millisecond, so a first retransmission lands within
+/// ~12 ms and a second, if that one is lost too, within ~22 ms. 40 ms allows
+/// for both plus scheduling noise. It is latency spent only while a packet is
+/// actually missing; the alternative is a keyframe, which costs more than
+/// 40 ms to arrive and a visible freeze.
+pub const HOLD: Duration = Duration::from_millis(40);
+
+/// Most packets parked behind a hole. 40 ms at 80 Mb/s is ~340 packets, and a
+/// keyframe burst can be 550; past this the hole is abandoned rather than
+/// letting memory follow a dead link.
+const MAX_HELD: usize = 2048;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step<P> {
+    /// The next packet in sequence.
+    Packet(P),
+    /// `n` packets were given up on; the stream resumes after them.
+    Lost(u16),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReorderStats {
+    /// Packets that filled a hole in time: a loss the viewer never saw.
+    pub recovered: u64,
+    /// Packets given up on.
+    pub lost: u64,
+    /// Holes given up on (one keyframe request each).
+    pub unrecovered_gaps: u64,
+    /// Arrived after being given up on, or twice. Dropped.
+    pub late_or_duplicate: u64,
+}
+
+pub struct Reorder<P> {
+    /// The sequence number owed to the consumer next.
+    next: Option<u16>,
+    /// Packets past the hole, keyed by distance from `next` at insert time
+    /// folded into a wrapping-safe extended sequence.
+    held: BTreeMap<u64, P>,
+    /// Extended sequence of `next`, so the map orders across the u16 wrap.
+    next_ext: u64,
+    /// When the current hole was first seen.
+    hole_since: Option<Instant>,
+    pub stats: ReorderStats,
+}
+
+impl<P> Reorder<P> {
+    pub fn new() -> Self {
+        Self {
+            next: None,
+            held: BTreeMap::new(),
+            next_ext: 1 << 32,
+            hole_since: None,
+            stats: ReorderStats::default(),
+        }
+    }
+
+    /// Whether a hole is open, i.e. [`Reorder::poll`] needs calling on a timer.
+    pub fn waiting(&self) -> bool {
+        self.hole_since.is_some()
+    }
+
+    /// When the open hole expires.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.hole_since.map(|t| t + HOLD)
+    }
+
+    /// Take an arriving packet; `out` receives whatever is now deliverable.
+    pub fn push(&mut self, seq: u16, packet: P, now: Instant, out: &mut Vec<Step<P>>) {
+        let Some(next) = self.next else {
+            self.next = Some(seq.wrapping_add(1));
+            self.next_ext += 1;
+            out.push(Step::Packet(packet));
+            return;
+        };
+        let ahead = seq.wrapping_sub(next);
+        if ahead >= 0x8000 {
+            // Behind `next`: already delivered or already given up on.
+            self.stats.late_or_duplicate += 1;
+            return;
+        }
+        if ahead == 0 {
+            if self.hole_since.is_some() {
+                self.stats.recovered += 1;
+            }
+            out.push(Step::Packet(packet));
+            self.advance(1);
+            self.drain(now, out);
+            return;
+        }
+        // Past a hole: park it.
+        let key = self.next_ext + u64::from(ahead);
+        if self.held.insert(key, packet).is_some() {
+            self.stats.late_or_duplicate += 1;
+        }
+        self.hole_since.get_or_insert(now);
+        if self.held.len() > MAX_HELD {
+            self.give_up(now, out);
+        }
+    }
+
+    /// Give up on a hole that has outlived [`HOLD`]. Call when
+    /// [`Reorder::deadline`] passes.
+    pub fn poll(&mut self, now: Instant, out: &mut Vec<Step<P>>) {
+        while self.hole_since.is_some_and(|t| now.duration_since(t) >= HOLD) {
+            self.give_up(now, out);
+        }
+    }
+
+    fn advance(&mut self, n: u16) {
+        self.next = self.next.map(|s| s.wrapping_add(n));
+        self.next_ext += u64::from(n);
+    }
+
+    /// Skip to the first held packet, reporting the hole.
+    fn give_up(&mut self, now: Instant, out: &mut Vec<Step<P>>) {
+        let Some((&first, _)) = self.held.iter().next() else {
+            self.hole_since = None;
+            return;
+        };
+        let missing = (first - self.next_ext) as u16;
+        self.stats.lost += u64::from(missing);
+        self.stats.unrecovered_gaps += 1;
+        out.push(Step::Lost(missing));
+        self.advance(missing);
+        self.drain(now, out);
+    }
+
+    /// Deliver the run of held packets that is now contiguous.
+    fn drain(&mut self, now: Instant, out: &mut Vec<Step<P>>) {
+        while let Some(p) = self.held.remove(&self.next_ext) {
+            if self.hole_since.is_some() {
+                // Parked behind the hole that just closed; not itself a recovery.
+            }
+            out.push(Step::Packet(p));
+            self.advance(1);
+        }
+        // Anything still held sits behind a *new* hole, which gets its own
+        // full hold from now.
+        self.hole_since = if self.held.is_empty() { None } else { Some(now) };
+    }
+}
+
+impl<P> Default for Reorder<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feed(r: &mut Reorder<u16>, seqs: &[u16], now: Instant) -> Vec<Step<u16>> {
+        let mut out = Vec::new();
+        for &s in seqs {
+            r.push(s, s, now, &mut out);
+        }
+        out
+    }
+
+    fn packets(steps: &[Step<u16>]) -> Vec<u16> {
+        steps.iter().filter_map(|s| if let Step::Packet(p) = s { Some(*p) } else { None }).collect()
+    }
+
+    #[test]
+    fn in_order_passes_straight_through() {
+        let mut r = Reorder::new();
+        let out = feed(&mut r, &[10, 11, 12, 13], Instant::now());
+        assert_eq!(packets(&out), vec![10, 11, 12, 13]);
+        assert!(!r.waiting());
+        assert_eq!(r.stats, ReorderStats::default());
+    }
+
+    #[test]
+    fn a_retransmission_in_time_is_invisible() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        let out = feed(&mut r, &[1, 2, 4, 5], t);
+        assert_eq!(packets(&out), vec![1, 2], "4 and 5 wait behind the hole");
+        assert!(r.waiting());
+        let mut out = Vec::new();
+        r.push(3, 3, t + Duration::from_millis(12), &mut out);
+        assert_eq!(packets(&out), vec![3, 4, 5]);
+        assert!(!r.waiting());
+        assert_eq!(r.stats.recovered, 1);
+        assert_eq!(r.stats.lost, 0);
+    }
+
+    #[test]
+    fn a_hole_that_outlives_the_hold_is_reported_and_skipped() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        feed(&mut r, &[1, 2, 5, 6], t);
+        let mut out = Vec::new();
+        r.poll(t + HOLD - Duration::from_millis(1), &mut out);
+        assert!(out.is_empty(), "not yet");
+        r.poll(t + HOLD, &mut out);
+        assert_eq!(out, vec![Step::Lost(2), Step::Packet(5), Step::Packet(6)]);
+        assert_eq!(r.stats.lost, 2);
+        assert_eq!(r.stats.unrecovered_gaps, 1);
+        // The retransmission finally turns up: too late, dropped.
+        let mut out = Vec::new();
+        r.push(3, 3, t + HOLD * 2, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(r.stats.late_or_duplicate, 1);
+    }
+
+    #[test]
+    fn a_second_hole_gets_its_own_hold() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        feed(&mut r, &[1, 3, 5], t);
+        let mut out = Vec::new();
+        let t1 = t + Duration::from_millis(30);
+        r.push(2, 2, t1, &mut out);
+        assert_eq!(packets(&out), vec![2, 3]);
+        assert_eq!(r.deadline(), Some(t1 + HOLD), "the hole at 4 starts its clock now");
+    }
+
+    #[test]
+    fn duplicates_are_dropped() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        let out = feed(&mut r, &[1, 2, 2, 1, 3], t);
+        assert_eq!(packets(&out), vec![1, 2, 3]);
+        assert_eq!(r.stats.late_or_duplicate, 2);
+    }
+
+    #[test]
+    fn order_survives_the_u16_wrap() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        let out = feed(&mut r, &[65_533, 65_534, 0, 1, 65_535], t);
+        assert_eq!(packets(&out), vec![65_533, 65_534, 65_535, 0, 1]);
+        assert_eq!(r.stats.recovered, 1);
+    }
+
+    #[test]
+    fn a_dead_link_cannot_grow_the_buffer_without_bound() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        let mut out = Vec::new();
+        r.push(0, 0, t, &mut out);
+        for s in 2..(MAX_HELD as u16 + 10) {
+            r.push(s, s, t, &mut out);
+        }
+        assert!(out.contains(&Step::Lost(1)), "the hole was abandoned on size, before its hold");
+        assert!(r.held.len() <= MAX_HELD);
+    }
+}

@@ -30,6 +30,8 @@ mdns-sd = "0.21"
 rand = "0.9"
 rtc = "0.20"
 sha2 = "0.10"
+socket2 = "0.6"
+log = "0.4"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "sync", "signal"] }
 webrtc = "0.20"
 

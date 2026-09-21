@@ -9,22 +9,32 @@
 pub mod control;
 pub mod depay;
 pub mod discovery;
+pub mod feedback;
 pub mod netcheck;
+pub mod netio;
 pub mod receiver;
+pub mod reorder;
 pub mod sei;
 pub mod sender;
 pub mod signal;
 
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
+use rtc::interceptor::{NackGeneratorBuilder, NackResponderBuilder};
+use rtc::peer_connection::configuration::interceptor_registry::{
+    configure_rtcp_reports, configure_simulcast_extension_headers, configure_twcc_receiver_only,
+};
 use rtc::peer_connection::configuration::media_engine::{MediaEngine, MIME_TYPE_OPUS};
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind};
+use rtc::rtp_transceiver::rtp_sender::{
+    RTCPFeedback, RTCRtpCodec, RTCRtpCodecParameters, RtpCodecKind,
+};
 use tokio::sync::mpsc;
 use webrtc::media_stream::track_remote::TrackRemote;
 use webrtc::peer_connection::{
@@ -37,7 +47,40 @@ use crate::codec::VideoCodec;
 
 pub const AUDIO_PT: u8 = 120;
 
-/// RTP codec parameters for `codec`. Sender and receiver build these from the
+/// How often the receiver asks again for what is missing.
+///
+/// The library default is 100 ms — six frames at 60 fps, by which time the
+/// damaged frame has long been shown. On a LAN a retransmission costs one
+/// packet and under a millisecond of round trip, so ask early: 10 ms puts the
+/// first retransmission inside the same frame interval and leaves room for
+/// three more inside [`reorder::HOLD`].
+pub const NACK_INTERVAL: Duration = Duration::from_millis(10);
+
+/// NACKs per missing packet. After [`reorder::HOLD`] the receiver has moved
+/// on and asked for a keyframe; anything the sender retransmits past that is
+/// wasted bandwidth, and unlimited is the library default.
+const NACKS_PER_PACKET: u16 = 4;
+
+/// SRTP anti-replay window, in packets. The library default is 64, which at
+/// 4,000 packets a second is 16 ms: every NACK retransmission of a video
+/// packet is older than that by the time it arrives, and SRTP rejects it as a
+/// replay ("duplicated") before anything above sees it. Measured in S30 —
+/// 1,627 rejections in 6.6 s, 14 holes repaired out of 124. It has to cover
+/// [`reorder::HOLD`] at the highest rate plus a keyframe burst: 40 ms at
+/// 80 Mb/s is ~340 packets, a 4K keyframe up to ~2,000. 4096 is a 512-byte
+/// bitmask and still rejects true replays.
+const SRTP_REPLAY_WINDOW: usize = 4096;
+
+/// Packets each end remembers for NACK: the receiver's arrival log and the
+/// sender's retransmission buffer. 2048 is 250 ms at 80 Mb/s and four
+/// worst-case keyframes; the defaults (512 / 1024) are shorter than one 4K
+/// keyframe burst. Must be a power of two.
+const NACK_HISTORY: u16 = 2048;
+
+/// RTP codec parameters for `codec`. The feedback list is empty here and
+/// filled in by `build_pc`: `register_feedback` appends `nack`, `nack pli`
+/// and `transport-cc` to every registered video codec, which is what reaches
+/// the SDP. Sender and receiver build these from the
 /// same table, so the fmtp lines match exactly.
 pub fn video_codec(codec: VideoCodec) -> RTCRtpCodecParameters {
     RTCRtpCodecParameters {
@@ -147,7 +190,28 @@ pub async fn build_pc(
         media_engine.register_codec(video_codec(c), RtpCodecKind::Video)?;
     }
     media_engine.register_codec(audio_codec(), RtpCodecKind::Audio)?;
-    let registry = register_default_interceptors(Registry::new(), &mut media_engine)?;
+    // `register_default_interceptors`, unrolled so NACK can be tuned for a
+    // LAN (see `NACK_INTERVAL`). Same set otherwise: NACK both ways, RTCP
+    // reports, transport-cc feedback from the receiving end.
+    for parameter in ["", "pli"] {
+        media_engine.register_feedback(
+            RTCPFeedback { typ: "nack".to_owned(), parameter: parameter.to_owned() },
+            RtpCodecKind::Video,
+        );
+    }
+    let registry = Registry::new()
+        .with(feedback::keyframe_request_forwarder())
+        .with(
+            NackGeneratorBuilder::new()
+                .with_size(NACK_HISTORY)
+                .with_interval(NACK_INTERVAL)
+                .with_max_nacks_per_packet(NACKS_PER_PACKET)
+                .build(),
+        )
+        .with(NackResponderBuilder::new().with_size(NACK_HISTORY).build());
+    let registry = configure_rtcp_reports(registry);
+    configure_simulcast_extension_headers(&mut media_engine)?;
+    let registry = configure_twcc_receiver_only(registry, &mut media_engine)?;
 
     // No ICE servers: host candidates only, STUN off. LAN by construction.
     let config = RTCConfigurationBuilder::new().build();
@@ -163,9 +227,13 @@ pub async fn build_pc(
         tracks: track_tx,
     });
 
-    let runtime = default_runtime().context("webrtc runtime")?;
+    let (runtime, net) = netio::TunedRuntime::wrap(default_runtime().context("webrtc runtime")?);
+    netio::log_every_second(&net);
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_srtp_replay_protection_window(SRTP_REPLAY_WINDOW);
     let pc = PeerConnectionBuilder::new()
         .with_configuration(config)
+        .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
         .with_handler(handler)

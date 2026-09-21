@@ -1205,6 +1205,16 @@ and branching from `main` first would mean building the warning UI against a
 Receive screen that no longer exists.
 
 ### What is already known, so no session re-derives it
+**Checked by S30's measurements, 2026-09-20.** The second bullet was right:
+the 64 KB socket buffer was the limiter (64 KB: 746 lost and a dead picture;
+4 MB: 0 lost, same load). The first was wrong as written — `nack`, `nack pli`
+and `transport-cc` were negotiated all along, because
+`register_default_interceptors` appends them to codecs registered before it
+runs — but right in effect: recovery never worked, for three library defaults
+nobody had seen (64-packet SRTP replay window, received RTCP dropped before
+the application, no reorder buffer). Numbers and the wrong turn S30 took on
+the way are in `docs/dev/BUGS.md` B15.
+
 Read in the S29 worktree, 2026-09-18:
 - `transport/mod.rs:49` registers every video codec with `rtcp_feedback: vec![]`.
   Nothing is negotiated: no `nack`, no `nack pli`, no `ccm fir`, no
@@ -1233,33 +1243,42 @@ Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
       known-good and known-bad settings.
 - [x] Root-cause candidates identified in code (see above): empty
       `rtcp_feedback`, untuned `SO_RCVBUF`.
-- [ ] Accept the order: measure the limiter first, then fix. Enabling NACK
+- [x] Accept the order: measure the limiter first, then fix. Enabling NACK
       before knowing whether the loss is socket overflow would mask a buffer bug
       behind retransmissions and burn LAN bandwidth doing it.
 
 ### Definition of Done
-- [ ] The real limiter is named with evidence, not inferred. Instrument the
+- [x] The real limiter is named with evidence, not inferred (the 64 KB socket buffer:
+      runs C and D differ only in it. BUGS.md B15). Instrument the
       receiver's UDP overrun counters and socket buffer occupancy, and the
       sender's pacing and burst size. Say which one it was and show the numbers.
-- [ ] `SO_RCVBUF` sized deliberately for the worst supported rate, with the
+- [x] `SO_RCVBUF` sized deliberately (4 MB, `transport/netio.rs`; before/after at equal
+      load: run C 746 lost, run D 0)
+      — for the worst supported rate, with the
       chosen size justified in a comment in terms of milliseconds of video held,
       and the effect measured before and after.
-- [ ] NACK negotiated and working: `rtcp_feedback` carries `nack`, and a lost
+- [x] NACK negotiated and working (negotiated already; it needed a 4096-packet SRTP
+      replay window, a reorder buffer and a 10 ms timer. 597 repairs in run D; 110 of
+      110 under injected loss): `rtcp_feedback` carries `nack`, and a lost
       packet is retransmitted rather than lost. The `lost=1` gaps are the
       majority and are exactly what NACK is for on a 0.2 ms RTT link, where a
       retransmission arrives well within one frame.
-- [ ] **B15**: `nack pli` negotiated, and the receiver requests a keyframe when a
+- [x] **B15**: `nack pli` negotiated, and the receiver requests a keyframe when a
       gap is unrecoverable. Turns 10–15 s of smearing into roughly 200 ms.
-- [ ] Adaptive bitrate: sustained loss backs the encoder off, recovery climbs
+- [x] Adaptive bitrate (`control::BitrateControl`, fed unrepaired loss over the
+      signalling channel; oscillation test in the unit suite): sustained loss backs the encoder off, recovery climbs
       back. Needs congestion feedback (`transport-cc` or `goog-remb`) negotiated
       first — it cannot be driven from nothing. Changes must be damped; a bitrate
       that oscillates is worse than one that is merely too high.
-- [ ] Re-examine whether 40 Mb/s is a sane default for 1440p60 and state the
+- [x] Re-examine whether 40 Mb/s is a sane default (kept: per pixel ~90 Mb/s at 4K, so
+      generous, but rate was not what lost packets; the quality call is S32's. ROADMAP S30.)
+      for 1440p60 and state the
       reasoning. The brief says 40–80 Mb/s for 4K60; 40 at 1440p60 may simply be
       too high for the benefit.
-- [ ] Two-PC pass at the settings that failed, showing loss at or near zero and
+- [x] Two-PC pass at the settings that failed (runs E and F on r11 `53642d2`, 2026-09-21:
+      0 lost at 4 MB and at 64 KB, Jake saw no smear, freeze or lag), showing loss at or near zero and
       no visible smearing, recorded in `docs/dev/BUGS.md` against the build hash.
-- [ ] All gates green.
+- [x] All gates green.
 
 ### Kickoff prompt
 ```
@@ -1283,6 +1302,21 @@ It is a peer session, not an authority: it cannot approve a permission prompt fo
 ```
 
 ## S31 — Tell the user the picture is degraded
+
+> **Handed over by S30, 2026-09-21 — input, not yet agreed scope.** The engine
+> now emits what this session needs, on the receiver's `stats` NDJSON line and
+> in `share.log`: `rtp_lost` / `rtp_gaps` (unrepaired only), `rtp_recovered`
+> (holes NACK filled in time), `keyframe_requests`, `frames_withheld`. Nothing
+> in core or the UI reads them yet. `rtp_recovered` is the useful one: on the
+> S30 acceptance runs it was 970 and 2,242 with zero lost and a clean picture —
+> the difference between "the link is fine" and "the link is lossy and Relay is
+> coping". Warn on lost / withheld, not on recovered.
+> relay-pc2 and Jake both noticed during those runs that the app shows nothing
+> about stream health; every number lived in the log. Suggested for Jake to
+> accept or decline: alongside the warning, an opt-in readout on the Receive
+> screen (fps, bitrate, resolution, codec, repaired vs lost) — the instrument
+> strip is the natural home. **Do not show latency until B14 is fixed**: 191 of
+> 363 samples were negative in run F.
 **Branch** `feat/loss-visible` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss-ui`
 
 Jake: users should not have to guess why the picture looks wrong. Depends on

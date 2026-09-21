@@ -63,6 +63,7 @@ fn main() -> Result<()> {
             .init(),
         None => tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(level).init(),
     }
+    relay_capture::transport::netio::forward_log_crate(level == tracing::Level::DEBUG);
 
     match cmd {
         #[cfg(windows)]

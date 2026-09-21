@@ -183,6 +183,9 @@ pub async fn run(
                 let latency_ms = present_latency.load(Ordering::Relaxed) as f64 / 1e3;
                 let gaps = stats.video_gaps.load(Ordering::Relaxed);
                 let lost = stats.video_lost_packets.load(Ordering::Relaxed);
+                let recovered = stats.video_recovered.load(Ordering::Relaxed);
+                let keyframe_requests = stats.keyframe_requests.load(Ordering::Relaxed);
+                let withheld = stats.video_aus_dropped.load(Ordering::Relaxed);
                 println!("{}", serde_json::json!({
                     "event": "stats",
                     "aus": aus,
@@ -192,6 +195,9 @@ pub async fn run(
                     "capture_to_present_ms": latency_ms,
                     "rtp_gaps": gaps,
                     "rtp_lost": lost,
+                    "rtp_recovered": recovered,
+                    "keyframe_requests": keyframe_requests,
+                    "frames_withheld": withheld,
                 }));
 
                 // Also to the log. A receiver that freezes mid-share leaves
@@ -215,7 +221,10 @@ pub async fn run(
                         "receiver stalled"
                     );
                 } else if presented > 0 {
-                    info!(aus, presented, audio, latency_ms, pts, slice, gaps, lost, "receiving");
+                    info!(
+                        aus, presented, audio, latency_ms, pts, slice, gaps, lost, recovered,
+                        keyframe_requests, withheld, "receiving"
+                    );
                 }
                 last_aus = aus;
                 last_presented = presented;
