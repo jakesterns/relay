@@ -142,9 +142,15 @@ engine. The same debug build copied to a different file name ran 150 s and
 exited cleanly (sender 73 ms, receiver 107 ms). Exit code 1 with nothing
 logged is what `taskkill /F` leaves, and S30 was running its own loopback
 tests on this PC at the time, so the likeliest cause is another session
-killing `relay-share.exe` by image name. One renamed run is a strong hint,
-not proof. Practical rule for parallel sessions: never kill Relay processes
-by name; kill the PIDs you started.
+killing `relay-share.exe` by image name. *Confirmed 2026-09-20 by the S30
+session:* its loopback cleanup ran `taskkill /F /IM relay-share.exe` about a
+dozen times between 2026-09-18 23:27 UTC and 2026-09-21 00:12 UTC. The
+teardown timings above all come from runs that ended with `stopped` and exit
+code 0. The B14 drift runs were cut short by a kill (the -50 ppm resync run
+has 195 samples instead of ~235), which shortens them but does not touch the
+samples taken before it; worth one clean re-run all the same. Rule for
+parallel sessions:
+never kill Relay processes by name; kill the PIDs you started.
 
 ### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, VERIFIED on hardware 2026-09-18
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
