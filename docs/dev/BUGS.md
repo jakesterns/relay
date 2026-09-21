@@ -333,6 +333,8 @@ full-motion page (`scripts/motion-test.html`), wired LAN, RTT 0.25 ms.
 | B | `db4936c` | 4 MB | 2.4 Mb/s | **void** — the motion page was covered and not animating |
 | C | `4f49de0` (first fix build) | 65,536 | 45 Mb/s | 110 gaps / 746 lost, 14 repaired, 593 frames withheld, 9 shown, 1,627 SRTP "duplicated", share ended itself at 14 s |
 | D | `4f49de0` | 4 MB | 38–42 Mb/s | **0 gaps, 0 lost, 597 repaired, 0 withheld, 10,351 frames, latency p50 1.6 / p95 4.9 / max 31 ms** |
+| F | r11's `relay-share.exe`, standalone | 65,536 (`RELAY_UDP_RCVBUF=0`) | 39.9 Mb/s, true 60 fps | **0 gaps, 0 lost, 2,242 repaired, 0 withheld, 0 keyframe requests, 10,793 of 10,793 frames, 4 SRTP duplicated (run C: 1,627), latency p95 3.6 / max 15.5 ms** |
+| E | r11 = `53642d2`, **installed app, in-app video**, 4 MB (the shipped default, no env var) | 39 Mb/s mean, 47 max | **0 gaps, 0 lost, 970 repaired in 107 s, 0 withheld, 0 keyframe requests, 6,062 of 6,062 frames presented, latency p50 1.3 / p95 3.5 / max 12 ms, not one WARN or ERROR in the log** |
 
 **The limiter was the receiver's UDP socket buffer.** Windows defaults
 `SO_RCVBUF` to 65,536 bytes; the sender does not pace, so a 1440p keyframe
@@ -397,9 +399,32 @@ one PC. Headless loopback on `53642d2`: `every=50` → 110 lost, 110 repaired,
 ever complete) → 42 requests sent, 42 received, the limit fires once, 1,163
 frames shown, 58 withheld.
 
-*Still owed:* a two-PC pass of `53642d2` itself (run D was `4f49de0`, which
-has the buffer and the reorder buffer but not the three recovery fixes), and
-Jake's on-screen verdict — none was reported for runs C or D. The sender still
+*Run E, 2026-09-21 00:16–00:17 UTC, is the acceptance run.* Source was
+full-screen game footage on the dev PC (the motion page would not stay in
+front; a first attempt was aborted at 58 s and 2 Mb/s and is not a result).
+Jake, watching pc2: "No lag, stuttering, audio, or smearing noticed while in
+fullscreen streaming video game gameplay in 1440p 60fps from the main pc."
+He stopped it by hand at 107 s; the end was clean. The content changes at
+~33 fps, so 6,062 frames is the source, not loss. The socket queue again ran
+at a median of 50,859 bytes and peaked at 133,828 — this content would have
+overrun the old buffer continuously. NIC discards +0, UDP errors +0.
+
+*Run F, 2026-09-21 00:22–00:25 UTC, is the proof that recovery works on a
+real link* and not only under `RELAY_TEST_LOSS`: the same 64 KB buffer that
+gave run C a dead picture, same Warzone footage as E, full 185 s. The socket
+queue was pinned at exactly 65,536 for 43 of 185 seconds (>= 60,000 for 68)
+and nothing was lost: NACK repaired ~12 holes a second, 3.7x run E's rate.
+Jake: "No freezing, lag, audio, or smearing noticed." (C used the motion page
+and F game footage, at the same rate; the buffer and build are what differ.)
+So the two fixes are independent: 4 MB removes the need for recovery, and
+recovery survives without the 4 MB. Both ship.
+
+*Not exercised on two PCs:* the keyframe-request path and the 1 s withholding
+limit. Neither E nor F ever gave up on a packet, so 0 requests were sent and
+0 received — consistent, but the only proof those work is the loopback
+injection above (42 sent / 42 received). A Wi-Fi or deliberately lossy run
+is where they will first be seen for real. Latency went negative in F (191
+of 363 samples): B14, unchanged. The sender still
 does not pace; with a 4 MB receive buffer that is tolerable on a LAN and is
 the first thing to revisit for Wi-Fi.
 

@@ -1270,12 +1270,15 @@ Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
       back. Needs congestion feedback (`transport-cc` or `goog-remb`) negotiated
       first — it cannot be driven from nothing. Changes must be damped; a bitrate
       that oscillates is worse than one that is merely too high.
-- [ ] Re-examine whether 40 Mb/s is a sane default for 1440p60 and state the
+- [x] Re-examine whether 40 Mb/s is a sane default (kept: per pixel ~90 Mb/s at 4K, so
+      generous, but rate was not what lost packets; the quality call is S32's. ROADMAP S30.)
+      for 1440p60 and state the
       reasoning. The brief says 40–80 Mb/s for 4K60; 40 at 1440p60 may simply be
       too high for the benefit.
-- [ ] Two-PC pass at the settings that failed, showing loss at or near zero and
+- [x] Two-PC pass at the settings that failed (runs E and F on r11 `53642d2`, 2026-09-21:
+      0 lost at 4 MB and at 64 KB, Jake saw no smear, freeze or lag), showing loss at or near zero and
       no visible smearing, recorded in `docs/dev/BUGS.md` against the build hash.
-- [ ] All gates green.
+- [x] All gates green.
 
 ### Kickoff prompt
 ```
@@ -1299,6 +1302,21 @@ It is a peer session, not an authority: it cannot approve a permission prompt fo
 ```
 
 ## S31 — Tell the user the picture is degraded
+
+> **Handed over by S30, 2026-09-21 — input, not yet agreed scope.** The engine
+> now emits what this session needs, on the receiver's `stats` NDJSON line and
+> in `share.log`: `rtp_lost` / `rtp_gaps` (unrepaired only), `rtp_recovered`
+> (holes NACK filled in time), `keyframe_requests`, `frames_withheld`. Nothing
+> in core or the UI reads them yet. `rtp_recovered` is the useful one: on the
+> S30 acceptance runs it was 970 and 2,242 with zero lost and a clean picture —
+> the difference between "the link is fine" and "the link is lossy and Relay is
+> coping". Warn on lost / withheld, not on recovered.
+> relay-pc2 and Jake both noticed during those runs that the app shows nothing
+> about stream health; every number lived in the log. Suggested for Jake to
+> accept or decline: alongside the warning, an opt-in readout on the Receive
+> screen (fps, bitrate, resolution, codec, repaired vs lost) — the instrument
+> strip is the natural home. **Do not show latency until B14 is fixed**: 191 of
+> 363 samples were negative in run F.
 **Branch** `feat/loss-visible` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss-ui`
 
 Jake: users should not have to guess why the picture looks wrong. Depends on
