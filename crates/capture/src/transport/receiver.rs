@@ -170,10 +170,15 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let (loss_tx, mut loss_rx) = mpsc::channel::<f32>(4);
     // A fatal render error, forwarded to the sender before we close (B3).
     let (abort_tx, mut abort_rx) = mpsc::channel::<(String, tokio::sync::oneshot::Sender<()>)>(1);
+    // The sender said goodbye, or its end of the signalling socket closed
+    // (B8). Either is the end of the share, known at once; ICE takes about
+    // four seconds to reach the same conclusion from silence.
+    let (gone_tx, mut gone_rx) = mpsc::channel::<()>(1);
     {
         let offset = clock_offset_ns.clone();
         let mut sig = sig;
         tokio::spawn(async move {
+            let mut clock_updates = 0u64;
             loop {
                 tokio::select! {
                     incoming = sig.recv() => match incoming {
@@ -190,14 +195,31 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                             }
                         }
                         Ok(signal::SigMsg::Clock { offset_ns, rtt_ns }) => {
-                            info!(
-                                offset_ms = offset_ns as f64 / 1e6,
-                                rtt_ms = rtt_ns as f64 / 1e6,
-                                "clock offset from sender"
-                            );
+                            // The sender re-measures every couple of seconds
+                            // (B14); only the first and any real move are news.
+                            let moved_ns = offset_ns - offset.load(Ordering::Relaxed);
+                            if clock_updates == 0 || moved_ns.abs() > 1_000_000 {
+                                info!(
+                                    offset_ms = offset_ns as f64 / 1e6,
+                                    rtt_ms = rtt_ns as f64 / 1e6,
+                                    moved_ms = moved_ns as f64 / 1e6,
+                                    clock_updates,
+                                    "clock offset from sender"
+                                );
+                            }
+                            clock_updates += 1;
                             offset.store(offset_ns, Ordering::Relaxed);
                         }
-                        Ok(signal::SigMsg::Bye) | Err(_) => break,
+                        Ok(signal::SigMsg::Bye) => {
+                            info!("sender said goodbye");
+                            let _ = gone_tx.try_send(());
+                            break;
+                        }
+                        Err(e) => {
+                            info!(error = %e, "signalling closed; the sender is gone");
+                            let _ = gone_tx.try_send(());
+                            break;
+                        }
                         Ok(_) => {}
                     },
                     Some(fraction) = loss_rx.recv() => {
@@ -312,6 +334,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         "keyframe_requests": stats2.keyframe_requests.load(Ordering::Relaxed),
                         "frames_withheld": stats2.video_aus_dropped.load(Ordering::Relaxed),
                         "capture_to_arrival_ms": { "p50": p50, "p99": p99, "max": max },
+                        // The percentiles are over the whole run, which hides
+                        // drift (B14); this is the newest access unit alone.
+                        "capture_to_arrival_last_ms":
+                            stats2.arrival_latency_us_last.load(Ordering::Relaxed) as f64 / 1e3,
                     }));
                     last_aus = aus;
                 }
@@ -319,10 +345,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                     warn!("peer connection closed");
                     break;
                 }
+                _ = gone_rx.recv() => break,
                 _ = tokio::signal::ctrl_c() => break,
             }
         }
-        pc.close().await?;
+        super::close_bounded(&pc, "receiver").await;
         let (p50, p99, max) = lat.summary().unwrap_or((0.0, 0.0, 0.0));
         println!(
             "{}",
@@ -341,8 +368,20 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         mic_route: opts.mic_route.clone(),
         host: opts.host,
     };
-    crate::render::run(au_rx, opus_rx, mic_rx, stats, events.closed, pc, render_opts, abort_tx)
-        .await
+    // The render loop ends on either: the transport closing, or the sender
+    // going away on the signalling socket.
+    let (end_tx, end_rx) = mpsc::channel::<()>(1);
+    {
+        let mut closed = events.closed;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = closed.recv() => {}
+                _ = gone_rx.recv() => {}
+            }
+            let _ = end_tx.send(()).await;
+        });
+    }
+    crate::render::run(au_rx, opus_rx, mic_rx, stats, end_rx, pc, render_opts, abort_tx).await
 }
 
 /// What the reorder buffer's output does to the access unit being built.

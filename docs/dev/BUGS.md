@@ -97,6 +97,55 @@ and exits; run 4 showed the deadline firing every time, i.e. the teardown
 still hangs (`pc.close()` / the AU sender outliving it) and every share end
 now costs 3 s. The cure is still owed.
 
+*S33, 2026-09-18, `ebc0c72`: cause found, fixed, measured on one PC; the
+windowed two-PC confirmation is recorded under "S33 two-PC pass" below.* Two
+separate things were hiding behind the deadline:
+
+1. **What hung.** Not `pc.close()` and not the AU sender: both finish in
+   well under a millisecond (`peer connection closed ms=0.03`). `send` and
+   `recv` read commands through `tokio::io::stdin()`, which parks a
+   blocking-pool thread in `ReadFile`; `Runtime::drop` waits for that thread,
+   and the read only returns when the core writes a line or closes the pipe.
+   So a share that ended any way *other* than a stdin command — the sender
+   stopped, the connection dropped — finished its teardown and then sat in
+   the runtime's destructor until the deadline killed it. A user "Stop
+   receiving" never showed it because that line is what the read was waiting
+   for, which is exactly the split run 3/run 4 saw. `tests/stdin_shutdown.rs`
+   plays the core (stdin held open, never written): old drop **never exits**
+   (killed at 4 s), `run_async`'s `shutdown_timeout` exits in **0.7 s**
+   including process start and 200 ms of simulated work.
+2. **Why the receiver was 3-4 s late to begin with.** The sender closed
+   without a word, so the receiver learned the share was over from the 3 s AU
+   idle timeout (windowed) or ICE's ~4.2 s disconnect (headless). The sender
+   now sends `Bye` on the signalling socket before it winds its pipelines
+   down, and the receiver ends on `Bye` or on the socket closing.
+   `scripts/teardown-check.sh`, headless loopback, time from the sender's
+   `stop` to the receiver process exiting:
+
+   | build | runs | sender stop->exit | receiver stop->exit |
+   |---|---|---|---|
+   | before (`11df2ee` + timing only) | 3 x 6 s | 80-139 ms | 4257-4332 ms |
+   | `ebc0c72` | 3 x 6 s | 73-78 ms | 103-109 ms |
+   | `ebc0c72` | 2 x 90 s | 79-88 ms | 110-118 ms |
+
+   (The receiver figures are quantised by the script's 100 ms poll.)
+
+The 3 s deadline thread stays as a backstop; the log line it prints is now
+a bug report, not the normal path.
+
+**A false alarm worth remembering.** During these runs the loopback sender
+or receiver died silently five times in shares longer than ~90 s: no log
+line, no `stopped`, exit code 1, once reported by bash as a segfault, at
+unrelated moments (46 s, 95-104 s, during teardown), and on main's
+pre-S33 binary as readily as on this branch. It looked like a crash in the
+engine. The same debug build copied to a different file name ran 150 s and
+exited cleanly (sender 73 ms, receiver 107 ms). Exit code 1 with nothing
+logged is what `taskkill /F` leaves, and S30 was running its own loopback
+tests on this PC at the time, so the likeliest cause is another session
+killing `relay-share.exe` by image name. One renamed run is a strong hint,
+not proof. Practical rule for parallel sessions: never kill Relay processes
+by name; kill the PIDs you started.
+
 ### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, VERIFIED on hardware 2026-09-18
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
 the sender was capturing, so the capture contained the window showing the
@@ -160,12 +209,25 @@ before anything is signed: a signature over a build nobody can reproduce is
 worth very little.
 
 *S29, 2026-09-17:* a third instance. `pnpm tauri build` rewrote
-`target
-elease
-elay-ui.exe` 12 ms *after* writing the NSIS installer, so
+`target\release\relay-ui.exe` 12 ms *after* writing the NSIS installer, so
 the exe inside the installer (`4A2E2BA4...910E`) differs from the one left on
 disk (`2E0B8748...45DB`). Hash the installer, or extract from it; never the
 loose `relay-ui.exe`.
+
+*S33, 2026-09-18, `ebc0c72`: the Rust binaries are now reproducible, and the
+rest is written down.* `scripts/repro-check.ps1` builds one commit from two
+folders and compares hashes: plain `cargo build --release`, **0 of 4**
+binaries identical (`relay-core`, `relay-svc`, `relay-elevate`,
+`relay-share`); with the flags `stage-bundle.ps1` now sets
+(`--remap-path-prefix` for repo, cargo home and rustup home, plus `/Brepro`),
+**4 of 4** identical. The real cause of the `relay-preview.exe` finding was
+the linker timestamp and embedded paths, not caching: two links of identical
+source never matched. The catalogue is staged with LF endings whatever the
+tree holds (the main checkout still carries a CRLF copy that git does not
+report). Not yet shown reproducible, and said so: `relay-ui.exe`, the two
+DLLs and `relay-preview.exe` (same flags, not in the measured set), and the
+NSIS installer itself (stored mtimes, solid LZMA). `docs/dev/reproducible-builds.md`
+has each input, the evidence, and a checklist for reasoning about a mismatch.
 
 ### B13 — The received stream played in a window of its own  |  FIXED, verified on the second PC 2026-09-18 (r10 = `5cb414b`)
 Jake, after the first real two-PC test: the picture belongs *inside* the
@@ -288,6 +350,44 @@ fixed jitter/depacketiser target, the WASAPI render buffer, Opus frame
 accumulation before playback starts. Needs: audio arrival-to-render time
 and render-buffer depth in the stats line, then a lip-sync check with
 something on screen that flashes when a sound plays. Own session.
+
+*S33, 2026-09-18, `ebc0c72`: measured first, then fixed.* Where the second
+went, stage by stage:
+
+| stage | how measured | result |
+|---|---|---|
+| sender capture -> Opus packet | `relay-share bench-audio 5` (desktop, 48 kHz, 10 ms frames) | p50 0.11 ms, p99 0.22 ms (+ up to one 10 ms loopback period) |
+| network | clock-sync RTT | 0.08-0.25 ms |
+| receiver: packets waiting to decode | `PlaybackStats.channel_packets` | 0 |
+| receiver: decoded PCM queue | `queue_ms` | 0 ms |
+| receiver: **WASAPI render buffer** | `render_ms` (`GetCurrentPadding`) | **1000 ms** of a 1000 ms buffer |
+
+`playback.rs` asked WASAPI for a one-second buffer and on every wake filled
+*all* free space, with silence when it had nothing else. The first wake
+queued a second of silence and every real sample stood behind it for the rest
+of the share. Nothing else in the path holds more than a period.
+
+Fix: a per-track jitter queue primed to 40 ms that re-primes after running
+dry, a 20 ms cap on what sits in the render buffer, and one-frame-per-480
+skip/repeat slewing on the queue's one-second low-water mark so two sound
+cards a few dozen ppm apart neither drain it nor let it grow (simulated for an
+hour at +/-200 ppm: no underrun, no hard drop). The stream is opened as
+48 kHz stereo float with `AUTOCONVERTPCM`, so an endpoint at another rate is
+converted by the audio engine rather than played off-pitch — the old code
+wrote 48 kHz samples into whatever the mix format was.
+`tests/playback_depth.rs` (plays silence on the default endpoint, run by
+hand), same binary, `RELAY_AUDIO_LEGACY=1` for the old path:
+
+| path | arrival -> endpoint, mean | render buffer | queue | underruns |
+|---|---|---|---|---|
+| legacy | 1010 ms | 1000 ms | 0 ms | 0 |
+| S33 | 40-60 ms | 20 ms | 20 ms | 0 |
+
+The receiver's `stats` line and `share.log` now carry `audio.buffered_ms`
+with its parts, underruns and slew counts. Against video: the picture is
+~3 ms capture-to-present plus display, so audio now trails it by roughly
+40-60 ms — inside the ~125 ms at which late audio becomes noticeable
+(ITU-R BT.1359), where 1 s was not. Two-PC confirmation below.
 
 ### B15 — Mid-stream smear: a damaged access unit is decoded and nobody asks for a keyframe
 relay-pc2, run 2: "every now and then the stream shows a weird smeared-paint
@@ -438,6 +538,37 @@ estimated once at connect and never again, so the "latency" readout is that
 drift. Pre-dates S29 (M4 measurement code). Fix: re-estimate periodically,
 or measure glass-to-glass against a monotonic clock. Also worth checking
 why a Windows 10 PC on the LAN drifts a second a minute (NTP off?).
+
+
+*S33, 2026-09-18, `ebc0c72`: fixed, measured on one PC with manufactured
+drift; two-PC confirmation below.* The sender now pings every 2 s on the
+signalling socket it already owns, filters the samples (`ClockFilter`: ignore
+a sample whose round trip is more than twice the recent best, smooth the
+rest, take a >20 ms step at once) and pushes each estimate to the receiver.
+Latency stamps on both ends come from the wall clock read once and then
+advanced by the monotonic clock, so an NTP step mid-share cannot move the
+readout either. An older peer on either end simply keeps the connect-time
+offset. `scripts/clock-drift-check.sh 90 -500 [once]` — headless loopback,
+receiver clock skewed by -500 ppm (`RELAY_CLOCK_SKEW_PPM`, test hook), newest
+frame's capture-to-arrival latency:
+
+| sender | first 10 % | last 10 % | drift | negative samples |
+|---|---|---|---|---|
+| offset measured once (`RELAY_CLOCK_SYNC_ONCE=1`) | 2.66 ms | -39.00 ms | -29.2 ms/min | 152 of 171 |
+| `ebc0c72`, resync every 2 s | 1.584 ms | 1.579 ms | -0.004 ms/min | 1 of 171 (-0.002 ms) |
+
+-500 ppm is ten times a real crystal, chosen so 90 s shows the slope; it
+also moves the clock 1 ms between two pings, which is the sawtooth that
+produced the single -0.002 ms sample. At a realistic -50 ppm over 120 s:
+measured once, 2.18 -> -0.50 ms with 57 of 228 samples negative; with resync,
+5.15 -> 4.87 ms, minimum 3.67 ms, **0 of 195 negative** (the runs' absolute
+levels differ because the desktop being captured differed).
+
+The 1 s/min wall-clock disagreement in the original report does not match
+the 2-3 ms/min the latency actually drifted (that would be ~50 ppm, an
+ordinary crystal); the wall-clock figures were read by eye from two screens
+and are probably the odd ones out. Worth one look at the Windows 10 PC's
+time service all the same.
 
 
 ## Fixed, verified on the second PC

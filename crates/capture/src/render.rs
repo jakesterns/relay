@@ -127,9 +127,12 @@ pub async fn run(
     // Audio playback thread (best-effort; a decode failure must not kill video).
     let (audio_stop_tx, audio_stop_rx) = std::sync::mpsc::channel::<()>();
     let mic_route = opts.mic_route.clone();
+    let audio_stats = Arc::new(crate::playback::PlaybackStats::default());
+    let audio_stats2 = audio_stats.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
-            if let Err(e) = crate::playback::run(opus, mic, audio_stop_rx, mic_route) {
+            if let Err(e) = crate::playback::run(opus, mic, audio_stop_rx, mic_route, audio_stats2)
+            {
                 warn!(error = %e, "audio playback stopped");
             }
         })?;
@@ -198,6 +201,7 @@ pub async fn run(
                     "rtp_recovered": recovered,
                     "keyframe_requests": keyframe_requests,
                     "frames_withheld": withheld,
+                    "audio": audio_stats.json(),
                 }));
 
                 // Also to the log. A receiver that freezes mid-share leaves
@@ -209,6 +213,7 @@ pub async fn run(
                 // separate those cases.
                 let pts = stats.last_pts_100ns.load(Ordering::Relaxed);
                 let slice = stats.last_subresource.load(Ordering::Relaxed);
+                let audio_ms = audio_stats.buffered_ms();
                 let stalled_aus = aus == last_aus;
                 let stalled_present = presented == last_presented;
                 // Only warn once frames have started: two false alarms fired
@@ -216,14 +221,14 @@ pub async fn run(
                 // the one log someone reads when things go wrong.
                 if presented > 0 && (stalled_aus || stalled_present) {
                     warn!(
-                        aus, presented, audio, latency_ms, pts, slice, gaps, lost,
+                        aus, presented, audio, audio_ms, latency_ms, pts, slice, gaps, lost,
                         arriving = !stalled_aus, presenting = !stalled_present,
                         "receiver stalled"
                     );
                 } else if presented > 0 {
                     info!(
-                        aus, presented, audio, latency_ms, pts, slice, gaps, lost, recovered,
-                        keyframe_requests, withheld, "receiving"
+                        aus, presented, audio, audio_ms, latency_ms, pts, slice, gaps, lost,
+                        recovered, keyframe_requests, withheld, "receiving"
                     );
                 }
                 last_aus = aus;
@@ -279,13 +284,15 @@ pub async fn run(
     }
 
     let _ = audio_stop_tx.send(());
-    let _ = pc.close().await;
+    let teardown = std::time::Instant::now();
+    crate::transport::close_bounded(&pc, "receiver").await;
 
     // Bounded joins (B8): a thread that will not wake is not worth hanging
     // the exit for — the failure reason was taken above, the peer connection
     // is closed, and the process is on its way out.
     join_bounded(video_join, "render");
     join_bounded(audio_join, "audio playback");
+    info!(ms = teardown.elapsed().as_secs_f64() * 1e3, "teardown finished");
     Ok(())
 }
 

@@ -425,33 +425,89 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
 
     // Loss feedback from the receiver → AIMD bitrate control; and the
-    // receiver's reason, if it stops on a fatal error.
+    // receiver's reason, if it stops on a fatal error. The same task owns the
+    // signalling socket, so it also keeps the clock offset current (B14): one
+    // ping every `CLOCK_RESYNC_INTERVAL`, filtered, pushed to the receiver.
+    // Measured once at connect, the offset was 11 ms stale within four
+    // minutes and the receiver's latency readout went negative.
     let (abort_tx, mut abort_rx) = mpsc::channel::<String>(1);
+    // Fired when the share stops: the task says `Bye` on the socket it owns,
+    // so the receiver ends now instead of when ICE gives up on us (B8).
+    let (bye_tx, bye_rx) = tokio::sync::oneshot::channel::<()>();
+    let (bye_sent_tx, bye_sent_rx) = tokio::sync::oneshot::channel::<()>();
     {
         let target = target_bps.clone();
+        // S30's controller, not S33's `AimdBitrate`: the two sessions wrote a
+        // bitrate control each against the same task, and S30's is the one
+        // that survived into `control.rs` with the loss measurements behind it.
         let mut control = super::control::BitrateControl::new(opts.bitrate_bps);
+        let mut clock = signal::ClockFilter::seeded(offset_ns, rtt_ns);
+        let mut bye_rx = bye_rx;
+        // Test hook: the pre-S33 behaviour, to measure the drift it leaves.
+        let resync = std::env::var_os("RELAY_CLOCK_SYNC_ONCE").is_none();
         runtime.spawn(Box::pin(async move {
+            let mut ping = tokio::time::interval(signal::CLOCK_RESYNC_INTERVAL);
+            ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut seq = 1000u32;
             loop {
-                match sig.recv().await {
-                    Ok(signal::SigMsg::Loss { fraction }) => {
-                        let was = target.load(Ordering::Relaxed);
-                        let now = control.on_window(fraction);
-                        if now != was {
-                            target.store(now, Ordering::Relaxed);
-                            info!(
-                                from_mbps = was as f64 / 1e6,
-                                to_mbps = now as f64 / 1e6,
-                                loss_percent = fraction as f64 * 100.0,
-                                "bitrate target changed"
-                            );
+                tokio::select! {
+                    incoming = sig.recv() => match incoming {
+                        Ok(signal::SigMsg::Loss { fraction }) => {
+                            let was = target.load(Ordering::Relaxed);
+                            let now = control.on_window(fraction);
+                            if now != was {
+                                target.store(now, Ordering::Relaxed);
+                                info!(
+                                    from_mbps = was as f64 / 1e6,
+                                    to_mbps = now as f64 / 1e6,
+                                    loss_percent = fraction as f64 * 100.0,
+                                    "bitrate target changed"
+                                );
+                            }
                         }
-                    }
-                    Ok(signal::SigMsg::Abort { reason }) => {
-                        let _ = abort_tx.send(reason).await;
+                        Ok(signal::SigMsg::Pong { seq: got, t1_ns, t2_ns, t3_ns })
+                            if got == seq =>
+                        {
+                            let (offset, rtt) =
+                                signal::clock_sample(t1_ns, t2_ns, t3_ns, signal::unix_now_ns());
+                            match clock.push(offset, rtt) {
+                                Some(offset_ns) => {
+                                    debug!(
+                                        offset_ms = offset_ns as f64 / 1e6,
+                                        sample_ms = offset as f64 / 1e6,
+                                        rtt_ms = rtt as f64 / 1e6,
+                                        "clock offset updated"
+                                    );
+                                    let msg = signal::SigMsg::Clock { offset_ns, rtt_ns: rtt };
+                                    if sig.send(&msg).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => debug!(
+                                    rtt_ms = rtt as f64 / 1e6,
+                                    "clock sample ignored: slow round trip"
+                                ),
+                            }
+                        }
+                        Ok(signal::SigMsg::Abort { reason }) => {
+                            let _ = abort_tx.send(reason).await;
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    },
+                    _ = &mut bye_rx => {
+                        let _ = sig.send(&signal::SigMsg::Bye).await;
+                        let _ = bye_sent_tx.send(());
                         break;
                     }
-                    Ok(_) => {}
-                    Err(_) => break,
+                    _ = ping.tick(), if resync => {
+                        seq = seq.wrapping_add(1);
+                        let msg = signal::SigMsg::Ping { seq, t1_ns: signal::unix_now_ns() };
+                        if sig.send(&msg).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         }));
@@ -780,14 +836,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     };
 
     info!("stopping share");
+    let stopping = std::time::Instant::now();
     stop.store(true, Ordering::Relaxed);
+    // Tell the receiver first: its picture should end when ours does, not
+    // after our pipelines have wound down. Bounded, in case the task has
+    // already ended with the connection.
+    let _ = bye_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_millis(200), bye_sent_rx).await;
     let _ = video_join.join();
     for j in [audio_join, mic_join].into_iter().flatten() {
         let _ = j.join();
     }
-    // `sig` is owned by the loss-feedback task; closing the peer connection and
-    // exiting closes the TCP, which the receiver reads as end-of-share.
-    pc.close().await?;
+    info!(ms = stopping.elapsed().as_secs_f64() * 1e3, "pipelines stopped");
+    super::close_bounded(&pc, "sender").await;
     println!("{}", serde_json::json!({ "event": "stopped" }));
     result
 }

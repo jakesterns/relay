@@ -124,11 +124,7 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "send" => {
             let opts = parse_send_args(&args[1..])?;
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?
-                .block_on(relay_capture::transport::sender::run(opts))
+            run_async(relay_capture::transport::sender::run(opts))
         }
         #[cfg(windows)]
         "discover" => {
@@ -153,27 +149,50 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "host-stub" => {
             let opts = parse_recv_args(&args[1..])?;
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?
-                .block_on(relay_capture::render::run_stub(opts.host))
+            run_async(relay_capture::render::run_stub(opts.host))
         }
         #[cfg(windows)]
         "recv" => {
             let opts = parse_recv_args(&args[1..])?;
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()?
-                .block_on(relay_capture::transport::receiver::run(opts))
+            run_async(relay_capture::transport::receiver::run(opts))
         }
+        // B8 regression check, not a feature: start a read on stdin the way
+        // `send`/`recv` do, finish 200 ms later without stdin ever yielding,
+        // and let the caller time the exit. See `tests/stdin_shutdown.rs`.
+        "stdin-exit-check" => run_async(async {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+            tokio::select! {
+                _ = lines.next_line() => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)) => {}
+            }
+            Ok(())
+        }),
         "" | "-h" | "--help" => {
             print!("{USAGE}");
             Ok(())
         }
         other => bail!("unknown command `{other}`\n{USAGE}"),
     }
+}
+
+/// Run one share on its own runtime, and do not let the runtime outlive it.
+///
+/// `send` and `recv` read commands with `tokio::io::stdin()`, which parks a
+/// blocking-pool thread in `ReadFile`. Dropping a runtime waits for that
+/// thread, and the read only returns when the core writes a line or closes
+/// the pipe — so a share that ended any *other* way (the sender stopped, the
+/// connection dropped) finished its teardown in milliseconds and then sat in
+/// `Runtime::drop` until the 3 s deadline killed it. That was B8. A `stop`
+/// from the core never showed it, because that line is what the read was
+/// waiting for. `RELAY_RUNTIME_DROP=1` brings the old exit back for the test.
+fn run_async<F: std::future::Future<Output = Result<()>>>(fut: F) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?;
+    let result = rt.block_on(fut);
+    if std::env::var_os("RELAY_RUNTIME_DROP").is_none() {
+        rt.shutdown_timeout(std::time::Duration::from_millis(100));
+    }
+    result
 }
 
 /// `hevc` / `h264` for the benches. Benches only: a share negotiates.

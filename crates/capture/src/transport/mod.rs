@@ -245,6 +245,24 @@ pub async fn build_pc(
     Ok((pc, PcEvents { gather_done, connected, closed, tracks }, runtime))
 }
 
+/// How long closing a peer connection may take before we stop waiting. It is
+/// tidiness: by the time anyone calls this the share is over and the peer has
+/// been told on the signalling socket, so nothing the user sees depends on it.
+pub const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Close `pc`, but never wait on it for longer than [`CLOSE_GRACE`] (B8), and
+/// say how long it took so a slow close shows up in the log as a number.
+pub async fn close_bounded(pc: &impl PeerConnection, who: &str) {
+    let started = std::time::Instant::now();
+    let finished = tokio::time::timeout(CLOSE_GRACE, pc.close()).await.is_ok();
+    let ms = started.elapsed().as_secs_f64() * 1e3;
+    if finished {
+        tracing::info!(who, ms, "peer connection closed");
+    } else {
+        tracing::warn!(who, ms, "peer connection did not close in time; moving on");
+    }
+}
+
 /// The local address the OS would use to reach `peer` — the right interface
 /// for ICE host candidates without binding to everything.
 pub fn local_ip_towards(peer: IpAddr) -> Result<IpAddr> {
