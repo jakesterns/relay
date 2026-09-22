@@ -1579,8 +1579,30 @@ an update of either PC, and the first share after an update needs no code.
       it down before writing code; the whole feature is a security decision
       wearing a convenience feature's clothes.
 
+### Progress, 2026-09-22
+Done and merged (`6c21c0c`), while Jake was away:
+- **The blocker nobody had noticed.** `peers.json` was written but never read,
+  because `build_pc` supplied no certificate: webrtc-rs minted a throwaway one
+  per connection, so this PC's DTLS fingerprint changed every run and a stored
+  fingerprint could never match. The store was not unused by oversight, it was
+  unusable. Identity had to come before storage.
+- `transport/identity.rs`: one ECDSA P-256 keypair, generated on first use,
+  kept as `identity.pem` in the data root, used for DTLS on every connection.
+  Pinning a fingerprint now authenticates. 3 tests.
+- `rcgen` pinned with `=` — `rtc` takes an `rcgen::KeyPair` without
+  re-exporting the type, so a version skew is a baffling type error.
+- `docs/dev/trusted-peers.md`: the trust model.
+
+**Blocked on Jake:** §5 of the trust model. May a remembered sender connect
+while the receiving PC is *not* in "Start receiving"? Recommended answer is no
+— remembering removes the code, not the consent. **No pairing code is skipped
+anywhere until he answers**, so the feature is inert by design right now.
+
+Still to do: the versioned peer store (id, last_seen, favourite, migration
+test), the quick-connect path itself, and both list UIs with Forget.
+
 ### Definition of Done
-- [ ] **The trust model is written down first**, in `docs/dev/trusted-peers.md`,
+- [x] **The trust model is written down first**, in `docs/dev/trusted-peers.md`,
       and answers at minimum: what the stored secret is and what it authorises;
       what an attacker who copies the data folder can do; whether a remembered
       sender can connect while the receiver is *not* in "Start receiving", and
