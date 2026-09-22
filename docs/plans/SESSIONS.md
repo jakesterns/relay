@@ -1698,6 +1698,8 @@ source list per side, the wire shape, and a DoD that includes a listening
 check on the second PC (speech, never a tone).
 
 ## S38 — Stream resilience: crash record, auto-reconnect, resume · `feat/stream-resilience`
+**Plan** `docs/plans/S38-stream-resilience.md` (written 2026-09-22, after S35
+merged — its one hard dependency) · **Worktree** `C:\Users\stern\Documents\Code\relay-resilience`
 Requested by Jake 2026-09-18. If the engine or the app crashes during a
 live stream — or the PC loses power, or the link glitches — keep the crash
 log, come back up, and reconnect on its own so a multi-streamer's feed
