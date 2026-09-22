@@ -185,6 +185,22 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .preview .cap { position: absolute; right: 14px; bottom: 12px; color: rgba(236,230,220,.6); font-size: 12px; }
 .preview .idlemsg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim); }
 
+/* Stream-health chip (S31).
+   Bottom-left, inside the frame, over the stream's own native window. It is
+   deliberately small and cornered: the user is being told the picture is
+   damaged, and a banner across the middle would stop them judging the very
+   thing being described. Amber, not red -- the share is still running. */
+.preview .healthchip {
+  position: absolute; left: 14px; bottom: 12px; max-width: calc(100% - 28px);
+  display: flex; align-items: center; gap: 8px;
+  background: rgba(14,13,12,.82); border: 1px solid rgba(201,169,106,.35);
+  border-radius: 6px; padding: 7px 11px; color: var(--ink); font-size: 12px;
+  line-height: 1.4; animation: chip-in .4s var(--ease) both;
+}
+.preview .healthchip i { width: 7px; height: 7px; border-radius: 50%; background: var(--brass); flex: none; }
+@keyframes chip-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .preview .healthchip { animation: none; } }
+
 .meter { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1.2fr 1.1fr; border: 1px solid var(--line2); border-radius: 8px; background: var(--surface); }
 .meter > div { padding: 14px 18px 12px; border-right: 1px solid var(--line); }
 .meter > div:last-child { border-right: 0; }
