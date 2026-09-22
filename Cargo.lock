@@ -3504,6 +3504,7 @@ dependencies = [
  "mdns-sd",
  "opus",
  "rand 0.9.5",
+ "rcgen",
  "relay-core",
  "relay-vdevice",
  "rtc",
