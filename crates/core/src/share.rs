@@ -19,7 +19,21 @@ pub struct ShareRequest {
     /// Receiver instance name (mDNS) or `ip:port`; empty = first discovered.
     #[serde(default)]
     pub peer: Option<String>,
+    /// Six-digit code from the receiver. May be empty when `peer_id` names a
+    /// remembered PC (S35).
+    #[serde(default)]
     pub code: String,
+    /// A remembered peer (`relay_core::peers`) to connect to without a code.
+    /// The service resolves it to the receiver's name and fingerprint; the
+    /// client only ever names the id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_id: Option<String>,
+    /// The remembered receiver's DTLS fingerprint, resolved by the service
+    /// from `peer_id`. Skipped by serde on purpose: a client cannot supply
+    /// it, so the only way to connect without a code is through a peer the
+    /// store actually holds.
+    #[serde(skip)]
+    pub trusted: Option<String>,
     #[serde(default = "default_bitrate")]
     pub bitrate_mbps: u32,
     #[serde(default = "default_fps")]
@@ -172,12 +186,22 @@ pub struct ReceiveRequest {
 pub enum ShareEvent {
     /// One `stats` line from the engine, forwarded verbatim to the strip.
     Stats { data: serde_json::Value },
-    /// The engine connected to a receiver.
-    Connected { peer: String },
+    /// The engine connected to a receiver. `trusted`: without a code, as a
+    /// remembered PC (S35).
+    Connected {
+        peer: String,
+        #[serde(default)]
+        trusted: bool,
+    },
     /// Receiver is advertising and waiting with this pairing code.
     Waiting { code: String, name: String },
-    /// Receiver paired with a sender.
-    Paired { sender: String },
+    /// Receiver paired with a sender. `trusted`: it connected without a code
+    /// and DTLS proved it was the PC we remembered.
+    Paired {
+        sender: String,
+        #[serde(default)]
+        trusted: bool,
+    },
     /// The engine exited; `ok` is false on crash or non-zero exit.
     Exited { ok: bool, code: Option<i32> },
     /// A structured error line from the engine.
@@ -421,7 +445,18 @@ impl Drop for ShareEngine {
 /// The `relay-share send` command line for a request. Kept pure for tests:
 /// this mapping is half of the core↔engine contract (NDJSON is the other).
 fn send_args(req: &ShareRequest) -> Vec<String> {
-    let mut args = vec!["send".into(), "--code".into(), req.code.clone()];
+    let mut args = vec!["send".into()];
+    match req.trusted.as_deref() {
+        // A remembered receiver: its fingerprint stands in for the code.
+        Some(fp) => {
+            args.push("--trusted".into());
+            args.push(fp.into());
+        }
+        None => {
+            args.push("--code".into());
+            args.push(req.code.clone());
+        }
+    }
     if let Some(peer) = req.peer.as_deref().filter(|p| !p.is_empty()) {
         args.push("--peer".into());
         args.push(peer.into());
@@ -511,6 +546,7 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         Some("stats") => Some(ShareEvent::Stats { data: v }),
         Some("connected") => Some(ShareEvent::Connected {
             peer: v.get("peer").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+            trusted: v.get("trusted").and_then(|t| t.as_bool()).unwrap_or(false),
         }),
         Some("waiting") => Some(ShareEvent::Waiting {
             code: v.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string(),
@@ -518,6 +554,7 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         }),
         Some("paired") => Some(ShareEvent::Paired {
             sender: v.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            trusted: v.get("trusted").and_then(|t| t.as_bool()).unwrap_or(false),
         }),
         Some("error") => Some(ShareEvent::Error {
             message: v.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string(),
@@ -889,7 +926,7 @@ mod tests {
         assert_eq!(data["bitrate_mbps"], 57.2);
 
         let ev = decode_line(r#"{"event":"connected","peer":"den-pc","rtt_ms":0.4}"#).unwrap();
-        assert!(matches!(ev, ShareEvent::Connected { peer } if peer == "den-pc"));
+        assert!(matches!(ev, ShareEvent::Connected { peer, .. } if peer == "den-pc"));
 
         let ev = decode_line(r#"{"event":"waiting","code":"123456","name":"jake"}"#).unwrap();
         assert!(
@@ -897,7 +934,7 @@ mod tests {
         );
 
         let ev = decode_line(r#"{"event":"paired","sender":"jake"}"#).unwrap();
-        assert!(matches!(ev, ShareEvent::Paired { sender } if sender == "jake"));
+        assert!(matches!(ev, ShareEvent::Paired { sender, .. } if sender == "jake"));
 
         let ev = decode_line(r#"{"event":"error","where":"video","message":"boom"}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Error { message } if message == "boom"));
@@ -907,10 +944,22 @@ mod tests {
     }
 
     #[test]
+    fn paired_and_connected_carry_whether_a_code_was_used() {
+        // S35: `trusted` says the peer connected as a remembered PC. Absent
+        // (an engine that predates it) means a code was used.
+        let ev = decode_line(r#"{"event":"paired","sender":"jake","trusted":true}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Paired { trusted: true, .. }));
+        let ev = decode_line(r#"{"event":"paired","sender":"jake"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Paired { trusted: false, .. }));
+        let ev = decode_line(r#"{"event":"connected","peer":"den-pc","trusted":true}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Connected { trusted: true, .. }));
+    }
+
+    #[test]
     fn decode_line_tolerates_missing_fields_and_junk() {
         // Missing fields fall back to empty strings, not a dropped event.
         let ev = decode_line(r#"{"event":"connected"}"#).unwrap();
-        assert!(matches!(ev, ShareEvent::Connected { peer } if peer.is_empty()));
+        assert!(matches!(ev, ShareEvent::Connected { peer, .. } if peer.is_empty()));
         let ev = decode_line(r#"{"event":"error"}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Error { message } if message == "error"));
 

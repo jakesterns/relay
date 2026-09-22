@@ -322,6 +322,9 @@ pub fn to_share_request(
     ShareRequest {
         peer,
         code,
+        // Set by the service from the request that named a remembered PC.
+        peer_id: None,
+        trusted: None,
         bitrate_mbps: preset.bitrate_mbps,
         fps: preset.fps,
         size: preset.size,

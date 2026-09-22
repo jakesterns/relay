@@ -212,6 +212,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
     let mut opts = relay_capture::transport::sender::SendOpts {
         peer: None,
         code: String::new(),
+        trusted: None,
         bitrate_bps: 60_000_000,
         fps: 60,
         audio: Some(relay_capture::audio::AudioSource::Desktop),
@@ -229,6 +230,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         match a.as_str() {
             "--peer" => opts.peer = it.next().cloned(),
             "--code" => opts.code = it.next().cloned().unwrap_or_default(),
+            // The remembered receiver's DTLS fingerprint (S35); replaces --code.
+            "--trusted" => opts.trusted = it.next().cloned(),
             "--bitrate" => {
                 opts.bitrate_bps = it.next().context("--bitrate Mb/s")?.parse::<u32>()? * 1_000_000
             }
@@ -265,8 +268,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             other => bail!("unknown send flag `{other}`"),
         }
     }
-    if opts.code.is_empty() {
-        bail!("send needs --code <six digits from the receiver>");
+    if opts.code.is_empty() && opts.trusted.is_none() {
+        bail!("send needs --code <six digits from the receiver>, or --trusted <fingerprint>");
     }
     Ok(opts)
 }

@@ -9,7 +9,7 @@
  */
 import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
-  ElevatedOp, FirewallStatus,
+  ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus,
 } from "../lib/ipc";
@@ -32,6 +32,9 @@ export interface FakeCore {
   firewall: FirewallStatus;
   /** The received stream's native window, as the shell reports it (S29). */
   stream: StreamStatus;
+  /** Remembered PCs (S35). Empty by default: most screens must not change
+   *  when the list is empty, which is how every user starts. */
+  peers: Peer[];
   autostart: boolean;
   /** `settings.json`: what closing the window means. */
   prefs: UiPrefs;
@@ -142,6 +145,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       unknown: false,
     },
     stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
+    peers: [],
     autostart: false,
     prefs: { close_action: "keep_running" },
     elevation: { decline: false },
@@ -189,6 +193,18 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     },
     stop_share: () => void (core.state.sharing = { kind: "off" }),
     start_share_preset: (a) => {
+      // As the service does: a peer id resolves to a remembered PC, and an
+      // unknown id or a missing code is refused before anything starts.
+      const peerId = a.peerId as string | null | undefined;
+      if (peerId) {
+        const p = core.peers.find((x) => x.id === peerId);
+        if (!p) throw new Error("That PC is no longer remembered. Pair with its code once and it will be.");
+        core.state.sharing = { kind: "sharing", peer: p.name };
+        return;
+      }
+      if (!String(a.code ?? "").trim()) {
+        throw new Error("Enter the six-digit code shown on the receiving PC.");
+      }
       core.state.sharing = { kind: "sharing", peer: (a.peer as string | null) ?? "living-room-pc" };
     },
     record: () => undefined,
@@ -355,6 +371,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       { name: "living-room-pc", addr: "192.168.1.42", port: 0 },
       { name: "studio-pc", addr: "192.168.1.51", port: 0 },
     ],
+    list_peers: () => structuredClone(core.peers),
+    forget_peer: (a) => {
+      const before = core.peers.length;
+      core.peers = core.peers.filter((p) => p.id !== a.id);
+      if (core.peers.length === before) throw new Error("no remembered PC with that id");
+    },
+    set_peer_favourite: (a) => {
+      const p = core.peers.find((x) => x.id === a.id);
+      if (!p) throw new Error("no remembered PC with that id");
+      p.favourite = !!a.favourite;
+    },
   };
 
   core.handler = (cmd, args) => {
@@ -384,4 +411,5 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",
   "launch_uninstaller", "discover_receivers",
+  "list_peers", "forget_peer", "set_peer_favourite",
 ];

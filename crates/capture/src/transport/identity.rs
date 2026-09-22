@@ -97,8 +97,8 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(not(windows))]
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)

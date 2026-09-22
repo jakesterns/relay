@@ -1,7 +1,8 @@
 # Trusted peers: the trust model
 
-**Status: written by S35 for Jake to approve. One decision (§5) is his, not
-mine. Nothing in Relay skips a pairing code until he has answered it.**
+**Status: approved. Jake answered §5 on 2026-09-22 — no: both PCs must be
+ready. Implemented as Option A, and the implementation is described at the
+end (§8).**
 
 Jake's requirement: after two PCs have paired once, reconnecting should be one
 click, not a fresh six-digit code read aloud between two machines. It must
@@ -96,12 +97,16 @@ six-digit code exactly as today.
 **A remembered peer that has itself been compromised** can reconnect. That is
 inherent in remembering it, and is why revocation and visibility matter.
 
-## 5. The decision Jake needs to make
+## 5. The decision — answered
 
 **May a remembered sender connect while the receiving PC is _not_ in "Start
 receiving"?**
 
-*Option A — no (recommended, and what I will implement unless told otherwise).*
+**Jake, 2026-09-22: no.** "I would say no to the pairing without both devices
+ready for streaming." Option A is what shipped. Option B is kept below as the
+record of what was considered and why it was not the default.
+
+*Option A — no (recommended; implemented).*
 The receiver must be receiving; remembering removes the **code**, not the
 consent. One click on the receiving PC, then the sender connects with no code.
 
@@ -140,3 +145,39 @@ lie. The next connection attempt simply falls back to the code.
 - No zero-configuration promise is broken: no ports, no accounts, no relays.
 - LAN only, as today.
 - Nothing is written to the registry; the data root only.
+
+## 8. How it is built
+
+- **Identity**: `crates/capture/src/transport/identity.rs`. One ECDSA P-256
+  key in `identity.pem`, used for every `PeerConnection` via
+  `RTCConfigurationBuilder::with_certificates`.
+- **Store**: `crates/core/src/peers.rs`, `peers.json` version 1. Migrates the
+  pre-S35 file (version 0) on first load; keeps fields it does not know;
+  moves an unreadable file aside rather than overwriting it. Matches on
+  fingerprint only. `remember` is the code-verified path and the only one
+  that creates an entry; `touch` (the trusted path) can only update one.
+- **Wire**: `SigMsg::Offer` gained `trusted: bool` (serde default `false`).
+  A trusted offer carries an empty MAC. A receiver that predates the field
+  fails the MAC and says `Bye`, and the sender turns that into "pair with
+  its code once and it will" — the right fallback, by construction.
+- **Receiver** (`receiver.rs`): a trusted offer is accepted only if
+  `peers::recognise(fingerprint)` hits, and **"paired" is not reported until
+  DTLS has completed**, because the fingerprint in an SDP is public and
+  only the key-holder can finish the handshake with it. A stranger who
+  presents a remembered fingerprint is refused and named as such in the log.
+  A code-verified offer is remembered, as before.
+- **Sender** (`sender.rs`): given `--trusted <fingerprint>`, it sends no MAC
+  and checks the receiver's *answer* carries that fingerprint — mutual
+  authentication, so a LAN device calling itself by a remembered name gets
+  nowhere. Both ends `touch` the store only after DTLS connects.
+- **Service** (`service.rs`): the client names a peer by *id*.
+  `resolve_share_peer` turns it into name + fingerprint; `ShareRequest::trusted`
+  is `#[serde(skip)]`, so nothing over IPC can set it. A missing peer and a
+  missing code are both refused before the engine starts, in words.
+- **UI**: the Share screen lists remembered PCs (favourites, last connected)
+  above scanned ones and hides the code box when one is chosen, saying the one
+  thing that can still fail — the other PC must be on Start receiving. The
+  Receive screen lists remembered PCs with a real Forget, and says
+  "remembered, no code" when a sender got in that way.
+- **Not done**: DPAPI wrapping of `identity.pem` (§4). Recommended, Windows
+  only, a few lines; deferred so the cross-platform seam is designed once.

@@ -76,7 +76,7 @@ describe("starting a share", () => {
     await settle();
 
     expect(tauri.lastCall("start_share_preset")?.args).toEqual({
-      preset: "desktop", code: "445566", peer: "studio-pc",
+      preset: "desktop", code: "445566", peer: "studio-pc", peerId: null,
     });
     expect(core.state.sharing).toEqual({ kind: "sharing", peer: "studio-pc" });
     h.expectClean();
@@ -344,5 +344,95 @@ describe("the overlay and encoder labels", () => {
     await push(() => tauri.emit("core://share-stats", { event: "stats", codec: "hevc", bitrate_mbps: 50, fps: 60, cpu_percent: 2 }));
     expect(tags()).toEqual(["60 fps", "HEVC"]);
     expect(readout("Load").hint).toBe("Hardware encoder · CPU 2%");
+  });
+});
+
+/** Remembered PCs (S35): one click, no code.
+ *
+ *  The one thing these must prove is that the code path is untouched when
+ *  the list is empty -- which is how every user starts -- and that choosing a
+ *  remembered PC sends an id, never a fingerprint, and no code. */
+describe("remembered PCs", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const remembered = () => [
+    { id: "p1", name: "studio-pc", fingerprint: "sha-256 aa", first_paired_unix: now - 9000,
+      last_seen_unix: now - 120, last_direction: "sent_to" as const, favourite: false },
+    { id: "p2", name: "den-pc", fingerprint: "sha-256 bb", first_paired_unix: now - 90000,
+      last_seen_unix: now - 86400, last_direction: "sent_to" as const, favourite: true },
+  ];
+
+  it("changes nothing when there are none", async () => {
+    await mount();
+    expect(screen.queryAllByTestId("peer-row")).toHaveLength(0);
+    expect(codeBox()).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start sharing" })).toBeDisabled();
+  });
+
+  it("connects with an id and no code, and never a fingerprint", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    expect(screen.getAllByTestId("peer-row")).toHaveLength(2);
+    expect(screen.getByText(/★ den-pc/)).toBeInTheDocument();
+
+    await h.user.click(screen.getByRole("radio", { name: /studio-pc/ }));
+    // The code box is gone; in its place, the one way this can still fail.
+    expect(screen.queryByPlaceholderText(/6 digits/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("no-code-needed")).toHaveTextContent(/Start receiving/);
+    const start = screen.getByRole("button", { name: "Start sharing" });
+    expect(start).toBeEnabled();
+
+    await h.user.click(start);
+    await settle();
+    const args = tauri.lastCall("start_share_preset")?.args ?? {};
+    expect(args).toEqual(expect.objectContaining({ code: "", peer: null, peerId: "p1" }));
+    expect(JSON.stringify(args)).not.toMatch(/sha-256/);
+    expect(core.state.sharing).toEqual({ kind: "sharing", peer: "studio-pc" });
+  });
+
+  it("lists a PC that is both remembered and just scanned once", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Scan for receivers" }));
+    await settle();
+    // studio-pc is in both lists; the remembered row wins.
+    expect(screen.getAllByRole("radio", { name: /studio-pc/ })).toHaveLength(1);
+    expect(screen.getByRole("radio", { name: /living-room-pc/ })).toBeInTheDocument();
+  });
+
+  it("picking a scanned receiver after a remembered one brings the code box back", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("radio", { name: /studio-pc/ }));
+    await h.user.click(screen.getByRole("button", { name: "Scan for receivers" }));
+    await settle();
+    await h.user.click(screen.getByRole("radio", { name: /living-room-pc/ }));
+    expect(codeBox()).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start sharing" })).toBeDisabled();
+  });
+
+  it("says so when the PC is no longer remembered, instead of pretending", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("radio", { name: /studio-pc/ }));
+    // Forgotten on the Receive screen meanwhile.
+    core.peers = [];
+    await h.user.click(screen.getByRole("button", { name: "Start sharing" }));
+    await settle();
+    expect(screen.getByText(/no longer remembered/)).toBeInTheDocument();
+    expect(core.state.sharing).toEqual({ kind: "off" });
+  });
+
+  it("favouriting reaches the core", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Favourite studio-pc" }));
+    await settle();
+    expect(tauri.lastCall("set_peer_favourite")?.args).toEqual({ id: "p1", favourite: true });
+    expect(core.peers.find((p) => p.id === "p1")?.favourite).toBe(true);
   });
 });
