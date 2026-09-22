@@ -605,3 +605,22 @@ from M4: mDNS discovery (picked the real LAN address, not VMware/Tailscale/WSL),
 six-digit pairing, the SDP MAC, DTLS-SRTP, clock sync (RTT 0.25 ms), wired-link
 detection, and both media pipelines. 252 frames, zero dropped, capture→send
 ~2 ms, encode ~4.9 ms.
+
+---
+
+## Build log — what each installer contains, and what only two PCs can prove
+
+Kept here because the second PC is the only place most of it can be checked,
+and a result nobody wrote down gets re-tested. Rule: ship from `main`, state
+the contents, state what is owed.
+
+| Build | `main` | Adds | Verified on two PCs | Owed to two PCs |
+|---|---|---|---|---|
+| r12 | `2d47572` | S30 loss recovery + S33 clock/audio/teardown, first time with S29 in one binary | — | S30's keyframe request and 1 s withholding under real loss; B14/B16/B8 confirmation |
+| r13 | `5c060c4` | S31 stream health; S35 identity foundation | — | chip stays quiet on a good stream; latency never negative |
+| r14 | `0fa9776` | S35 remembered devices (Option A) | — | code pairing → reconnect with no code → consent check (receiver not listening) → Forget → reboot; install-over-the-top on both PCs |
+| r15 | `4cdda0f` | S38 stream resilience | — | kill the sender's engine by PID and watch it return; same for the receiver; Stop is a Stop; give-up time; reboot one PC mid-share; crash line shown once; close notice on/off |
+| r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | — | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
+
+Each build supersedes the one before; install over the top without
+uninstalling, on both PCs — that is the standing-rule check itself.
