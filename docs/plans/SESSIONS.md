@@ -1657,6 +1657,9 @@ Never write the registry; the data root only. Raise questions and failure points
 ```
 
 ## S36 — Direct send to streaming software · `feat/stream-out`
+**Decision doc** `docs/plans/v11-stream-out.md` (2026-09-22): local
+virtual-camera path (a) recommended first, Windows 11 + VB-Cable caveats stated;
+RTMP/SRT push (b) is a product decision for Jake before any plan.
 Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
 straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
 program with little to no setup on the user's part.
@@ -1674,6 +1677,9 @@ request" rule revisited. **First task of the session: write
 `docs/plans/v11-stream-out.md` with the decision and a real DoR/DoD.**
 
 ## S37 — Audio mixer on Share and Receive · `feat/audio-mixer`
+**Plan** `docs/plans/S37-audio-mixer.md` (written 2026-09-22) · **Worktree**
+`C:\Users\stern\Documents\Code\relay-mixer`. Three tracks, not a mixing engine:
+"everything else on the PC" is process loopback with the *exclude* flag.
 Requested by Jake 2026-09-18. When sharing a window or one application
 rather than the whole screen, choose what goes out: that app's sound, the
 whole OS mix, system sounds, the microphone — each on its own fader with
