@@ -3,9 +3,10 @@ import { Card, ErrorNote, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
+import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
-  api, codecLabel, onCoreEvents, type FirewallStatus, type ShareCapabilities, type StreamStatus,
-  type VdeviceStatus, type VideoArea, type VideoCodec,
+  api, codecLabel, onCoreEvents, type FirewallStatus, type ShareCapabilities, type ShareStats,
+  type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
 
 /** Warn before the user tries, not after it fails.
@@ -284,6 +285,50 @@ function useVideoArea(deps: unknown[]) {
  * into a window of its own and back (S29). The pairing code shown here is
  * what the sender types on its Share screen.
  */
+/** The numbers that used to exist only in `share.log`.
+ *
+ *  Every night spent debugging the second PC's picture was spent reading a log
+ *  file over a chat session, because the app itself showed nothing about the
+ *  stream it was playing. This is that information, in the instrument-strip
+ *  idiom: a readout, not an alert.
+ *
+ *  `rtp_recovered` is shown next to `rtp_lost` deliberately. Repaired-but-not-
+ *  lost is the signature of a lossy link that Relay is handling, and someone
+ *  looking at a perfect picture with a large repair count should be able to
+ *  see that rather than conclude the counters are broken. */
+function StreamHealthCard(
+  { on, s, state, d }:
+  { on: boolean; s: ShareStats | null; state: HealthState; d: HealthDelta },
+) {
+  if (!on || !s) return null;
+  const n = (v: number | undefined) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const fps = n(s.fps);
+  const mbps = n(s.bitrate_mbps);
+  const latency = n(s.capture_to_present_ms);
+  const audioMs = n(s.audio?.buffered_ms);
+  const lost = n(s.rtp_lost) ?? 0;
+  const recovered = n(s.rtp_recovered) ?? 0;
+
+  return (
+    <Card title="Stream health">
+      {fps !== null && <Kv k="Frame rate" v={`${fps.toFixed(1)} fps`} mono />}
+      {mbps !== null && <Kv k="Bitrate" v={`${mbps.toFixed(1)} Mb/s`} mono />}
+      {/* Latency is safe to show since B14: the clock is re-estimated during
+          the share, so this no longer drifts and no longer goes negative. */}
+      {latency !== null && <Kv k="Latency" v={`${latency.toFixed(1)} ms`} mono />}
+      {audioMs !== null && <Kv k="Audio delay" v={`${audioMs.toFixed(0)} ms`} mono />}
+      <Kv k="Repaired" v={recovered.toLocaleString()} mono />
+      <Kv k="Lost" v={lost.toLocaleString()} mono />
+      {state === "coping" && d.recovered > 0 && (
+        <p className="note" data-testid="health-coping">
+          This link is dropping packets and Relay is repairing them in time. The picture is not
+          affected.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function Receive() {
   const { mock } = useCore();
   const [receiving, setReceiving] = useState(false);
@@ -297,6 +342,14 @@ export function Receive() {
   // say so rather than snapping back to the idle prompt as if nothing
   // happened. A frozen last frame was the old way of "saying" it.
   const [ended, setEnded] = useState<string | null>(null);
+  // Stream health (S31). The tracker is a ref, not state: it is fed on every
+  // stats line and only the *derived* state should cause a render.
+  const health = useRef(new HealthTracker());
+  const [healthState, setHealthState] = useState<HealthState>("ok");
+  const [healthDelta, setHealthDelta] = useState<HealthDelta>(
+    { lost: 0, recovered: 0, withheld: 0, keyframeRequests: 0 },
+  );
+  const [live, setLive] = useState<ShareStats | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -323,7 +376,20 @@ export function Receive() {
         if (!s.receiving) {
           setSender((was) => { if (was) setEnded(was); return null; });
           setCode(null); setCodec(null);
+          // A dead share leaves no health behind it. Without this the next
+          // one inherits a stale "degraded", and the tracker would diff a
+          // fresh engine's counters against the old engine's totals.
+          health.current.reset();
+          setHealthState("ok");
+          setLive(null);
         }
+      },
+      shareStats: (s) => {
+        // Only the receiver's line carries these; the sender's has none of
+        // them and the tracker ignores it.
+        setHealthState(health.current.push(s));
+        setHealthDelta(health.current.delta());
+        setLive(s);
       },
       stream: (s) => setStream(s),
     }).then((u) => { unsub = u; });
@@ -332,6 +398,7 @@ export function Receive() {
 
   const start = async () => {
     setBusy(true); setError(null); setEnded(null);
+    health.current.reset(); setHealthState("ok"); setLive(null);
     try { await api.startReceive({}); setReceiving(true); }
     catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
@@ -350,6 +417,8 @@ export function Receive() {
   const popped = !!stream?.live && stream.mode === "popout";
   // Re-measure whenever what is around the video area can change.
   const sceneRef = useVideoArea([receiving, sender, error, embedded]);
+
+  const healthMsg = receiving ? healthText(healthState, healthDelta) : null;
 
   const areaText = popped
     ? `Playing in its own window · ${sender ?? ""}`.trim()
@@ -379,6 +448,14 @@ export function Receive() {
               under the picture. */}
           <div className="scene" ref={sceneRef} />
           {areaText && <div className="idlemsg">{areaText}</div>}
+          {/* Sits in the corner over the picture's own window, never across
+              it: the one thing worse than an unexplained bad picture is a
+              message covering the picture you are trying to judge. */}
+          {healthMsg && (
+            <div className="healthchip" data-testid="health-chip" role="status">
+              <i /><span>{healthMsg}</span>
+            </div>
+          )}
         </div>
       </section>
       <aside className="side">
@@ -412,6 +489,7 @@ export function Receive() {
               sharing this PC's screen while receiving would show the stream inside itself.</p>
           )}
         </Card>
+        <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
         <VirtualDeviceCard />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving

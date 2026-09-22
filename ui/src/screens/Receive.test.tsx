@@ -372,3 +372,98 @@ describe("firewall capability", () => {
     expect(screen.queryByText(/Windows Firewall/)).not.toBeInTheDocument();
   });
 });
+
+/** Stream health (S31).
+ *
+ *  These assert the two rules that decide whether the indicator is useful or
+ *  is trained away: it must not appear for a single lost packet, and it must
+ *  never appear for repair alone. Both come from real runs — S30 measured
+ *  2,242 repaired packets with zero lost and a clean picture. */
+describe("stream health", () => {
+  const receiving = () =>
+    push(() => tauri.emit("core://receive-status",
+      { receiving: true, code: "418254", sender: "studio-pc" }));
+
+  /** One receiver `stats` line with cumulative counters. */
+  const stats = (o: Record<string, unknown>) =>
+    push(() => tauri.emit("core://share-stats", { event: "stats", ...o }));
+
+  const chip = () => screen.queryByTestId("health-chip");
+
+  it("shows nothing while the stream is healthy", async () => {
+    await mount();
+    await receiving();
+    await stats({ fps: 60, bitrate_mbps: 40, rtp_lost: 0, rtp_recovered: 0 });
+    await stats({ fps: 60, bitrate_mbps: 40, rtp_lost: 0, rtp_recovered: 0 });
+    expect(chip()).not.toBeInTheDocument();
+  });
+
+  it("does not flash for a single lost packet", async () => {
+    await mount();
+    await receiving();
+    await stats({ rtp_lost: 0 });
+    await stats({ rtp_lost: 1 });
+    expect(chip()).not.toBeInTheDocument();
+  });
+
+  it("never warns about repaired packets, however many", async () => {
+    await mount();
+    await receiving();
+    // S30's acceptance run, in miniature: a lossy link Relay is handling.
+    await stats({ rtp_lost: 0, rtp_recovered: 0 });
+    for (let i = 1; i <= 8; i++) await stats({ rtp_lost: 0, rtp_recovered: i * 280 });
+    expect(chip()).not.toBeInTheDocument();
+    // It is still worth saying, just not as a warning.
+    expect(screen.getByTestId("health-coping")).toBeInTheDocument();
+    expect(kv("Repaired")).toBe("2,240");
+    expect(kv("Lost")).toBe("0");
+  });
+
+  it("warns once damage is sustained, and says so without blaming the network", async () => {
+    await mount();
+    await receiving();
+    await stats({ rtp_lost: 0 });
+    await stats({ rtp_lost: 40 });
+    await stats({ rtp_lost: 90 });
+    const el = chip();
+    expect(el).toBeInTheDocument();
+    expect(el!.textContent ?? "").not.toMatch(/network|Wi-?Fi|router/i);
+  });
+
+  it("clears the warning when the stream recovers", async () => {
+    await mount();
+    await receiving();
+    await stats({ rtp_lost: 0 });
+    await stats({ rtp_lost: 40 });
+    await stats({ rtp_lost: 90 });
+    expect(chip()).toBeInTheDocument();
+    // Clearing is deliberately slower than triggering.
+    for (let i = 0; i < 6; i++) await stats({ rtp_lost: 90 });
+    expect(chip()).not.toBeInTheDocument();
+  });
+
+  it("drops the warning and the readout when the share ends", async () => {
+    await mount();
+    await receiving();
+    await stats({ rtp_lost: 0 });
+    await stats({ rtp_lost: 40 });
+    await stats({ rtp_lost: 90 });
+    expect(chip()).toBeInTheDocument();
+
+    await push(() => tauri.emit("core://receive-status", { receiving: false }));
+    expect(chip()).not.toBeInTheDocument();
+    // And no stale numbers from a dead engine left on screen: the whole card
+    // goes, rather than freezing on the last counts it happened to see.
+    expect(screen.queryByText("Stream health")).not.toBeInTheDocument();
+  });
+
+  it("shows latency, which B14 made trustworthy again", async () => {
+    await mount();
+    await receiving();
+    await stats({ fps: 59.9, bitrate_mbps: 38.2, capture_to_present_ms: 1.3,
+      audio: { buffered_ms: 44 }, rtp_lost: 0, rtp_recovered: 0 });
+    expect(kv("Latency")).toBe("1.3 ms");
+    expect(kv("Audio delay")).toBe("44 ms");
+    expect(kv("Frame rate")).toBe("59.9 fps");
+  });
+});

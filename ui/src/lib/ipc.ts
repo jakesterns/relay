@@ -168,6 +168,27 @@ export interface ShareStats {
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;
   replay_fill?: number; replays_saved?: number; rec_stopped_disk?: boolean;
+
+  // --- Receiver-side stream health (S30, S33). Absent on the sender's line. ---
+  /** Access units assembled, and frames actually put on screen. */
+  aus?: number; presented?: number;
+  /** Sequence gaps and packets still missing *after* NACK repair. */
+  rtp_gaps?: number; rtp_lost?: number;
+  /** Holes NACK filled in time. High with `rtp_lost` at 0 means the link is
+   *  lossy and Relay is coping — which is not a problem to report. */
+  rtp_recovered?: number;
+  /** Keyframes asked for because a gap could not be repaired. */
+  keyframe_requests?: number;
+  /** Frames held back while waiting for that keyframe (capped at ~1 s). */
+  frames_withheld?: number;
+  audio?: AudioHealth;
+}
+/** The receiver's audio pipeline, from `playback.rs` (S33's B16 work). */
+export interface AudioHealth {
+  buffered_ms?: number; render_ms?: number; queue_ms?: number;
+  channel_packets?: number; engine_ms?: number; render_buffer_ms?: number;
+  underruns?: number; slew_skipped?: number; slew_repeated?: number;
+  dropped_frames?: number;
 }
 export interface RecordingStatus { on: boolean; path: string | null }
 export interface ReplaySaved { path: string; ms: number }
