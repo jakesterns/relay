@@ -45,6 +45,9 @@ pub fn summary(state: &CoreState, autostart: bool) -> String {
     let share = match &state.sharing {
         ShareState::Off => "off".to_string(),
         ShareState::Sharing { peer } => format!("sending to {peer}"),
+        ShareState::Reconnecting { peer, attempt } => {
+            format!("reconnecting to {peer} (attempt {attempt})")
+        }
     };
     let _ = writeln!(s, "  share        {share}");
     let _ = writeln!(

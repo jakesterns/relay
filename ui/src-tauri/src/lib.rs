@@ -148,6 +148,15 @@ async fn start_core() -> CmdResult<bool> {
     }
 }
 
+/// The user has read the last-crash line (S38).
+#[tauri::command]
+async fn ack_crash() -> CmdResult<()> {
+    match call(Method::AckCrash).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::GetUiPrefs).await? {
@@ -864,6 +873,10 @@ pub fn run() {
             .init(),
     }
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "relay-ui starting");
+    // S38: a panic in the shell leaves a record beside the core's.
+    if let Ok(paths) = relay_core::config::Paths::default_for_user() {
+        relay_core::crash::install_panic_hook(relay_core::crash::dir(&paths), "relay-ui");
+    }
 
     // Held until the process ends; the OS releases the name then.
     #[cfg(windows)]
@@ -908,7 +921,19 @@ pub fn run() {
                     // separate processes: the close proceeds untouched, this
                     // process ends and gives its ~25 MB back, and the core
                     // carries on applying profiles with the notification-area
-                    // icon there to say so. Nothing to do.
+                    // icon there to say so.
+                    //
+                    // S38: tell the core, so it can say so in a balloon (a
+                    // preference, on by default). Bounded and blocking on
+                    // purpose: this process is about to exit, and a task
+                    // spawned here would be dropped with it.
+                    let _ = tauri::async_runtime::block_on(async {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            call(Method::WindowClosed),
+                        )
+                        .await
+                    });
                     return;
                 }
                 // The user asked for closing to mean quitting Relay. The close
@@ -967,6 +992,7 @@ pub fn run() {
             list_peers,
             forget_peer,
             set_peer_favourite,
+            ack_crash,
             list_hardware,
             save_hardware,
             delete_hardware,

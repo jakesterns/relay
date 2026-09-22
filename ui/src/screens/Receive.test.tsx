@@ -524,3 +524,37 @@ describe("remembered PCs", () => {
     expect(screen.getByText("Remembered PCs")).toBeInTheDocument();
   });
 });
+
+/** S38: the core restarts a receiver whose sender vanished. The screen must
+ *  say that, not pretend it is a fresh wait -- and must not say it after a
+ *  wait the user started by hand. */
+describe("a receiver brought back on its own", () => {
+  const paired = () =>
+    push(() => tauri.emit("core://receive-status",
+      { receiving: true, code: "418254", sender: "studio-pc" }));
+  const gone = () => push(() => tauri.emit("core://receive-status", { receiving: false }));
+  const waiting = () =>
+    push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254" }));
+
+  it("says the share dropped and it is waiting for it", async () => {
+    await mount();
+    await paired();
+    await gone();
+    expect(screen.getByText("The share from studio-pc ended.")).toBeInTheDocument();
+    // No hand on Start receiving: the core did this.
+    await waiting();
+    expect(screen.getByText(/The share from studio-pc dropped — waiting for it to come back/))
+      .toBeInTheDocument();
+  });
+
+  it("but a Start receiving by hand is a fresh wait", async () => {
+    const h = await mount();
+    await paired();
+    await gone();
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await settle();
+    await waiting();
+    expect(screen.getByText("Waiting for a sender to pair…")).toBeInTheDocument();
+    expect(screen.queryByText(/dropped/)).not.toBeInTheDocument();
+  });
+});

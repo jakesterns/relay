@@ -65,6 +65,17 @@ impl WinLoop {
     }
 }
 
+/// Show a notification-area balloon from the tray icon (S38): the one way the
+/// core can say something with no window open. Safe from any thread — the
+/// text is handed to the loop thread, which owns the icon. A no-op before the
+/// loop is up or where there is no tray.
+pub fn balloon(title: &str, text: &str) {
+    #[cfg(windows)]
+    imp::balloon(title, text);
+    #[cfg(not(windows))]
+    let _ = (title, text);
+}
+
 impl Drop for WinLoop {
     fn drop(&mut self) {
         self.request_stop();
@@ -154,6 +165,32 @@ mod imp {
     /// process-wide and never 0, so 0 doubles as "not registered yet".
     static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
+    /// The loop thread's id, for posting it work from other threads; 0 until
+    /// the loop is up.
+    static LOOP_THREAD: AtomicU32 = AtomicU32::new(0);
+
+    /// A balloon waiting to be shown by the loop thread (S38). One slot: a
+    /// second request before the first is shown replaces it, which is also
+    /// what Windows does with the balloons themselves.
+    static BALLOON: Mutex<Option<(String, String)>> = Mutex::new(None);
+
+    /// Thread message: "show the balloon in `BALLOON`". `WM_APP + 2`;
+    /// `WM_APP + 1` is the tray's callback.
+    const WM_BALLOON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
+
+    pub fn balloon(title: &str, text: &str) {
+        let thread = LOOP_THREAD.load(Ordering::Relaxed);
+        if thread == 0 {
+            debug!(title, "balloon requested before the loop is up; dropped");
+            return;
+        }
+        *BALLOON.lock() = Some((title.to_string(), text.to_string()));
+        // SAFETY: posting a message to our own loop thread; no pointers cross.
+        unsafe {
+            let _ = PostThreadMessageW(thread, WM_BALLOON, WPARAM(0), LPARAM(0));
+        }
+    }
+
     /// Tiny wrapper so the registration site reads as a plain assignment.
     trait SetOnce {
         fn set(&self, v: u32);
@@ -175,6 +212,7 @@ mod imp {
         let join = std::thread::Builder::new().name("relay-winloop".into()).spawn(move || {
             // SAFETY: plain Win32 calls on our own thread; handles are unhooked below.
             unsafe {
+                LOOP_THREAD.store(GetCurrentThreadId(), Ordering::Relaxed);
                 let _ = id_tx.send(GetCurrentThreadId());
 
                 let _ = SetConsoleCtrlHandler(Some(ctrl_handler), true);
@@ -236,6 +274,20 @@ mod imp {
 
                 let mut msg = MSG::default();
                 while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                    if msg.message == WM_BALLOON {
+                        // A thread message, not a window one, so it is handled
+                        // here rather than in the window procedure.
+                        if let Some((title, text)) = BALLOON.lock().take() {
+                            // Inside the loop's `unsafe` block: this thread
+                            // owns the window and the icon.
+                            TRAY.with(|t| {
+                                if let Some(tray) = t.borrow().as_ref() {
+                                    tray.balloon(&title, &text);
+                                }
+                            });
+                        }
+                        continue;
+                    }
                     if msg.message == WM_HOTKEY {
                         if let Some(action) = HotkeyAction::from_id(msg.wParam.0 as i32) {
                             emit(CoreEvent::Hotkey(action));
@@ -248,6 +300,7 @@ mod imp {
 
                 // Drop the icon before the window it hangs off goes away, or
                 // it lingers in the notification area as a dead entry.
+                LOOP_THREAD.store(0, Ordering::Relaxed);
                 TRAY.with(|t| t.borrow_mut().take());
                 if let Some(w) = hw_window {
                     let _ = WTSUnRegisterSessionNotification(w);

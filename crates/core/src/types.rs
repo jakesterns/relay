@@ -235,6 +235,10 @@ pub struct CoreState {
     /// `--data-dir` and `RELAY_INSTANCE` both move them.
     #[serde(default)]
     pub build: BuildInfo,
+    /// One sentence about a crash record not yet shown to the user (S38).
+    /// Set once at start, cleared by `Method::AckCrash`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_crash: Option<String>,
 }
 
 /// What this build is and where it keeps its files.
@@ -274,6 +278,12 @@ pub enum ShareState {
     Off,
     Sharing {
         peer: String,
+    },
+    /// The share dropped and Relay is bringing it back (S38). `attempt` is
+    /// how many times it has tried so far in this episode.
+    Reconnecting {
+        peer: String,
+        attempt: u32,
     },
 }
 

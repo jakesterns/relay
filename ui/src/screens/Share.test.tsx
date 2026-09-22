@@ -436,3 +436,26 @@ describe("remembered PCs", () => {
     expect(core.peers.find((p) => p.id === "p1")?.favourite).toBe(true);
   });
 });
+
+/** S38: a share being brought back is still the user's share. */
+describe("reconnecting", () => {
+  it("shows the attempt in the pill and keeps Stop where it was", async () => {
+    await mount();
+    core.state.sharing = { kind: "reconnecting", peer: "studio-pc", attempt: 2 };
+    await pushState();
+    expect(screen.getByText("Reconnecting (2)…")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop sharing" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Start sharing" })).not.toBeInTheDocument();
+    expect(kv("Peer")).toBe("studio-pc");
+  });
+
+  it("reads as plain Sharing again once it is back", async () => {
+    await mount();
+    core.state.sharing = { kind: "reconnecting", peer: "studio-pc", attempt: 1 };
+    await pushState();
+    core.state.sharing = { kind: "sharing", peer: "studio-pc" };
+    await pushState();
+    expect(screen.getByText("Sharing")).toBeInTheDocument();
+    expect(screen.queryByText(/Reconnecting/)).not.toBeInTheDocument();
+  });
+});

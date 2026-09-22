@@ -56,11 +56,17 @@ export function Settings() {
     }
   };
 
-  const setClose = async (quit: boolean) => {
+  // Always the whole object: the core replaces the file with what it is
+  // sent, so a partial patch would silently reset every other preference to
+  // its default -- exactly the "an update reset my settings" the standing
+  // rule forbids, only self-inflicted.
+  const setPref = async (patch: Partial<UiPrefs>) => {
+    if (!prefs) return;
     setPrefsErr(null);
-    try { setPrefs(await api.setUiPrefs({ close_action: quit ? "quit_relay" : "keep_running" })); }
+    try { setPrefs(await api.setUiPrefs({ ...prefs, ...patch })); }
     catch (e) { setPrefsErr(String((e as { message?: string })?.message ?? e)); }
   };
+  const setClose = (quit: boolean) => setPref({ close_action: quit ? "quit_relay" : "keep_running" });
 
   const editRecording = (patch: Partial<RecordingSettings>) => {
     setRecording((r) => (r ? { ...r, ...patch } : r));
@@ -120,6 +126,24 @@ export function Settings() {
               : prefs.close_action === "quit_relay"
                 ? "Closing the window stops Relay and restores your audio and display first. Profiles will not apply again until you open Relay."
                 : "Closing the window leaves Relay running so your profiles keep working. Quit Relay from the notification area to stop it."} />
+          <Toggle
+            on={prefs?.close_notice ?? true}
+            onChange={prefs === null ? undefined : (v) => void setPref({ close_notice: v })}
+            label="Say so in the notification area when I close the window"
+            sub={prefs === null
+              ? "Reading…"
+              : prefs.close_notice
+                ? "A short message by the clock each time the window closes and Relay keeps running."
+                : "Nothing is shown when the window closes. The icon by the clock is still there."} />
+          <Toggle
+            on={prefs?.resilience ?? true}
+            onChange={prefs === null ? undefined : (v) => void setPref({ resilience: v })}
+            label="Bring a share back on its own if it drops"
+            sub={prefs === null
+              ? "Reading…"
+              : prefs.resilience
+                ? "If a share you started dies — a crash, a dropped link, a reboot — Relay reconnects, keeps trying for three minutes, and tells you what it is doing. Stop sharing ends it as usual."
+                : "A share that dies stays dead until you start it again. Relay still records what happened."} />
           {prefsErr && <div className="offline"><i />{prefsErr}</div>}
         </Card>
         <Card title="What Relay installs">

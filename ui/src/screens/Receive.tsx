@@ -492,7 +492,14 @@ export function Receive() {
       : sender
         ? `Connected to ${sender} — waiting for the first frame…`
         : receiving
-          ? "Waiting for a sender to pair…"
+          // `ended` survives only an automatic restart: Start receiving by
+          // hand clears it. So "receiving, with a name still remembered" is
+          // exactly "the share dropped and the core brought the receiver
+          // back on its own" (S38), and it says so rather than pretending
+          // this is a fresh wait.
+          ? ended
+            ? `The share from ${ended} dropped — waiting for it to come back…`
+            : "Waiting for a sender to pair…"
           : ended
             ? `The share from ${ended} ended.`
             : "Press Start receiving, then enter the code on the sending PC.";

@@ -61,8 +61,8 @@ mod imp {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
     use windows::Win32::UI::Shell::{
-        ExtractIconW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
-        NOTIFYICONDATAW,
+        ExtractIconW, Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO,
+        NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
@@ -177,6 +177,38 @@ mod imp {
             // SAFETY: as documented on the method.
             unsafe {
                 self.notify(NIM_DELETE);
+            }
+        }
+
+        /// A balloon from the icon (S38): the one way the core can say
+        /// something with no window open. Windows shows it as a toast and
+        /// keeps it in the notification centre; a second call replaces the
+        /// first. Text is cut to the `szInfo` / `szInfoTitle` limits.
+        ///
+        /// # Safety
+        /// Must be called on the thread that owns the window.
+        pub unsafe fn balloon(&self, title: &str, text: &str) {
+            // SAFETY: `data` is fully initialised and lives across the call.
+            unsafe {
+                let mut data = NOTIFYICONDATAW {
+                    cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                    hWnd: self.hwnd,
+                    uID: 1,
+                    uFlags: NIF_INFO,
+                    ..Default::default()
+                };
+                data.Anonymous.uTimeout = 10_000;
+                data.dwInfoFlags = NIIF_INFO;
+                let put = |dst: &mut [u16], s: &str| {
+                    let w: Vec<u16> = s.encode_utf16().collect();
+                    let n = w.len().min(dst.len() - 1);
+                    dst[..n].copy_from_slice(&w[..n]);
+                };
+                put(&mut data.szInfoTitle, title);
+                put(&mut data.szInfo, text);
+                if !Shell_NotifyIconW(NIM_MODIFY, &data).as_bool() {
+                    warn!(title, "notification-area balloon was not shown");
+                }
             }
         }
 

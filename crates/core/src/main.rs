@@ -420,6 +420,9 @@ fn run(args: Args) -> Result<()> {
     };
     args.paths.ensure()?;
     logging::init_service(&args.paths.log_file(), args.verbose)?;
+    // S38: a panic leaves a record the next start can name, not just a
+    // stderr line nobody was watching.
+    relay_core::crash::install_panic_hook(relay_core::crash::dir(&args.paths), "relay-core");
     hide_own_console();
     Service::run(args.paths, Backends::from_env())
 }

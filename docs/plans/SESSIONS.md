@@ -1733,6 +1733,11 @@ exists (`settings.json` `close_action`, default keep-running, S23); what
 this adds is the notification-area message on close and the resilience
 toggle beside it.
 
+**Built 2026-09-22, the day S35 merged** (the only hard dependency). See the
+plan's Definition of Done for what is ticked and the roadmap entry for what
+shipped. Owed to two PCs: the in-session kill test on each end, and the
+reboot-of-one / reboot-of-both resume.
+
 
 # Group 5 — v1.1 backlog
 
