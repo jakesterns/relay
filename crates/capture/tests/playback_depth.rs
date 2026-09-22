@@ -20,7 +20,13 @@ fn measure(secs: u64) -> (f64, f64, Arc<PlaybackStats>) {
     let (stop_tx, stop_rx) = std::sync::mpsc::channel();
     let stats = Arc::new(PlaybackStats::default());
     let stats2 = stats.clone();
-    let player = std::thread::spawn(move || playback::run(rx, mic_rx, stop_rx, None, stats2));
+    // S37: a third track and the faders; neither is fed here, and unity is
+    // the default, so the depth measurement is unchanged.
+    let (_rest_tx, rest_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    let faders = relay_capture::mixer::Faders::shared();
+    let player = std::thread::spawn(move || {
+        playback::run(rx, mic_rx, rest_rx, stop_rx, None, stats2, faders)
+    });
 
     let mut enc =
         opus::Encoder::new(48_000, opus::Channels::Stereo, opus::Application::Audio).unwrap();

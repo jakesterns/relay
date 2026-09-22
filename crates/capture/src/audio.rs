@@ -23,8 +23,9 @@ use windows::Win32::Media::Audio::{
     IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK, AUDIOCLIENT_ACTIVATION_PARAMS,
     AUDIOCLIENT_ACTIVATION_PARAMS_0, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-    VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
+    AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS, PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    WAVEFORMATEX, WAVEFORMATEXTENSIBLE,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -41,6 +42,10 @@ pub enum AudioSource {
     Desktop,
     /// One process tree only (`AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`).
     Process { pid: u32 },
+    /// Everything on the endpoint *except* one process tree (S37): the same
+    /// activation with the exclude flag, so "the rest of the PC" is one
+    /// capture the audio engine has already mixed, not a session walk of ours.
+    Rest { pid: u32 },
     /// Default capture endpoint (microphone).
     Microphone,
 }
@@ -123,13 +128,18 @@ fn activate_client(source: &AudioSource) -> Result<(IAudioClient, u32)> {
                 let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
                 Ok((client, 0))
             }
-            AudioSource::Process { pid } => {
+            AudioSource::Process { pid } | AudioSource::Rest { pid } => {
+                let mode = if matches!(source, AudioSource::Rest { .. }) {
+                    PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE
+                } else {
+                    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE
+                };
                 let params = AUDIOCLIENT_ACTIVATION_PARAMS {
                     ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
                     Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
                         ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
                             TargetProcessId: *pid,
-                            ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+                            ProcessLoopbackMode: mode,
                         },
                     },
                 };
@@ -322,7 +332,13 @@ pub struct OpusStream {
     /// log so an audio-quality question has the conversion visible.
     pub conversion: Option<String>,
     /// Peak of the last encoded frame, 0..=1 (for the instrument strip).
+    /// Measured *after* the fader, so a muted track meters as silence —
+    /// what is sent, not what was captured.
     pub peak: f32,
+    /// The fader this track reads, if the share has a mixer (S37).
+    faders: Option<(Arc<crate::mixer::Faders>, crate::mixer::Track)>,
+    /// Gain the previous frame ended on, so a change ramps from there.
+    gain: f32,
 }
 
 pub struct OpusPacket {
@@ -410,7 +426,15 @@ impl OpusStream {
             frame_samples,
             conversion,
             peak: 0.0,
+            faders: None,
+            gain: 1.0,
         })
+    }
+
+    /// Read gain and mute for `track` from `faders` before every frame (S37).
+    /// Without this the stream encodes at unity, as it always has.
+    pub fn set_faders(&mut self, faders: Arc<crate::mixer::Faders>, track: crate::mixer::Track) {
+        self.faders = Some((faders, track));
     }
 
     /// The endpoint's own sample rate, before conversion.
@@ -453,7 +477,14 @@ impl OpusStream {
             }
         }
         let captured_qpc_100ns = take_capture_stamp(&mut self.stamps, self.frame_samples);
-        let frame: Vec<f32> = self.pending.drain(..self.frame_samples).collect();
+        let mut frame: Vec<f32> = self.pending.drain(..self.frame_samples).collect();
+        // The fader, ramped across this frame (S37). A muted track keeps
+        // sending: silence is cheaper to reason about on both ends than a
+        // track that comes and goes.
+        if let Some((faders, track)) = self.faders.as_ref() {
+            self.gain =
+                crate::mixer::apply_gain(&mut frame, self.gain, faders.get(*track).target());
+        }
         self.peak = frame.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         let data = self.encoder.encode_vec_float(&frame, 1500)?;
         Ok(Some(OpusPacket {

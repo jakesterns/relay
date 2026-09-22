@@ -24,6 +24,7 @@ pub mod d3d;
 pub mod decode;
 #[cfg(windows)]
 pub mod encode;
+pub mod mixer;
 pub mod pace;
 #[cfg(windows)]
 pub mod playback;

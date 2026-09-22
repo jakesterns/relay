@@ -11,7 +11,7 @@ import { push, renderScreen, settle } from "../test/render";
 import { card, field, inCard, kv, readout } from "../test/dom";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
-import { Share } from "./Share";
+import { Share, sendRows } from "./Share";
 
 let core: FakeCore;
 
@@ -457,5 +457,42 @@ describe("reconnecting", () => {
     await pushState();
     expect(screen.getByText("Sharing")).toBeInTheDocument();
     expect(screen.queryByText(/Reconnecting/)).not.toBeInTheDocument();
+  });
+});
+
+/** The mixer on the sending end (S37): rows match the preset's tracks, it
+ *  appears only while sharing, and the preset editor can ask for the
+ *  rest-of-PC track beside Game and nowhere else. */
+describe("the mixer", () => {
+  it("is absent until a share runs, then shows one row per track", async () => {
+    await mount();
+    expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
+    // The Game preset: game audio only, no mic, no rest.
+    await mount(); // fresh, on the game preset by default
+    core.state.sharing = { kind: "sharing", peer: "living-room-pc" };
+    await pushState();
+    expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
+  });
+
+  it("derives its rows from the preset's audio, in the order they sound", () => {
+    expect(sendRows({ desktop: "game", mic: true, rest: true }).map((r) => r.key))
+      .toEqual(["app", "rest", "mic"]);
+    expect(sendRows({ desktop: "system", mic: false, rest: true }).map((r) => r.key))
+      .toEqual(["app"]);
+    expect(sendRows({ desktop: "off", mic: true })).toEqual([{ key: "mic", label: "Microphone" }]);
+    expect(sendRows({ desktop: "off", mic: false })).toEqual([]);
+    expect(sendRows(undefined)).toEqual([]);
+  });
+
+  it("shows the card with the running preset's rows once the share starts here", async () => {
+    const h = await mount();
+    await h.user.type(codeBox(), "123456");
+    await h.user.click(screen.getByRole("button", { name: "Start sharing" }));
+    await settle();
+    await pushState();
+    // Started from this screen, so the preset is known: Game = one row.
+    expect(screen.getByText("Mixer")).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Game" })).toBeInTheDocument();
+    expect(screen.queryByRole("slider", { name: "Microphone" })).not.toBeInTheDocument();
   });
 });

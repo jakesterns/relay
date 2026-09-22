@@ -92,6 +92,11 @@ pub enum Method {
     SwitchSource {
         target: SourceTarget,
     },
+    /// Per-track gain and mute on the running share or receive, live (S37).
+    SetMixer {
+        side: crate::share::MixerSide,
+        faders: crate::share::FaderSet,
+    },
     /// Presets and recording settings.
     ListPresets,
     SavePreset {

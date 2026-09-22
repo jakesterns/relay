@@ -51,6 +51,10 @@ pub struct ShareRequest {
     /// false` with `mic: true`.
     #[serde(default)]
     pub mic: bool,
+    /// Also send everything on the PC except the shared app, as a third
+    /// track (S37). Only meaningful with `audio_pid`; ignored otherwise.
+    #[serde(default)]
+    pub rest: bool,
     #[serde(default = "default_true")]
     pub cursor: bool,
     /// The preset this request was resolved from (informational).
@@ -112,12 +116,43 @@ pub enum SourceTarget {
 /// you are sharing and cheap enough to be invisible in the latency budget.
 pub const DEFAULT_PREVIEW_FPS: u32 = 2;
 
+/// Mirror of `relay_capture::command::FaderLevel` (S37).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct FaderLevel {
+    pub gain: f32,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+/// Mirror of `relay_capture::command::FaderSet`.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct FaderSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<FaderLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<FaderLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic: Option<FaderLevel>,
+}
+
+/// Which engine a mixer command is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MixerSide {
+    Send,
+    Receive,
+}
+
 /// Mirror of `relay_capture::command::EngineCmd`, serialised onto the
 /// engine's stdin one line at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCmd {
     Stop,
+    /// Per-track gain and mute, live, on either engine (S37).
+    Mixer {
+        faders: FaderSet,
+    },
     Record {
         on: bool,
     },
@@ -479,6 +514,11 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     if req.mic {
         args.push("--audio-mic".into());
     }
+    // Only with an app to be the rest of: the engine ignores it otherwise,
+    // and not sending it keeps the line identical for every existing preset.
+    if req.rest && req.audio && req.audio_pid.is_some() {
+        args.push("--audio-rest".into());
+    }
     if !req.cursor {
         args.push("--no-cursor".into());
     }
@@ -732,6 +772,37 @@ mod tests {
         let args = send_args(&req);
         assert!(args.contains(&"--no-audio".to_string()));
         assert!(args.contains(&"--audio-mic".to_string()));
+    }
+
+    /// S37: the rest-of-PC track only rides beside a game, never the desktop
+    /// mix, and only when asked for -- every existing preset's line is
+    /// byte-identical.
+    #[test]
+    fn send_args_rest_only_beside_a_game() {
+        let with: ShareRequest =
+            serde_json::from_str(r#"{"code":"1","audio_pid":4321,"rest":true}"#).unwrap();
+        assert!(send_args(&with).contains(&"--audio-rest".to_string()));
+        let desktop: ShareRequest = serde_json::from_str(r#"{"code":"1","rest":true}"#).unwrap();
+        assert!(!send_args(&desktop).contains(&"--audio-rest".to_string()));
+        let plain: ShareRequest = serde_json::from_str(r#"{"code":"1","audio_pid":4321}"#).unwrap();
+        assert!(!send_args(&plain).contains(&"--audio-rest".to_string()));
+    }
+
+    /// S37: the mixer command's wire shape, as the engine parses it. A fader
+    /// left out is left out, so a slider move is one field.
+    #[test]
+    fn mixer_wire_shape_is_locked() {
+        let cmd = EngineCmd::Mixer {
+            faders: FaderSet {
+                app: None,
+                rest: Some(FaderLevel { gain: 0.5, mute: false }),
+                mic: Some(FaderLevel { gain: 1.0, mute: true }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&cmd).unwrap(),
+            r#"{"cmd":"mixer","faders":{"rest":{"gain":0.5,"mute":false},"mic":{"gain":1.0,"mute":true}}}"#
+        );
     }
 
     /// And no mic asked for means no mic flag: single-track peers and

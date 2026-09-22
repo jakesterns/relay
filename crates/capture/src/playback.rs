@@ -113,14 +113,16 @@ impl PlaybackStats {
 pub fn run(
     opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mic_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    rest_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     stop: Receiver<()>,
     device_id: Option<String>,
     stats: Arc<PlaybackStats>,
+    faders: Arc<crate::mixer::Faders>,
 ) -> Result<()> {
     // SAFETY: COM for this thread; WASAPI render loop; balanced on return.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
-        let result = render_loop(opus_rx, mic_rx, stop, device_id, stats);
+        let result = render_loop(opus_rx, mic_rx, rest_rx, stop, device_id, stats, faders);
         CoUninitialize();
         result
     }
@@ -305,9 +307,11 @@ fn render_format() -> WAVEFORMATEXTENSIBLE {
 unsafe fn render_loop(
     opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     mic_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    rest_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     stop: Receiver<()>,
     device_id: Option<String>,
     stats: Arc<PlaybackStats>,
+    faders: Arc<crate::mixer::Faders>,
 ) -> Result<()> {
     let legacy = std::env::var_os("RELAY_AUDIO_LEGACY").is_some();
     let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -356,9 +360,17 @@ unsafe fn render_loop(
         "audio playback up"
     );
 
-    // One per incoming track. A sender with no mic simply never feeds the
-    // second stream, which then contributes silence and costs one add.
-    let mut streams = [DecodedStream::new(opus_rx, legacy)?, DecodedStream::new(mic_rx, legacy)?];
+    // One per incoming track. A sender with no mic or no rest track simply
+    // never feeds that stream, which then contributes silence and costs one
+    // add. Order matches `gains` and the faders below.
+    let mut streams = [
+        DecodedStream::new(opus_rx, legacy)?,
+        DecodedStream::new(mic_rx, legacy)?,
+        DecodedStream::new(rest_rx, legacy)?,
+    ];
+    // The gain each stream ended the last buffer on; a fader change ramps
+    // from here across the next buffer (S37), so a mute never clicks.
+    let mut gains = [1.0f32; 3];
     // Room for the longest Opus frame (120 ms), whatever the sender chose.
     let mut pcm = vec![0f32; 5760 * 2];
 
@@ -381,11 +393,18 @@ unsafe fn render_loop(
         if room > 0 {
             let ptr = render.GetBuffer(room)?;
             let out = std::slice::from_raw_parts_mut(ptr as *mut f32, room as usize * 2);
+            let targets = [faders.app.target(), faders.mic.target(), faders.rest.target()];
+            let steps = std::array::from_fn::<f32, 3, _>(|i| (targets[i] - gains[i]) / room as f32);
             for frame in out.chunks_exact_mut(2) {
+                for i in 0..3 {
+                    gains[i] += steps[i];
+                }
                 let pairs = streams.each_mut().map(|s| s.queue.pop_pair());
-                frame[0] = mix_sum(&pairs.map(|p| p.0));
-                frame[1] = mix_sum(&pairs.map(|p| p.1));
+                frame[0] = mix_sum(&std::array::from_fn::<f32, 3, _>(|i| pairs[i].0 * gains[i]));
+                frame[1] = mix_sum(&std::array::from_fn::<f32, 3, _>(|i| pairs[i].1 * gains[i]));
             }
+            // Land exactly, so float drift over many buffers cannot creep.
+            gains = targets;
             render.ReleaseBuffer(room, 0)?;
         }
 

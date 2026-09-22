@@ -35,16 +35,20 @@ pub enum DesktopAudio {
 pub struct PresetAudio {
     pub desktop: DesktopAudio,
     pub mic: bool,
+    /// With `Game`: also send everything else on the PC as its own track,
+    /// so the receiver can mix or mute it separately (S37). Meaningless with
+    /// `System` (that already is everything) and `Off`; ignored there.
+    pub rest: bool,
 }
 
 impl PresetAudio {
     /// No audio at all.
     pub fn off() -> Self {
-        Self { desktop: DesktopAudio::Off, mic: false }
+        Self { desktop: DesktopAudio::Off, mic: false, rest: false }
     }
 
     pub fn desktop(desktop: DesktopAudio) -> Self {
-        Self { desktop, mic: false }
+        Self { desktop, mic: false, rest: false }
     }
 
     /// Does this preset ask for any audio track at all?
@@ -65,6 +69,8 @@ enum PresetAudioRepr {
         desktop: DesktopAudio,
         #[serde(default)]
         mic: bool,
+        #[serde(default)]
+        rest: bool,
     },
     Legacy(LegacyAudio),
 }
@@ -81,11 +87,11 @@ enum LegacyAudio {
 impl From<PresetAudioRepr> for PresetAudio {
     fn from(r: PresetAudioRepr) -> Self {
         match r {
-            PresetAudioRepr::Set { desktop, mic } => Self { desktop, mic },
+            PresetAudioRepr::Set { desktop, mic, rest } => Self { desktop, mic, rest },
             PresetAudioRepr::Legacy(LegacyAudio::System) => Self::desktop(DesktopAudio::System),
             PresetAudioRepr::Legacy(LegacyAudio::Game) => Self::desktop(DesktopAudio::Game),
             PresetAudioRepr::Legacy(LegacyAudio::Mic) => {
-                Self { desktop: DesktopAudio::Off, mic: true }
+                Self { desktop: DesktopAudio::Off, mic: true, rest: false }
             }
             PresetAudioRepr::Legacy(LegacyAudio::Off) => Self::off(),
         }
@@ -94,7 +100,7 @@ impl From<PresetAudioRepr> for PresetAudio {
 
 impl From<PresetAudio> for PresetAudioRepr {
     fn from(a: PresetAudio) -> Self {
-        PresetAudioRepr::Set { desktop: a.desktop, mic: a.mic }
+        PresetAudioRepr::Set { desktop: a.desktop, mic: a.mic, rest: a.rest }
     }
 }
 
@@ -319,6 +325,8 @@ pub fn to_share_request(
     // `mic` is additive: it asks for a *second* Opus track, so a preset can
     // now carry the game and the microphone at once.
     let mic = preset.audio.mic;
+    // The rest of the PC only exists as a track beside a game (S37).
+    let rest = preset.audio.rest && preset.audio.desktop == DesktopAudio::Game;
     ShareRequest {
         peer,
         code,
@@ -331,6 +339,7 @@ pub fn to_share_request(
         audio,
         audio_pid,
         mic,
+        rest,
         cursor: preset.cursor,
         preset: Some(preset.id.clone()),
         record: preset.record,
@@ -397,7 +406,7 @@ mod tests {
             bitrate_mbps: 20,
             fps: 30,
             size: Some((1920, 1080)),
-            audio: PresetAudio { desktop: DesktopAudio::Off, mic: true },
+            audio: PresetAudio { desktop: DesktopAudio::Off, mic: true, rest: false },
             cursor: true,
             record: true,
             replay_secs: 0,
@@ -444,7 +453,7 @@ mod tests {
     fn a_preset_can_ask_for_game_audio_and_the_microphone_together() {
         let rec = RecordingSettings::default();
         let both = SharePresetDef {
-            audio: PresetAudio { desktop: DesktopAudio::Game, mic: true },
+            audio: PresetAudio { desktop: DesktopAudio::Game, mic: true, rest: false },
             ..builtins()[0].clone()
         };
         let req = to_share_request(&both, "1".into(), None, Some(99), &rec);
@@ -463,7 +472,7 @@ mod tests {
         assert_eq!(parse("\"off\""), PresetAudio::off());
         assert_eq!(
             parse("\"mic\""),
-            PresetAudio { desktop: DesktopAudio::Off, mic: true },
+            PresetAudio { desktop: DesktopAudio::Off, mic: true, rest: false },
             "legacy mic was mic-instead-of-desktop"
         );
         // And a legacy mic preset still resolves to a mic-only share.
@@ -480,14 +489,14 @@ mod tests {
             PresetAudio::off(),
             PresetAudio::desktop(DesktopAudio::System),
             PresetAudio::desktop(DesktopAudio::Game),
-            PresetAudio { desktop: DesktopAudio::Game, mic: true },
-            PresetAudio { desktop: DesktopAudio::Off, mic: true },
+            PresetAudio { desktop: DesktopAudio::Game, mic: true, rest: false },
+            PresetAudio { desktop: DesktopAudio::Off, mic: true, rest: false },
         ] {
             let json = serde_json::to_string(&a).unwrap();
             assert_eq!(serde_json::from_str::<PresetAudio>(&json).unwrap(), a, "{json}");
         }
         assert!(PresetAudio::off().is_silent());
-        assert!(!PresetAudio { desktop: DesktopAudio::Off, mic: true }.is_silent());
+        assert!(!PresetAudio { desktop: DesktopAudio::Off, mic: true, rest: false }.is_silent());
     }
 
     #[test]

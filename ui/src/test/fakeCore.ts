@@ -211,6 +211,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     record: () => undefined,
     save_replay: () => undefined,
     switch_source: () => undefined,
+    set_mixer: () => undefined,
     list_presets: (): PresetsReply => structuredClone({ presets: core.presets, recording: core.recording }),
     save_preset: (a) => {
       const p = a.preset as SharePresetDef;
@@ -402,7 +403,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
-  "switch_source", "list_presets", "save_preset", "delete_preset",
+  "switch_source", "set_mixer", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
   "save_hardware", "delete_hardware", "probe_hardware", "import_curve",

@@ -558,3 +558,37 @@ describe("a receiver brought back on its own", () => {
     expect(screen.queryByText(/dropped/)).not.toBeInTheDocument();
   });
 });
+
+/** The mixer on the receiving end (S37): a row per track that has actually
+ *  arrived, and none of it before a sender is there. */
+describe("the mixer", () => {
+  const stats = (o: Record<string, unknown>) =>
+    push(() => tauri.emit("core://share-stats", { event: "stats", ...o }));
+
+  it("waits for a sender, then grows a row as each track arrives", async () => {
+    await mount();
+    await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254" }));
+    expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
+
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
+    expect(screen.getByRole("slider", { name: "Their audio" })).toBeInTheDocument();
+    expect(screen.queryByRole("slider", { name: "Their microphone" })).not.toBeInTheDocument();
+
+    await stats({ audio_packets: 50, mic_packets: 12 });
+    expect(screen.getByRole("slider", { name: "Their microphone" })).toBeInTheDocument();
+    await stats({ audio_packets: 100, mic_packets: 24, rest_packets: 9 });
+    expect(screen.getByRole("slider", { name: "Everything else on their PC" })).toBeInTheDocument();
+  });
+
+  it("sends a receive-side fader to the core", async () => {
+    await mount();
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
+    const s = screen.getByRole("slider", { name: "Their audio" });
+    // A range input is driven by event, never by moving the real cursor.
+    const { fireEvent } = await import("@testing-library/react");
+    fireEvent.change(s, { target: { value: "-6" } });
+    await new Promise((r) => setTimeout(r, 80));
+    await settle();
+    expect(tauri.lastCall("set_mixer")?.args).toMatchObject({ side: "receive" });
+  });
+});

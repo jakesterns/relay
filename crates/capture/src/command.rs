@@ -18,10 +18,36 @@ pub enum SourceTarget {
     Region { display: usize, x: u32, y: u32, w: u32, h: u32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// One fader's setting (S37). `gain` is linear, 0.0–2.0; unity is 1.0.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct FaderLevel {
+    pub gain: f32,
+    #[serde(default)]
+    pub mute: bool,
+}
+
+/// A mixer command: any subset of the three faders. A fader left out is
+/// left alone, so a slider move sends one field, not three.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct FaderSet {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<FaderLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest: Option<FaderLevel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic: Option<FaderLevel>,
+}
+
+// `PartialEq` but not `Eq`: `FaderLevel::gain` is an f32.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCmd {
     Stop,
+    /// Per-track gain and mute, live (S37). Both engines take it: the sender
+    /// applies it before encoding, the receiver before its one mix.
+    Mixer {
+        faders: FaderSet,
+    },
     /// Toggle continuous recording.
     Record {
         on: bool,

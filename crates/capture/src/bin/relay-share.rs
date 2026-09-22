@@ -221,6 +221,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         fps: 60,
         audio: Some(relay_capture::audio::AudioSource::Desktop),
         mic: false,
+        rest: false,
         cursor: true,
         size: None,
         record_dir: None,
@@ -250,6 +251,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             // replacing the program mix. Mic-only is `--no-audio --audio-mic`,
             // which is what the core emits for a legacy `mic` preset.
             "--audio-mic" => opts.mic = true,
+            // S37: everything except the --audio-pid app, as a third track.
+            "--audio-rest" => opts.rest = true,
             "--no-cursor" => opts.cursor = false,
             "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
