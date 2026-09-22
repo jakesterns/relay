@@ -91,7 +91,11 @@ export type HardwareItem =
 
 export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
-export type ShareState = { kind: "off" } | { kind: "sharing"; peer: string };
+export type ShareState =
+  | { kind: "off" }
+  | { kind: "sharing"; peer: string }
+  /** The share dropped and Relay is bringing it back (S38). */
+  | { kind: "reconnecting"; peer: string; attempt: number };
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
@@ -103,6 +107,8 @@ export interface CoreState {
   display_via: DisplayVia; footprint: Footprint;
   hardware: HardwareView;
   build?: BuildInfo;
+  /** One sentence about a crash not yet shown to the user (S38). */
+  last_crash?: string | null;
 }
 /** Version and the paths this core actually uses (`--data-dir` moves them). */
 export interface BuildInfo { version: string; data_dir: string; log_file: string }
@@ -281,7 +287,13 @@ export interface VdeviceStatus {
 }
 /** Mirror of `crates/core/src/uiprefs.rs`. */
 export type CloseAction = "keep_running" | "quit_relay";
-export interface UiPrefs { close_action: CloseAction }
+export interface UiPrefs {
+  close_action: CloseAction;
+  /** Bring a share back on its own after a crash, drop or reboot (S38). */
+  resilience: boolean;
+  /** Say in the notification area that Relay kept running on close (S38). */
+  close_notice: boolean;
+}
 
 export interface ShareStatus {
   sharing: boolean; peer?: string | null; message?: string | null;
@@ -477,7 +489,7 @@ const mockCatalog: CatalogEntry[] = [
 ];
 
 /** Browser-mode stand-in for `settings.json`. */
-let mockUiPrefs: UiPrefs = { close_action: "keep_running" };
+let mockUiPrefs: UiPrefs = { close_action: "keep_running", resilience: true, close_notice: true };
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -835,6 +847,12 @@ export const api = {
   async setPeerFavourite(id: string, favourite: boolean): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("set_peer_favourite", { id, favourite });
+  },
+
+  /** The user has read the last-crash line; the core clears it (S38). */
+  async ackCrash(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("ack_crash");
   },
 };
 

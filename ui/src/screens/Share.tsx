@@ -35,8 +35,11 @@ const idleStrip: Strip = {
 
 export function Share() {
   const { state, mock, offline } = useCore();
-  const sharing = state.sharing.kind === "sharing";
-  const peer = state.sharing.kind === "sharing" ? state.sharing.peer : null;
+  // Reconnecting counts as sharing for everything but the pill: the share
+  // is the user's until they stop it, and Stop is the button they need.
+  const reconnecting = state.sharing.kind === "reconnecting" ? state.sharing : null;
+  const sharing = state.sharing.kind === "sharing" || reconnecting !== null;
+  const peer = state.sharing.kind === "off" ? null : state.sharing.peer || null;
   const [presets, setPresets] = useState<SharePresetDef[]>([]);
   const [preset, setPreset] = useState("game");
   const [code, setCode] = useState("");
@@ -236,7 +239,9 @@ export function Share() {
       <section className="main">
         <div className="hdr">
           <h1>{sourceTitle(sharing ? source : { kind: "display", index: 0 })} <em>— this PC</em></h1>
-          <Live on={sharing} text={sharing ? "Sharing" : "Not sharing"} />
+          <Live on={sharing} text={reconnecting
+            ? `Reconnecting${reconnecting.attempt > 0 ? ` (${reconnecting.attempt})` : ""}…`
+            : sharing ? "Sharing" : "Not sharing"} />
         </div>
         <OfflineBanner />
         <CodecBanner need="share" />

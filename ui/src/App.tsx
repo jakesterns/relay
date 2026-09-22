@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { CrashBanner } from "./components/CrashBanner";
 import { Rail, type Screen } from "./components/Rail";
 import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
@@ -39,12 +40,14 @@ function Shell() {
     return () => { cancelled = true; };
   }, [offline]);
 
-  const sharing = state.sharing.kind === "sharing";
+  const sharing = state.sharing.kind !== "off";
   const profile = state.active_profile;
   const idle = !sharing && !profile;
 
-  const subtitle = sharing && state.sharing.kind === "sharing"
+  const subtitle = state.sharing.kind === "sharing"
     ? `Sending to ${state.sharing.peer}`
+    : state.sharing.kind === "reconnecting"
+    ? `Reconnecting to ${state.sharing.peer}…`
     : profile ? `${profile.name} · profile active`
     : offline && !mock ? "Not running"
     : "Idle";
@@ -77,6 +80,7 @@ function Shell() {
   return (
     <div className="app">
       <TitleBar subtitle={subtitle} idle={idle} />
+      <CrashBanner />
       <div className="body three">
         <Rail screen={railKey} onNav={nav} state={state} note={note} unsaved={unsaved} />
         {screen === "share" && <Share />}

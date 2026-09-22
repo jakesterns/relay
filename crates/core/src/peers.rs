@@ -88,7 +88,12 @@ struct StoreV0 {
 }
 
 pub fn path() -> Result<PathBuf> {
-    Ok(crate::config::Paths::default_for_user()?.data_dir().join(FILE))
+    Ok(path_in(&crate::config::Paths::default_for_user()?))
+}
+
+/// The store's place under a given data root (`--data-dir` moves it).
+pub fn path_in(paths: &crate::config::Paths) -> PathBuf {
+    paths.data_dir().join(FILE)
 }
 
 pub fn now_unix() -> u64 {

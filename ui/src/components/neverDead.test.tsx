@@ -196,8 +196,10 @@ describe("what keeps running after the window closes", () => {
     await h.user.click(screen.getByText("Quit Relay completely when I close the window"));
     await settle();
 
+    // The whole object goes, not a patch: the core replaces the file with
+    // what it is sent, so a partial write would reset the S38 switches.
     expect(tauri.lastCall("set_ui_prefs")?.args).toEqual({
-      prefs: { close_action: "quit_relay" },
+      prefs: { close_action: "quit_relay", resilience: true, close_notice: true },
     });
     expect(core.prefs.close_action).toBe("quit_relay");
     // And the explanation switches to what now happens.

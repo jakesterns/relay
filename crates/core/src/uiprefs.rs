@@ -36,10 +36,30 @@ pub enum CloseAction {
 }
 
 /// The whole settings file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiPrefs {
     #[serde(default)]
     pub close_action: CloseAction,
+    /// Bring a share back on its own after a crash, a dropped link or a
+    /// reboot (S38). On by default — Jake's decision — because the person it
+    /// is for is mid-stream with an audience and cannot rebuild it by hand.
+    #[serde(default = "default_true")]
+    pub resilience: bool,
+    /// Say in the notification area that Relay is still running when the
+    /// window closes (S38). On by default: a process that keeps going after
+    /// its window has gone should say so, every time, until told not to.
+    #[serde(default = "default_true")]
+    pub close_notice: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        UiPrefs { close_action: CloseAction::default(), resilience: true, close_notice: true }
+    }
 }
 
 /// On-disk shape, versioned like the other stores so a later field can be
@@ -133,7 +153,7 @@ mod tests {
     fn a_saved_choice_survives_a_reload() {
         let p = temp("roundtrip");
         let mut s = PrefsStore::load(&p);
-        s.set(UiPrefs { close_action: CloseAction::QuitRelay }).unwrap();
+        s.set(UiPrefs { close_action: CloseAction::QuitRelay, ..Default::default() }).unwrap();
 
         let reloaded = PrefsStore::load(&p);
         assert_eq!(reloaded.get().close_action, CloseAction::QuitRelay);
@@ -141,10 +161,26 @@ mod tests {
     }
 
     #[test]
+    fn the_s38_switches_default_on_and_an_older_file_turns_them_on_too() {
+        // Jake's decisions: resilience and the close notice are on unless
+        // turned off. And the standing rule: a settings.json written before
+        // these fields existed must not read as "off".
+        assert!(UiPrefs::default().resilience);
+        assert!(UiPrefs::default().close_notice);
+        let p = temp("pre-s38");
+        std::fs::write(&p, r#"{"version":1,"close_action":"quit_relay"}"#).unwrap();
+        let prefs = PrefsStore::load(&p).get();
+        assert_eq!(prefs.close_action, CloseAction::QuitRelay, "the old field survives");
+        assert!(prefs.resilience);
+        assert!(prefs.close_notice);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
     fn the_file_is_versioned_and_uses_the_wire_spellings() {
         let p = temp("shape");
         let mut s = PrefsStore::load(&p);
-        s.set(UiPrefs { close_action: CloseAction::QuitRelay }).unwrap();
+        s.set(UiPrefs { close_action: CloseAction::QuitRelay, ..Default::default() }).unwrap();
 
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("\"version\": 1"), "{text}");

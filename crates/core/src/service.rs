@@ -123,8 +123,63 @@ struct Inner {
     audio_watch: bool,
     /// Share presets + recording settings (`presets.json`).
     presets: PresetStore,
-    /// App preferences, currently just what closing the window means.
+    /// App preferences: what closing the window means, and the two S38
+    /// switches (bring a share back; say so in the tray on close).
     prefs: crate::uiprefs::PrefsStore,
+    /// S38: what the user started and has not stopped, mirrored to
+    /// `active-stream.json` so a fresh core can resume it. Present while a
+    /// share or receive is up *or being brought back*; cleared by a
+    /// deliberate stop or by giving up. One file holds one record — a send
+    /// wins over a receive if both exist, which nothing in the UI can
+    /// produce today.
+    send_intent: Option<crate::resilience::Record>,
+    recv_intent: Option<crate::resilience::Record>,
+    /// The reconnect episode in progress, if the engine is down and the
+    /// intent says it should not be.
+    send_episode: Option<crate::resilience::Episode>,
+    recv_episode: Option<crate::resilience::Episode>,
+}
+
+/// Write the intent to disk, or remove the file when there is none.
+fn persist_intent(g: &Inner) {
+    let path = crate::resilience::path_in(&g.paths);
+    match g.send_intent.as_ref().or(g.recv_intent.as_ref()) {
+        Some(rec) => {
+            if let Err(e) = rec.save(&path) {
+                warn!(error = %e, "could not write active-stream.json");
+            }
+        }
+        None => crate::resilience::Record::clear(&path),
+    }
+}
+
+/// Turn a recorded send back into a request the engine can act on now.
+///
+/// The peer is looked up by *name* in the remembered-PCs store: a share that
+/// began with a code remembered its receiver, so it resumes with none. A peer
+/// that is no longer remembered can still be reached with the code the user
+/// typed — the receiver comes back with the same one — and only a peer that
+/// is neither remembered nor coded is a dead end, which is reported as such.
+fn resume_send_request(
+    rec: &crate::resilience::Record,
+    paths: &Paths,
+) -> Result<crate::share::ShareRequest, String> {
+    let mut req = rec.share.clone().ok_or_else(|| "no share request was recorded".to_string())?;
+    req.trusted = None;
+    req.peer_id = None;
+    let peer = rec.peer.clone().unwrap_or_default();
+    let store = crate::peers::Store::load(&crate::peers::path_in(paths));
+    match store.peers.iter().find(|p| p.name.eq_ignore_ascii_case(&peer)) {
+        Some(p) => {
+            req.peer_id = Some(p.id.clone());
+            req.code.clear();
+        }
+        None if req.code.trim().is_empty() => {
+            return Err(format!("{peer} is not remembered and there is no code to use"));
+        }
+        None => req.peer = Some(peer),
+    }
+    Ok(req)
 }
 
 pub struct Service {
@@ -183,6 +238,10 @@ impl Service {
             audio_watch: false,
             presets,
             prefs,
+            send_intent: None,
+            recv_intent: None,
+            send_episode: None,
+            recv_episode: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -190,6 +249,15 @@ impl Service {
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let result = rt.block_on(service.main(tx, rx));
+
+        // Reached only by a deliberate shutdown: Quit in the tray, `relay-core
+        // shutdown`, the window's quit preference. A crash or a power cut
+        // never gets here — which is exactly what leaves `active-stream.json`
+        // behind for the next start to act on (S38).
+        {
+            let g = service.inner.lock();
+            crate::resilience::Record::clear(&crate::resilience::path_in(&g.paths));
+        }
 
         // Stop any share/receive child so it never outlives the core.
         let (share, receive) = {
@@ -251,6 +319,12 @@ impl Service {
         // pages back so idle RSS reflects steady state.
         crate::footprint::trim_working_set();
 
+        // S38: say if the last run ended badly, and pick up a stream the user
+        // never stopped. Both after the IPC server is up, so the first window
+        // to connect sees the result; the resume itself happens on the tick.
+        self.report_crash_once();
+        self.resume_if_recorded();
+
         // 1 s cadence for the exclusive-mode watcher (only probes while a
         // profile with audio processing is active); footprint every 5th tick.
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -281,6 +355,7 @@ impl Service {
                     }
                     self.refresh_audio_chain();
                     self.recheck_monitor();
+                    self.supervise();
                 }
             }
         }
@@ -321,6 +396,210 @@ impl Service {
                 true
             }
         }
+    }
+
+    /// S38: one sentence about the last crash, once. It goes into `CoreState`
+    /// rather than out as a `Notice`, because a notice sent before any window
+    /// is open reaches nobody; the state is read by every client that
+    /// connects, and the window clears it with `AckCrash`.
+    fn report_crash_once(&self) {
+        let mut g = self.inner.lock();
+        let dir = crate::crash::dir(&g.paths);
+        if let Some(file) = crate::crash::unseen(&dir) {
+            let text = crate::crash::summary(&file);
+            warn!(%text, "reporting a crash record from the last run");
+            g.state.last_crash = Some(text);
+        }
+    }
+
+    /// S38: a share or receive the user never stopped, left behind by a
+    /// crash, a power cut or a reboot. Becomes a reconnect episode — attempt
+    /// one is due after the usual first delay — so a receiver that is itself
+    /// still coming up gets the same patience as one that dropped mid-share.
+    fn resume_if_recorded(&self) {
+        let (path, resilience) = {
+            let g = self.inner.lock();
+            (crate::resilience::path_in(&g.paths), g.prefs.get().resilience)
+        };
+        let Some(record) = crate::resilience::Record::load(&path) else { return };
+        if !resilience {
+            info!("active-stream.json is present but resilience is off; not resuming");
+            crate::resilience::Record::clear(&path);
+            return;
+        }
+        let now = std::time::Instant::now();
+        let text = match record.kind {
+            crate::resilience::Kind::Send => {
+                let peer = record.peer.clone().unwrap_or_default();
+                let mut g = self.inner.lock();
+                g.send_intent = Some(record);
+                g.send_episode = Some(crate::resilience::Episode::begin(now));
+                g.state.sharing =
+                    crate::types::ShareState::Reconnecting { peer: peer.clone(), attempt: 0 };
+                format!("Relay is restoring your share to {peer}.")
+            }
+            crate::resilience::Kind::Receive => {
+                let mut g = self.inner.lock();
+                g.recv_intent = Some(record);
+                g.recv_episode = Some(crate::resilience::Episode::begin(now));
+                "Relay is going back to receiving, as it was before.".to_string()
+            }
+        };
+        info!(%text, "resuming from active-stream.json");
+        let _ = self.events.send(Event::Notice { text: text.clone() });
+        crate::winloop::balloon("Relay", &text);
+    }
+
+    /// S38: the reconnect schedule, on the 1 s tick. Decides under the lock
+    /// and acts outside it, because spawning takes the lock itself.
+    fn supervise(&self) {
+        enum Next {
+            Nothing,
+            Attempt(u32, crate::resilience::Record),
+            GiveUp(crate::resilience::Record),
+        }
+        let now = std::time::Instant::now();
+
+        // ---- send ----
+        let next = {
+            let mut g = self.inner.lock();
+            if g.share.is_some() {
+                Next::Nothing
+            } else {
+                match (g.send_intent.clone(), g.send_episode.as_mut()) {
+                    (Some(rec), Some(ep)) if ep.gave_up(now) => Next::GiveUp(rec),
+                    (Some(rec), Some(ep)) => match ep.due(now) {
+                        Some(n) => Next::Attempt(n, rec),
+                        None => Next::Nothing,
+                    },
+                    _ => Next::Nothing,
+                }
+            }
+        };
+        match next {
+            Next::Nothing => {}
+            Next::GiveUp(rec) => self.give_up_send(&rec.peer.unwrap_or_default(), None),
+            Next::Attempt(n, rec) => {
+                let peer = rec.peer.clone().unwrap_or_default();
+                let req = {
+                    let g = self.inner.lock();
+                    resume_send_request(&rec, &g.paths)
+                };
+                match req {
+                    Err(why) => {
+                        warn!(%why, "the share cannot be resumed");
+                        self.give_up_send(&peer, Some(why));
+                    }
+                    Ok(req) => {
+                        {
+                            let mut g = self.inner.lock();
+                            if let Some(r) = g.send_intent.as_mut() {
+                                r.attempts = n;
+                            }
+                            g.state.sharing = crate::types::ShareState::Reconnecting {
+                                peer: peer.clone(),
+                                attempt: n,
+                            };
+                        }
+                        info!(attempt = n, %peer, "reconnecting the share");
+                        if let Reply::Error { message } =
+                            spawn_share(&self.inner, &self.events, req, false)
+                        {
+                            warn!(%message, attempt = n, "reconnect attempt did not start");
+                        }
+                        self.push_state();
+                    }
+                }
+            }
+        }
+
+        // ---- receive ----
+        let next = {
+            let mut g = self.inner.lock();
+            if g.receive.is_some() {
+                Next::Nothing
+            } else {
+                match (g.recv_intent.clone(), g.recv_episode.as_mut()) {
+                    (Some(rec), Some(ep)) if ep.gave_up(now) => Next::GiveUp(rec),
+                    (Some(rec), Some(ep)) => match ep.due(now) {
+                        Some(n) => Next::Attempt(n, rec),
+                        None => Next::Nothing,
+                    },
+                    _ => Next::Nothing,
+                }
+            }
+        };
+        match next {
+            Next::Nothing => {}
+            Next::GiveUp(_) => self.give_up_receive(),
+            Next::Attempt(n, rec) => {
+                let Some(req) = rec.receive.clone() else {
+                    self.give_up_receive();
+                    return;
+                };
+                if let Some(r) = self.inner.lock().recv_intent.as_mut() {
+                    r.attempts = n;
+                }
+                info!(attempt = n, "going back to receiving");
+                if let Reply::Error { message } =
+                    spawn_receive(&self.inner, &self.events, req, false)
+                {
+                    warn!(%message, attempt = n, "receive did not restart");
+                }
+            }
+        }
+    }
+
+    /// Stop trying to bring a share back. Everything that referred to it
+    /// clears, on screen and on disk, and the user is told in one sentence.
+    fn give_up_send(&self, peer: &str, why: Option<String>) {
+        {
+            let mut g = self.inner.lock();
+            g.send_intent = None;
+            g.send_episode = None;
+            g.state.sharing = crate::types::ShareState::Off;
+            persist_intent(&g);
+        }
+        let detail = why.map(|w| format!(" ({w})")).unwrap_or_default();
+        let text = format!("The share to {peer} dropped and did not come back{detail}.");
+        warn!(%text, "gave up reconnecting");
+        let _ = self.events.send(Event::ShareStatus {
+            sharing: false,
+            peer: None,
+            message: Some(text.clone()),
+            trusted: false,
+        });
+        let _ = self.events.send(Event::Notice { text: text.clone() });
+        crate::winloop::balloon("Relay", &text);
+        self.push_state();
+    }
+
+    fn give_up_receive(&self) {
+        {
+            let mut g = self.inner.lock();
+            g.recv_intent = None;
+            g.recv_episode = None;
+            persist_intent(&g);
+        }
+        let text = "Relay stopped receiving: the share did not come back.".to_string();
+        warn!(%text, "gave up restarting the receiver");
+        let _ = self.events.send(Event::ReceiveStatus {
+            receiving: false,
+            code: None,
+            sender: None,
+            message: Some(text.clone()),
+            codec: None,
+            trusted: false,
+        });
+        let _ = self.events.send(Event::Notice { text: text.clone() });
+        crate::winloop::balloon("Relay", &text);
+    }
+
+    /// Broadcast the current state, for the parts of the UI that read
+    /// `state.sharing` rather than the share events.
+    fn push_state(&self) {
+        let state = Box::new(self.inner.lock().state.clone());
+        let _ = self.events.send(Event::StateChanged { state });
     }
 
     /// Probe, and if anything actually changed, re-run selection for the
@@ -467,14 +746,19 @@ impl Service {
                 }
             }
             HotkeyAction::ToggleShare => {
-                let sharing = self.inner.lock().share.is_some();
+                // A share being brought back counts as on: the hotkey's job
+                // is to stop it, not to start a second one beside it.
+                let sharing = {
+                    let g = self.inner.lock();
+                    g.share.is_some() || g.send_intent.is_some()
+                };
                 if sharing {
                     kill_share(&self.inner, &self.events);
                 } else {
                     let last = self.inner.lock().last_share.clone();
                     match last {
                         Some(req) => {
-                            spawn_share(&self.inner, &self.events, req);
+                            spawn_share(&self.inner, &self.events, req, true);
                         }
                         None => {
                             let _ = self.events.send(Event::Notice {
@@ -731,10 +1015,14 @@ fn edit_peers(f: impl FnOnce(&mut crate::peers::Store) -> bool) -> Reply {
 }
 
 /// Spawn the share engine and a thread that relays its NDJSON as IPC events.
+/// `by_user`: the request came from a hand on a button or a hotkey, so it
+/// becomes the recorded intent (S38). A reconnect attempt passes `false` and
+/// leaves the intent and the `Reconnecting` state as they are.
 fn spawn_share(
     inner: &Arc<Mutex<Inner>>,
     events: &broadcast::Sender<Event>,
     mut req: crate::share::ShareRequest,
+    by_user: bool,
 ) -> Reply {
     use crate::share::{ShareEngine, ShareEvent};
     if let Err(message) = resolve_share_peer(&mut req) {
@@ -751,8 +1039,15 @@ fn spawn_share(
     };
     g.share = Some(engine);
     g.preview_fps = req.preview_fps;
+    if by_user {
+        let peer = req.peer.clone().unwrap_or_default();
+        g.send_intent =
+            Some(crate::resilience::Record::for_send(&req, &peer, crate::peers::now_unix()));
+        g.send_episode = None;
+        persist_intent(&g);
+        g.state.sharing = crate::types::ShareState::Sharing { peer: String::new() };
+    }
     g.last_share = Some(req);
-    g.state.sharing = crate::types::ShareState::Sharing { peer: String::new() };
     drop(g);
 
     let events2 = events.clone();
@@ -768,14 +1063,33 @@ fn spawn_share(
                     let _ = events2.send(Event::SharePreview { width, height, jpeg });
                 }
                 ShareEvent::Connected { peer, trusted } => {
-                    inner2.lock().state.sharing =
-                        crate::types::ShareState::Sharing { peer: peer.clone() };
+                    let was_reconnecting = {
+                        let mut ig = inner2.lock();
+                        let back = ig.send_episode.take().is_some();
+                        if let Some(rec) = ig.send_intent.as_mut() {
+                            // The name the engine actually reached, so a
+                            // resume after a reboot has something to look up.
+                            rec.peer = Some(peer.clone());
+                            rec.attempts = 0;
+                        }
+                        persist_intent(&ig);
+                        ig.state.sharing = crate::types::ShareState::Sharing { peer: peer.clone() };
+                        back
+                    };
                     let _ = events2.send(Event::ShareStatus {
                         sharing: true,
-                        peer: Some(peer),
+                        peer: Some(peer.clone()),
                         message: None,
                         trusted,
                     });
+                    let state = Box::new(inner2.lock().state.clone());
+                    let _ = events2.send(Event::StateChanged { state });
+                    if was_reconnecting {
+                        let text = format!("The share to {peer} is back.");
+                        info!(%text, "reconnected");
+                        let _ = events2.send(Event::Notice { text: text.clone() });
+                        crate::winloop::balloon("Relay", &text);
+                    }
                 }
                 ShareEvent::Error { message } => {
                     let _ = events2.send(Event::ShareStatus {
@@ -801,31 +1115,13 @@ fn spawn_share(
                 | ShareEvent::RenderUp { .. }
                 | ShareEvent::Host { .. }
                 | ShareEvent::HostClose => {}
-                ShareEvent::Exited { ok, .. } => {
-                    let mut ig = inner2.lock();
-                    ig.share = None;
-                    ig.state.sharing = crate::types::ShareState::Off;
-                    drop(ig);
-                    let _ = events2.send(Event::ShareStatus {
-                        sharing: false,
-                        peer: None,
-                        message: (!ok).then(|| "share engine stopped unexpectedly".to_string()),
-                        trusted: false,
-                    });
-                }
+                ShareEvent::Exited { ok, code } => on_share_exit(&inner2, &events2, ok, code),
             });
-            // Channel closed (child stdout closed): make sure state is cleared.
-            let mut ig = inner2.lock();
-            if ig.share.is_some() {
-                ig.share = None;
-                ig.state.sharing = crate::types::ShareState::Off;
-                drop(ig);
-                let _ = events2.send(Event::ShareStatus {
-                    sharing: false,
-                    peer: None,
-                    message: None,
-                    trusted: false,
-                });
+            // Channel closed (child stdout closed) without an `Exited` line:
+            // treat it as an exit we were not told about.
+            let orphaned = inner2.lock().share.is_some();
+            if orphaned {
+                on_share_exit(&inner2, &events2, false, None);
             }
         })
         .ok();
@@ -839,11 +1135,105 @@ fn spawn_share(
     Reply::Ok
 }
 
+/// The share engine is gone. Either the user stopped it — the intent was
+/// cleared first, so there is nothing to do but report — or it died, in
+/// which case S38 starts bringing it back, and says so once per episode.
+fn on_share_exit(
+    inner: &Arc<Mutex<Inner>>,
+    events: &broadcast::Sender<Event>,
+    ok: bool,
+    code: Option<i32>,
+) {
+    let mut g = inner.lock();
+    g.share = None;
+    if !ok {
+        let dir = crate::crash::dir(&g.paths);
+        let log = g.paths.log_dir().join("share.log");
+        if let Some(p) = crate::crash::record_engine_exit(&dir, "relay-share", code, Some(&log)) {
+            warn!(record = %p.display(), ?code, "share engine exited unexpectedly");
+        }
+    }
+    let resilient = g.send_intent.is_some() && g.prefs.get().resilience;
+    if resilient {
+        let peer = g.send_intent.as_ref().and_then(|r| r.peer.clone()).unwrap_or_default();
+        let first = g.send_episode.is_none();
+        if first {
+            g.send_episode = Some(crate::resilience::Episode::begin(std::time::Instant::now()));
+        }
+        let attempt = g.send_episode.map(|e| e.attempts).unwrap_or(0);
+        g.state.sharing = crate::types::ShareState::Reconnecting { peer: peer.clone(), attempt };
+        let state = Box::new(g.state.clone());
+        drop(g);
+        let _ = events.send(Event::StateChanged { state });
+        if first {
+            let text = format!("The share to {peer} dropped. Relay is reconnecting.");
+            warn!(%text, "share dropped; reconnecting");
+            let _ = events.send(Event::Notice { text: text.clone() });
+            crate::winloop::balloon("Relay", &text);
+        }
+    } else {
+        g.state.sharing = crate::types::ShareState::Off;
+        let state = Box::new(g.state.clone());
+        drop(g);
+        let _ = events.send(Event::ShareStatus {
+            sharing: false,
+            peer: None,
+            message: (!ok).then(|| "share engine stopped unexpectedly".to_string()),
+            trusted: false,
+        });
+        let _ = events.send(Event::StateChanged { state });
+    }
+}
+
+/// The receive engine is gone. Same shape as [`on_share_exit`]: a cleared
+/// intent means the user stopped it; a present one means bring it back.
+/// `sender` is who was connected, for the sentence.
+fn on_receive_exit(
+    inner: &Arc<Mutex<Inner>>,
+    events: &broadcast::Sender<Event>,
+    last_failure: Option<String>,
+    sender: Option<String>,
+) {
+    let mut g = inner.lock();
+    g.receive = None;
+    if let Some(reason) = last_failure.as_deref() {
+        let dir = crate::crash::dir(&g.paths);
+        let log = g.paths.log_dir().join("share.log");
+        let _ = crate::crash::record_engine_exit(&dir, "relay-share-recv", None, Some(&log));
+        warn!(%reason, "receiver exited unexpectedly");
+    }
+    let resilient = g.recv_intent.is_some() && g.prefs.get().resilience;
+    let first = resilient && g.recv_episode.is_none();
+    if first {
+        g.recv_episode = Some(crate::resilience::Episode::begin(std::time::Instant::now()));
+    }
+    drop(g);
+    let _ = events.send(Event::ReceiveStatus {
+        receiving: false,
+        code: None,
+        sender: None,
+        message: last_failure,
+        codec: None,
+        trusted: false,
+    });
+    if first {
+        let text = match sender {
+            Some(s) => format!("The share from {s} dropped. Relay is waiting for it to come back."),
+            None => "Receiving stopped on its own. Relay is starting it again.".to_string(),
+        };
+        warn!(%text, "receive dropped; restarting");
+        let _ = events.send(Event::Notice { text: text.clone() });
+        crate::winloop::balloon("Relay", &text);
+    }
+}
+
 /// Spawn the receive engine (advertise + render) and relay its events.
+/// `by_user` as for [`spawn_share`].
 fn spawn_receive(
     inner: &Arc<Mutex<Inner>>,
     events: &broadcast::Sender<Event>,
     req: crate::share::ReceiveRequest,
+    by_user: bool,
 ) -> Reply {
     use crate::share::{ShareEngine, ShareEvent};
     let mut g = inner.lock();
@@ -860,6 +1250,12 @@ fn spawn_receive(
         Err(e) => return Reply::Error { message: e.to_string() },
     };
     g.receive = Some(engine);
+    if by_user {
+        g.recv_intent =
+            Some(crate::resilience::Record::for_receive(&req, crate::peers::now_unix()));
+        g.recv_episode = None;
+        persist_intent(&g);
+    }
     drop(g);
 
     let events2 = events.clone();
@@ -870,6 +1266,8 @@ fn spawn_receive(
             // Why the engine stopped, carried to the final ReceiveStatus so a
             // failure is never reported as a plain return to idle.
             let mut last_failure: Option<String> = None;
+            // Who was connected, for the one sentence S38 says if it drops.
+            let mut last_sender: Option<String> = None;
             let mut stream_size: (u32, u32) = (0, 0);
             crate::share::pump(rx, |ev| match ev {
                 // The receiver renders into the app (or its own window), so a
@@ -897,6 +1295,15 @@ fn spawn_receive(
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
+                    last_sender = Some(sender.clone());
+                    {
+                        // Paired again: the episode, if any, is over.
+                        let mut ig = inner2.lock();
+                        ig.recv_episode = None;
+                        if let Some(r) = ig.recv_intent.as_mut() {
+                            r.attempts = 0;
+                        }
+                    }
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -973,59 +1380,75 @@ fn spawn_receive(
                 | ShareEvent::ReplaySaved { .. }
                 | ShareEvent::SourceChanged { .. } => {}
             });
-            let mut ig = inner2.lock();
-            if ig.receive.is_some() {
-                ig.receive = None;
-                drop(ig);
-                let _ = events2.send(Event::ReceiveStatus {
-                    receiving: false,
-                    code: None,
-                    sender: None,
-                    message: last_failure.take(),
-                    codec: None,
-                    trusted: false,
-                });
+            let orphaned = inner2.lock().receive.is_some();
+            if orphaned {
+                on_receive_exit(&inner2, &events2, last_failure.take(), last_sender.take());
             }
         })
         .ok();
     Reply::Ok
 }
 
+/// The user's Stop. The intent goes first, so the exit that follows is read
+/// as "stopped", never as "died" (S38). Stopping while Relay is between
+/// reconnect attempts — no engine, an intent — is the same request and
+/// succeeds the same way.
 fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
-    let engine = inner.lock().receive.take();
+    let (engine, was_recovering) = {
+        let mut g = inner.lock();
+        let recovering = g.recv_intent.is_some() && g.receive.is_none();
+        g.recv_intent = None;
+        g.recv_episode = None;
+        persist_intent(&g);
+        (g.receive.take(), recovering)
+    };
     match engine {
         Some(engine) => {
             engine.stop();
-            let _ = events.send(Event::ReceiveStatus {
-                receiving: false,
-                code: None,
-                sender: None,
-                message: None,
-                codec: None,
-                trusted: false,
-            });
-            Reply::Ok
         }
-        None => Reply::Error { message: "not receiving".into() },
+        None if was_recovering => {}
+        None => return Reply::Error { message: "not receiving".into() },
     }
+    let _ = events.send(Event::ReceiveStatus {
+        receiving: false,
+        code: None,
+        sender: None,
+        message: None,
+        codec: None,
+        trusted: false,
+    });
+    Reply::Ok
 }
 
 fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
-    let engine = inner.lock().share.take();
+    let (engine, was_recovering) = {
+        let mut g = inner.lock();
+        let recovering = g.send_intent.is_some() && g.share.is_none();
+        g.send_intent = None;
+        g.send_episode = None;
+        persist_intent(&g);
+        (g.share.take(), recovering)
+    };
     match engine {
         Some(engine) => {
             engine.stop();
-            inner.lock().state.sharing = crate::types::ShareState::Off;
-            let _ = events.send(Event::ShareStatus {
-                sharing: false,
-                peer: None,
-                message: None,
-                trusted: false,
-            });
-            Reply::Ok
         }
-        None => Reply::Error { message: "no share is running".into() },
+        None if was_recovering => {}
+        None => return Reply::Error { message: "no share is running".into() },
     }
+    let state = {
+        let mut g = inner.lock();
+        g.state.sharing = crate::types::ShareState::Off;
+        Box::new(g.state.clone())
+    };
+    let _ = events.send(Event::ShareStatus {
+        sharing: false,
+        peer: None,
+        message: None,
+        trusted: false,
+    });
+    let _ = events.send(Event::StateChanged { state });
+    Reply::Ok
 }
 
 impl IpcHandler {
@@ -1105,7 +1528,7 @@ impl IpcHandler {
             },
             Method::StartShare { request } => {
                 drop(g);
-                spawn_share(&self.inner, &self.events, *request)
+                spawn_share(&self.inner, &self.events, *request, true)
             }
             Method::StopShare => {
                 drop(g);
@@ -1125,7 +1548,7 @@ impl IpcHandler {
                 );
                 req.peer_id = peer_id;
                 drop(g);
-                spawn_share(&self.inner, &self.events, req)
+                spawn_share(&self.inner, &self.events, req, true)
             }
             Method::Record { on } => {
                 drop(g);
@@ -1171,7 +1594,7 @@ impl IpcHandler {
             }
             Method::StartReceive { request } => {
                 drop(g);
-                spawn_receive(&self.inner, &self.events, *request)
+                spawn_receive(&self.inner, &self.events, *request, true)
             }
             Method::StopReceive => {
                 drop(g);
@@ -1525,6 +1948,24 @@ impl IpcHandler {
                 Err(e) => Reply::Error { message: format!("{e:#}") },
             },
             Method::Subscribe => Reply::Ok,
+            // S38: the window closed and the core is staying. Say so where
+            // the user can see it, every time, unless they turned it off.
+            Method::WindowClosed => {
+                let notice = g.prefs.get().close_notice;
+                drop(g);
+                if notice {
+                    crate::winloop::balloon(
+                        "Relay is still running",
+                        "Your profiles keep applying. Right-click the icon by the clock to open or quit Relay.",
+                    );
+                }
+                Reply::Ok
+            }
+            Method::AckCrash => {
+                crate::crash::mark_seen(&crate::crash::dir(&g.paths));
+                g.state.last_crash = None;
+                Reply::Ok
+            }
             Method::Shutdown => {
                 let _ = self.shutdown.send(CoreEvent::Shutdown);
                 Reply::Ok

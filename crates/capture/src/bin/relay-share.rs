@@ -64,6 +64,10 @@ fn main() -> Result<()> {
         None => tracing_subscriber::fmt().with_writer(std::io::stderr).with_max_level(level).init(),
     }
     relay_capture::transport::netio::forward_log_crate(level == tracing::Level::DEBUG);
+    // S38: a panic here used to go to stderr, which the core does not read.
+    if let Ok(paths) = relay_core::config::Paths::default_for_user() {
+        relay_core::crash::install_panic_hook(relay_core::crash::dir(&paths), "relay-share");
+    }
 
     match cmd {
         #[cfg(windows)]

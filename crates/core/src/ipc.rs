@@ -232,6 +232,12 @@ pub enum Method {
     /// Hand over to the Windows uninstaller (one installer, one uninstaller)
     /// and stop the core. Does not itself remove anything.
     LaunchUninstaller,
+    /// The app window closed with the core staying up (S38): show the
+    /// notification-area message, if that preference is on.
+    WindowClosed,
+    /// The user has seen the last-crash line; clear it and mark the records
+    /// seen (S38).
+    AckCrash,
     Subscribe,
     Shutdown,
 }

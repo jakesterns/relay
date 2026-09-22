@@ -147,7 +147,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
     peers: [],
     autostart: false,
-    prefs: { close_action: "keep_running" },
+    prefs: { close_action: "keep_running", resilience: true, close_notice: true },
     elevation: { decline: false },
     fail: new Map(),
     handler: () => undefined,
@@ -185,6 +185,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     set_autostart: (a) => (core.autostart = a.enabled as boolean),
     get_ui_prefs: () => structuredClone(core.prefs),
     set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
+    ack_crash: () => void (core.state.last_crash = null),
     // A core is already answering, so there is nothing to launch.
     start_core: () => false,
     start_share: (a) => {
@@ -399,7 +400,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
 export const KNOWN_COMMANDS: readonly string[] = [
   "core_status", "list_profiles", "get_profile", "save_profile", "delete_profile",
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
-  "get_ui_prefs", "set_ui_prefs", "start_core",
+  "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",

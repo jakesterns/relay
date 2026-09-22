@@ -135,27 +135,35 @@ default). Two `Toggle`s under the close-action one, in the same voice.
       exists; the 1 s tick exists.
 
 ## Definition of Done
-- [ ] `active-stream.json`: written on user start, cleared on user stop and
-      on give-up, versioned, round-trip and migration tests.
+- [x] `active-stream.json`: written on user start, cleared on user stop and
+      on give-up, versioned, round-trip and migration tests
+      (`crates/core/src/resilience.rs`, 7 tests).
 - [ ] Reconnect in-session: kill the sender's `relay-share` **by its own
       PID** (never by image name — see the S30 note) and the share is back
       within one backoff step on a LAN, with no code typed. Same for the
-      receiver's process.
-- [ ] Backoff is the stated schedule and gives up at 3 minutes; unit-tested
-      as a pure function.
+      receiver's process. **Built; needs the two-PC run.**
+- [x] Backoff is the stated schedule and gives up at 3 minutes; unit-tested
+      as a pure function (`Episode`).
 - [ ] Resume after a reboot of the sender, with the receiver on Start
-      receiving; and after a reboot of both.
-- [ ] Every state in §5 is visible where §5 says, and clears (rule 5).
-- [ ] A panic in any of the three binaries leaves a `crash\` file naming the
-      binary, message and location; the next start says so exactly once.
-- [ ] Two toggles in Settings, both default on, both honoured, both survive
-      an update.
-- [ ] Closing the window shows the tray balloon when `close_notice` is on,
-      and not when it is off.
-- [ ] Nothing here changes behaviour when `resilience` is off: an engine exit
+      receiving; and after a reboot of both. **Built; needs the two-PC run.**
+- [x] Every state in §5 is visible where §5 says, and clears (rule 5). One
+      deviation, for the better: the Receive video area's "dropped — waiting"
+      needed no protocol field — Start receiving by hand clears the last
+      sender's name and an automatic restart does not, so the screen tells
+      the two apart on its own.
+- [x] A panic in any of the three binaries leaves a `crash\` file naming the
+      binary, message and location; the next start says so exactly once
+      (`crash.rs`, `CoreState.last_crash`, `CrashBanner`, `AckCrash`).
+- [x] Two toggles in Settings, both default on, both honoured, both survive
+      an update (a pre-S38 `settings.json` reads them as on; tested).
+- [x] Closing the window shows the tray balloon when `close_notice` is on,
+      and not when it is off (`Method::WindowClosed`; the shell's close path
+      calls it, bounded to 500 ms).
+- [x] Nothing here changes behaviour when `resilience` is off: an engine exit
       is reported as today and nothing respawns.
-- [ ] All gates green; two-PC pass with relay-pc2 recorded in `BUGS.md`
-      against the build hash.
+- [ ] All gates green (**yes**: fmt, clippy `-D warnings`, 292 UI / 214 core /
+      176 capture, footprint); two-PC pass with relay-pc2 recorded in
+      `BUGS.md` against the build hash — **owed**.
 
 ## Kickoff prompt
 ```
