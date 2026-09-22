@@ -56,6 +56,10 @@ pub struct SendOpts {
     /// the program mix rather than instead of it. The receiver sums them;
     /// see `docs/dev/dual-audio-decision.md`.
     pub mic: bool,
+    /// Also send everything on the PC *except* the shared app, as a third
+    /// track (S37). Only meaningful with a `Process` program source; with
+    /// the desktop mix there is no "rest", and it is ignored.
+    pub rest: bool,
     pub cursor: bool,
     /// Encode size cap `(w, h)`; `None` = native capture size. The capture is
     /// GPU-scaled, so changing source never renegotiates the connection.
@@ -182,6 +186,9 @@ pub struct Stats {
     /// Counters for the mic track, when a second track is being sent.
     pub mic_packets: AtomicU64,
     pub mic_peak_milli: AtomicU32,
+    /// Counters for the rest-of-PC track (S37), when it is being sent.
+    pub rest_packets: AtomicU64,
+    pub rest_peak_milli: AtomicU32,
 }
 
 struct VideoAu {
@@ -244,6 +251,8 @@ async fn resolve_peer(peer: &Option<String>) -> Result<(SocketAddr, String)> {
 /// receiver classifies on; see [`super::audio_role`].
 pub const PROGRAM_TRACK_ID: &str = "relay-audio";
 pub const MIC_TRACK_ID: &str = "relay-audio-mic";
+/// Everything on the sending PC except the shared app (S37).
+pub const REST_TRACK_ID: &str = "relay-audio-rest";
 
 type AudioTrackPair = (Arc<TrackLocalStaticSample>, Arc<dyn webrtc::rtp_transceiver::RtpSender>);
 
@@ -341,6 +350,17 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     if opts.mic {
         mic_track =
             Some(add_audio_track(&pc, "relay-mic-stream", MIC_TRACK_ID, "Relay Microphone").await?);
+    }
+    // The rest of the PC only exists as a track when there is an app to be
+    // the rest *of*; with the whole desktop mix it would be a second copy.
+    let rest_pid = match (&opts.audio, opts.rest) {
+        (Some(AudioSource::Process { pid }), true) => Some(*pid),
+        _ => None,
+    };
+    let mut rest_track = None;
+    if rest_pid.is_some() {
+        rest_track =
+            Some(add_audio_track(&pc, "relay-rest-stream", REST_TRACK_ID, "Relay Rest").await?);
     }
 
     // Offer / answer, both MAC'd with the pairing code.
@@ -459,6 +479,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
 
     let stats = Arc::new(Stats::default());
     let stop = Arc::new(AtomicBool::new(false));
+    // Per-track gain and mute, set from stdin, read by each audio thread (S37).
+    let faders = crate::mixer::Faders::shared();
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
     // Adaptive target bitrate, read by the pipeline each frame.
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
@@ -638,8 +660,11 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let stats = stats.clone();
         let stop = stop.clone();
         let rec = recorder.clone();
+        let faders = faders.clone();
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
-            if let Err(e) = audio_pipeline(source, AudioTrack::Program, atx, stats, stop, rec) {
+            if let Err(e) =
+                audio_pipeline(source, AudioTrack::Program, atx, stats, stop, rec, faders)
+            {
                 warn!(error = %e, "audio pipeline stopped");
             }
         })?)
@@ -652,12 +677,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let stats = stats.clone();
         let stop = stop.clone();
         let rec = recorder.clone();
+        let faders = faders.clone();
         Some(std::thread::Builder::new().name("relay-mic-pipeline".into()).spawn(move || {
             // A missing or exclusively-held microphone must not take the
             // share down with it: video and the program mix carry on.
-            if let Err(e) =
-                audio_pipeline(AudioSource::Microphone, AudioTrack::Mic, mtx, stats, stop, rec)
-            {
+            if let Err(e) = audio_pipeline(
+                AudioSource::Microphone,
+                AudioTrack::Mic,
+                mtx,
+                stats,
+                stop,
+                rec,
+                faders,
+            ) {
                 warn!(error = %e, "microphone pipeline stopped");
                 println!(
                     "{}",
@@ -668,6 +700,37 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     } else {
         None
     };
+
+    // The rest of the PC (S37): the same process-loopback activation with the
+    // exclude flag. Best-effort like the mic -- the game and the mic carry on
+    // if it fails, and the failure is reported, not hidden.
+    let (rtx, rrx) = mpsc::channel::<(Vec<u8>, Duration)>(16);
+    let rest_join = if let Some(pid) = rest_pid {
+        let stats = stats.clone();
+        let stop = stop.clone();
+        let rec = recorder.clone();
+        let faders = faders.clone();
+        Some(std::thread::Builder::new().name("relay-rest-pipeline".into()).spawn(move || {
+            if let Err(e) = audio_pipeline(
+                AudioSource::Rest { pid },
+                AudioTrack::Rest,
+                rtx,
+                stats,
+                stop,
+                rec,
+                faders,
+            ) {
+                warn!(error = %e, "rest-of-PC audio pipeline stopped");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "error", "where": "rest", "message": e.to_string() })
+                );
+            }
+        })?)
+    } else {
+        None
+    };
+    let _ = &rest_join;
 
     // Async writers: channels → tracks.
     {
@@ -736,7 +799,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
-    for (slot, rx) in [(audio_track, arx), (mic_track, mrx)] {
+    for (slot, rx) in [(audio_track, arx), (mic_track, mrx), (rest_track, rrx)] {
         let Some((track, sender)) = slot else { continue };
         let mut rx = rx;
         runtime.spawn(Box::pin(async move {
@@ -796,6 +859,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "audio_peak": stats.audio_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
                     "mic_peak": stats.mic_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
+                    "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
+                    "rest_peak": stats.rest_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
                     "rss_mb": fp.rss_bytes as f64 / 1e6,
                 });
@@ -843,6 +908,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             } else {
                                 debug!(?target, "switch dropped (already live)");
                             }
+                        }
+                        Some(EngineCmd::Mixer { faders: set }) => {
+                            faders.apply(&set);
+                            debug!(?set, "mixer set");
                         }
                         Some(EngineCmd::Host { .. }) => {
                             debug!("host is a receiver command; ignored by the sender");
@@ -1166,6 +1235,10 @@ fn create_target_source(
 pub enum AudioTrack {
     Program = 0,
     Mic = 1,
+    /// The rest of the PC (S37). Index 2 is beyond what the muxers carry,
+    /// and they drop a track they do not have, so recordings keep the app
+    /// and the mic -- said in the UI, not discovered afterwards.
+    Rest = 2,
 }
 
 fn audio_pipeline(
@@ -1175,12 +1248,21 @@ fn audio_pipeline(
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
     recorder: Arc<OnceLock<Recorder>>,
+    faders: Arc<crate::mixer::Faders>,
 ) -> Result<()> {
     let profile = match which {
-        AudioTrack::Program => OpusProfile::program(),
+        AudioTrack::Program | AudioTrack::Rest => OpusProfile::program(),
         AudioTrack::Mic => OpusProfile::voice(),
     };
     let mut stream = OpusStream::new(source, profile)?;
+    stream.set_faders(
+        faders,
+        match which {
+            AudioTrack::Program => crate::mixer::Track::App,
+            AudioTrack::Mic => crate::mixer::Track::Mic,
+            AudioTrack::Rest => crate::mixer::Track::Rest,
+        },
+    );
     // Per track, not per share: the program mix and the microphone are
     // different endpoints and can run at different rates, so each one reports
     // its own conversion.
@@ -1194,6 +1276,7 @@ fn audio_pipeline(
     let (packets, peak) = match which {
         AudioTrack::Program => (&stats.audio_packets, &stats.audio_peak_milli),
         AudioTrack::Mic => (&stats.mic_packets, &stats.mic_peak_milli),
+        AudioTrack::Rest => (&stats.rest_packets, &stats.rest_peak_milli),
     };
     while !stop.load(Ordering::Relaxed) {
         let Some(p) = stream.next(Duration::from_millis(200))? else { continue };

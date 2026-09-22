@@ -4,6 +4,7 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
+import { MixerCard, type MixerRow } from "../components/Mixer";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
@@ -485,6 +486,16 @@ export function Receive() {
 
   const healthMsg = receiving ? healthText(healthState, healthDelta) : null;
 
+  // S37: one fader per track that has actually arrived. The program track
+  // is there as soon as a sender is; the others only once their packets are.
+  const receiveRows: MixerRow[] = sender
+    ? [
+        { key: "app" as const, label: "Their audio" },
+        ...(((live?.rest_packets ?? 0) > 0) ? [{ key: "rest" as const, label: "Everything else on their PC" }] : []),
+        ...(((live?.mic_packets ?? 0) > 0) ? [{ key: "mic" as const, label: "Their microphone" }] : []),
+      ]
+    : [];
+
   const areaText = popped
     ? `Playing in its own window · ${sender ?? ""}`.trim()
     : embedded
@@ -570,6 +581,9 @@ export function Receive() {
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}
+        {receiving && sender && (
+          <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender}`} />
+        )}
         {mock && <p className="note">Preview only — Relay isn't running.</p>}
         <p className="note">The stream plays here, in this window. Nothing on this PC is changed.</p>
       </aside>

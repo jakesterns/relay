@@ -105,6 +105,8 @@ pub enum AudioRole {
     Program,
     /// The sender microphone.
     Mic,
+    /// Everything on the sending PC except the shared app (S37).
+    Rest,
 }
 
 /// Classify an arriving audio track. `track_id` is the msid track id the
@@ -118,6 +120,7 @@ pub enum AudioRole {
 pub fn audio_role(track_id: &str, index: usize) -> AudioRole {
     match track_id {
         sender::MIC_TRACK_ID => AudioRole::Mic,
+        sender::REST_TRACK_ID => AudioRole::Rest,
         sender::PROGRAM_TRACK_ID => AudioRole::Program,
         _ if index == 0 => AudioRole::Program,
         _ => AudioRole::Mic,

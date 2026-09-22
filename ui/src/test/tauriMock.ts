@@ -112,6 +112,11 @@ export function commandNames(): string[] {
   return [...new Set(calls.map((c) => c.cmd))];
 }
 
+/** Every call of one command, in order. */
+export function callsOf(cmd: string): Call[] {
+  return calls.filter((c) => c.cmd === cmd);
+}
+
 export function lastCall(cmd: string): Call | undefined {
   return [...calls].reverse().find((c) => c.cmd === cmd);
 }

@@ -250,6 +250,18 @@ async fn switch_source(target: relay_core::share::SourceTarget) -> CmdResult<()>
     }
 }
 
+/// Per-track gain and mute, live (S37).
+#[tauri::command]
+async fn set_mixer(
+    side: relay_core::share::MixerSide,
+    faders: relay_core::share::FaderSet,
+) -> CmdResult<()> {
+    match call(Method::SetMixer { side, faders }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Mirrors `Reply::Presets`; the frontend gets one object.
 #[derive(Debug, serde::Serialize)]
 struct PresetsReply {
@@ -979,6 +991,7 @@ pub fn run() {
             record,
             save_replay,
             switch_source,
+            set_mixer,
             list_presets,
             save_preset,
             delete_preset,

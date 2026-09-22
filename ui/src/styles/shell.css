@@ -383,3 +383,8 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 /* "Starting…" is progress, not a fault: amber dot rather than the red one. */
 .offline.working { border-color: rgba(201,169,106,.3); }
 .offline.working i { background: var(--brass); }
+
+/* Mixer rows (S37): the slider takes the width, the mute sits at the end. */
+.fader { display: flex; align-items: center; gap: 10px; }
+.fader .sl { flex: 1; min-width: 0; }
+.fader .btn.on { border-color: var(--brass); color: var(--brass); }

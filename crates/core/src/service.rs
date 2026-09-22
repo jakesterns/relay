@@ -1562,6 +1562,14 @@ impl IpcHandler {
                 drop(g);
                 engine_command(&self.inner, &crate::share::EngineCmd::Switch { target })
             }
+            Method::SetMixer { side, faders } => {
+                drop(g);
+                let cmd = crate::share::EngineCmd::Mixer { faders };
+                match side {
+                    crate::share::MixerSide::Send => engine_command(&self.inner, &cmd),
+                    crate::share::MixerSide::Receive => receive_command(&self.inner, &cmd),
+                }
+            }
             Method::ListPresets => Reply::Presets {
                 presets: g.presets.all().to_vec(),
                 recording: g.presets.recording.clone(),

@@ -515,6 +515,7 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         audio: std::env::var("RELAY_NO_AUDIO").is_err(),
                         audio_pid: None,
                         mic: false,
+                        rest: false,
                         cursor: true,
                         preset: None,
                         record: std::env::var("RELAY_RECORD").is_ok(),

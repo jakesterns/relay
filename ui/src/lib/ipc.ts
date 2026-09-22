@@ -140,15 +140,27 @@ export type DesktopAudio = "system" | "game" | "off";
  * The core still reads the pre-S2 four-way string from disk, but everything
  * it hands out and takes back on the wire is this object.
  */
-export interface PresetAudio { desktop: DesktopAudio; mic: boolean }
+export interface PresetAudio {
+  desktop: DesktopAudio; mic: boolean;
+  /** With `game`: everything else on the PC as its own track too (S37). */
+  rest?: boolean;
+}
 
 /** Human summary of an audio source set, e.g. "Game only + microphone". */
 export function presetAudioLabel(a: PresetAudio): string {
-  const desktop = { system: "System mix", game: "Game only", off: "" }[a.desktop];
+  let desktop = { system: "System mix", game: "Game only", off: "" }[a.desktop];
+  if (a.desktop === "game" && a.rest) desktop = "Game + everything else";
   if (desktop && a.mic) return `${desktop} + microphone`;
   if (desktop) return desktop;
   return a.mic ? "Microphone" : "None";
 }
+
+/** Mixer (S37). Mirrors `crates/core/src/share.rs`. */
+export type MixerSide = "send" | "receive";
+export type MixerTrack = "app" | "rest" | "mic";
+/** `gain` is linear, 0–2 (unity 1). */
+export interface FaderLevel { gain: number; mute: boolean }
+export type FaderSet = Partial<Record<MixerTrack, FaderLevel>>;
 /**
  * Recording container. Same video + Opus bitstream either way — the choice
  * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
@@ -183,6 +195,8 @@ export interface ShareStats {
   capture_to_present_ms?: number; audio_packets?: number; audio_peak?: number;
   /** Second audio track (microphone); absent when only one track is sent. */
   mic_packets?: number; mic_peak?: number;
+  /** Third track: everything on the PC except the shared app (S37). */
+  rest_packets?: number; rest_peak?: number;
   cpu_percent?: number; rss_mb?: number;
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;
@@ -590,6 +604,11 @@ export const api = {
   async switchSource(target: SourceTarget): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("switch_source", { target });
+  },
+  /** Per-track gain and mute on the running share or receive, live (S37). */
+  async setMixer(side: MixerSide, faders: FaderSet): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("set_mixer", { side, faders });
   },
   async listPresets(): Promise<PresetsReply> {
     if (!isTauri()) return structuredClone({ presets: mockPresets, recording: mockRecording });

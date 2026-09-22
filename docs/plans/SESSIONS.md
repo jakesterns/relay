@@ -1680,6 +1680,8 @@ request" rule revisited. **First task of the session: write
 **Plan** `docs/plans/S37-audio-mixer.md` (written 2026-09-22) · **Worktree**
 `C:\Users\stern\Documents\Code\relay-mixer`. Three tracks, not a mixing engine:
 "everything else on the PC" is process loopback with the *exclude* flag.
+**Built 2026-09-22.** The plan's Definition of Done is ticked bar one: the
+listening check on the second PC (speech and music, never a tone), owed.
 Requested by Jake 2026-09-18. When sharing a window or one application
 rather than the whole screen, choose what goes out: that app's sound, the
 whole OS mix, system sounds, the microphone — each on its own fader with

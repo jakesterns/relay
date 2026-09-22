@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
+import { MixerCard, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
@@ -20,6 +21,8 @@ interface Strip {
   fps: number;
   /** Mic track level, and whether a second audio track is arriving at all. */
   micDb: number; micLive: boolean;
+  /** The rest-of-PC track (S37), same shape. */
+  restDb: number; restLive: boolean;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
   /** The codec the running share negotiated; null until the engine says. */
@@ -29,9 +32,22 @@ const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0, fps: 0,
   audioDb: -Infinity, history: Array(18).fill(0),
   micDb: -Infinity, micLive: false,
+  restDb: -Infinity, restLive: false,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
   codec: null,
 };
+
+/** The mixer rows a preset's audio produces on the sending end (S37): one
+ *  per track that will actually be on the wire, in the order they sound. */
+export function sendRows(audio: SharePresetDef["audio"] | undefined): MixerRow[] {
+  if (!audio) return [];
+  const rows: MixerRow[] = [];
+  if (audio.desktop === "game") rows.push({ key: "app", label: "Game" });
+  else if (audio.desktop === "system") rows.push({ key: "app", label: "System mix" });
+  if (audio.desktop === "game" && audio.rest) rows.push({ key: "rest", label: "Everything else" });
+  if (audio.mic) rows.push({ key: "mic", label: "Microphone" });
+  return rows;
+}
 
 export function Share() {
   const { state, mock, offline } = useCore();
@@ -130,6 +146,8 @@ export function Share() {
           // Packets, not level: a muted mic is still a live track, and the
           // meter should say so rather than vanish.
           micLive: (s.mic_packets ?? 0) > 0,
+          restDb: s.rest_peak ? 20 * Math.log10(Math.max(1e-4, s.rest_peak)) : -Infinity,
+          restLive: (s.rest_packets ?? 0) > 0,
           history: h,
           recording: s.recording ?? false,
           recMb: s.rec_mb ?? 0,
@@ -390,6 +408,14 @@ export function Share() {
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>
           : <button className="btn acc" onClick={start} disabled={!canStart}
               title={canStart ? "" : "Pick a remembered PC, or enter the 6-digit code shown on the receiver"}>Start sharing</button>}
+        {/* S37: one fader per track this share is sending. Rows come from
+            the preset the engine read at start, so they match the wire. */}
+        {sharing && (
+          <MixerCard side="send" rows={sendRows(runningDef?.audio)} sessionKey={`send-${running ?? ""}`}
+            note={runningDef?.audio.rest && runningDef.audio.desktop === "game"
+              ? "Recordings keep the game and the microphone; everything else is sent live but not written to disk."
+              : undefined} />
+        )}
         {mock && <p className="note">Preview data — Relay isn't running.</p>}
         <p className="note">Captures the screen the same way Windows does. Never touches games or other apps.</p>
       </aside>
@@ -501,16 +527,29 @@ function PresetCard({ def, locked, onSaved }: {
         <ChipSet label="Audio"
           values={[
             ...(draft.audio.desktop === "off" ? [] : [draft.audio.desktop]),
+            ...(draft.audio.desktop === "game" && draft.audio.rest ? ["rest" as const] : []),
             ...(draft.audio.mic ? ["mic" as const] : []),
           ]}
           options={[
             { key: "system", label: "System mix" }, { key: "game", label: "Game only" },
+            // Only means anything beside Game: with the system mix there is
+            // no "else". Shown always so the choice is discoverable; a click
+            // with System selected does nothing rather than silently
+            // switching the desktop source.
+            { key: "rest", label: "+ everything else" },
             { key: "mic", label: "Microphone" },
           ]}
           onToggle={(k) => {
             // The two desktop sources exclude each other — you cannot capture
             // the whole endpoint and one process at once — but the microphone
-            // is its own track and rides alongside either.
+            // is its own track and rides alongside either. "Everything else"
+            // (S37) is a third track that only exists beside Game.
+            if (k === "rest") {
+              if (draft.audio.desktop === "game") {
+                edit({ audio: { ...draft.audio, rest: !draft.audio.rest } });
+              }
+              return;
+            }
             if (k === "mic") edit({ audio: { ...draft.audio, mic: !draft.audio.mic } });
             else edit({
               audio: {
@@ -581,6 +620,7 @@ function InstrumentStrip({ s, live, recOn, encoder }: {
     live && isFinite(db) ? Math.round(((db + 40) / 40) * audioSegs) : 0;
   const lit = segsFor(s.audioDb);
   const micLit = segsFor(s.micDb);
+  const restLit = segsFor(s.restDb);
   const recording = live && (s.recording || recOn);
   const recWarn = live && (s.recDropped > 0 || s.recStoppedDisk);
   return (
@@ -619,6 +659,13 @@ function InstrumentStrip({ s, live, recOn, encoder }: {
           <label>Mic</label>
           <div className="v">{isFinite(s.micDb) ? s.micDb.toFixed(1) : "—"}<u>dB</u></div>
           <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < micLit ? "" : "off"} />)}</div>
+        </div>
+      )}
+      {s.restLive && (
+        <div>
+          <label>Everything else</label>
+          <div className="v">{isFinite(s.restDb) ? s.restDb.toFixed(1) : "—"}<u>dB</u></div>
+          <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < restLit ? "" : "off"} />)}</div>
         </div>
       )}
       <div className={recWarn ? "warn" : ""}>

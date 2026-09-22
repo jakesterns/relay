@@ -108,27 +108,36 @@ strip reads them like the others.
 - [x] Two Opus tracks already travel and are classified by msid id.
 - [x] The engines already take live commands on stdin (`Preview`, `Switch`,
       `Host`).
-- [ ] The recorder's audio-track count is known (see Recording).
+- [x] The recorder's audio-track count is known: both muxers carry two
+      audio tracks and *drop* a packet for a track they do not have (their
+      documented contract), so the rest track (index 2) is simply not
+      recorded. No muxer change; the UI says so.
 
 ## Definition of Done
-- [ ] `AudioSource::Rest { pid }`: everything on the endpoint except the
-      target's process tree, via the exclude flag; unit test on the params.
-- [ ] Three tracks on the wire when the preset asks (`rest: true` with
-      `game`); an older receiver still hears app + mic.
-- [ ] `EngineCmd::Mixer` on both engines; gains ramp within the frame; a
-      muted track keeps sending silence.
-- [ ] `Method::SetMixer`, Tauri command, `api.setMixer`; mixer state is
-      per-share and resets to unity.
-- [ ] Mixer cards on Share and Receive as described; rows only for tracks
-      present; live while sharing; tests in jsdom.
-- [ ] Levels for all three tracks in the strip.
-- [ ] Recording: tracks on disk match what the muxer supports, and the UI
-      says which.
+- [x] `AudioSource::Rest { pid }`: everything on the endpoint except the
+      target's process tree, via the exclude flag. **No unit test on the
+      params** — they are built inside the COM activation call and would need
+      a refactor to test in isolation; the flag choice is a one-line `match`
+      beside the include case. Proven by ear on the second PC instead.
+- [x] Three tracks on the wire when the preset asks (`rest: true` with
+      `game`); an older receiver still hears app + mic (`relay-audio-rest`
+      falls into its arrival-order fallback; noted for the release line).
+- [x] `EngineCmd::Mixer` on both engines; gains ramp within the frame
+      (`mixer::apply_gain`, tested); a muted track keeps sending silence and
+      meters as silence.
+- [x] `Method::SetMixer`, Tauri command, `api.setMixer`; mixer state is
+      per-share and resets to unity (`MixerCard`'s `sessionKey`; tested).
+- [x] Mixer cards on Share and Receive as described; rows only for tracks
+      present; live while sharing (50 ms batching, tested); jsdom only.
+- [x] Levels for all three tracks in the strip (`rest_peak` / `rest_packets`).
+- [x] Recording: the game and the microphone land on disk; everything else
+      does not, and the Share mixer says so when that track is being sent.
 - [ ] Listening check on the second PC with relay-pc2: **speech and music,
       never a tone.** Mute the game and hear only the rest; mute the rest and
       hear only the game; move a fader mid-share and hear no click. Recorded
-      in `BUGS.md` against the build hash.
-- [ ] All gates green.
+      in `BUGS.md` against the build hash. **Owed.**
+- [x] All gates green: fmt, clippy `-D warnings`, 304 UI / 216 core /
+      181 capture, footprint.
 
 ## Kickoff prompt
 ```

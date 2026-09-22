@@ -118,6 +118,7 @@ pub async fn run(
     aus: mpsc::Receiver<AccessUnit>,
     opus: mpsc::Receiver<Vec<u8>>,
     mic: mpsc::Receiver<Vec<u8>>,
+    rest: mpsc::Receiver<Vec<u8>>,
     stats: Arc<RecvStats>,
     mut closed: mpsc::Receiver<()>,
     pc: impl webrtc::peer_connection::PeerConnection,
@@ -129,10 +130,20 @@ pub async fn run(
     let mic_route = opts.mic_route.clone();
     let audio_stats = Arc::new(crate::playback::PlaybackStats::default());
     let audio_stats2 = audio_stats.clone();
+    // Per-track gain and mute (S37): set from stdin here, read by playback.
+    let faders = crate::mixer::Faders::shared();
+    let faders2 = faders.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
-            if let Err(e) = crate::playback::run(opus, mic, audio_stop_rx, mic_route, audio_stats2)
-            {
+            if let Err(e) = crate::playback::run(
+                opus,
+                mic,
+                rest,
+                audio_stop_rx,
+                mic_route,
+                audio_stats2,
+                faders2,
+            ) {
                 warn!(error = %e, "audio playback stopped");
             }
         })?;
@@ -195,6 +206,7 @@ pub async fn run(
                     "presented": presented,
                     "audio_packets": audio,
                     "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
+                    "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "capture_to_present_ms": latency_ms,
                     "rtp_gaps": gaps,
                     "rtp_lost": lost,
@@ -241,6 +253,10 @@ pub async fn run(
                         Some(EngineCmd::Host { mode, owner }) => {
                             info!(?mode, owner, "host command received on stdin");
                             link.post(mode, owner)
+                        }
+                        Some(EngineCmd::Mixer { faders: set }) => {
+                            faders.apply(&set);
+                            tracing::debug!(?set, "mixer set");
                         }
                         Some(other) => tracing::debug!(?other, "command not for a receiver"),
                         None => tracing::debug!(line = %l, "unrecognised stdin line ignored"),

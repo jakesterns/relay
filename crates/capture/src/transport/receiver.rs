@@ -68,6 +68,8 @@ pub struct RecvStats {
     /// Packets on the second (microphone) audio track, 0 when the sender
     /// ships only one.
     pub mic_packets: AtomicU64,
+    /// Packets on the rest-of-PC track (S37), 0 when it is not sent.
+    pub rest_packets: AtomicU64,
     /// network (+jitter) latency of the last AU: arrival − capture, in µs.
     pub arrival_latency_us_last: AtomicI64,
     /// Presentation timestamp of the last decoded frame, and which slice of
@@ -299,6 +301,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let (au_tx, mut au_rx) = mpsc::channel::<AccessUnit>(64);
     let (opus_tx, mut opus_rx) = mpsc::channel::<Vec<u8>>(64);
     let (mic_tx, mut mic_rx) = mpsc::channel::<Vec<u8>>(64);
+    let (rest_tx, mut rest_rx) = mpsc::channel::<Vec<u8>>(64);
     {
         let stats = stats.clone();
         let offset = clock_offset_ns.clone();
@@ -330,6 +333,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         let tx = match role {
                             super::AudioRole::Program => opus_tx.clone(),
                             super::AudioRole::Mic => mic_tx.clone(),
+                            super::AudioRole::Rest => rest_tx.clone(),
                         };
                         runtime2.spawn(Box::pin(async move {
                             while let Some(ev) = track.poll().await {
@@ -337,6 +341,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                                     match role {
                                         super::AudioRole::Program => {
                                             stats.audio_packets.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        super::AudioRole::Rest => {
+                                            stats.rest_packets.fetch_add(1, Ordering::Relaxed);
                                         }
                                         super::AudioRole::Mic => {
                                             stats.mic_packets.fetch_add(1, Ordering::Relaxed);
@@ -370,6 +377,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 }
                 Some(_pkt) = opus_rx.recv() => {}
                 Some(_pkt) = mic_rx.recv() => {}
+                Some(_pkt) = rest_rx.recv() => {}
                 _ = ticker.tick() => {
                     let aus = stats2.video_aus.load(Ordering::Relaxed);
                     let (p50, p99, max) = lat.summary().unwrap_or((0.0, 0.0, 0.0));
@@ -433,7 +441,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             let _ = end_tx.send(()).await;
         });
     }
-    crate::render::run(au_rx, opus_rx, mic_rx, stats, end_rx, pc, render_opts, abort_tx).await
+    crate::render::run(au_rx, opus_rx, mic_rx, rest_rx, stats, end_rx, pc, render_opts, abort_tx)
+        .await
 }
 
 /// What the reorder buffer's output does to the access unit being built.
