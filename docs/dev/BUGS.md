@@ -620,7 +620,7 @@ the contents, state what is owed.
 | r13 | `5c060c4` | S31 stream health; S35 identity foundation | — | chip stays quiet on a good stream; latency never negative |
 | r14 | `0fa9776` | S35 remembered devices (Option A) | — | code pairing → reconnect with no code → consent check (receiver not listening) → Forget → reboot; install-over-the-top on both PCs |
 | r15 | `4cdda0f` | S38 stream resilience | — | kill the sender's engine by PID and watch it return; same for the receiver; Stop is a Stop; give-up time; reboot one PC mid-share; crash line shown once; close notice on/off |
-| r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | — | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
+| r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | Loopback on the main PC, headless, 2026-09-22: exclude-mode capture activates (`audio pipeline up track=Rest`, 48 kHz stereo), three tracks travel (`rest_packets` in lockstep with `audio_packets` and `mic_packets`, 1,048 each in 10 s), receiver classifies `relay-audio-rest` as `Rest`. Nothing was playing, so `rest_peak` = 0: *that* the track flows is proven, *what* it carries is not. | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
 
 Each build supersedes the one before; install over the top without
 uninstalling, on both PCs — that is the standing-rule check itself.
