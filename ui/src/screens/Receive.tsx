@@ -3,10 +3,11 @@ import { Card, ErrorNote, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
+import { ago } from "../lib/ago";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
-  api, codecLabel, onCoreEvents, type FirewallStatus, type ShareCapabilities, type ShareStats,
-  type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
+  api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
+  type ShareStats, type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
 
 /** Warn before the user tries, not after it fails.
@@ -329,6 +330,59 @@ function StreamHealthCard(
   );
 }
 
+/** PCs that may send to this one without a code (S35).
+ *
+ *  They still need this screen to be on Start receiving. Remembering removed
+ *  the code, not the consent -- Jake's call in the trust model (§5): nothing
+ *  can put a picture on this screen unasked. Forget is real, not a hidden
+ *  row: the PC needs a code again, like a stranger. */
+function TrustedSendersCard({ tick }: { tick: number }) {
+  const { offline } = useCore();
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api.listPeers()
+      .then((p) => { if (live) setPeers(p); })
+      .catch(() => { if (live) setPeers([]); });
+    return () => { live = false; };
+  }, [offline, tick]);
+
+  // Stays for the note after the last Forget: a card that vanishes the moment
+  // you act on it looks like the click did nothing.
+  if (peers.length === 0 && !note) return null;
+
+  const forget = async (p: Peer) => {
+    try {
+      await api.forgetPeer(p.id);
+      setPeers((was) => was.filter((x) => x.id !== p.id));
+      setNote(`${p.name} will need a code next time.`);
+    } catch (e) { setNote(errText(e)); }
+  };
+  const direction = (p: Peer) =>
+    p.last_direction === "received_from" ? "shared to this PC" : "received a share from this PC";
+
+  return (
+    <Card title="Remembered PCs">
+      {peers.map((p) => (
+        <div key={p.id} className="dev" data-testid="trusted-row">
+          <div>
+            <b>{p.favourite ? "★ " : ""}{p.name}</b>
+            <span>Last {direction(p)} · {ago(p.last_seen_unix)}</span>
+          </div>
+          <button className="btn q" style={{ marginLeft: "auto" }} onClick={() => void forget(p)}>
+            Forget
+          </button>
+        </div>
+      ))}
+      <p className="note">
+        {note ?? "These PCs connect without a code — but only while Start receiving is on here. Nothing can put a picture on this screen unasked."}
+      </p>
+    </Card>
+  );
+}
+
 export function Receive() {
   const { mock } = useCore();
   const [receiving, setReceiving] = useState(false);
@@ -342,6 +396,11 @@ export function Receive() {
   // say so rather than snapping back to the idle prompt as if nothing
   // happened. A frozen last frame was the old way of "saying" it.
   const [ended, setEnded] = useState<string | null>(null);
+  // The current sender connected without a code, as a remembered PC (S35);
+  // and a counter that tells the remembered-PCs card to reload, because a
+  // share starting or ending is what changes that list.
+  const [trusted, setTrusted] = useState(false);
+  const [peersTick, setPeersTick] = useState(0);
   // Stream health (S31). The tracker is a ref, not state: it is fed on every
   // stats line and only the *derived* state should cause a render.
   const health = useRef(new HealthTracker());
@@ -370,12 +429,18 @@ export function Receive() {
       receiveStatus: (s) => {
         setReceiving(s.receiving);
         if (s.code) setCode(s.code);
-        if (s.sender) { setSender(s.sender); setEnded(null); }
+        if (s.sender) {
+          setSender(s.sender); setEnded(null);
+          setTrusted(!!s.trusted);
+          setPeersTick((t) => t + 1);
+        }
         if (s.message) setError(s.message);
         if (s.codec) setCodec(s.codec);
         if (!s.receiving) {
           setSender((was) => { if (was) setEnded(was); return null; });
           setCode(null); setCodec(null);
+          setTrusted(false);
+          setPeersTick((t) => t + 1);
           // A dead share leaves no health behind it. Without this the next
           // one inherits a stale "degraded", and the tracker would diff a
           // fresh engine's counters against the old engine's totals.
@@ -471,7 +536,9 @@ export function Receive() {
           <p className="note">Type this on the other PC's Share screen.</p>
         </Card>
         <Card>
-          <Kv k="Status" v={sender ? `Paired with ${sender}` : receiving ? "Advertising on the LAN" : "Idle"} />
+          <Kv k="Status" v={sender
+            ? `Paired with ${sender}${trusted ? " · remembered, no code" : ""}`
+            : receiving ? "Advertising on the LAN" : "Idle"} />
           {/* Named only once the stream says which: HEVC or H.264 is decided per
               share, by what both PCs can do. */}
           <Kv k="Codec" v={receiving && codec ? codecLabel(codec) : "—"} mono />
@@ -490,6 +557,7 @@ export function Receive() {
           )}
         </Card>
         <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
+        <TrustedSendersCard tick={peersTick} />
         <VirtualDeviceCard />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving

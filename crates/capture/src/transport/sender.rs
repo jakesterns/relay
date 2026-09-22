@@ -39,7 +39,14 @@ use std::sync::{Mutex as StdMutex, OnceLock};
 pub struct SendOpts {
     /// Receiver instance name (mDNS) or `ip:port`; `None` = first discovered.
     pub peer: Option<String>,
+    /// Six-digit code from the receiver. Empty when `trusted` is set.
     pub code: String,
+    /// Connect without a code, as a PC the receiver remembers (S35). The
+    /// value is the receiver's expected DTLS fingerprint: the answer must
+    /// carry it, or we are talking to the wrong machine and stop before any
+    /// media flows. The core resolves this from a peer id; the engine never
+    /// chooses it.
+    pub trusted: Option<String>,
     pub bitrate_bps: u32,
     pub fps: u32,
     /// The program-mix track: `None` = no program audio; `Some(Desktop)` is
@@ -342,24 +349,47 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let _ = events.gather_done.recv().await;
     let local = pc.local_description().await.context("no local description")?;
     let offer_json = serde_json::to_string(&local)?;
+    // A remembered receiver gets no MAC — there is no code to MAC with. It
+    // recognises this PC by the DTLS fingerprint in the SDP, and DTLS then
+    // proves we hold that certificate's key (S35).
+    let trusted = opts.trusted.is_some();
     sig.send(&signal::SigMsg::Offer {
         name: discovery::hostname(),
         sdp: offer_json.clone(),
-        mac: signal::mac(&opts.code, &offer_json),
+        mac: if trusted { String::new() } else { signal::mac(&opts.code, &offer_json) },
+        trusted,
     })
     .await?;
 
-    let answer_json = match sig.recv().await? {
-        signal::SigMsg::Answer { name, sdp, mac } => {
+    let answer_json = match (sig.recv().await?, opts.trusted.as_deref()) {
+        (signal::SigMsg::Answer { name, sdp, .. }, Some(expected)) => {
+            // Mutual: the receiver checked us, we check it. A name is not an
+            // identity — anything on the LAN can call itself `studio-pc` —
+            // so the answer must carry the fingerprint we remembered, and
+            // DTLS holds it to that.
+            let got = signal::sdp_fingerprint(&sdp).unwrap_or_default();
+            if relay_core::peers::norm(&got) != relay_core::peers::norm(expected) {
+                bail!(
+                    "`{name}` is not the PC this one remembers by that name; \
+                     pair with its code to trust the new one"
+                );
+            }
+            sdp
+        }
+        (signal::SigMsg::Bye, Some(_)) => {
+            bail!("`{peer_name}` does not remember this PC; pair with its code once and it will")
+        }
+        (signal::SigMsg::Answer { name, sdp, mac }, None) => {
             if !signal::verify_mac(&opts.code, &sdp, &mac) {
                 bail!("pairing code mismatch - the receiver used a different code");
             }
             if let Some(fp) = signal::sdp_fingerprint(&sdp) {
-                let _ = signal::remember_peer(&name, &fp);
+                let _ =
+                    relay_core::peers::remember(&name, &fp, relay_core::peers::Direction::SentTo);
             }
             sdp
         }
-        other => bail!("expected answer, got {other:?}"),
+        (other, _) => bail!("expected answer, got {other:?}"),
     };
     let answer: RTCSessionDescription = serde_json::from_str(&answer_json)?;
     debug!(offer = %local.sdp, answer = %answer.sdp, "sdp exchange");
@@ -395,9 +425,18 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         _ = tokio::time::sleep(Duration::from_secs(15)) => bail!("timed out waiting for DTLS/ICE"),
     }
     info!("connected; starting media");
+    if let Some(fp) = opts.trusted.as_deref() {
+        // DTLS has now proved the receiver is the PC we remembered.
+        let _ = relay_core::peers::touch(fp, relay_core::peers::Direction::SentTo);
+    }
     println!(
         "{}",
-        serde_json::json!({ "event": "connected", "peer": peer_name, "rtt_ms": rtt_ns as f64 / 1e6 })
+        serde_json::json!({
+            "event": "connected",
+            "peer": peer_name,
+            "rtt_ms": rtt_ns as f64 / 1e6,
+            "trusted": trusted,
+        })
     );
 
     // Warn if the route to the peer leaves over Wi-Fi.

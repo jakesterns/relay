@@ -501,6 +501,8 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                     request: Box::new(ShareRequest {
                         peer: std::env::var("RELAY_PEER").ok(),
                         code,
+                        peer_id: None,
+                        trusted: None,
                         bitrate_mbps: std::env::var("RELAY_BITRATE_MBPS")
                             .ok()
                             .and_then(|s| s.parse().ok())

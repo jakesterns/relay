@@ -685,13 +685,61 @@ fn library_changed(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>)
     reselect(inner, events);
 }
 
+/// Turn a `peer_id` into what the engine needs, or say why a request cannot
+/// start. This is the service's job on purpose (S35): the client names a
+/// remembered PC by id and never handles a fingerprint, and
+/// `ShareRequest::trusted` is serde-skipped so nothing over IPC can set it.
+/// The only way to connect without a code is through a peer the store holds.
+fn resolve_share_peer(req: &mut crate::share::ShareRequest) -> Result<(), String> {
+    match req.peer_id.as_deref() {
+        Some(id) => {
+            let path = crate::peers::path().map_err(|e| e.to_string())?;
+            match crate::peers::Store::load(&path).get(id) {
+                Some(p) => {
+                    req.peer = Some(p.name.clone());
+                    req.trusted = Some(p.fingerprint.clone());
+                    Ok(())
+                }
+                None => {
+                    Err("That PC is no longer remembered. Pair with its code once and it will be."
+                        .into())
+                }
+            }
+        }
+        None if req.code.trim().is_empty() => {
+            Err("Enter the six-digit code shown on the receiving PC.".into())
+        }
+        None => Ok(()),
+    }
+}
+
+/// Load, change, save the remembered-peers store. `false` from `f` means the
+/// id was not there, which is reported rather than treated as done.
+fn edit_peers(f: impl FnOnce(&mut crate::peers::Store) -> bool) -> Reply {
+    let path = match crate::peers::path() {
+        Ok(p) => p,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    let mut store = crate::peers::Store::load(&path);
+    if !f(&mut store) {
+        return Reply::Error { message: "no remembered PC with that id".into() };
+    }
+    match store.save(&path) {
+        Ok(()) => Reply::Ok,
+        Err(e) => Reply::Error { message: e.to_string() },
+    }
+}
+
 /// Spawn the share engine and a thread that relays its NDJSON as IPC events.
 fn spawn_share(
     inner: &Arc<Mutex<Inner>>,
     events: &broadcast::Sender<Event>,
-    req: crate::share::ShareRequest,
+    mut req: crate::share::ShareRequest,
 ) -> Reply {
     use crate::share::{ShareEngine, ShareEvent};
+    if let Err(message) = resolve_share_peer(&mut req) {
+        return Reply::Error { message };
+    }
     let mut g = inner.lock();
     if g.share.is_some() {
         return Reply::Error { message: "a share is already running".into() };
@@ -719,13 +767,14 @@ fn spawn_share(
                 ShareEvent::Preview { width, height, jpeg } => {
                     let _ = events2.send(Event::SharePreview { width, height, jpeg });
                 }
-                ShareEvent::Connected { peer } => {
+                ShareEvent::Connected { peer, trusted } => {
                     inner2.lock().state.sharing =
                         crate::types::ShareState::Sharing { peer: peer.clone() };
                     let _ = events2.send(Event::ShareStatus {
                         sharing: true,
                         peer: Some(peer),
                         message: None,
+                        trusted,
                     });
                 }
                 ShareEvent::Error { message } => {
@@ -733,6 +782,7 @@ fn spawn_share(
                         sharing: true,
                         peer: None,
                         message: Some(message),
+                        trusted: false,
                     });
                 }
                 ShareEvent::Recording { on, path } => {
@@ -760,6 +810,7 @@ fn spawn_share(
                         sharing: false,
                         peer: None,
                         message: (!ok).then(|| "share engine stopped unexpectedly".to_string()),
+                        trusted: false,
                     });
                 }
             });
@@ -769,13 +820,22 @@ fn spawn_share(
                 ig.share = None;
                 ig.state.sharing = crate::types::ShareState::Off;
                 drop(ig);
-                let _ =
-                    events2.send(Event::ShareStatus { sharing: false, peer: None, message: None });
+                let _ = events2.send(Event::ShareStatus {
+                    sharing: false,
+                    peer: None,
+                    message: None,
+                    trusted: false,
+                });
             }
         })
         .ok();
 
-    let _ = events.send(Event::ShareStatus { sharing: true, peer: None, message: None });
+    let _ = events.send(Event::ShareStatus {
+        sharing: true,
+        peer: None,
+        message: None,
+        trusted: false,
+    });
     Reply::Ok
 }
 
@@ -823,6 +883,7 @@ fn spawn_receive(
                         sender: None,
                         message: None,
                         codec: None,
+                        trusted: false,
                     });
                 }
                 ShareEvent::Codec { codec } => {
@@ -832,15 +893,17 @@ fn spawn_receive(
                         sender: None,
                         message: None,
                         codec: Some(codec),
+                        trusted: false,
                     });
                 }
-                ShareEvent::Paired { sender } => {
+                ShareEvent::Paired { sender, trusted } => {
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
                         sender: Some(sender),
                         message: None,
                         codec: None,
+                        trusted,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -856,6 +919,7 @@ fn spawn_receive(
                         sender: None,
                         message: Some(message),
                         codec: None,
+                        trusted: false,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -919,6 +983,7 @@ fn spawn_receive(
                     sender: None,
                     message: last_failure.take(),
                     codec: None,
+                    trusted: false,
                 });
             }
         })
@@ -937,6 +1002,7 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
                 sender: None,
                 message: None,
                 codec: None,
+                trusted: false,
             });
             Reply::Ok
         }
@@ -950,7 +1016,12 @@ fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> R
         Some(engine) => {
             engine.stop();
             inner.lock().state.sharing = crate::types::ShareState::Off;
-            let _ = events.send(Event::ShareStatus { sharing: false, peer: None, message: None });
+            let _ = events.send(Event::ShareStatus {
+                sharing: false,
+                peer: None,
+                message: None,
+                trusted: false,
+            });
             Reply::Ok
         }
         None => Reply::Error { message: "no share is running".into() },
@@ -1040,18 +1111,19 @@ impl IpcHandler {
                 drop(g);
                 kill_share(&self.inner, &self.events)
             }
-            Method::StartSharePreset { preset, code, peer } => {
+            Method::StartSharePreset { preset, code, peer, peer_id } => {
                 let Some(def) = g.presets.get(&preset).cloned() else {
                     return Reply::Error { message: format!("no preset `{preset}`") };
                 };
                 let game_pid = g.state.foreground.as_ref().map(|f| f.pid);
-                let req = crate::presets::to_share_request(
+                let mut req = crate::presets::to_share_request(
                     &def,
                     code,
                     peer,
                     game_pid,
                     &g.presets.recording,
                 );
+                req.peer_id = peer_id;
                 drop(g);
                 spawn_share(&self.inner, &self.events, req)
             }
@@ -1116,6 +1188,21 @@ impl IpcHandler {
                     Ok(receivers) => Reply::Receivers { receivers },
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
+            }
+            Method::ListPeers => {
+                drop(g);
+                match crate::peers::path() {
+                    Ok(p) => Reply::Peers { peers: crate::peers::Store::load(&p).list() },
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::ForgetPeer { id } => {
+                drop(g);
+                edit_peers(|s| s.forget(&id))
+            }
+            Method::SetPeerFavourite { id, favourite } => {
+                drop(g);
+                edit_peers(|s| s.set_favourite(&id, favourite))
             }
             Method::ListHardware => Reply::Hardware {
                 headsets: g.library.headsets.clone(),

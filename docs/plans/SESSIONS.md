@@ -1593,13 +1593,10 @@ Done and merged (`6c21c0c`), while Jake was away:
   re-exporting the type, so a version skew is a baffling type error.
 - `docs/dev/trusted-peers.md`: the trust model.
 
-**Blocked on Jake:** §5 of the trust model. May a remembered sender connect
-while the receiving PC is *not* in "Start receiving"? Recommended answer is no
-— remembering removes the code, not the consent. **No pairing code is skipped
-anywhere until he answers**, so the feature is inert by design right now.
-
-Still to do: the versioned peer store (id, last_seen, favourite, migration
-test), the quick-connect path itself, and both list UIs with Forget.
+**§5 answered by Jake, 2026-09-22: no** — "I would say no to the pairing
+without both devices ready for streaming." Remembering removes the code, not
+the consent. Built as Option A the same day (`docs/dev/trusted-peers.md` §8
+describes the implementation). What is left is what only two PCs can prove.
 
 ### Definition of Done
 - [x] **The trust model is written down first**, in `docs/dev/trusted-peers.md`,
@@ -1610,22 +1607,35 @@ test), the quick-connect path itself, and both list UIs with Forget.
       what happens when the same secret appears from a new address. "Any machine
       that once paired may reconnect silently forever" is the failure to design
       against.
-- [ ] Per-peer records in `%LOCALAPPDATA%\Relay`, versioned, with a migration
+- [x] Per-peer records in `%LOCALAPPDATA%\Relay`, versioned, with a migration
       test that loads the previous version. Secrets are per-peer and revocable,
-      never one global key.
-- [ ] One-click reconnect with no code, on both ends, after an app restart and
-      after a reboot of either PC.
-- [ ] The Share screen lists remembered receivers; the Receive screen lists
+      never one global key. (`crates/core/src/peers.rs`, 14 tests; the
+      credential is the peer's own key, held by the peer — nothing symmetric is
+      stored at all.)
+- [x] One-click reconnect with no code, on both ends, after an app restart —
+      the store and the identity key both live in the data root and the engine
+      reads them fresh per share. *After a reboot of either PC*: same
+      mechanism, owed to the two-PC pass below.
+- [x] The Share screen lists remembered receivers; the Receive screen lists
       trusted senders. Both show a name and last-connected time, support
       favourites, and have an obvious **Forget** that actually revokes rather
-      than hiding the row.
-- [ ] The six-digit code still works for first contact and for anything not
-      remembered. Nothing here removes it.
+      than hiding the row. (10 UI tests.)
+- [x] The six-digit code still works for first contact and for anything not
+      remembered. Nothing here removes it. (Every pre-existing Share test
+      still passes unchanged; an older receiver's `Bye` becomes "pair with its
+      code once".)
 - [ ] Survives an update on both ends: install over the top on each PC, then
       share with no code. This is the standing rule and is the single most
-      likely thing to regress.
+      likely thing to regress. **Needs both PCs — r14 is the build to test it
+      on, over r13.**
 - [ ] Two-PC pass with relay-pc2, recorded in `docs/dev/BUGS.md` with the hash.
-- [ ] All gates green.
+      The script: pair once with a code (both ends now remember each other);
+      stop; on Share pick the remembered PC; Start receiving on the other; Start
+      sharing — no code — and Receive should read "remembered, no code". Then
+      Forget on one end and confirm the next attempt says "does not remember
+      this PC" rather than connecting.
+- [x] All gates green: fmt, clippy `-D warnings`, `cargo test --workspace`,
+      `pnpm build`, `pnpm test` (283), footprint.
 
 ### Kickoff prompt
 ```

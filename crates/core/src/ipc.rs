@@ -73,9 +73,14 @@ pub enum Method {
     /// from the focused window, recording folder from settings).
     StartSharePreset {
         preset: String,
+        /// May be empty when `peer_id` is set.
         code: String,
         #[serde(default)]
         peer: Option<String>,
+        /// A remembered PC to connect to without a code (S35). The service
+        /// resolves it; the client never sees a fingerprint.
+        #[serde(default)]
+        peer_id: Option<String>,
     },
     /// Toggle continuous recording on the running share.
     Record {
@@ -113,6 +118,17 @@ pub enum Method {
     },
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
+    /// PCs this one has paired with (S35), favourites first.
+    ListPeers,
+    /// Stop remembering a PC. It needs a code again, like a stranger; takes
+    /// effect at the next connection attempt on this end.
+    ForgetPeer {
+        id: String,
+    },
+    SetPeerFavourite {
+        id: String,
+        favourite: bool,
+    },
     /// The hardware library plus what is connected right now.
     ListHardware,
     /// Create or update a library headset/monitor.
@@ -264,6 +280,11 @@ pub enum Reply {
     Receivers {
         receivers: serde_json::Value,
     },
+    /// Remembered PCs. Carries the fingerprint, which is public (it is in
+    /// every SDP this PC sends); nothing secret leaves the core here.
+    Peers {
+        peers: Vec<crate::peers::Peer>,
+    },
     Hardware {
         headsets: Vec<Headset>,
         monitors: Vec<Monitor>,
@@ -359,6 +380,9 @@ pub enum Event {
         sharing: bool,
         peer: Option<String>,
         message: Option<String>,
+        /// Connected without a code, as a remembered PC (S35).
+        #[serde(default)]
+        trusted: bool,
     },
     /// Continuous recording started/stopped on the share engine.
     RecordingStatus {
@@ -398,6 +422,10 @@ pub enum Event {
         /// The negotiated video codec, once the first frame names it.
         #[serde(default)]
         codec: Option<String>,
+        /// The sender connected without a code, as a remembered PC, and
+        /// DTLS proved it (S35).
+        #[serde(default)]
+        trusted: bool,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

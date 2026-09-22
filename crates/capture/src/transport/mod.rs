@@ -22,8 +22,8 @@ pub mod signal;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use tracing::warn;
 use std::time::Duration;
+use tracing::warn;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;

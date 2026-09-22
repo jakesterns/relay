@@ -5,9 +5,10 @@ import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { encoderBrand, shareTags } from "../lib/honest";
+import { ago } from "../lib/ago";
 import {
   api, onCoreEvents, presetAudioLabel,
-  type DesktopAudio, type DiscoveredReceiver, type ProcessInfo, type ShareCapabilities,
+  type DesktopAudio, type DiscoveredReceiver, type Peer, type ProcessInfo, type ShareCapabilities,
   type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
 
@@ -41,6 +42,11 @@ export function Share() {
   const [code, setCode] = useState("");
   const [receivers, setReceivers] = useState<DiscoveredReceiver[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
+  // Remembered PCs (S35): one click, no code. `selectedPeer` is an id, and
+  // choosing one clears `selected` and vice versa -- the two lists are one
+  // choice, not two.
+  const [peers, setPeers] = useState<Peer[]>([]);
+  const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Two error channels, because the controls that fail are at opposite ends
   // of the screen: session errors belong beside Start/Stop in the side panel,
@@ -155,19 +161,37 @@ export function Share() {
     return () => clearTimeout(t);
   }, [replayToast]);
 
+  // Reloaded whenever a share starts or stops: a code-paired share is what
+  // adds a PC to this list, so the next visit should already show it.
+  const loadPeers = useCallback(async () => {
+    try { setPeers(await api.listPeers()); }
+    catch { /* a convenience list; the code path works without it */ }
+  }, []);
+  useEffect(() => { void loadPeers(); }, [loadPeers, sharing]);
+
   const discover = async () => {
     setBusy(true); setError(null);
     try {
       const list = await api.discoverReceivers();
       setReceivers(list);
-      if (list.length && !selected) setSelected(list[0].name);
+      if (list.length && !selected && !selectedPeer) setSelected(list[0].name);
     } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
 
   const start = async () => {
     setBusy(true); setError(null);
-    try { await api.startSharePreset(preset, code.trim(), selected); setRunning(preset); }
+    try {
+      // A remembered PC: no code, and the core resolves the id to a name and
+      // fingerprint itself. Anything else: the code, as before.
+      await api.startSharePreset(
+        preset,
+        selectedPeer ? "" : code.trim(),
+        selectedPeer ? null : selected,
+        selectedPeer,
+      );
+      setRunning(preset);
+    }
     catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
@@ -198,7 +222,13 @@ export function Share() {
   // "Display 1", "Display 2"… from the connected monitors. Never guess more
   // than one: offering a display that isn't there just fails the switch.
   const displayCount = Math.max(state.hardware.monitors.length, 1);
-  const canStart = code.trim().length === 6 && !busy && !!selectedDef;
+  const canStart = (!!selectedPeer || code.trim().length === 6) && !busy && !!selectedDef;
+  const chosenPeer = peers.find((p) => p.id === selectedPeer) ?? null;
+  // A PC that is both remembered and just scanned is one PC; list it once,
+  // under the name that needs no code.
+  const strangers = receivers.filter(
+    (r) => !peers.some((p) => p.name.toLowerCase() === r.name.toLowerCase()),
+  );
   const replayOn = (selectedDef?.replay_secs ?? 0) > 0;
 
   return (
@@ -304,20 +334,45 @@ export function Share() {
       </section>
       <aside className="side">
         <Card title="Send to">
-          {receivers.length === 0
-            ? <p className="note">No receivers found yet. Open Relay on the other PC's Receive screen, then scan.</p>
-            : receivers.map((r) => (
-              <label key={r.name} className="dev" style={{ cursor: "pointer" }}>
-                <input type="radio" name="rcv" checked={selected === r.name}
-                  onChange={() => setSelected(r.name)} />
-                <div><b>{r.name}</b><span>{r.addr}</span></div>
-              </label>
-            ))}
+          {peers.map((p) => (
+            <label key={p.id} className="dev" style={{ cursor: "pointer" }} data-testid="peer-row">
+              <input type="radio" name="rcv" checked={selectedPeer === p.id}
+                onChange={() => { setSelectedPeer(p.id); setSelected(null); }} />
+              <div>
+                <b>{p.favourite ? "★ " : ""}{p.name}</b>
+                <span>Remembered · {ago(p.last_seen_unix)}</span>
+              </div>
+              <button type="button" className="btn q" style={{ marginLeft: "auto" }}
+                aria-label={p.favourite ? `Unfavourite ${p.name}` : `Favourite ${p.name}`}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void api.setPeerFavourite(p.id, !p.favourite).then(loadPeers).catch(() => {});
+                }}>{p.favourite ? "★" : "☆"}</button>
+            </label>
+          ))}
+          {strangers.map((r) => (
+            <label key={r.name} className="dev" style={{ cursor: "pointer" }}>
+              <input type="radio" name="rcv" checked={selected === r.name}
+                onChange={() => { setSelected(r.name); setSelectedPeer(null); }} />
+              <div><b>{r.name}</b><span>{r.addr}</span></div>
+            </label>
+          ))}
+          {peers.length === 0 && strangers.length === 0 && (
+            <p className="note">No receivers found yet. Open Relay on the other PC's Receive screen, then scan.</p>
+          )}
           <button className="btn" onClick={discover} disabled={busy}>Scan for receivers</button>
         </Card>
         <Card title="Pairing code">
-          <input className="in" inputMode="numeric" maxLength={6} placeholder="6 digits from the receiver"
-            value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />
+          {chosenPeer
+            // Remembering removed the code, not the consent: the other PC
+            // still has to be on Start receiving, and that is worth saying
+            // here because it is the one way this can fail.
+            ? <p className="note" data-testid="no-code-needed">
+                No code needed — {chosenPeer.name} remembers this PC. It just has to be on
+                its Receive screen with Start receiving pressed.
+              </p>
+            : <input className="in" inputMode="numeric" maxLength={6} placeholder="6 digits from the receiver"
+                value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} />}
         </Card>
         <PresetCard def={selectedDef} locked={sharing} onSaved={reloadPresets} />
         <Card>
@@ -329,7 +384,7 @@ export function Share() {
         {sharing
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>
           : <button className="btn acc" onClick={start} disabled={!canStart}
-              title={canStart ? "" : "Enter the 6-digit code shown on the receiver"}>Start sharing</button>}
+              title={canStart ? "" : "Pick a remembered PC, or enter the 6-digit code shown on the receiver"}>Start sharing</button>}
         {mock && <p className="note">Preview data — Relay isn't running.</p>}
         <p className="note">Captures the screen the same way Windows does. Never touches games or other apps.</p>
       </aside>

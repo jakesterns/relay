@@ -205,8 +205,13 @@ async fn stop_share() -> CmdResult<()> {
 }
 
 #[tauri::command]
-async fn start_share_preset(preset: String, code: String, peer: Option<String>) -> CmdResult<()> {
-    match call(Method::StartSharePreset { preset, code, peer }).await? {
+async fn start_share_preset(
+    preset: String,
+    code: String,
+    peer: Option<String>,
+    peer_id: Option<String>,
+) -> CmdResult<()> {
+    match call(Method::StartSharePreset { preset, code, peer, peer_id }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
@@ -587,6 +592,31 @@ async fn discover_receivers() -> CmdResult<serde_json::Value> {
     }
 }
 
+// Remembered PCs (S35).
+#[tauri::command]
+async fn list_peers() -> CmdResult<Vec<relay_core::peers::Peer>> {
+    match call(Method::ListPeers).await? {
+        Reply::Peers { peers } => Ok(peers),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn forget_peer(id: String) -> CmdResult<()> {
+    match call(Method::ForgetPeer { id }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_peer_favourite(id: String, favourite: bool) -> CmdResult<()> {
+    match call(Method::SetPeerFavourite { id, favourite }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Keep a subscription open to the core and forward its events to the webview
 /// as `core://state` and `core://notice`. Reconnects while the window is open.
 #[cfg(windows)]
@@ -621,13 +651,14 @@ fn spawn_event_bridge(app: AppHandle) {
                                 Event::ShareStats { data } => {
                                     let _ = app.emit("core://share-stats", data);
                                 }
-                                Event::ShareStatus { sharing, peer, message } => {
+                                Event::ShareStatus { sharing, peer, message, trusted } => {
                                     let _ = app.emit(
                                         "core://share-status",
                                         serde_json::json!({
                                             "sharing": sharing,
                                             "peer": peer,
                                             "message": message,
+                                            "trusted": trusted,
                                         }),
                                     );
                                 }
@@ -688,11 +719,13 @@ fn spawn_event_bridge(app: AppHandle) {
                                     sender,
                                     message,
                                     codec,
+                                    trusted,
                                 } => {
                                     tracing::info!(
                                         receiving,
                                         ?sender,
                                         ?message,
+                                        trusted,
                                         "receive status from the core"
                                     );
                                     stream_host::on_receive_status(
@@ -712,6 +745,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "sender": sender,
                                             "message": message,
                                             "codec": codec,
+                                            "trusted": trusted,
                                         }),
                                     );
                                 }
@@ -930,6 +964,9 @@ pub fn run() {
             set_stream_mode,
             stream_status,
             discover_receivers,
+            list_peers,
+            forget_peer,
+            set_peer_favourite,
             list_hardware,
             save_hardware,
             delete_hardware,

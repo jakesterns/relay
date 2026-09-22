@@ -134,20 +134,49 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     info!(%from, "sender connected");
     let mut sig = signal::SigStream::new(tcp);
 
-    // Offer first, so we only build the peer connection for a valid code.
-    let (offer_json, sender_name) = match sig.recv().await? {
-        signal::SigMsg::Offer { name, sdp, mac } => {
+    // Offer first, so we only build the peer connection for a valid code —
+    // or for a PC we remember.
+    let (offer_json, sender_name, trusted) = match sig.recv().await? {
+        signal::SigMsg::Offer { name, sdp, trusted: true, .. } => {
+            // No code: the sender says we remember it. Its claim is the
+            // fingerprint in its SDP, which anyone could have copied from an
+            // earlier exchange — so this decides only whether to *proceed*.
+            // DTLS decides whether the claim is true, and "paired" is not
+            // reported until it has. That this PC is in Start receiving at
+            // all is the consent: remembering removes the code, not the
+            // consent (trust model §5, Jake's decision).
+            let fp = signal::sdp_fingerprint(&sdp);
+            let known = fp.as_deref().and_then(|f| relay_core::peers::recognise(f).ok().flatten());
+            match known {
+                Some(peer) => {
+                    info!(sender = %name, remembered_as = %peer.name, "remembered PC connecting without a code");
+                    (sdp, name, true)
+                }
+                None => {
+                    let _ = sig.send(&signal::SigMsg::Bye).await;
+                    bail!("`{name}` ({from}) asked to connect without a code, but this PC does not remember it");
+                }
+            }
+        }
+        signal::SigMsg::Offer { name, sdp, mac, trusted: false } => {
             if !signal::verify_mac(&code, &sdp, &mac) {
                 let _ = sig.send(&signal::SigMsg::Bye).await;
                 bail!("pairing code mismatch from {from}");
             }
-            (sdp, name)
+            // The code binds the SDP, fingerprint included, so this is a
+            // consented pairing worth remembering.
+            if let Some(fp) = signal::sdp_fingerprint(&sdp) {
+                let _ = relay_core::peers::remember(
+                    &name,
+                    &fp,
+                    relay_core::peers::Direction::ReceivedFrom,
+                );
+            }
+            (sdp, name, false)
         }
         other => bail!("expected offer, got {other:?}"),
     };
-    if let Some(fp) = signal::sdp_fingerprint(&offer_json) {
-        let _ = signal::remember_peer(&sender_name, &fp);
-    }
+    let offer_fp = signal::sdp_fingerprint(&offer_json);
 
     let (pc, mut events, runtime) = build_pc(local_ip, &codecs).await?;
     let offer: RTCSessionDescription = serde_json::from_str(&offer_json)?;
@@ -237,7 +266,30 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         });
     }
 
-    println!("{}", serde_json::json!({ "event": "paired", "sender": sender_name }));
+    if trusted {
+        // The fingerprint was only a claim. Only the holder of that
+        // certificate's private key can finish DTLS with it, so a trusted
+        // pairing is announced when DTLS has — and a PC that presented a
+        // remembered identity it could not prove is reported as exactly that,
+        // never as "paired". The code path does not wait here: its MAC
+        // already bound the SDP, and its timing is what two PCs verified.
+        tokio::select! {
+            _ = events.connected.recv() => {}
+            _ = events.closed.recv() => bail!(
+                "`{sender_name}` presented a remembered identity it could not prove; refused"
+            ),
+            _ = tokio::time::sleep(Duration::from_secs(15)) => bail!(
+                "timed out waiting for `{sender_name}` to prove its identity"
+            ),
+        }
+        if let Some(fp) = offer_fp.as_deref() {
+            let _ = relay_core::peers::touch(fp, relay_core::peers::Direction::ReceivedFrom);
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({ "event": "paired", "sender": sender_name, "trusted": trusted })
+    );
 
     // Track fan-out: video AUs and audio packets land on channels.
     let stats = Arc::new(RecvStats::default());

@@ -108,7 +108,10 @@ export interface CoreState {
 export interface BuildInfo { version: string; data_dir: string; log_file: string }
 
 export interface ShareRequest {
-  peer?: string | null; code: string; bitrate_mbps: number; fps: number;
+  peer?: string | null; code: string;
+  /** A remembered PC to connect to without a code (S35). */
+  peer_id?: string | null;
+  bitrate_mbps: number; fps: number;
   size?: [number, number];
   audio: boolean; audio_pid?: number; mic?: boolean; cursor: boolean;
   preset?: string; record?: boolean; replay_secs?: number; record_dir?: string;
@@ -154,6 +157,16 @@ export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb
 export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
 export interface ReceiveRequest { name?: string | null; code?: string }
 export interface DiscoveredReceiver { name: string; addr: string; port: number }
+/** A PC this one has paired with (S35). Mirror of `crates/core/src/peers.rs`.
+ *  `fingerprint` is the credential the core matches on; it is public (it is
+ *  in every SDP), and the UI only ever shows the name. */
+export interface Peer {
+  id: string; name: string; fingerprint: string;
+  first_paired_unix: number; last_seen_unix: number;
+  /** From this PC's point of view: we sent to them, or they sent to us. */
+  last_direction?: "sent_to" | "received_from" | null;
+  favourite: boolean;
+}
 /** One `stats` NDJSON line from the share/receive engine (loose shape). */
 export interface ShareStats {
   event: string;
@@ -270,11 +283,17 @@ export interface VdeviceStatus {
 export type CloseAction = "keep_running" | "quit_relay";
 export interface UiPrefs { close_action: CloseAction }
 
-export interface ShareStatus { sharing: boolean; peer?: string | null; message?: string | null }
+export interface ShareStatus {
+  sharing: boolean; peer?: string | null; message?: string | null;
+  /** Connected without a code, as a remembered PC (S35). */
+  trusted?: boolean;
+}
 export interface ReceiveStatus {
   receiving: boolean; code?: string | null; sender?: string | null; message?: string | null;
   /** Negotiated codec, sent once the first video packet names it. */
   codec?: VideoCodec | null;
+  /** The sender connected without a code and DTLS proved it (S35). */
+  trusted?: boolean;
 }
 
 /** How the received stream's native window is hosted (S29). `embedded` =
@@ -538,9 +557,15 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("stop_share");
   },
-  async startSharePreset(preset: string, code: string, peer?: string | null): Promise<void> {
+  /** `peerId` names a remembered PC (S35): the code may then be empty, and the
+   *  core resolves the id itself -- the UI never handles a fingerprint. */
+  async startSharePreset(
+    preset: string, code: string, peer?: string | null, peerId?: string | null,
+  ): Promise<void> {
     if (!isTauri()) return;
-    return invoke<void>("start_share_preset", { preset, code, peer: peer ?? null });
+    return invoke<void>("start_share_preset", {
+      preset, code, peer: peer ?? null, peerId: peerId ?? null,
+    });
   },
   async record(on: boolean): Promise<void> {
     if (!isTauri()) return;
@@ -795,6 +820,21 @@ export const api = {
   async discoverReceivers(): Promise<DiscoveredReceiver[]> {
     if (!isTauri()) return [{ name: "living-room-pc", addr: "192.168.1.42", port: 0 }];
     return invoke<DiscoveredReceiver[]>("discover_receivers");
+  },
+
+  // Remembered PCs (S35).
+  async listPeers(): Promise<Peer[]> {
+    if (!isTauri()) return [];
+    return invoke<Peer[]>("list_peers");
+  },
+  /** Real: the PC needs a code again next time, like a stranger. */
+  async forgetPeer(id: string): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("forget_peer", { id });
+  },
+  async setPeerFavourite(id: string, favourite: boolean): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("set_peer_favourite", { id, favourite });
   },
 };
 

@@ -3,13 +3,18 @@
 //! The six-digit code never crosses the wire. Each side proves it knows the
 //! code by sending `HMAC-SHA256(code, sdp)` next to its SDP; the SDP contains
 //! the DTLS certificate fingerprint, and DTLS itself verifies the certificate
-//! against the SDP — so a verified MAC transitively pins the peer. Paired
-//! peer fingerprints persist in `%LOCALAPPDATA%\Relay\data\peers.json`.
+//! against the SDP — so a verified MAC transitively pins the peer.
+//!
+//! A *remembered* peer (S35) sends no MAC and sets `trusted`: the receiver
+//! looks the SDP fingerprint up in `relay_core::peers` and, if it is one it
+//! remembers, proceeds — and reports "paired" only once DTLS has proved the
+//! sender holds that certificate's key, since the fingerprint itself is
+//! public. The store lives in `relay_core::peers`; the trust model in
+//! `docs/dev/trusted-peers.md`.
 //!
 //! After SDP exchange the sender runs a few NTP-style pings so the receiver
 //! can convert the sender's in-band capture timestamps to its own clock.
 
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -25,7 +30,13 @@ pub enum SigMsg {
     Offer {
         name: String,
         sdp: String,
+        /// Empty when `trusted`: there is no code to MAC with.
         mac: String,
+        /// "You remember me": authorise by the SDP's DTLS fingerprint instead
+        /// of a code. A receiver that predates this field ignores it, fails
+        /// the empty MAC and says `Bye` — which is the right fallback.
+        #[serde(default)]
+        trusted: bool,
     },
     Answer {
         name: String,
@@ -160,48 +171,10 @@ pub fn sdp_fingerprint(sdp: &str) -> Option<String> {
     sdp.lines().find_map(|l| l.trim().strip_prefix("a=fingerprint:").map(str::to_string))
 }
 
-// ---- paired-peers store ------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Peer {
-    pub name: String,
-    pub fingerprint: String,
-    pub paired_unix: u64,
-}
-
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Peers {
-    #[serde(default)]
-    pub peers: Vec<Peer>,
-}
-
-pub fn peers_file() -> Result<PathBuf> {
-    Ok(relay_core::config::Paths::default_for_user()?.data_dir().join("peers.json"))
-}
-
-pub fn remember_peer(name: &str, fingerprint: &str) -> Result<()> {
-    remember_peer_at(&peers_file()?, name, fingerprint)
-}
-
-/// Upsert `name` in the peer store at `path` (one entry per name; re-pairing
-/// replaces the fingerprint). Tolerates a missing or corrupt store.
-pub fn remember_peer_at(path: &std::path::Path, name: &str, fingerprint: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let mut store: Peers = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    store.peers.retain(|p| p.name != name);
-    store.peers.push(Peer {
-        name: name.to_string(),
-        fingerprint: fingerprint.to_string(),
-        paired_unix: SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-    });
-    std::fs::write(path, serde_json::to_vec_pretty(&store)?)?;
-    Ok(())
-}
+// The paired-peers store that used to live here moved to `relay_core::peers`
+// (S35). It was written but never read, because without a lasting identity
+// certificate (`transport::identity`) the fingerprints it recorded were stale
+// the moment they were written.
 
 /// How often the sender re-measures the offset during a share. Two crystals
 /// 50 ppm apart move 0.1 ms in this long, which is inside the ping's noise.
@@ -384,46 +357,23 @@ mod tests {
         assert!(!verify_mac("123456", "payload", ""));
     }
 
-    fn temp_store(tag: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("relay-test-peers-{tag}-{}.json", std::process::id()))
-    }
-
-    #[test]
-    fn peer_store_round_trips_and_dedupes_by_name() {
-        let path = temp_store("dedupe");
-        let _ = std::fs::remove_file(&path);
-        remember_peer_at(&path, "gaming-pc", "sha-256 AA").unwrap();
-        remember_peer_at(&path, "laptop", "sha-256 BB").unwrap();
-        // Re-pairing the same name replaces its fingerprint, no duplicate row.
-        remember_peer_at(&path, "gaming-pc", "sha-256 CC").unwrap();
-
-        let store: Peers = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(store.peers.len(), 2);
-        let gp = store.peers.iter().find(|p| p.name == "gaming-pc").unwrap();
-        assert_eq!(gp.fingerprint, "sha-256 CC");
-        assert!(gp.paired_unix > 0);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn peer_store_survives_corrupt_file() {
-        let path = temp_store("corrupt");
-        std::fs::write(&path, b"{ not json !!").unwrap();
-        remember_peer_at(&path, "laptop", "sha-256 DD").unwrap();
-        let store: Peers = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(store.peers.len(), 1);
-        assert_eq!(store.peers[0].name, "laptop");
-        let _ = std::fs::remove_file(&path);
-    }
+    // The peer-store tests moved to `relay_core::peers` with the store.
 
     #[test]
     fn sig_msg_wire_format_is_stable() {
         // The receiver of the other version must parse these exact shapes.
         let m = SigMsg::Loss { fraction: 0.25 };
         assert_eq!(serde_json::to_string(&m).unwrap(), r#"{"type":"loss","fraction":0.25}"#);
+        // An offer from a sender that predates S35 has no `trusted` field and
+        // must still parse -- as an ordinary, code-MAC'd offer.
         let m: SigMsg =
             serde_json::from_str(r#"{"type":"offer","name":"pc","sdp":"v=0","mac":"ab"}"#).unwrap();
-        assert!(matches!(m, SigMsg::Offer { .. }));
+        assert!(matches!(m, SigMsg::Offer { trusted: false, .. }));
+        let m: SigMsg = serde_json::from_str(
+            r#"{"type":"offer","name":"pc","sdp":"v=0","mac":"","trusted":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(m, SigMsg::Offer { trusted: true, .. }));
         let m = SigMsg::Abort { reason: "no H.264 decoder".into() };
         assert_eq!(
             serde_json::to_string(&m).unwrap(),
@@ -449,9 +399,14 @@ mod tests {
     #[tokio::test]
     async fn sig_stream_round_trips_every_variant() {
         let (mut a, mut b) = sig_pair().await;
-        a.send(&SigMsg::Offer { name: "pc".into(), sdp: "v=0".into(), mac: "ab".into() })
-            .await
-            .unwrap();
+        a.send(&SigMsg::Offer {
+            name: "pc".into(),
+            sdp: "v=0".into(),
+            mac: "ab".into(),
+            trusted: false,
+        })
+        .await
+        .unwrap();
         a.send(&SigMsg::Ping { seq: 3, t1_ns: 42 }).await.unwrap();
         a.send(&SigMsg::Bye).await.unwrap();
         assert!(matches!(b.recv().await.unwrap(), SigMsg::Offer { .. }));
@@ -476,8 +431,12 @@ mod tests {
 
         // A message over the 256 KB cap is rejected even if it is valid JSON.
         let (mut a, mut b) = sig_pair().await;
-        let big =
-            SigMsg::Offer { name: "pc".into(), sdp: "x".repeat(300 * 1024), mac: "ab".into() };
+        let big = SigMsg::Offer {
+            name: "pc".into(),
+            sdp: "x".repeat(300 * 1024),
+            mac: "ab".into(),
+            trusted: false,
+        };
         let send = a.send(&big);
         let recv = b.recv();
         let (sent, got) = tokio::join!(send, recv);

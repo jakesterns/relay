@@ -467,3 +467,60 @@ describe("stream health", () => {
     expect(kv("Frame rate")).toBe("59.9 fps");
   });
 });
+
+/** Remembered PCs (S35), from the receiving end.
+ *
+ *  Forget must be real, and the screen must say when a sender got in
+ *  without a code -- that is the one visible proof the feature works. */
+describe("remembered PCs", () => {
+  const now = Math.floor(Date.now() / 1000);
+  const remembered = () => [
+    { id: "p1", name: "studio-pc", fingerprint: "sha-256 aa", first_paired_unix: now - 9000,
+      last_seen_unix: now - 300, last_direction: "received_from" as const, favourite: false },
+  ];
+
+  it("shows nothing when none are remembered", async () => {
+    await mount();
+    expect(screen.queryByText("Remembered PCs")).not.toBeInTheDocument();
+  });
+
+  it("lists them, and Forget is real", async () => {
+    core.peers = remembered();
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    expect(screen.getByText("Remembered PCs")).toBeInTheDocument();
+    expect(screen.getAllByTestId("trusted-row")).toHaveLength(1);
+    // Honest about the limit: no code, but only while Start receiving is on.
+    expect(screen.getByText(/only while Start receiving is on/)).toBeInTheDocument();
+
+    await h.user.click(screen.getByRole("button", { name: "Forget" }));
+    await settle();
+    expect(tauri.lastCall("forget_peer")?.args).toEqual({ id: "p1" });
+    expect(core.peers).toHaveLength(0);
+    expect(screen.queryAllByTestId("trusted-row")).toHaveLength(0);
+    expect(screen.getByText(/studio-pc will need a code next time/)).toBeInTheDocument();
+  });
+
+  it("says when the sender got in without a code, and only then", async () => {
+    await mount();
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: true, sender: "studio-pc", trusted: true }));
+    expect(kv("Status")).toBe("Paired with studio-pc · remembered, no code");
+
+    await push(() => tauri.emit("core://receive-status", { receiving: false }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "laptop" }));
+    expect(kv("Status")).toBe("Paired with laptop");
+  });
+
+  it("picks up a PC remembered by the share that just happened", async () => {
+    await mount();
+    expect(screen.queryByText("Remembered PCs")).not.toBeInTheDocument();
+    // A code-paired share adds the sender to the store; the card should
+    // notice without a reload.
+    core.peers = remembered();
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: true, code: "418254", sender: "studio-pc" }));
+    await settle();
+    expect(screen.getByText("Remembered PCs")).toBeInTheDocument();
+  });
+});
