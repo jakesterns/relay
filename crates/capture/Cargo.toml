@@ -28,6 +28,14 @@ bytes = "1"
 hmac = "0.12"
 mdns-sd = "0.21"
 rand = "0.9"
+# S35: the DTLS identity key is persisted so this PC keeps one certificate
+# fingerprint across runs and a remembered peer can be recognised at all.
+# `rtc` takes an `rcgen::KeyPair` but does not re-export the type, so we have
+# to name rcgen ourselves -- and it must be the SAME version rtc resolved, or
+# the KeyPair we build is a different type from the one it accepts. Pinned
+# deliberately: a silent minor bump is a baffling type error at best.
+# Check `cargo tree -p rtc -i rcgen` before changing it.
+rcgen = "=0.14.10"
 rtc = "0.20"
 sha2 = "0.10"
 socket2 = "0.6"

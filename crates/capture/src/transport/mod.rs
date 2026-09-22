@@ -10,6 +10,7 @@ pub mod control;
 pub mod depay;
 pub mod discovery;
 pub mod feedback;
+pub mod identity;
 pub mod netcheck;
 pub mod netio;
 pub mod receiver;
@@ -20,6 +21,8 @@ pub mod signal;
 
 use std::net::IpAddr;
 use std::sync::Arc;
+
+use tracing::warn;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -214,7 +217,21 @@ pub async fn build_pc(
     let registry = configure_twcc_receiver_only(registry, &mut media_engine)?;
 
     // No ICE servers: host candidates only, STUN off. LAN by construction.
-    let config = RTCConfigurationBuilder::new().build();
+    //
+    // The certificate is this installation's lasting identity (S35) rather
+    // than the throwaway one webrtc-rs would mint per connection. Without it
+    // our DTLS fingerprint changes every run, and a remembered peer can never
+    // be recognised — which is why `peers.json` was written but never read.
+    // A failure here is not fatal: fall back to a generated certificate so a
+    // share still works, and say so, because the symptom (peers stop being
+    // recognised) is otherwise unexplainable.
+    let config = match identity::certificate() {
+        Ok(cert) => RTCConfigurationBuilder::new().with_certificates(vec![cert]).build(),
+        Err(e) => {
+            warn!(error = %e, "no lasting DTLS identity; peers will not recognise this PC");
+            RTCConfigurationBuilder::new().build()
+        }
+    };
 
     let (gather_tx, gather_done) = mpsc::channel(1);
     let (conn_tx, connected) = mpsc::channel(1);
