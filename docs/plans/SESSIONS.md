@@ -1660,6 +1660,9 @@ Never write the registry; the data root only. Raise questions and failure points
 **Decision doc** `docs/plans/v11-stream-out.md` (2026-09-22): local
 virtual-camera path (a) recommended first, Windows 11 + VB-Cable caveats stated;
 RTMP/SRT push (b) is a product decision for Jake before any plan.
+**Started 2026-09-22 on the local path**: `docs/plans/S36-relay-camera-sender.md`
+· worktree `C:\Users\stern\Documents\Code\relay-camsend`. Video only — on the
+same PC the streaming program captures the game's audio itself.
 Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
 straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
 program with little to no setup on the user's part.
