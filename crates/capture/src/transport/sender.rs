@@ -411,8 +411,15 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 bail!("pairing code mismatch - the receiver used a different code");
             }
             if let Some(fp) = signal::sdp_fingerprint(&sdp) {
-                let _ =
-                    relay_core::peers::remember(&name, &fp, relay_core::peers::Direction::SentTo);
+                // Never silent: a store that cannot be written is why the
+                // next no-code share would fail (B17 hid behind a `let _ =`).
+                if let Err(e) =
+                    relay_core::peers::remember(&name, &fp, relay_core::peers::Direction::SentTo)
+                {
+                    warn!(error = %e, receiver = %name, "could not remember this receiver");
+                }
+            } else {
+                warn!(receiver = %name, "answer carries no DTLS fingerprint; nothing to remember");
             }
             sdp
         }
@@ -454,7 +461,11 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     info!("connected; starting media");
     if let Some(fp) = opts.trusted.as_deref() {
         // DTLS has now proved the receiver is the PC we remembered.
-        let _ = relay_core::peers::touch(fp, relay_core::peers::Direction::SentTo);
+        match relay_core::peers::touch(fp, relay_core::peers::Direction::SentTo) {
+            Ok(true) => {}
+            Ok(false) => warn!("trusted receiver connected but is no longer in the store"),
+            Err(e) => warn!(error = %e, "could not update the remembered receiver"),
+        }
     }
     println!(
         "{}",

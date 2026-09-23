@@ -168,11 +168,18 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             // The code binds the SDP, fingerprint included, so this is a
             // consented pairing worth remembering.
             if let Some(fp) = signal::sdp_fingerprint(&sdp) {
-                let _ = relay_core::peers::remember(
+                // Not fatal — the share goes on — but never silent: a store
+                // that cannot be written is why "remembered" would fail next
+                // time (B17 hid behind a `let _ =` here).
+                if let Err(e) = relay_core::peers::remember(
                     &name,
                     &fp,
                     relay_core::peers::Direction::ReceivedFrom,
-                );
+                ) {
+                    warn!(error = %e, sender = %name, "could not remember this sender");
+                }
+            } else {
+                warn!(sender = %name, "offer carries no DTLS fingerprint; nothing to remember");
             }
             (sdp, name, false)
         }
@@ -285,7 +292,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             ),
         }
         if let Some(fp) = offer_fp.as_deref() {
-            let _ = relay_core::peers::touch(fp, relay_core::peers::Direction::ReceivedFrom);
+            match relay_core::peers::touch(fp, relay_core::peers::Direction::ReceivedFrom) {
+                Ok(true) => {}
+                Ok(false) => warn!("trusted sender connected but is no longer in the store"),
+                Err(e) => warn!(error = %e, "could not update the remembered sender"),
+            }
         }
     }
     println!(
