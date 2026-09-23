@@ -55,6 +55,12 @@ pub struct ShareRequest {
     /// track (S37). Only meaningful with `audio_pid`; ignored otherwise.
     #[serde(default)]
     pub rest: bool,
+    /// Also present the captured picture as "Relay Camera" on this PC (S36),
+    /// for a streaming program running here. The service settles it from the
+    /// preset's wish, consent, registration and whether a receive already
+    /// holds the camera; a client's value is only a wish.
+    #[serde(default)]
+    pub vcam: bool,
     #[serde(default = "default_true")]
     pub cursor: bool,
     /// The preset this request was resolved from (informational).
@@ -519,6 +525,9 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     if req.rest && req.audio && req.audio_pid.is_some() {
         args.push("--audio-rest".into());
     }
+    if req.vcam {
+        args.push("--vcam".into());
+    }
     if !req.cursor {
         args.push("--no-cursor".into());
     }
@@ -803,6 +812,16 @@ mod tests {
             serde_json::to_string(&cmd).unwrap(),
             r#"{"cmd":"mixer","faders":{"rest":{"gain":0.5,"mute":false},"mic":{"gain":1.0,"mute":true}}}"#
         );
+    }
+
+    /// S36: the camera flag rides on the send line only when the service
+    /// left it set; every existing request is byte-identical.
+    #[test]
+    fn send_args_vcam_only_when_asked() {
+        let on: ShareRequest = serde_json::from_str(r#"{"code":"1","vcam":true}"#).unwrap();
+        assert!(send_args(&on).contains(&"--vcam".to_string()));
+        let off: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert!(!send_args(&off).contains(&"--vcam".to_string()));
     }
 
     /// And no mic asked for means no mic flag: single-track peers and

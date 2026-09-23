@@ -1663,6 +1663,7 @@ RTMP/SRT push (b) is a product decision for Jake before any plan.
 **Started 2026-09-22 on the local path**: `docs/plans/S36-relay-camera-sender.md`
 · worktree `C:\Users\stern\Documents\Code\relay-camsend`. Video only — on the
 same PC the streaming program captures the game's audio itself.
+**Built 2026-09-22** (camera-while-sharing). Owed: OBS on this PC picking it up during a real share; the no-receiver mode is a separate decision (see the plan).
 Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
 straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
 program with little to no setup on the user's part.

@@ -229,6 +229,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         replay_secs: 0,
         preview_fps: 0,
         container: relay_core::share::RecordingContainer::Mp4,
+        vcam: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -254,6 +255,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             // S37: everything except the --audio-pid app, as a third track.
             "--audio-rest" => opts.rest = true,
             "--no-cursor" => opts.cursor = false,
+            // S36: also feed "Relay Camera" on this PC with the captured frames.
+            "--vcam" => opts.vcam = true,
             "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
                 let s = it.next().context("--size WxH")?;

@@ -143,6 +143,11 @@ pub struct SharePresetDef {
     /// Container for recordings and replay saves made under this preset.
     #[serde(default)]
     pub container: RecordingContainer,
+    /// Also show the share as "Relay Camera" on this PC while it runs (S36),
+    /// for OBS-style software here. A wish: the service still needs consent,
+    /// registration and Windows 11. Old files read it as off.
+    #[serde(default)]
+    pub vcam: bool,
 }
 
 fn default_true() -> bool {
@@ -208,6 +213,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             record: false,
             replay_secs: 60,
             container: RecordingContainer::Mp4,
+            vcam: false,
         },
         SharePresetDef {
             id: "daw".into(),
@@ -220,6 +226,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             record: false,
             replay_secs: 0,
             container: RecordingContainer::Mp4,
+            vcam: false,
         },
         SharePresetDef {
             id: "desktop".into(),
@@ -232,6 +239,7 @@ pub fn builtins() -> Vec<SharePresetDef> {
             record: false,
             replay_secs: 0,
             container: RecordingContainer::Mp4,
+            vcam: false,
         },
     ]
 }
@@ -346,6 +354,7 @@ pub fn to_share_request(
         replay_secs: preset.replay_secs,
         record_dir: Some(recording.resolved_dir()),
         container: preset.container,
+        vcam: preset.vcam,
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,
@@ -411,6 +420,7 @@ mod tests {
             record: true,
             replay_secs: 0,
             container: RecordingContainer::Mp4,
+            vcam: false,
         });
         store.save().unwrap();
 
