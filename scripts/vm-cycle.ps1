@@ -261,8 +261,10 @@ function Phase-Share {
     $dir = Get-InstallDir
     $code = '424242'
     $env:RELAY_PEER = '127.0.0.1'
+    # Headless, always: a windowed receiver on the PC being captured shows the
+    # capture of itself and smears the whole screen (docs/dev/BUGS.md B9).
     $recv = Start-Process -FilePath (Join-Path $dir 'relay-share.exe') `
-        -ArgumentList @('recv', '--code', $code) -PassThru
+        -ArgumentList @('recv', '--headless', '--code', $code) -PassThru
     Start-Sleep -Seconds 2
     Relay-Core @('share-start', $code) -AllowFail | ForEach-Object { Say "    $_" }
     Start-Sleep -Seconds 8

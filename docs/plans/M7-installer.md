@@ -413,5 +413,11 @@ results below show.
    machine, so the `share` phase proves the engine spins up and tears down
    rather than that a share ran end to end. Two-PC validation is already
    M4's deferred item; the cycle will pick it up for free once that runs.
+   *2026-09-23:* a headless loopback pairs on one machine every time now
+   (`scripts/teardown-check.sh`, `scripts/trusted-check.sh`), and the cycle's
+   receiver was windowed — which also captures itself and smears the screen
+   (B9). `vm-cycle.ps1` now starts it `--headless`; whether the core-driven
+   `share-start` completes against it is confirmed the next time the cycle
+   runs, which is the clean-VM pass (item 1).
 _(The autostart console flash that M0 deferred here is **done** — see the
 launcher decision above and the measurements below.)_
