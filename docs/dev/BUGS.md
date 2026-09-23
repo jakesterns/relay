@@ -182,7 +182,7 @@ established whether a window appeared first and vanished, or never appeared at
 all. A window that flashes and disappears reads as a crash to a user even when
 the failure is handled. Needs eyes on the screen.
 
-### B10 — The picture freezes a few seconds into a share
+### B10 — The picture freezes a few seconds into a share  |  FIXED 2026-09-22 (r12+), cause known
 Seen on the second PC on the first share that actually displayed: video
 appeared, then froze on one frame within seconds and stayed there for the rest
 of the 30 s run. Audio behaviour at the same moment is unknown (see B11).
@@ -196,7 +196,19 @@ when either stops moving. The next run should say which.
 
 The sender saw none of it: 892 frames, zero dropped, for the full 30 s.
 
-### B11 — A long continuous beep from the receiver's speakers
+*Resolved, 2026-09-22 (the S29/S30 work, r12 onward).* Two things were
+stacked. The "freeze" was the last frame of a share that had already ended:
+the sender's AU channel was never closed on its way out, so the receiver's
+render loop sat on the final picture with nothing saying the share was over.
+`render.rs` now ends the receive when no access unit has arrived for
+`AU_IDLE_TIMEOUT` (3 s) — generous, so a bad LAN second never ends a live
+share — and the sender says `Bye` before it winds down (B8), so the normal
+end is immediate. The `aus == 2 × presented` oddity was a double increment
+of `video_aus`, removed. The S29 runs 1–7 (B13 below) ran 30 s–5 min with
+`presented` climbing throughout and no freeze; what remains of "mid-stream
+smear while frames keep presenting" is B15, its own entry.
+
+### B11 — A long continuous beep from the receiver's speakers  |  RESOLVED 2026-09-22: it was the test signal
 Started when the share started, described as loud and constant. The sender was
 sending real audio (2,999 packets, peak 0.091), so this is the receiver's
 playback path rather than the source — a stale buffer repeating, or an
@@ -205,6 +217,15 @@ moment the picture froze, which would tie it to B10.
 
 Worse than it sounds: it is the first thing a user hears from Relay, through
 whatever their speakers are set to.
+
+*Resolved, 2026-09-22.* The "beep" was Relay's own bench signal: the M4
+measurement scripts play a generated 440 Hz tone through the sender's
+default endpoint (`docs/plans/M4-share.md`, "A generated 440 Hz tone
+plays…"), and that run had it on. The receiver reproduced it faithfully —
+loud, constant, on both PCs. Not a playback fault: the S29 audio run (r6,
+Windows text-to-speech, 91 s) was clear with no stutter or tone, and every
+run since has been speech or music. Standing rule from this, kept in the
+test scripts: **a listening test uses speech or music, never a tone.**
 
 ### B12 — Installers are not byte-reproducible
 Two builds of the same commit from different worktrees ship different files:
