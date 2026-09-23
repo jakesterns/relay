@@ -75,6 +75,11 @@ pub struct SendOpts {
     /// preview events on stdout, so the app window can show what is being
     /// shared. 0 = off, which costs nothing at all.
     pub preview_fps: u32,
+    /// Also present the captured picture as "Relay Camera" on this PC (S36),
+    /// so a streaming program here can pick it as a webcam. Video only: the
+    /// program captures the game's audio itself. The core decides this from
+    /// the preset, consent and registration; the engine never chooses it.
+    pub vcam: bool,
 }
 
 /// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
@@ -189,6 +194,8 @@ pub struct Stats {
     /// Counters for the rest-of-PC track (S37), when it is being sent.
     pub rest_packets: AtomicU64,
     pub rest_peak_milli: AtomicU32,
+    /// Frames handed to "Relay Camera" on this PC (S36); 0 when it is off.
+    pub vcam_frames: AtomicU64,
 }
 
 struct VideoAu {
@@ -627,6 +634,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let target = target_bps.clone();
         let rec = recorder.clone();
         let sw = switcher.clone();
+        let vcam = opts.vcam;
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
             if let Err(e) = video_pipeline(
                 codec,
@@ -643,6 +651,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 rec,
                 record_setup,
                 sw,
+                vcam,
             ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
@@ -861,6 +870,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "mic_peak": stats.mic_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "rest_peak": stats.rest_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
+                    "vcam_frames": stats.vcam_frames.load(Ordering::Relaxed),
                     "cpu_percent": fp.cpu_percent,
                     "rss_mb": fp.rss_bytes as f64 / 1e6,
                 });
@@ -976,6 +986,43 @@ struct RecordSetup {
 /// packet sizes on the wire did not change when the video track went raw.
 const RTP_OUTBOUND_MTU: usize = 1200;
 
+/// "Relay Camera" on the sending PC (S36), if this Windows has the API and
+/// the camera is registered. Every failure is reported as a `vcam_error` line
+/// and answered with `None`: a webcam is never a reason to lose the share.
+fn start_vcam_sink(size: (u32, u32), fps: u32) -> Option<crate::vcam_sink::VcamSink> {
+    // `MFCreateVirtualCamera` is delay-loaded; on a Windows without it the
+    // call is a structured exception, not an error. Same guard as the receiver.
+    if !relay_vdevice::detect::frameserver_supported() {
+        let build = relay_vdevice::detect::windows_build();
+        warn!(?build, "MFCreateVirtualCamera not present; sharing without Relay Camera");
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "vcam_error",
+                "message": format!(
+                    "this PC has no virtual camera API (Windows build {}); the share still goes out",
+                    build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
+                ),
+            })
+        );
+        return None;
+    }
+    match crate::vcam_sink::VcamSink::start(size.0, size.1, fps) {
+        Ok(sink) => {
+            println!(
+                "{}",
+                serde_json::json!({ "event": "vcam_up", "width": size.0, "height": size.1 })
+            );
+            Some(sink)
+        }
+        Err(e) => {
+            warn!(error = %e, "Relay Camera unavailable; sharing without it");
+            println!("{}", serde_json::json!({ "event": "vcam_error", "message": e.to_string() }));
+            None
+        }
+    }
+}
+
 /// Blocking pipeline: WGC/DXGI capture → GPU NV12 → HEVC/H.264 MFT → SEI → channel.
 #[allow(clippy::too_many_arguments)]
 fn video_pipeline(
@@ -993,6 +1040,7 @@ fn video_pipeline(
     recorder: Arc<OnceLock<Recorder>>,
     record_setup: Option<RecordSetup>,
     switcher: Arc<StdMutex<Switcher>>,
+    vcam: bool,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -1064,6 +1112,12 @@ fn video_pipeline(
             "adapter": gpu.adapter_name,
         })
     );
+
+    // S36: the same picture as "Relay Camera" on this PC. Started at the
+    // encode size, which is fixed for the share -- a source switch scales
+    // into it -- so the camera never has to change format. Best-effort like
+    // the receiver's: a failure is reported once and the share goes on.
+    let mut vcam_sink = if vcam { start_vcam_sink(size, fps) } else { None };
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
@@ -1162,6 +1216,31 @@ fn video_pipeline(
                 }
                 emit_preview(&mut preview, &gpu, &frame.texture, conv_in);
                 let nv12 = conv.convert(&frame.texture)?;
+                if let Some(sink) = vcam_sink.as_mut() {
+                    // The NV12 the encoder is about to take, copied to the
+                    // ring first; the copy is queued on the same immediate
+                    // context, so it completes before the encoder's read.
+                    let cam = crate::decode::mf::DecodedFrame {
+                        texture: nv12.clone(),
+                        subresource: 0,
+                        pts_100ns: frame.qpc_100ns,
+                        width: size.0,
+                        height: size.1,
+                    };
+                    match sink.push(&gpu.device, &gpu.context, &cam) {
+                        Ok(()) => {
+                            stats.vcam_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Relay Camera stopped; the share carries on");
+                            println!(
+                                "{}",
+                                serde_json::json!({ "event": "error", "where": "vcam", "message": e.to_string() })
+                            );
+                            vcam_sink = None;
+                        }
+                    }
+                }
                 enc.submit(&nv12, frame.qpc_100ns)?;
                 inflight.insert(frame.qpc_100ns, time::qpc_now_100ns());
                 stats.dropped.store(src.dropped(), Ordering::Relaxed);

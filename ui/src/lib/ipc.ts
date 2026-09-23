@@ -170,6 +170,8 @@ export interface SharePresetDef {
   id: string; name: string; bitrate_mbps: number; fps: number;
   size?: [number, number]; audio: PresetAudio; cursor: boolean;
   record: boolean; replay_secs: number; container: RecordingContainer;
+  /** Also show the share as "Relay Camera" on this PC while it runs (S36). */
+  vcam?: boolean;
 }
 export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb: number }
 export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
@@ -197,6 +199,8 @@ export interface ShareStats {
   mic_packets?: number; mic_peak?: number;
   /** Third track: everything on the PC except the shared app (S37). */
   rest_packets?: number; rest_peak?: number;
+  /** Frames handed to "Relay Camera" on the sending PC (S36). */
+  vcam_frames?: number;
   cpu_percent?: number; rss_mb?: number;
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;

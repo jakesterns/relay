@@ -1032,6 +1032,24 @@ fn spawn_share(
     if g.share.is_some() {
         return Reply::Error { message: "a share is already running".into() };
     }
+    // S36: "Relay Camera" on this PC only if the preset asked, the user
+    // consented, it is registered, this Windows has the API -- and nothing
+    // else is feeding it. The ring has one writer, and a receive that is
+    // showing an incoming share on the camera keeps it. Refused in words,
+    // never silently.
+    if req.vcam {
+        let (camera_ok, _) = crate::vdevice::receive_routing(&g.paths);
+        let receive_has_it = g.receive.is_some() && camera_ok;
+        if !camera_ok || receive_has_it {
+            req.vcam = false;
+            let why = if receive_has_it {
+                "Relay Camera is showing the share this PC is receiving; stop receiving to use it for this share."
+            } else {
+                "Relay Camera is not set up on this PC: it needs Windows 11 and the camera installed in Settings."
+            };
+            let _ = events.send(Event::Notice { text: why.to_string() });
+        }
+    }
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
@@ -1244,6 +1262,14 @@ fn spawn_receive(
     // never by the client: no opt-in, no camera, no mic route.
     let mut req = req;
     (req.vcam, req.mic_route) = crate::vdevice::receive_routing(&g.paths);
+    // S36: the reverse of the rule in `spawn_share` -- a share that is
+    // feeding Relay Camera keeps it while it runs.
+    if req.vcam && g.share.is_some() && g.last_share.as_ref().is_some_and(|r| r.vcam) {
+        req.vcam = false;
+        let _ = events.send(Event::Notice {
+            text: "Relay Camera is showing the share this PC is sending; the incoming share plays in Relay only.".into(),
+        });
+    }
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,

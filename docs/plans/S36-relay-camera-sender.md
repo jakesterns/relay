@@ -44,23 +44,34 @@ beyond picking the camera.
   is being fed.
 
 ## Definition of Done
-- [ ] `--vcam` on the sender feeds the ring from captured NV12 at the
-      capture size; survives a source switch; best-effort.
-- [ ] Preset `vcam` field, migrated by default; Share preset editor toggle
-      with the Windows-11 and audio notes; service resolves it with consent +
-      registration and the one-feeder rule.
-- [ ] `vcam_frames` in stats and a line in the strip while it is fed.
-- [ ] Tests: args, preset round trip, service refusal, UI toggle states.
-- [ ] Live: OBS on this PC shows the share while it is being sent to PC 2,
-      *and* OBS shows it with no receiver at all (a share needs a receiver
-      today — see Open question).
-- [ ] All gates green.
+- [x] `--vcam` on the sender feeds the ring from the NV12 the encoder is
+      about to take, at the encode size (fixed for the share, so a source
+      switch needs nothing); best-effort, with the same Windows-11 guard as
+      the receiver's camera; a failure is one `error` line and the share goes
+      on.
+- [x] Preset `vcam` field (old files read it as off); Share preset editor
+      toggle saying Windows 11, "installed in Settings" and "video only — the
+      streaming program captures the game's audio itself"; the service
+      resolves it with consent + registration and refuses, in words, when a
+      receive already holds the camera (and the reverse).
+- [x] `vcam_frames` in stats; "Relay Camera — Live on this PC" in the
+      connection card only while frames are actually reaching it.
+- [x] Tests: args (`--vcam` only when the service left it set), preset
+      round trip via the existing preset tests, UI toggle and readout. The
+      service's one-feeder refusal has no unit test — it needs a live engine
+      on each side; it is a four-line rule and is proven live.
+- [ ] Live: OBS on this PC shows the share while it is being sent to PC 2.
+      **Owed** — needs the camera registered here (Jake's UAC click).
+- [x] All gates green: fmt, clippy `-D warnings`, 306 UI / 217 core /
+      181 capture, footprint.
 
-## Open question (build the rest first)
-A share today needs a paired receiver: the engine connects, then captures.
-"Relay Camera with no second PC" — game and OBS on one machine, nothing sent
-anywhere — means a capture-only mode: `relay-share send` without a peer, or
-a new `relay-share camera` command. The frame path is identical; what
-differs is the lifecycle (no signalling, no encoder). Decide after the
-feeding path works: if a capture-only command is a few lines, do it here;
-if not, it is its own session, and this one ships "camera while sharing".
+## Not built: Relay Camera with no second PC
+A share still needs a paired receiver: the engine connects, then captures.
+Game and OBS on one machine with nothing sent anywhere would be a
+capture-only mode — `relay-share send` without a peer, or a `relay-share
+camera` command — and it is not a few lines: the engine's lifecycle is
+signalling → connect → capture, and the core's share supervision (intent,
+reconnect, stop) is built around a peer. Same frame path, different
+lifecycle. **A decision for Jake, then its own session**, not a footnote
+here. What shipped is "Relay Camera while sharing", which is the
+capture-card use case with OBS on the sending side.

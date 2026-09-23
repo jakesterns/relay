@@ -496,3 +496,28 @@ describe("the mixer", () => {
     expect(screen.queryByRole("slider", { name: "Microphone" })).not.toBeInTheDocument();
   });
 });
+
+/** Relay Camera on this PC (S36): a preset wish, saved like any other field,
+ *  and off for every preset that predates it. */
+describe("Relay Camera on this PC", () => {
+  it("is off by default and reads as such", async () => {
+    await mount();
+    expect(kv("Relay Camera here", presetCard())).toBe("Off");
+  });
+
+  it("is a preset toggle that saves to the core and reads back", async () => {
+    const h = await mount();
+    await h.user.click(inCard(/preset/i).getByRole("button", { name: "Edit" }));
+    const toggle = screen.getByRole("switch", { name: /Also show this share as Relay Camera/ });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    // Honest about what it needs and what it does not do.
+    expect(toggle).toHaveTextContent(/Windows 11/);
+    expect(toggle).toHaveTextContent(/audio itself/);
+    await h.user.click(toggle);
+    await h.user.click(screen.getByRole("button", { name: "Save preset" }));
+    await settle();
+    expect(core.presets.find((p) => p.id === "game")?.vcam).toBe(true);
+    expect(kv("Relay Camera here", presetCard())).toBe("On");
+    h.expectClean();
+  });
+});

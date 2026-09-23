@@ -23,6 +23,8 @@ interface Strip {
   micDb: number; micLive: boolean;
   /** The rest-of-PC track (S37), same shape. */
   restDb: number; restLive: boolean;
+  /** Frames fed to Relay Camera on this PC (S36); 0 when off. */
+  vcamFrames: number;
   recording: boolean; recMb: number; recDropped: number;
   replayFill: number; recStoppedDisk: boolean;
   /** The codec the running share negotiated; null until the engine says. */
@@ -33,6 +35,7 @@ const idleStrip: Strip = {
   audioDb: -Infinity, history: Array(18).fill(0),
   micDb: -Infinity, micLive: false,
   restDb: -Infinity, restLive: false,
+  vcamFrames: 0,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
   codec: null,
 };
@@ -148,6 +151,7 @@ export function Share() {
           micLive: (s.mic_packets ?? 0) > 0,
           restDb: s.rest_peak ? 20 * Math.log10(Math.max(1e-4, s.rest_peak)) : -Infinity,
           restLive: (s.rest_packets ?? 0) > 0,
+          vcamFrames: s.vcam_frames ?? 0,
           history: h,
           recording: s.recording ?? false,
           recMb: s.rec_mb ?? 0,
@@ -402,6 +406,10 @@ export function Share() {
           <Kv k="Connection" v={sharing ? "Direct, encrypted (DTLS-SRTP)" : "—"} />
           <Kv k="Path" v={sharing ? "LAN · host candidates only" : "—"} mono />
           <Kv k="Peer" v={peer ?? "—"} mono />
+          {/* S36: only while frames are actually reaching the camera. */}
+          {sharing && strip.vcamFrames > 0 && (
+            <Kv k="Relay Camera" v="Live on this PC — pick it in OBS" />
+          )}
         </Card>
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {sharing
@@ -487,6 +495,7 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
         <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
+        <Kv k="Relay Camera here" v={def.vcam ? "On" : "Off"} />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );
@@ -561,6 +570,9 @@ function PresetCard({ def, locked, onSaved }: {
         <p className="note">Pick any combination: the microphone travels as its own track alongside the desktop mix, and the person on the other end hears them together. Nothing selected means a silent share.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
+        <Toggle on={draft.vcam ?? false} onChange={(v) => edit({ vcam: v })}
+          label="Also show this share as Relay Camera on this PC"
+          sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs Windows 11 and the camera installed in Settings. Video only — the streaming program captures the game's audio itself." />
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
           label="Start recording with the share"
           sub="Writes the same bitstream to disk; costs no extra encode." />
