@@ -622,5 +622,7 @@ the contents, state what is owed.
 | r15 | `4cdda0f` | S38 stream resilience | — | kill the sender's engine by PID and watch it return; same for the receiver; Stop is a Stop; give-up time; reboot one PC mid-share; crash line shown once; close notice on/off |
 | r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | Loopback on the main PC, headless, 2026-09-22: exclude-mode capture activates (`audio pipeline up track=Rest`, 48 kHz stereo), three tracks travel (`rest_packets` in lockstep with `audio_packets` and `mic_packets`, 1,048 each in 10 s), receiver classifies `relay-audio-rest` as `Rest`. Nothing was playing, so `rest_peak` = 0: *that* the track flows is proven, *what* it carries is not. | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
 
+| r17 | `b23a85c` | S36 Relay Camera on the sending PC (camera while sharing, video only) | — | OBS on the **main** PC picking up its own outgoing share (camera must be registered there first — Jake's UAC click); the reverse path, PC 2 → main PC → OBS, is M5 as built and is the OBS test Jake queued |
+
 Each build supersedes the one before; install over the top without
 uninstalling, on both PCs — that is the standing-rule check itself.
