@@ -672,5 +672,7 @@ the contents, state what is owed.
 
 | r18 | `2da791f` | B17, both causes: identity is the stored certificate (DPAPI-wrapped `identity.key`) and the fingerprint is read from the real wire form; first build where a remembered peer can actually match — proven headless on one PC by `scripts/trusted-check.sh` | — | **the S35 script, now possible for the first time**: code pairing, then a second share with no code, on both directions; consent check; Forget; reboot; install-over-the-top keeps the identity (log says "identity upgraded" / "wrapped", never "generated" on an updated PC) |
 
+| r19 | `2091050` | S19 call-audio return route: the receiver sends the call app's audio back (`relay-audio-return`), the sender hears it behind a Call fader; "Send the call back" card on Receive | One-PC headless `scripts/return-check.sh`: 647 packets sent, 599+ received and played, peak 0.33 with a `SoundPlayer` as the call app | a real call on PC 2 (Discord, second participant): the main PC hears them, they never hear themselves; then Game + "everything else" once to hear the echo the Share screen warns about |
+
 Each build supersedes the one before; install over the top without
 uninstalling, on both PCs — that is the standing-rule check itself.
