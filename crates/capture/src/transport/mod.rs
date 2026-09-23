@@ -29,6 +29,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use rtc::interceptor::Registry;
 use rtc::interceptor::{NackGeneratorBuilder, NackResponderBuilder};
+use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::configuration::interceptor_registry::{
     configure_rtcp_reports, configure_simulcast_extension_headers, configure_twcc_receiver_only,
 };
@@ -125,6 +126,51 @@ pub fn audio_role(track_id: &str, index: usize) -> AudioRole {
         _ if index == 0 => AudioRole::Program,
         _ => AudioRole::Mic,
     }
+}
+
+/// The msid track id of the audio the *receiver* sends back (S19): the call
+/// app's output, heard on the sender. The only track that travels that way.
+pub const RETURN_TRACK_ID: &str = "relay-audio-return";
+
+/// Does this offer leave room for the return track — an audio m-line the
+/// sender only receives on? A receiver adds its return track only when it
+/// does; against an older sender the answer would otherwise grow an m-line
+/// the offer never had, and the whole share would fail rather than just the
+/// return. Takes the raw SDP or the JSON description that is actually sent.
+pub fn sdp_offers_return(sdp: &str) -> bool {
+    let inner = serde_json::from_str::<serde_json::Value>(sdp)
+        .ok()
+        .and_then(|v| v.get("sdp")?.as_str().map(str::to_string));
+    let text = inner.as_deref().unwrap_or(sdp);
+    let mut in_audio = false;
+    for line in text.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("m=") {
+            in_audio = rest.starts_with("audio ");
+        } else if in_audio && line == "a=recvonly" {
+            return true;
+        }
+    }
+    false
+}
+
+/// One Opus track description, the shape both ends use for anything they
+/// send: `stream_id`/`track_id` are the msid the other end classifies on.
+pub fn audio_stream_track(stream_id: &str, track_id: &str, label: &str) -> MediaStreamTrack {
+    use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters};
+    MediaStreamTrack::new(
+        stream_id.into(),
+        track_id.into(),
+        label.into(),
+        RtpCodecKind::Audio,
+        vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(rand::random::<u32>()),
+                ..Default::default()
+            },
+            codec: audio_codec().rtp_codec,
+            ..Default::default()
+        }],
+    )
 }
 
 pub fn audio_codec() -> RTCRtpCodecParameters {
@@ -312,6 +358,29 @@ mod tests {
         assert_eq!(audio_role("audio", 0), AudioRole::Program);
         assert_eq!(audio_role("", 0), AudioRole::Program);
         assert_eq!(audio_role("6f2e1b3a-audio", 0), AudioRole::Program);
+    }
+
+    #[test]
+    fn an_offer_with_a_receive_only_audio_line_has_room_for_the_return() {
+        // The S19 sender: three send-only audio lines, then the one it
+        // only receives on. Attributes of *other* lines must not count.
+        let offer = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98\r\na=sendonly\r\n\
+                     m=audio 9 UDP/TLS/RTP/SAVPF 120\r\na=sendonly\r\n\
+                     m=audio 9 UDP/TLS/RTP/SAVPF 120\r\na=recvonly\r\n";
+        assert!(sdp_offers_return(offer));
+        // And in the JSON form that actually travels (B17's lesson).
+        let json = serde_json::json!({ "type": "offer", "sdp": offer }).to_string();
+        assert!(sdp_offers_return(&json));
+
+        // A pre-S19 sender: audio lines all send-only. No room, no track.
+        let old = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98\r\na=sendonly\r\n\
+                   m=audio 9 UDP/TLS/RTP/SAVPF 120\r\na=sendonly\r\n";
+        assert!(!sdp_offers_return(old));
+        // A receive-only *video* line is not an audio return either.
+        let video_only = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 98\r\na=recvonly\r\n\
+                          m=audio 9 UDP/TLS/RTP/SAVPF 120\r\na=sendonly\r\n";
+        assert!(!sdp_offers_return(video_only));
+        assert!(!sdp_offers_return(""));
     }
 
     #[test]

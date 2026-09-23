@@ -11,7 +11,7 @@ import { push, renderScreen, settle } from "../test/render";
 import { card, field, inCard, kv, readout } from "../test/dom";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
-import { Share, sendRows } from "./Share";
+import { Share, callNote, sendRows } from "./Share";
 
 let core: FakeCore;
 
@@ -494,6 +494,39 @@ describe("the mixer", () => {
     expect(screen.getByText("Mixer")).toBeInTheDocument();
     expect(screen.getByRole("slider", { name: "Game" })).toBeInTheDocument();
     expect(screen.queryByRole("slider", { name: "Microphone" })).not.toBeInTheDocument();
+  });
+
+  /** S19: the call coming back is a row only once it is actually arriving,
+   *  and the note says whether it goes out again with what this share sends. */
+  it("grows a Call row when the receiver sends the call back, and says it stays here for a game-only share", async () => {
+    const h = await mount();
+    await h.user.type(codeBox(), "123456");
+    await h.user.click(screen.getByRole("button", { name: "Start sharing" }));
+    await settle();
+    await pushState();
+    expect(screen.queryByRole("slider", { name: "The call (heard here)" })).not.toBeInTheDocument();
+
+    await push(() => tauri.emit("core://share-stats", {
+      event: "stats", codec: "hevc", bitrate_mbps: 50, fps: 60, return_packets: 120, return_peak: 0.3,
+    }));
+    expect(screen.getByRole("slider", { name: "The call (heard here)" })).toBeInTheDocument();
+    expect(screen.getByText(/Only the game goes out, so the other people never hear themselves/)).toBeInTheDocument();
+  });
+
+  it("derives the Call row and the echo warning from what the share captures", () => {
+    expect(sendRows({ desktop: "game", mic: false, rest: false }, true).map((r) => r.key))
+      .toEqual(["app", "call"]);
+    expect(sendRows({ desktop: "game", mic: false, rest: false }, false).map((r) => r.key))
+      .toEqual(["app"]);
+    // Nothing coming back: nothing to say.
+    expect(callNote({ desktop: "game", mic: false, rest: false }, false)).toBeUndefined();
+    expect(callNote(undefined, true)).toBeUndefined();
+    // App-only capture never contains the return audio.
+    expect(callNote({ desktop: "game", mic: true, rest: false }, true)).toMatch(/never hear themselves/);
+    // The desktop mix and "everything else" both contain what this PC plays,
+    // so the call would go back out — said, not silently fixed.
+    expect(callNote({ desktop: "system", mic: false, rest: false }, true)).toMatch(/system mix.*hear themselves/);
+    expect(callNote({ desktop: "game", mic: false, rest: true }, true)).toMatch(/everything else.*hear themselves/);
   });
 });
 

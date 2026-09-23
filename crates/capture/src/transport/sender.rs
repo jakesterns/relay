@@ -196,6 +196,10 @@ pub struct Stats {
     pub rest_peak_milli: AtomicU32,
     /// Frames handed to "Relay Camera" on this PC (S36); 0 when it is off.
     pub vcam_frames: AtomicU64,
+    /// The call coming back from the receiver (S19): packets received, and
+    /// the peak of what was played here. Both 0 until the receiver sends it.
+    pub return_packets: AtomicU64,
+    pub return_peak_milli: AtomicU32,
 }
 
 struct VideoAu {
@@ -370,6 +374,21 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             Some(add_audio_track(&pc, "relay-rest-stream", REST_TRACK_ID, "Relay Rest").await?);
     }
 
+    // Room for the call to come back (S19): one audio m-line we only receive
+    // on. Added *after* our own audio tracks, because `add_track` binds to
+    // the first audio transceiver without a sender and this one must not be
+    // it. Costs nothing when the receiver has no call app to return.
+    pc.add_transceiver_from_kind(
+        RtpCodecKind::Audio,
+        Some(rtc::rtp_transceiver::RTCRtpTransceiverInit {
+            direction: rtc::rtp_transceiver::RTCRtpTransceiverDirection::Recvonly,
+            streams: vec![],
+            send_encodings: vec![],
+        }),
+    )
+    .await
+    .context("add the return-audio transceiver")?;
+
     // Offer / answer, both MAC'd with the pairing code.
     let offer = pc.create_offer(None).await?;
     pc.set_local_description(offer).await?;
@@ -499,6 +518,65 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     // Per-track gain and mute, set from stdin, read by each audio thread (S37).
     let faders = crate::mixer::Faders::shared();
+    // The call coming back (S19). The receiver sends at most one track our
+    // way; when it arrives, play it on the default endpoint behind the Call
+    // fader. The playback thread starts only then, so a share with nothing
+    // coming back opens no render stream here.
+    let return_stop = std::sync::Mutex::new(None::<std::sync::mpsc::Sender<()>>);
+    {
+        let mut tracks = events.tracks;
+        let stats = stats.clone();
+        let faders = faders.clone();
+        let runtime2 = runtime.clone();
+        runtime.spawn(Box::pin(async move {
+            while let Some(track) = tracks.recv().await {
+                if track.kind().await != RtpCodecKind::Audio {
+                    continue;
+                }
+                let track_id = track.track_id().await;
+                info!(%track_id, "return audio track arrived from the receiver");
+                let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+                let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+                *return_stop.lock().unwrap() = Some(stop_tx);
+                let play_stats = Arc::new(crate::playback::PlaybackStats::default());
+                let play_stats2 = play_stats.clone();
+                let faders2 = faders.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("relay-return-playback".into())
+                    .spawn(move || {
+                        if let Err(e) = crate::playback::run(
+                            vec![(rx, crate::mixer::Track::Call)],
+                            stop_rx,
+                            None,
+                            play_stats2,
+                            faders2,
+                        ) {
+                            warn!(error = %e, "return audio playback stopped");
+                        }
+                    });
+                if let Err(e) = spawned {
+                    warn!(error = %e, "could not start return audio playback");
+                    continue;
+                }
+                let stats = stats.clone();
+                runtime2.spawn(Box::pin(async move {
+                    use webrtc::media_stream::track_remote::TrackRemoteEvent;
+                    while let Some(ev) = track.poll().await {
+                        if let TrackRemoteEvent::OnRtpPacket(p) = ev {
+                            stats.return_packets.fetch_add(1, Ordering::Relaxed);
+                            stats.return_peak_milli.store(
+                                play_stats.peak_milli.load(Ordering::Relaxed),
+                                Ordering::Relaxed,
+                            );
+                            if tx.send(p.payload.to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }));
+            }
+        }));
+    }
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
     // Adaptive target bitrate, read by the pipeline each frame.
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
@@ -882,6 +960,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "rest_peak": stats.rest_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "vcam_frames": stats.vcam_frames.load(Ordering::Relaxed),
+                    "return_packets": stats.return_packets.load(Ordering::Relaxed),
+                    "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
                     "rss_mb": fp.rss_bytes as f64 / 1e6,
                 });

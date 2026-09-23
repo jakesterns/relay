@@ -294,6 +294,7 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         vcam: false,
         mic_route: None,
         host: None,
+        return_pid: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -303,6 +304,11 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--code" => opts.code = it.next().cloned(),
             "--vcam" => opts.vcam = true,
             "--mic-route" => opts.mic_route = it.next().cloned(),
+            // S19: send the call app's output back to the sender.
+            "--return-pid" => {
+                opts.return_pid =
+                    Some(it.next().context("--return-pid <pid>")?.parse().context("--return-pid")?)
+            }
             "--host" => {
                 opts.host = Some(it.next().context("--host <hwnd>")?.parse().context("--host")?)
             }
@@ -880,6 +886,12 @@ mod tests {
         let o = parse_recv_args(&s(&["--host", "133742"])).unwrap();
         assert_eq!(o.host, Some(133742));
         assert!(parse_recv_args(&s(&["--host", "nope"])).is_err());
+
+        // S19: the return route is off unless the service names the call app.
+        assert_eq!(o.return_pid, None);
+        let o = parse_recv_args(&s(&["--return-pid", "4242"])).unwrap();
+        assert_eq!(o.return_pid, Some(4242));
+        assert!(parse_recv_args(&s(&["--return-pid", "discord"])).is_err());
 
         assert!(parse_recv_args(&s(&["--wat"])).is_err());
     }

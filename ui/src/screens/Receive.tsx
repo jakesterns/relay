@@ -5,6 +5,7 @@ import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
 import { MixerCard, type MixerRow } from "../components/Mixer";
+import type { ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
@@ -384,9 +385,77 @@ function TrustedSendersCard({ tick }: { tick: number }) {
   );
 }
 
+/** Where the call app's choice is kept between runs (S19). The exe name,
+ *  not the PID: a PID is new every launch, the program is not. */
+const CALL_APP_KEY = "relay.callApp.exe";
+
+/** The return route (S19): pick the call app on this PC and its audio —
+ *  the other participants, never this PC's own mic — goes back to the
+ *  sending PC as one more track. Locked while receiving: the engine read
+ *  the choice when it started. */
+function CallReturnCard({ value, locked, onChange }: {
+  value: ProcessInfo | null; locked: boolean; onChange: (p: ProcessInfo | null) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  const [procs, setProcs] = useState<ProcessInfo[]>([]);
+  const open = () => {
+    setPicking(true);
+    void api.listProcesses().then(setProcs).catch(() => setProcs([]));
+  };
+  return (
+    <Card title="Send the call back">
+      <Kv k="Call app" v={value ? value.exe : "None"} />
+      {!locked && !picking && (
+        <div className="row">
+          <button className="btn q" onClick={open}>{value ? "Change…" : "Pick the call app…"}</button>
+          {value && <button className="btn q" onClick={() => onChange(null)}>Off</button>}
+        </div>
+      )}
+      {!locked && picking && (
+        <label className="pick">
+          <select value="" aria-label="Call app"
+            onChange={(e) => {
+              const p = procs.find((x) => String(x.pid) === e.target.value) ?? null;
+              if (p) { onChange(p); setPicking(false); }
+            }}>
+            <option value="" disabled>{procs.length ? "Pick the call app" : "Loading…"}</option>
+            {procs.map((p) => (
+              <option key={p.pid} value={String(p.pid)}>{p.exe} — {p.title}</option>
+            ))}
+          </select>
+        </label>
+      )}
+      <p className="note">
+        {value
+          ? "The other people on the call are heard on the sending PC. They never hear themselves: only the call app's own output goes back, never this PC's microphone."
+          : "Pick Discord, Zoom or whatever the call runs in, and the sending PC hears the other people — never itself."}
+      </p>
+    </Card>
+  );
+}
+
 export function Receive() {
   const { mock } = useCore();
   const [receiving, setReceiving] = useState(false);
+  // The call app whose audio goes back to the sender (S19); remembered by
+  // exe name and re-found among the running programs on the next visit.
+  const [callApp, setCallApp] = useState<ProcessInfo | null>(null);
+  useEffect(() => {
+    const saved = localStorage.getItem(CALL_APP_KEY);
+    if (!saved) return;
+    let live = true;
+    api.listProcesses().then((ps) => {
+      if (!live) return;
+      const p = ps.find((x) => x.exe === saved);
+      if (p) setCallApp(p);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  const pickCallApp = (p: ProcessInfo | null) => {
+    setCallApp(p);
+    if (p) localStorage.setItem(CALL_APP_KEY, p.exe);
+    else localStorage.removeItem(CALL_APP_KEY);
+  };
   const [code, setCode] = useState<string | null>(null);
   const [sender, setSender] = useState<string | null>(null);
   const [codec, setCodec] = useState<VideoCodec | null>(null);
@@ -465,7 +534,10 @@ export function Receive() {
   const start = async () => {
     setBusy(true); setError(null); setEnded(null);
     health.current.reset(); setHealthState("ok"); setLive(null);
-    try { await api.startReceive({}); setReceiving(true); }
+    try {
+      await api.startReceive(callApp ? { return_pid: callApp.pid } : {});
+      setReceiving(true);
+    }
     catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
@@ -576,6 +648,7 @@ export function Receive() {
         </Card>
         <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
         <TrustedSendersCard tick={peersTick} />
+        <CallReturnCard value={callApp} locked={receiving} onChange={pickCallApp} />
         <VirtualDeviceCard />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving

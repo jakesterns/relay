@@ -24,8 +24,15 @@ fn measure(secs: u64) -> (f64, f64, Arc<PlaybackStats>) {
     // the default, so the depth measurement is unchanged.
     let (_rest_tx, rest_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
     let faders = relay_capture::mixer::Faders::shared();
+    use relay_capture::mixer::Track;
     let player = std::thread::spawn(move || {
-        playback::run(rx, mic_rx, rest_rx, stop_rx, None, stats2, faders)
+        playback::run(
+            vec![(rx, Track::App), (mic_rx, Track::Mic), (rest_rx, Track::Rest)],
+            stop_rx,
+            None,
+            stats2,
+            faders,
+        )
     });
 
     let mut enc =

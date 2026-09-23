@@ -103,29 +103,50 @@ the user chose the sources.
 - [x] Version skew both ways ends in a working share (the m-line check
       above), decided before code.
 
-## Definition of Done
-- [ ] Receiver: `--return-pid`; the Opus track is added only when the offer
+## Definition of Done — built 2026-09-23
+- [x] Receiver: `--return-pid`; the Opus track is added only when the offer
       carries a `recvonly` audio m-line; otherwise a log line and a normal
-      share. Tests: args; the m-line check on raw SDP (both cases).
-- [ ] Sender: the `recvonly` transceiver on every offer; the return track
-      decoded and played on the default render endpoint; the Call fader;
-      `return_packets` / `return_peak_milli` in stats. Tests: the offer
-      contains the m-line (SDP inspection); fader wiring.
-- [ ] `playback::run` takes `Vec<(Receiver, Track)>`; the receiver's three
-      streams and the sender's one both go through it; existing playback
-      tests green.
-- [ ] Service + IPC + UI: `return_pid` on the receive request, persisted;
-      the picker on Receive; the Call row and the echo sentence on Share;
-      `ipc.rs` and `ipc.ts` in one commit. UI tests for the picker, the
-      row, the sentence appearing only for rest/desktop capture.
-- [ ] One-PC proof, headless: `scripts/return-check.sh` — the receiver
-      returns a process's audio and the sender's stats show
-      `return_packets` climbing and `return_peak` > 0 while that process
-      plays something (speech or music, never a tone).
-- [ ] Docs: this file's DoD ticked or moved to Deferred with a runbook;
-      ROADMAP v1.1 row; SESSIONS.md S19 entry; `docs/dev/dual-audio-decision.md`
-      gains a line saying the seam was used.
-- [ ] Gates: fmt, clippy `-D warnings`, `cargo test --workspace`,
-      `pnpm build`, `pnpm test`, footprint.
-- [ ] Owed to two PCs: Discord on PC 2 with a real second participant;
-      the gaming PC hears them, they do not hear themselves.
+      share. Tests: args; `sdp_offers_return` on raw and JSON SDP, the
+      pre-S19 offer, and a receive-only *video* line (all four cases).
+- [x] Sender: the `recvonly` transceiver on every offer — added **after**
+      its own audio tracks, because `add_track` binds to the first audio
+      transceiver without a sender; the return track decoded and played on
+      the default render endpoint by a playback thread that starts only when
+      the track arrives; the Call fader; `return_packets` / `return_peak`
+      in stats. The offer's m-line is proven by the loopback below rather
+      than a unit test: building a `PeerConnection` in a test means a
+      runtime, sockets and the whole media engine.
+- [x] `playback::run` takes `Vec<(Receiver, Track)>`; the receiver's three
+      streams and the sender's one both go through it; the mix reports its
+      peak (`PlaybackStats::peak_milli`); `playback_depth` updated.
+- [x] Service + IPC + UI: `ReceiveRequest.return_pid` (serde default, 0 =
+      none, `--return-pid` only when set); the "Send the call back" card on
+      Receive with the process picker, remembered by **exe name** (a PID is
+      new every launch) and re-found on the next visit, locked while
+      receiving; the Call row on Share's mixer only while packets arrive,
+      and `callNote` saying whether the call goes back out again (app-only:
+      never; desktop mix or "everything else": yes, in words). `ipc.rs` and
+      `ipc.ts` in the same commit. 3 UI tests.
+- [x] One-PC proof, headless: `scripts/return-check.sh` — a PowerShell
+      `SoundPlayer` looping Relay's demo clip is the "call app"; receiver
+      647 packets sent, sender 599+ received and played, `return_peak` up
+      to 0.33 while the clip played. Track arrived as
+      `relay-audio-return` on the sender's only `on_track`.
+- [x] Docs: this file; ROADMAP v1.1 entry; SESSIONS.md S19 entry;
+      `docs/dev/dual-audio-decision.md` notes the seam was used.
+- [x] Gates: fmt, clippy `-D warnings`, 187 capture / 217 core, 309 UI,
+      `pnpm build`, footprint.
+- [ ] **Owed to two PCs:** Discord on PC 2 with a real second participant;
+      the gaming PC hears them, they do not hear themselves; the echo case
+      (Game + "everything else") heard once so the sentence is known to be
+      true, then never used that way again.
+
+## Where the transceiver trap was
+Both `add_track` (rtc) and the offer/answer matching are order-sensitive:
+`add_track` takes the first audio transceiver with no sender, and applying
+an offer pairs a remote `recvonly` line with a *local `sendonly`*
+transceiver that has no mid yet. So the sender adds the receive-only
+transceiver last, and the receiver adds its track as a send-only
+transceiver *before* `set_remote_description`. Either the other way round
+puts the return track on the program line as `sendrecv` against a
+`sendonly` offer.

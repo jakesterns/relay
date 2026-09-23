@@ -63,15 +63,19 @@ pub enum Track {
     /// Everything on the PC except the app (the exclude-loopback track).
     Rest,
     Mic,
+    /// The call coming back from the receiving PC (S19), heard on the
+    /// sender. Only the sender ever reads this one.
+    Call,
 }
 
-/// The three faders both engines know about. A track that is not being sent
+/// The faders both engines know about. A track that is not being sent
 /// or has not arrived simply has a fader nobody reads.
 #[derive(Debug, Default)]
 pub struct Faders {
     pub app: Fader,
     pub rest: Fader,
     pub mic: Fader,
+    pub call: Fader,
 }
 
 impl Faders {
@@ -84,6 +88,7 @@ impl Faders {
             Track::App => &self.app,
             Track::Rest => &self.rest,
             Track::Mic => &self.mic,
+            Track::Call => &self.call,
         }
     }
 
@@ -97,6 +102,9 @@ impl Faders {
         }
         if let Some(l) = set.mic {
             self.mic.set(l);
+        }
+        if let Some(l) = set.call {
+            self.call.set(l);
         }
     }
 }
@@ -168,10 +176,14 @@ mod tests {
             app: Some(level(0.5, false)),
             rest: None,
             mic: Some(level(1.0, true)),
+            call: None,
         });
         assert_eq!(f.app.target(), 0.5);
         assert_eq!(f.rest.target(), 0.25, "untouched");
         assert_eq!(f.mic.target(), 0.0);
+        assert_eq!(f.call.target(), 1.0, "untouched");
+        f.apply(&FaderSet { call: Some(level(0.75, false)), ..Default::default() });
+        assert_eq!(f.get(Track::Call).target(), 0.75);
     }
 
     #[test]

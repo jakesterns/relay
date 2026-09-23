@@ -100,6 +100,38 @@ describe("pairing", () => {
     expect(screen.queryByText(/ended\./)).not.toBeInTheDocument();
   });
 
+  /** S19: the return route. Off until a call app is picked; then its PID
+   *  rides on the receive request, the choice survives a revisit by exe
+   *  name, and it is locked while receiving. */
+  it("sends the picked call app's PID with Start receiving, and remembers the app", async () => {
+    localStorage.clear();
+    const h = await mount();
+    expect(kv("Call app")).toBe("None");
+    await h.user.click(screen.getByRole("button", { name: "Pick the call app…" }));
+    await settle();
+    await h.user.selectOptions(screen.getByRole("combobox", { name: "Call app" }), "1004");
+    expect(kv("Call app")).toBe("discord.exe");
+
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await settle();
+    expect(tauri.lastCall("start_receive")?.args).toEqual({ request: { return_pid: 1004 } });
+    // Locked while receiving: the engine read the choice when it started.
+    await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254" }));
+    expect(screen.queryByRole("button", { name: "Change…" })).not.toBeInTheDocument();
+
+    // A fresh visit finds the same program again by name, not by PID.
+    expect(localStorage.getItem("relay.callApp.exe")).toBe("discord.exe");
+    // (The first screen is still mounted and locked, so the buttons below
+    // can only belong to the fresh one.)
+    const again = await mount();
+    await settle();
+    expect(screen.getByRole("button", { name: "Change…" })).toBeInTheDocument();
+    await again.user.click(screen.getByRole("button", { name: "Off" }));
+    expect(screen.getByRole("button", { name: "Pick the call app…" })).toBeInTheDocument();
+    expect(localStorage.getItem("relay.callApp.exe")).toBeNull();
+    localStorage.clear();
+  });
+
   it("shows the core's message when a start fails", async () => {
     core.fail.set("start_receive", "another receiver already holds the port");
     const h = await mount();
