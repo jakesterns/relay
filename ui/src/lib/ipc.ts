@@ -157,7 +157,8 @@ export function presetAudioLabel(a: PresetAudio): string {
 
 /** Mixer (S37). Mirrors `crates/core/src/share.rs`. */
 export type MixerSide = "send" | "receive";
-export type MixerTrack = "app" | "rest" | "mic";
+/** `call` is the audio coming back from the receiving PC (S19); sender only. */
+export type MixerTrack = "app" | "rest" | "mic" | "call";
 /** `gain` is linear, 0–2 (unity 1). */
 export interface FaderLevel { gain: number; mute: boolean }
 export type FaderSet = Partial<Record<MixerTrack, FaderLevel>>;
@@ -175,7 +176,12 @@ export interface SharePresetDef {
 }
 export interface RecordingSettings { dir?: string; cap_gb: number; free_floor_gb: number }
 export interface PresetsReply { presets: SharePresetDef[]; recording: RecordingSettings }
-export interface ReceiveRequest { name?: string | null; code?: string }
+export interface ReceiveRequest {
+  name?: string | null; code?: string;
+  /** Send this app's audio back to the sender (S19): the call app's PID.
+   *  Absent or 0 = no return route. */
+  return_pid?: number;
+}
 export interface DiscoveredReceiver { name: string; addr: string; port: number }
 /** A PC this one has paired with (S35). Mirror of `crates/core/src/peers.rs`.
  *  `fingerprint` is the credential the core matches on; it is public (it is
@@ -201,6 +207,9 @@ export interface ShareStats {
   rest_packets?: number; rest_peak?: number;
   /** Frames handed to "Relay Camera" on the sending PC (S36). */
   vcam_frames?: number;
+  /** The call coming back (S19): on the sender, packets received and the
+   *  peak played here; on the receiver, packets sent and the peak encoded. */
+  return_packets?: number; return_peak?: number;
   cpu_percent?: number; rss_mb?: number;
   /** Present while the engine is recording-capable. */
   recording?: boolean; rec_mb?: number; rec_dropped?: number;

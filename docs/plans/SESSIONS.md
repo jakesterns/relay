@@ -1769,8 +1769,9 @@ ASIO exclusive mode. **First task of that session: write `docs/plans/v11-vst3.md
 with a real DoR and DoD.**
 
 ## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · **S2 landed, so unblocked**
-**Started 2026-09-23** — plan, design and DoR/DoD in
-`docs/plans/S19-call-return.md`; worktree `relay-mixminus`. In one line:
+**Built 2026-09-23** — plan, design, DoD and the transceiver-order trap in
+`docs/plans/S19-call-return.md`; worktree `relay-mixminus`. Proven on one
+PC by `scripts/return-check.sh`; the real-call pass on PC 2 is owed. In one line:
 the receiver sends the call app's own output back as a fourth Opus track
 (`relay-audio-return`, process loopback of the call app, so it is remote
 voices only), the sender plays it on the default endpoint behind a Call

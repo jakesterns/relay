@@ -135,10 +135,9 @@ pub async fn run(
     let faders2 = faders.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
+            use crate::mixer::Track;
             if let Err(e) = crate::playback::run(
-                opus,
-                mic,
-                rest,
+                vec![(opus, Track::App), (mic, Track::Mic), (rest, Track::Rest)],
                 audio_stop_rx,
                 mic_route,
                 audio_stats2,
@@ -207,6 +206,8 @@ pub async fn run(
                     "audio_packets": audio,
                     "mic_packets": stats.mic_packets.load(Ordering::Relaxed),
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
+                    "return_packets": stats.return_packets.load(Ordering::Relaxed),
+                    "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "capture_to_present_ms": latency_ms,
                     "rtp_gaps": gaps,
                     "rtp_lost": lost,

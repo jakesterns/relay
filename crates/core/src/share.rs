@@ -139,6 +139,9 @@ pub struct FaderSet {
     pub rest: Option<FaderLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic: Option<FaderLevel>,
+    /// The call coming back from the receiver (S19); sender side only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<FaderLevel>,
 }
 
 /// Which engine a mixer command is for.
@@ -219,6 +222,11 @@ pub struct ReceiveRequest {
     /// shell fills this in; the core passes it through as `--host`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<u64>,
+    /// Send the call app's output back to the sender (S19): the PID of the
+    /// call app on this PC. `None` = no return route; an old request or a
+    /// pre-S19 record reads as off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_pid: Option<u32>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -575,6 +583,10 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--host".into());
         args.push(h.to_string());
     }
+    if let Some(pid) = req.return_pid.filter(|p| *p != 0) {
+        args.push("--return-pid".into());
+        args.push(pid.to_string());
+    }
     args
 }
 
@@ -806,11 +818,23 @@ mod tests {
                 app: None,
                 rest: Some(FaderLevel { gain: 0.5, mute: false }),
                 mic: Some(FaderLevel { gain: 1.0, mute: true }),
+                call: None,
             },
         };
         assert_eq!(
             serde_json::to_string(&cmd).unwrap(),
             r#"{"cmd":"mixer","faders":{"rest":{"gain":0.5,"mute":false},"mic":{"gain":1.0,"mute":true}}}"#
+        );
+        // S19: the Call fader travels the same way, and only when mentioned.
+        let cmd = EngineCmd::Mixer {
+            faders: FaderSet {
+                call: Some(FaderLevel { gain: 0.5, mute: false }),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&cmd).unwrap(),
+            r#"{"cmd":"mixer","faders":{"call":{"gain":0.5,"mute":false}}}"#
         );
     }
 
@@ -1006,6 +1030,11 @@ mod tests {
         let req: ReceiveRequest = serde_json::from_str(r#"{"host":0}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
         let req: ReceiveRequest = serde_json::from_str(r#"{"mic_route":""}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
+        // S19: the return route only when a call app was picked; 0 is "none".
+        let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":4242}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv", "--return-pid", "4242"]);
+        let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":0}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
     }
 

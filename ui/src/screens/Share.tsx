@@ -23,6 +23,9 @@ interface Strip {
   micDb: number; micLive: boolean;
   /** The rest-of-PC track (S37), same shape. */
   restDb: number; restLive: boolean;
+  /** The call coming back from the receiving PC (S19): level as played
+   *  here, and whether its packets are arriving at all. */
+  callDb: number; callLive: boolean;
   /** Frames fed to Relay Camera on this PC (S36); 0 when off. */
   vcamFrames: number;
   recording: boolean; recMb: number; recDropped: number;
@@ -35,21 +38,41 @@ const idleStrip: Strip = {
   audioDb: -Infinity, history: Array(18).fill(0),
   micDb: -Infinity, micLive: false,
   restDb: -Infinity, restLive: false,
+  callDb: -Infinity, callLive: false,
   vcamFrames: 0,
   recording: false, recMb: 0, recDropped: 0, replayFill: 0, recStoppedDisk: false,
   codec: null,
 };
 
 /** The mixer rows a preset's audio produces on the sending end (S37): one
- *  per track that will actually be on the wire, in the order they sound. */
-export function sendRows(audio: SharePresetDef["audio"] | undefined): MixerRow[] {
+ *  per track that will actually be on the wire, in the order they sound.
+ *  `callLive` adds the row for the call coming *back* (S19), which exists
+ *  only once the receiving PC actually sends it. */
+export function sendRows(audio: SharePresetDef["audio"] | undefined, callLive = false): MixerRow[] {
   if (!audio) return [];
   const rows: MixerRow[] = [];
   if (audio.desktop === "game") rows.push({ key: "app", label: "Game" });
   else if (audio.desktop === "system") rows.push({ key: "app", label: "System mix" });
   if (audio.desktop === "game" && audio.rest) rows.push({ key: "rest", label: "Everything else" });
   if (audio.mic) rows.push({ key: "mic", label: "Microphone" });
+  if (callLive) rows.push({ key: "call", label: "The call (heard here)" });
   return rows;
+}
+
+/** What to say under the mixer while the call is coming back (S19). The
+ *  return audio plays on this PC's default endpoint; whether it goes back
+ *  out again depends on what this share captures — app-only capture never
+ *  includes it, the desktop mix or "everything else" always does, and Relay
+ *  has no echo cancellation. Said, not silently fixed: the sources are the
+ *  user's choice. */
+export function callNote(audio: SharePresetDef["audio"] | undefined, callLive: boolean): string | undefined {
+  if (!callLive || !audio) return undefined;
+  if (audio.desktop === "system" || (audio.desktop === "game" && audio.rest)) {
+    return "The call is coming back to this PC — and going out again with the " +
+      (audio.desktop === "system" ? "system mix" : "“everything else” track") +
+      ", so the other people will hear themselves. Share the game alone to avoid that.";
+  }
+  return "The call is coming back to this PC. Only the game goes out, so the other people never hear themselves.";
 }
 
 export function Share() {
@@ -151,6 +174,8 @@ export function Share() {
           micLive: (s.mic_packets ?? 0) > 0,
           restDb: s.rest_peak ? 20 * Math.log10(Math.max(1e-4, s.rest_peak)) : -Infinity,
           restLive: (s.rest_packets ?? 0) > 0,
+          callDb: s.return_peak ? 20 * Math.log10(Math.max(1e-4, s.return_peak)) : -Infinity,
+          callLive: (s.return_packets ?? 0) > 0,
           vcamFrames: s.vcam_frames ?? 0,
           history: h,
           recording: s.recording ?? false,
@@ -419,10 +444,13 @@ export function Share() {
         {/* S37: one fader per track this share is sending. Rows come from
             the preset the engine read at start, so they match the wire. */}
         {sharing && (
-          <MixerCard side="send" rows={sendRows(runningDef?.audio)} sessionKey={`send-${running ?? ""}`}
-            note={runningDef?.audio.rest && runningDef.audio.desktop === "game"
-              ? "Recordings keep the game and the microphone; everything else is sent live but not written to disk."
-              : undefined} />
+          <MixerCard side="send" rows={sendRows(runningDef?.audio, strip.callLive)} sessionKey={`send-${running ?? ""}`}
+            note={[
+              runningDef?.audio.rest && runningDef.audio.desktop === "game"
+                ? "Recordings keep the game and the microphone; everything else is sent live but not written to disk."
+                : undefined,
+              callNote(runningDef?.audio, strip.callLive),
+            ].filter(Boolean).join(" ") || undefined} />
         )}
         {mock && <p className="note">Preview data — Relay isn't running.</p>}
         <p className="note">Captures the screen the same way Windows does. Never touches games or other apps.</p>

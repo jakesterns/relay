@@ -38,6 +38,13 @@ today — one audible stream on the chosen endpoint, whether that endpoint is
 the speakers or the interim virtual-mic route — while the separation survives
 all the way to the last op, which is where S19 needs to break it apart.
 
+*2026-09-23:* S19 used the seam, though not by breaking the sum apart —
+the call comes *back* as a fourth track (`relay-audio-return`, receiver →
+sender), and the receiver's sum stays as it was. What changed at the last
+op is that `playback::run` now takes any list of `(stream, fader)` pairs,
+so the sender runs the same loop with its one incoming track. Record:
+`docs/plans/S19-call-return.md`.
+
 ### Why not sender-side mixing
 
 It is cheaper on the wire (one Opus stream, ~160 kb/s saved) and simpler. It

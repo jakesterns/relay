@@ -81,6 +81,9 @@ pub struct PlaybackStats {
     pub slew_repeated: AtomicU64,
     /// Frames thrown away by the hard high-water drop.
     pub dropped_frames: AtomicU64,
+    /// Peak of the last rendered buffer after the faders and the sum, ×1e3.
+    /// What reached the endpoint, not what arrived.
+    pub peak_milli: AtomicU32,
 }
 
 impl PlaybackStats {
@@ -106,23 +109,31 @@ impl PlaybackStats {
             "slew_skipped": self.slew_skipped.load(Ordering::Relaxed),
             "slew_repeated": self.slew_repeated.load(Ordering::Relaxed),
             "dropped_frames": self.dropped_frames.load(Ordering::Relaxed),
+            "peak": self.peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
         })
     }
 }
 
+/// One incoming Opus track for the render loop: its packet channel and the
+/// fader it reads. The first stream is the one the depth stats describe.
+pub type Stream = (tokio::sync::mpsc::Receiver<Vec<u8>>, crate::mixer::Track);
+
+/// Decode `streams` and render their fader-weighted sum on `device_id` (the
+/// default render endpoint when `None`) until `stop`. The receiver runs it
+/// with the sender's tracks; since S19 the sender runs it too, with the one
+/// track coming back from the call.
 pub fn run(
-    opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    mic_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    rest_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    streams: Vec<Stream>,
     stop: Receiver<()>,
     device_id: Option<String>,
     stats: Arc<PlaybackStats>,
     faders: Arc<crate::mixer::Faders>,
 ) -> Result<()> {
+    anyhow::ensure!(!streams.is_empty(), "playback needs at least one stream");
     // SAFETY: COM for this thread; WASAPI render loop; balanced on return.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
-        let result = render_loop(opus_rx, mic_rx, rest_rx, stop, device_id, stats, faders);
+        let result = render_loop(streams, stop, device_id, stats, faders);
         CoUninitialize();
         result
     }
@@ -305,9 +316,7 @@ fn render_format() -> WAVEFORMATEXTENSIBLE {
 }
 
 unsafe fn render_loop(
-    opus_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    mic_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
-    rest_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    inputs: Vec<Stream>,
     stop: Receiver<()>,
     device_id: Option<String>,
     stats: Arc<PlaybackStats>,
@@ -362,15 +371,19 @@ unsafe fn render_loop(
 
     // One per incoming track. A sender with no mic or no rest track simply
     // never feeds that stream, which then contributes silence and costs one
-    // add. Order matches `gains` and the faders below.
-    let mut streams = [
-        DecodedStream::new(opus_rx, legacy)?,
-        DecodedStream::new(mic_rx, legacy)?,
-        DecodedStream::new(rest_rx, legacy)?,
-    ];
+    // add. Order matches `gains` and `tracks` below.
+    let mut streams = Vec::with_capacity(inputs.len());
+    let mut tracks = Vec::with_capacity(inputs.len());
+    for (rx, track) in inputs {
+        streams.push(DecodedStream::new(rx, legacy)?);
+        tracks.push(track);
+    }
+    let n = streams.len();
     // The gain each stream ended the last buffer on; a fader change ramps
     // from here across the next buffer (S37), so a mute never clicks.
-    let mut gains = [1.0f32; 3];
+    let mut gains = vec![1.0f32; n];
+    let mut steps = vec![0f32; n];
+    let mut targets = vec![1.0f32; n];
     // Room for the longest Opus frame (120 ms), whatever the sender chose.
     let mut pcm = vec![0f32; 5760 * 2];
 
@@ -393,18 +406,26 @@ unsafe fn render_loop(
         if room > 0 {
             let ptr = render.GetBuffer(room)?;
             let out = std::slice::from_raw_parts_mut(ptr as *mut f32, room as usize * 2);
-            let targets = [faders.app.target(), faders.mic.target(), faders.rest.target()];
-            let steps = std::array::from_fn::<f32, 3, _>(|i| (targets[i] - gains[i]) / room as f32);
+            for i in 0..n {
+                targets[i] = faders.get(tracks[i]).target();
+                steps[i] = (targets[i] - gains[i]) / room as f32;
+            }
+            let mut peak = 0f32;
             for frame in out.chunks_exact_mut(2) {
-                for i in 0..3 {
+                let (mut l, mut r) = (0f32, 0f32);
+                for i in 0..n {
                     gains[i] += steps[i];
+                    let (pl, pr) = streams[i].queue.pop_pair();
+                    l += pl * gains[i];
+                    r += pr * gains[i];
                 }
-                let pairs = streams.each_mut().map(|s| s.queue.pop_pair());
-                frame[0] = mix_sum(&std::array::from_fn::<f32, 3, _>(|i| pairs[i].0 * gains[i]));
-                frame[1] = mix_sum(&std::array::from_fn::<f32, 3, _>(|i| pairs[i].1 * gains[i]));
+                frame[0] = l.clamp(-1.0, 1.0);
+                frame[1] = r.clamp(-1.0, 1.0);
+                peak = peak.max(frame[0].abs()).max(frame[1].abs());
             }
             // Land exactly, so float drift over many buffers cannot creep.
-            gains = targets;
+            gains.copy_from_slice(&targets);
+            stats.peak_milli.store((peak * 1e3) as u32, Ordering::Relaxed);
             render.ReleaseBuffer(room, 0)?;
         }
 

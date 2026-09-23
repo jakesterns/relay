@@ -43,14 +43,14 @@ export function MixerCard({ side, rows, sessionKey, note }: {
   side: MixerSide; rows: MixerRow[]; sessionKey: string; note?: string;
 }) {
   const [state, setState] = useState<Record<MixerTrack, FaderState>>({
-    app: unity(), rest: unity(), mic: unity(),
+    app: unity(), rest: unity(), mic: unity(), call: unity(),
   });
   const pending = useRef<FaderSet>({});
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // A new share: back to unity, on screen and in the engine.
   useEffect(() => {
-    setState({ app: unity(), rest: unity(), mic: unity() });
+    setState({ app: unity(), rest: unity(), mic: unity(), call: unity() });
     pending.current = {};
     if (timer.current) { clearTimeout(timer.current); timer.current = null; }
   }, [sessionKey]);

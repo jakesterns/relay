@@ -26,8 +26,8 @@ pub struct FaderLevel {
     pub mute: bool,
 }
 
-/// A mixer command: any subset of the three faders. A fader left out is
-/// left alone, so a slider move sends one field, not three.
+/// A mixer command: any subset of the faders. A fader left out is
+/// left alone, so a slider move sends one field, not four.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct FaderSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +36,9 @@ pub struct FaderSet {
     pub rest: Option<FaderLevel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic: Option<FaderLevel>,
+    /// The call coming back from the receiver (S19); sender only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<FaderLevel>,
 }
 
 // `PartialEq` but not `Eq`: `FaderLevel::gain` is an f32.

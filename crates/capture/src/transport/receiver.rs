@@ -4,7 +4,7 @@
 //! audio playback attach on top (`recv` command); `--headless` just counts
 //! and reports latency, which is how the transport is benchmarked.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +13,10 @@ use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
+use webrtc::media_stream::track_local::static_sample::TrackLocalStaticSample;
+use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
+use webrtc::media_stream::Track;
 use webrtc::peer_connection::PeerConnection;
 
 use super::{build_pc, discovery, sei, signal};
@@ -34,6 +37,10 @@ pub struct RecvOpts {
     /// The app window's HWND: create the stream window embedded in it (S29)
     /// rather than as a window of its own.
     pub host: Option<u64>,
+    /// Send this process tree's audio — the call app's output, i.e. the
+    /// other participants — back to the sender as one more Opus track
+    /// (S19). The service sets it from the user's pick; never inferred.
+    pub return_pid: Option<u32>,
 }
 
 /// One depacketized video access unit.
@@ -70,6 +77,10 @@ pub struct RecvStats {
     pub mic_packets: AtomicU64,
     /// Packets on the rest-of-PC track (S37), 0 when it is not sent.
     pub rest_packets: AtomicU64,
+    /// The call audio sent *back* to the sender (S19): packets, and the
+    /// peak of the last encoded frame ×1e3. 0 when the route is off.
+    pub return_packets: AtomicU64,
+    pub return_peak_milli: AtomicU32,
     /// network (+jitter) latency of the last AU: arrival − capture, in µs.
     pub arrival_latency_us_last: AtomicI64,
     /// Presentation timestamp of the last decoded frame, and which slice of
@@ -92,6 +103,45 @@ pub struct RecvStats {
     /// decoder while waiting for one or because it fell behind.
     pub keyframe_requests: AtomicU64,
     pub video_aus_dropped: AtomicU64,
+}
+
+/// Raises the flag when the receive ends, whichever way it ends, so the
+/// return-capture thread sees it and lets go of the call app's audio.
+struct StopOnDrop(Arc<AtomicBool>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Capture the call app's output and encode it for the return track (S19).
+/// The program profile, not voice: it carries other people's voices as the
+/// call app rendered them, and a second voice-grade pass would only cost.
+fn return_pipeline(
+    pid: u32,
+    tx: mpsc::Sender<(Vec<u8>, Duration)>,
+    stats: Arc<RecvStats>,
+    stop: Arc<AtomicBool>,
+) -> Result<()> {
+    use crate::audio::{AudioSource, OpusProfile, OpusStream};
+    let mut stream = OpusStream::new(AudioSource::Process { pid }, OpusProfile::program())?;
+    info!(
+        pid,
+        rate = stream.endpoint_rate(),
+        channels = stream.endpoint_channels(),
+        conversion = stream.conversion.as_deref().unwrap_or("none"),
+        "return audio pipeline up"
+    );
+    while !stop.load(Ordering::Relaxed) {
+        let Some(p) = stream.next(Duration::from_millis(200))? else { continue };
+        stats.return_packets.fetch_add(1, Ordering::Relaxed);
+        stats.return_peak_milli.store((stream.peak * 1e3) as u32, Ordering::Relaxed);
+        if tx.blocking_send((p.data, p.duration)).is_err() {
+            break;
+        }
+    }
+    Ok(())
 }
 
 pub async fn run(opts: RecvOpts) -> Result<()> {
@@ -188,6 +238,44 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let offer_fp = signal::sdp_fingerprint(&offer_json);
 
     let (pc, mut events, runtime) = build_pc(local_ip, &codecs).await?;
+
+    // The call going back (S19). Our track must sit on the offer's
+    // receive-only audio m-line and nowhere else: a send-only transceiver
+    // added *before* the offer is applied is what the library pairs with a
+    // remote `recvonly` line (and never with the sender's own audio lines,
+    // which want a receive-only partner). An older sender has no such line;
+    // then the track is not added at all, because an answer with an extra
+    // m-line fails the whole share, not just the return.
+    let mut return_track = None;
+    if let Some(pid) = opts.return_pid {
+        if super::sdp_offers_return(&offer_json) {
+            let track = Arc::new(TrackLocalStaticSample::new(super::audio_stream_track(
+                "relay-return-stream",
+                super::RETURN_TRACK_ID,
+                "Relay Call",
+            ))?);
+            let transceiver = pc
+                .add_transceiver_from_track(
+                    track.clone() as Arc<dyn TrackLocal>,
+                    Some(rtc::rtp_transceiver::RTCRtpTransceiverInit {
+                        direction: rtc::rtp_transceiver::RTCRtpTransceiverDirection::Sendonly,
+                        streams: vec![],
+                        send_encodings: vec![],
+                    }),
+                )
+                .await
+                .context("add the return-audio track")?;
+            let sender = transceiver
+                .sender()
+                .await?
+                .context("the return-audio transceiver has no sender")?;
+            info!(pid, "returning the call app's audio to the sender");
+            return_track = Some((track, sender, pid));
+        } else {
+            warn!(pid, "the sender's Relay predates the return route; the call is not sent back");
+        }
+    }
+
     let offer: RTCSessionDescription = serde_json::from_str(&offer_json)?;
     pc.set_remote_description(offer).await?;
     let answer = pc.create_answer(None).await?;
@@ -304,8 +392,45 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         serde_json::json!({ "event": "paired", "sender": sender_name, "trusted": trusted })
     );
 
-    // Track fan-out: video AUs and audio packets land on channels.
+    // Feed the return track (S19): process loopback of the call app, Opus,
+    // straight onto the track. Best effort — a call app that is not playing
+    // delivers no blocks and so no packets, which the stats show as 0.
     let stats = Arc::new(RecvStats::default());
+    let return_stop = Arc::new(AtomicBool::new(false));
+    if let Some((track, sender, pid)) = return_track {
+        let (tx, mut rx) = mpsc::channel::<(Vec<u8>, Duration)>(64);
+        let stop = return_stop.clone();
+        let stats = stats.clone();
+        std::thread::Builder::new().name("relay-return-capture".into()).spawn(move || {
+            if let Err(e) = return_pipeline(pid, tx, stats, stop) {
+                warn!(error = %e, pid, "return audio capture stopped");
+            }
+        })?;
+        runtime.spawn(Box::pin(async move {
+            let Ok(params) = sender.get_parameters().await else { return };
+            let Some(pt) = params.rtp_parameters.codecs.first().map(|c| c.payload_type) else {
+                return;
+            };
+            let ssrcs = track.ssrcs().await;
+            let Some(&ssrc) = ssrcs.first() else { return };
+            while let Some((data, dur)) = rx.recv().await {
+                let res = track
+                    .sample_writer(ssrc, pt)
+                    .write_sample(&rtc::media::Sample {
+                        data: bytes::Bytes::from(data),
+                        duration: dur,
+                        ..Default::default()
+                    })
+                    .await;
+                if res.is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    let _return_guard = StopOnDrop(return_stop);
+
+    // Track fan-out: video AUs and audio packets land on channels.
     // Deep enough to ride out decoder start-up (a few hundred ms) without
     // the track loop dropping units; see `video_track_loop` for why it must
     // never wait here.
@@ -399,6 +524,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         "video_bytes": stats2.video_bytes.load(Ordering::Relaxed),
                         "audio_packets": stats2.audio_packets.load(Ordering::Relaxed),
                         "mic_packets": stats2.mic_packets.load(Ordering::Relaxed),
+                        "rest_packets": stats2.rest_packets.load(Ordering::Relaxed),
+                        "return_packets": stats2.return_packets.load(Ordering::Relaxed),
+                        "return_peak": stats2.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                         "rtp_gaps": stats2.video_gaps.load(Ordering::Relaxed),
                         "rtp_lost": stats2.video_lost_packets.load(Ordering::Relaxed),
                         "rtp_recovered": stats2.video_recovered.load(Ordering::Relaxed),
