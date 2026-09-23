@@ -599,6 +599,21 @@ the copier holds nothing, which is the point of §4. 7 tests, one of which
 (`the_same_key_comes_back_across_runs`) now asserts the fingerprint, so this
 cannot come back silently.
 
+**Second cause, found the same day by running it.** With the fingerprint
+fixed, a headless loopback code pairing still wrote no `peers.json`:
+`signal::sdp_fingerprint` scanned for an `a=fingerprint:` line, but what
+`Offer.sdp` / `Answer.sdp` carry is the JSON `RTCSessionDescription`
+(`{"type":"offer","sdp":"v=0\r\n…"}`), one line, no such prefix — so it
+returned `None` at every call site, `remember` was never reached, and the
+errors it would have raised were `let _ =` anyway. Its unit test used raw
+SDP. Now it takes either form, with a test on the JSON form, and
+`scripts/trusted-check.sh` proves the whole path on one PC, headless: code
+pairing → `paired trusted=false` and an entry written; a second share with
+`--trusted <fp>` and no code → `paired trusted=true` on the receiver,
+`connected trusted=true` on the sender; a fingerprint nobody holds →
+refused before DTLS, zero paired events. Run it before every r-build that
+touches signalling.
+
 **Owed to two PCs (r18):** the S35 script as written — code pairing, then a
 second share with no code — was never actually possible before r18 and is
 now the first thing to run.

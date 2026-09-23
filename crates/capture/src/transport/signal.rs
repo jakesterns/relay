@@ -167,8 +167,18 @@ pub fn unix_now_ns() -> i64 {
 }
 
 /// `a=fingerprint:` line of an SDP (the DTLS certificate fingerprint).
+///
+/// Takes either the raw SDP text or the JSON `RTCSessionDescription` that
+/// actually travels in `Offer`/`Answer` (`{"type":"offer","sdp":"v=0\r\n…"}`).
+/// The first cut of S35 only handled the raw form, and every caller passed
+/// the JSON — so no fingerprint was ever extracted, nothing was ever
+/// remembered, and the trusted path could not start (B17, 2026-09-23).
 pub fn sdp_fingerprint(sdp: &str) -> Option<String> {
-    sdp.lines().find_map(|l| l.trim().strip_prefix("a=fingerprint:").map(str::to_string))
+    let inner = serde_json::from_str::<serde_json::Value>(sdp)
+        .ok()
+        .and_then(|v| v.get("sdp")?.as_str().map(str::to_string));
+    let text = inner.as_deref().unwrap_or(sdp);
+    text.lines().find_map(|l| l.trim().strip_prefix("a=fingerprint:").map(str::to_string))
 }
 
 // The paired-peers store that used to live here moved to `relay_core::peers`
@@ -335,6 +345,21 @@ mod tests {
     fn fingerprint_is_extracted() {
         let sdp = "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 AA:BB\r\n";
         assert_eq!(sdp_fingerprint(sdp).as_deref(), Some("sha-256 AA:BB"));
+    }
+
+    #[test]
+    fn fingerprint_is_extracted_from_the_json_description_that_is_actually_sent() {
+        // What `Offer.sdp` really carries: serde_json of an
+        // RTCSessionDescription, the SDP inside it with escaped CRLFs.
+        let json = serde_json::json!({
+            "type": "offer",
+            "sdp": "v=0\r\no=- 1 1 IN IP4 0.0.0.0\r\na=fingerprint:sha-256 AA:BB\r\n"
+        })
+        .to_string();
+        assert_eq!(sdp_fingerprint(&json).as_deref(), Some("sha-256 AA:BB"));
+        // And a JSON body with no SDP in it finds nothing rather than
+        // scanning the JSON text.
+        assert_eq!(sdp_fingerprint(r#"{"type":"offer"}"#), None);
     }
 
     #[test]

@@ -160,7 +160,10 @@ lie. The next connection attempt simply falls back to the code.
   serial and subject) every call. The first cut of S35 stored only the key
   and so had a different fingerprint every share — found 2026-09-23 by a
   test that compares fingerprints across two loads rather than file bytes.
-  A key-only file is upgraded in place on first read.
+  A key-only file is upgraded in place on first read. The same day,
+  `signal::sdp_fingerprint` was found to have never matched on the wire
+  (it was given the JSON description, not raw SDP); it now takes either,
+  and `scripts/trusted-check.sh` is the one-PC proof of the whole path.
 - **Store**: `crates/core/src/peers.rs`, `peers.json` version 1. Migrates the
   pre-S35 file (version 0) on first load; keeps fields it does not know;
   moves an unreadable file aside rather than overwriting it. Matches on
