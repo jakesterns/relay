@@ -36,7 +36,9 @@ rand = "0.9"
 # deliberately: a silent minor bump is a baffling type error at best.
 # Check `cargo tree -p rtc -i rcgen` before changing it.
 rcgen = "=0.14.10"
-rtc = "0.20"
+# `pem` so the whole certificate round-trips: the fingerprint hashes the
+# certificate, and rebuilding one from the key alone gives a new one each run.
+rtc = { version = "0.20", features = ["pem"] }
 sha2 = "0.10"
 socket2 = "0.6"
 log = "0.4"
@@ -65,6 +67,7 @@ windows = { workspace = true, features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography",
     "Win32_Media_MediaFoundation",
     "Win32_Media_Audio",
     "Win32_System_Com",

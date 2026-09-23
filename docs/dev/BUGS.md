@@ -576,6 +576,32 @@ ordinary crystal); the wall-clock figures were read by eye from two screens
 and are probably the odd ones out. Worth one look at the Windows 10 PC's
 time service all the same.
 
+### B17 — Remembered peers could never be recognised: the fingerprint changed every share  |  FIXED 2026-09-23 (r18), two-PC confirmation owed
+
+**Found** writing the DPAPI wrap for `identity.pem`, by a test that compared
+fingerprints across two loads of the same key file instead of file bytes.
+S35 stored the ECDSA *key* and rebuilt the DTLS certificate from it on
+every run, but `RTCCertificate::from_key_pair` mints a fresh self-signed
+certificate each call (random serial, random subject) and the fingerprint
+is a hash of the certificate. So r12–r17 presented a new fingerprint on
+every share; `peers.json` recorded them faithfully and nothing could ever
+match. The two-PC symptom would have been "asks for a code every time,
+`Bye` from the receiver in the log" — the exact fallback S35 designed for an
+older peer.
+
+**Fix.** Store the whole certificate in rtc's own PEM (`serialize_pem` /
+`from_pem`, its documented persistent-identity path) and, on Windows, wrap
+that file with DPAPI in user scope as `identity.key` (application entropy,
+UI forbidden). A key-only `identity.pem` from r12–r17 is upgraded in place
+on first read; a plaintext certificate file is wrapped and removed. A blob
+copied to another PC or account fails to unwrap and is replaced loudly —
+the copier holds nothing, which is the point of §4. 7 tests, one of which
+(`the_same_key_comes_back_across_runs`) now asserts the fingerprint, so this
+cannot come back silently.
+
+**Owed to two PCs (r18):** the S35 script as written — code pairing, then a
+second share with no code — was never actually possible before r18 and is
+now the first thing to run.
 
 ## Fixed, verified on the second PC
 
@@ -627,7 +653,6 @@ the contents, state what is owed.
 | r14 | `0fa9776` | S35 remembered devices (Option A) | — | code pairing → reconnect with no code → consent check (receiver not listening) → Forget → reboot; install-over-the-top on both PCs |
 | r15 | `4cdda0f` | S38 stream resilience | — | kill the sender's engine by PID and watch it return; same for the receiver; Stop is a Stop; give-up time; reboot one PC mid-share; crash line shown once; close notice on/off |
 | r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | Loopback on the main PC, headless, 2026-09-22: exclude-mode capture activates (`audio pipeline up track=Rest`, 48 kHz stereo), three tracks travel (`rest_packets` in lockstep with `audio_packets` and `mic_packets`, 1,048 each in 10 s), receiver classifies `relay-audio-rest` as `Rest`. Nothing was playing, so `rest_peak` = 0: *that* the track flows is proven, *what* it carries is not. | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
-
 | r17 | `b23a85c` | S36 Relay Camera on the sending PC (camera while sharing, video only) | — | OBS on the **main** PC picking up its own outgoing share (camera must be registered there first — Jake's UAC click); the reverse path, PC 2 → main PC → OBS, is M5 as built and is the OBS test Jake queued |
 
 Each build supersedes the one before; install over the top without

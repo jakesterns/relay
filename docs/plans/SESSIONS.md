@@ -1588,7 +1588,12 @@ Done and merged (`6c21c0c`), while Jake was away:
   unusable. Identity had to come before storage.
 - `transport/identity.rs`: one ECDSA P-256 keypair, generated on first use,
   kept as `identity.pem` in the data root, used for DTLS on every connection.
-  Pinning a fingerprint now authenticates. 3 tests.
+  Pinning a fingerprint now authenticates. 3 tests. **Corrected 2026-09-23:**
+  the key alone was not enough — the certificate rebuilt from it had a new
+  serial each run, so the fingerprint still changed every share. The whole
+  certificate is now stored (DPAPI-wrapped `identity.key` on Windows), a
+  key-only file upgrades in place, and the test compares fingerprints across
+  loads. 7 tests. No r-build before r18 could recognise a remembered peer.
 - `rcgen` pinned with `=` — `rtc` takes an `rcgen::KeyPair` without
   re-exporting the type, so a version skew is a baffling type error.
 - `docs/dev/trusted-peers.md`: the trust model.

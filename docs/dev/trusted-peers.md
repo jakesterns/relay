@@ -83,10 +83,13 @@ That last point is the real exposure, and it is bounded, not eliminated:
   are not the weak link.
 - The identity key is stored separately from `peers.json`, so "send me your
   peers.json" style support requests never move the key.
-- **Recommendation for Windows: wrap the key with DPAPI** (`CryptProtectData`,
-  user scope), so a copied file is inert on another machine. It is a few lines
-  and turns file theft into a machine-bound problem. Not portable, so the
-  cross-platform seam keeps a plaintext fallback with the risk documented.
+- **On Windows the file is DPAPI-wrapped** (`CryptProtectData`, user scope,
+  fixed application entropy) as `identity.key` — done 2026-09-23. A copied
+  file is inert on another machine or under another account: the unwrap
+  fails, Relay logs it and mints a fresh identity, and the copier holds
+  nothing. Theft of the data folder is now a machine-bound problem. Not
+  portable, so other platforms keep the plaintext `identity.pem` at mode
+  0600 with this risk standing.
 - Revocation is per-peer and immediate (§6), so a suspected compromise has an
   answer that is not "reinstall".
 
@@ -149,8 +152,15 @@ lie. The next connection attempt simply falls back to the code.
 ## 8. How it is built
 
 - **Identity**: `crates/capture/src/transport/identity.rs`. One ECDSA P-256
-  key in `identity.pem`, used for every `PeerConnection` via
-  `RTCConfigurationBuilder::with_certificates`.
+  self-signed **certificate** (rtc's PEM: key + certificate), DPAPI-wrapped
+  as `identity.key` on Windows and plaintext `identity.pem` elsewhere, used
+  for every `PeerConnection` via `RTCConfigurationBuilder::with_certificates`.
+  It must be the certificate, not the key: the fingerprint hashes the
+  certificate, and `RTCCertificate::from_key_pair` mints a new one (random
+  serial and subject) every call. The first cut of S35 stored only the key
+  and so had a different fingerprint every share — found 2026-09-23 by a
+  test that compares fingerprints across two loads rather than file bytes.
+  A key-only file is upgraded in place on first read.
 - **Store**: `crates/core/src/peers.rs`, `peers.json` version 1. Migrates the
   pre-S35 file (version 0) on first load; keeps fields it does not know;
   moves an unreadable file aside rather than overwriting it. Matches on
@@ -179,5 +189,6 @@ lie. The next connection attempt simply falls back to the code.
   thing that can still fail — the other PC must be on Start receiving. The
   Receive screen lists remembered PCs with a real Forget, and says
   "remembered, no code" when a sender got in that way.
-- **Not done**: DPAPI wrapping of `identity.pem` (§4). Recommended, Windows
-  only, a few lines; deferred so the cross-platform seam is designed once.
+- **DPAPI wrapping** (§4): done 2026-09-23, Windows only. On first run of a
+  build that has it, an existing plaintext `identity.pem` is wrapped into
+  `identity.key` and removed; the fingerprint is unchanged by the migration.
