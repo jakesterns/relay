@@ -1769,6 +1769,14 @@ ASIO exclusive mode. **First task of that session: write `docs/plans/v11-vst3.md
 with a real DoR and DoD.**
 
 ## S19 — Call-audio return route and mix-minus · `feat/mix-minus` · **S2 landed, so unblocked**
+**Started 2026-09-23** — plan, design and DoR/DoD in
+`docs/plans/S19-call-return.md`; worktree `relay-mixminus`. In one line:
+the receiver sends the call app's own output back as a fourth Opus track
+(`relay-audio-return`, process loopback of the call app, so it is remote
+voices only), the sender plays it on the default endpoint behind a Call
+fader, and the echo case (desktop/rest capture on the sender) is stated
+in words rather than cancelled.
+
 Audio back from the call to the sending PC, minus your own voice. S2's second
 Opus track is the foundation; this is the feature it was always heading toward.
 The seam S2 left for it: the two sources stay separate through decode and are
