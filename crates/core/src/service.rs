@@ -1336,6 +1336,11 @@ fn spawn_receive(
             // Who was connected, for the one sentence S38 says if it drops.
             let mut last_sender: Option<String> = None;
             let mut ended_by_sender = false;
+            // Whether the connected sender came in as a remembered PC. Kept so
+            // later status lines (the codec) repeat who is connected instead
+            // of wiping it: a sender-less line after `paired` made the screen
+            // forget "remembered, no code" 0.4 s into every trusted share.
+            let mut last_trusted = false;
             let mut stream_size: (u32, u32) = (0, 0);
             crate::share::pump(rx, |ev| match ev {
                 // The receiver renders into the app (or its own window), so a
@@ -1357,15 +1362,16 @@ fn spawn_receive(
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
-                        sender: None,
+                        sender: last_sender.clone(),
                         message: None,
                         codec: Some(codec),
-                        trusted: false,
+                        trusted: last_trusted,
                         ended_by_sender: false,
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
                     last_sender = Some(sender.clone());
+                    last_trusted = trusted;
                     {
                         // Paired again: the episode, if any, is over.
                         let mut ig = inner2.lock();
