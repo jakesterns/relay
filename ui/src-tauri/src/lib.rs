@@ -741,6 +741,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                     message,
                                     codec,
                                     trusted,
+                                    ..
                                 } => {
                                     tracing::info!(
                                         receiving,
