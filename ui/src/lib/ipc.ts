@@ -335,6 +335,8 @@ export interface ReceiveStatus {
   trusted?: boolean;
   /** The share ended because the sender stopped it, not because it dropped. */
   ended_by_sender?: boolean;
+  /** The engine is gone and the core is bringing the receiver straight back. */
+  restarting?: boolean;
 }
 
 /** How the received stream's native window is hosted (S29). `embedded` =

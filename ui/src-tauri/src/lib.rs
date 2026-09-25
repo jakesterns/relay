@@ -742,6 +742,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                     codec,
                                     trusted,
                                     ended_by_sender,
+                                    restarting,
                                 } => {
                                     tracing::info!(
                                         receiving,
@@ -770,6 +771,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "codec": codec,
                                             "trusted": trusted,
                                             "ended_by_sender": ended_by_sender,
+                                            "restarting": restarting,
                                         }),
                                     );
                                 }

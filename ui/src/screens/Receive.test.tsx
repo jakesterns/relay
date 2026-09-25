@@ -579,6 +579,15 @@ describe("a receiver brought back on its own", () => {
       .toBeInTheDocument();
   });
 
+  it("says dropped at once, never ended, while the core restarts it", async () => {
+    await mount();
+    await paired();
+    await push(() => tauri.emit("core://receive-status", { receiving: false, restarting: true }));
+    expect(screen.getByText(/The share from studio-pc dropped — waiting for it to come back/))
+      .toBeInTheDocument();
+    expect(screen.queryByText(/ended/)).not.toBeInTheDocument();
+  });
+
   it("says ended, not dropped, when the sender stopped it", async () => {
     await mount();
     await paired();

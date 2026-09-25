@@ -441,6 +441,11 @@ pub enum Event {
         /// not because it dropped. Receiving carries on either way.
         #[serde(default)]
         ended_by_sender: bool,
+        /// The engine is gone but the core is bringing the receiver straight
+        /// back (S38). The page keeps its receiving state rather than
+        /// flashing Idle / "ended" before the restart lands.
+        #[serde(default)]
+        restarting: bool,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

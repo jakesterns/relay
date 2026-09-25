@@ -499,7 +499,9 @@ export function Receive() {
     let unsub = () => {};
     void onCoreEvents({
       receiveStatus: (s) => {
-        setReceiving(s.receiving);
+        // A restart the core is already making is still "receiving": showing
+        // Idle and "ended" for the second it takes would contradict itself.
+        setReceiving(s.receiving || !!s.restarting);
         if (s.code) setCode(s.code);
         if (s.sender) {
           setSender(s.sender); setEnded(null); setEndedClean(false);

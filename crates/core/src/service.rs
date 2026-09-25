@@ -600,6 +600,7 @@ impl Service {
             codec: None,
             trusted: false,
             ended_by_sender: false,
+            restarting: false,
         });
         let _ = self.events.send(Event::Notice { text: text.clone() });
         crate::winloop::balloon("Relay", &text);
@@ -1271,6 +1272,7 @@ fn on_receive_exit(
         codec: None,
         trusted: false,
         ended_by_sender,
+        restarting: resilient,
     });
     if first && !ended_by_sender {
         let text = match sender {
@@ -1356,6 +1358,7 @@ fn spawn_receive(
                         codec: None,
                         trusted: false,
                         ended_by_sender: false,
+                        restarting: false,
                     });
                 }
                 ShareEvent::Codec { codec } => {
@@ -1367,6 +1370,7 @@ fn spawn_receive(
                         codec: Some(codec),
                         trusted: last_trusted,
                         ended_by_sender: false,
+                        restarting: false,
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
@@ -1388,6 +1392,7 @@ fn spawn_receive(
                         codec: None,
                         trusted,
                         ended_by_sender: false,
+                        restarting: false,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -1405,6 +1410,7 @@ fn spawn_receive(
                         codec: None,
                         trusted: false,
                         ended_by_sender: false,
+                        restarting: false,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -1504,6 +1510,7 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
         codec: None,
         trusted: false,
         ended_by_sender: false,
+        restarting: false,
     });
     Reply::Ok
 }
