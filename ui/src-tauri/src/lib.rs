@@ -741,13 +741,14 @@ fn spawn_event_bridge(app: AppHandle) {
                                     message,
                                     codec,
                                     trusted,
-                                    ..
+                                    ended_by_sender,
                                 } => {
                                     tracing::info!(
                                         receiving,
                                         ?sender,
                                         ?message,
                                         trusted,
+                                        ended_by_sender,
                                         "receive status from the core"
                                     );
                                     stream_host::on_receive_status(
@@ -768,6 +769,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "message": message,
                                             "codec": codec,
                                             "trusted": trusted,
+                                            "ended_by_sender": ended_by_sender,
                                         }),
                                     );
                                 }

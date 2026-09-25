@@ -102,7 +102,11 @@ pub fn certificate_at(path: &Path) -> Result<RTCCertificate> {
 fn load_or_create(path: &Path) -> Result<RTCCertificate> {
     if let Some(pem) = read_stored(path) {
         match parse(&pem) {
-            Ok(Parsed::Certificate(c)) => return Ok(c),
+            Ok(Parsed::Certificate(c)) => {
+                // Evidence for "survives an update": the same identity, reused.
+                tracing::info!(path = %path.display(), "loaded this PC's DTLS identity");
+                return Ok(c);
+            }
             Ok(Parsed::KeyOnly(key)) => {
                 // A file from the first cut of S35: key only. Build the
                 // certificate once and keep it, so the fingerprint is fixed
