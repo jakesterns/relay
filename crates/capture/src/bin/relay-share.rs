@@ -36,6 +36,8 @@ fn main() -> Result<()> {
     // or the core only sees an unexplained exit and treats it as a drop.
     if let Err(e) = &result {
         let refused = e.downcast_ref::<relay_capture::transport::Refused>().is_some();
+        // And in share.log, which is where anyone looks afterwards.
+        tracing::error!(error = %e, refused, "relay-share stopped with an error");
         println!(
             "{}",
             serde_json::json!({

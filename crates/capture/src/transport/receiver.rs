@@ -180,60 +180,75 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         })
     );
 
-    let (tcp, from) = listener.accept().await?;
-    tcp.set_nodelay(true)?;
-    let local_ip = tcp.local_addr()?.ip();
-    info!(%from, "sender connected");
-    let mut sig = signal::SigStream::new(tcp);
-
     // Offer first, so we only build the peer connection for a valid code —
-    // or for a PC we remember.
-    let (offer_json, sender_name, trusted) = match sig.recv().await? {
-        signal::SigMsg::Offer { name, sdp, trusted: true, .. } => {
-            // No code: the sender says we remember it. Its claim is the
-            // fingerprint in its SDP, which anyone could have copied from an
-            // earlier exchange — so this decides only whether to *proceed*.
-            // DTLS decides whether the claim is true, and "paired" is not
-            // reported until it has. That this PC is in Start receiving at
-            // all is the consent: remembering removes the code, not the
-            // consent (trust model §5, Jake's decision).
-            let fp = signal::sdp_fingerprint(&sdp);
-            let known = fp.as_deref().and_then(|f| relay_core::peers::recognise(f).ok().flatten());
-            match known {
-                Some(peer) => {
-                    info!(sender = %name, remembered_as = %peer.name, "remembered PC connecting without a code");
-                    (sdp, name, true)
+    // or for a PC we remember. A no-code offer from a PC this one does not
+    // remember is refused and the receiver keeps waiting on the same code:
+    // it must not be able to make the receiver restart and rotate the code
+    // the user is reading off the screen. A wrong code still ends the wait
+    // (and so rotates the code), which is what keeps guessing expensive.
+    let (mut sig, local_ip, offer_json, sender_name, trusted) = loop {
+        let (tcp, from) = listener.accept().await?;
+        tcp.set_nodelay(true)?;
+        let local_ip = tcp.local_addr()?.ip();
+        info!(%from, "sender connected");
+        let mut sig = signal::SigStream::new(tcp);
+        let (offer_json, sender_name, trusted) = match sig.recv().await? {
+            signal::SigMsg::Offer { name, sdp, trusted: true, .. } => {
+                // No code: the sender says we remember it. Its claim is the
+                // fingerprint in its SDP, which anyone could have copied from an
+                // earlier exchange — so this decides only whether to *proceed*.
+                // DTLS decides whether the claim is true, and "paired" is not
+                // reported until it has. That this PC is in Start receiving at
+                // all is the consent: remembering removes the code, not the
+                // consent (trust model §5, Jake's decision).
+                let fp = signal::sdp_fingerprint(&sdp);
+                let known =
+                    fp.as_deref().and_then(|f| relay_core::peers::recognise(f).ok().flatten());
+                match known {
+                    Some(peer) => {
+                        info!(sender = %name, remembered_as = %peer.name, "remembered PC connecting without a code");
+                        (sdp, name, true)
+                    }
+                    None => {
+                        let _ = sig.send(&signal::SigMsg::Bye).await;
+                        warn!(
+                            sender = %name, %from, fingerprint = fp.as_deref().unwrap_or("none"),
+                            "refused: asked to connect without a code, but this PC does not remember it"
+                        );
+                        println!(
+                            "{}",
+                            serde_json::json!({ "event": "refused_peer", "name": name })
+                        );
+                        continue;
+                    }
                 }
-                None => {
+            }
+            signal::SigMsg::Offer { name, sdp, mac, trusted: false } => {
+                if !signal::verify_mac(&code, &sdp, &mac) {
                     let _ = sig.send(&signal::SigMsg::Bye).await;
-                    bail!("`{name}` ({from}) asked to connect without a code, but this PC does not remember it");
+                    bail!("pairing code mismatch from {from}");
                 }
-            }
-        }
-        signal::SigMsg::Offer { name, sdp, mac, trusted: false } => {
-            if !signal::verify_mac(&code, &sdp, &mac) {
-                let _ = sig.send(&signal::SigMsg::Bye).await;
-                bail!("pairing code mismatch from {from}");
-            }
-            // The code binds the SDP, fingerprint included, so this is a
-            // consented pairing worth remembering.
-            if let Some(fp) = signal::sdp_fingerprint(&sdp) {
-                // Not fatal — the share goes on — but never silent: a store
-                // that cannot be written is why "remembered" would fail next
-                // time (B17 hid behind a `let _ =` here).
-                if let Err(e) = relay_core::peers::remember(
-                    &name,
-                    &fp,
-                    relay_core::peers::Direction::ReceivedFrom,
-                ) {
-                    warn!(error = %e, sender = %name, "could not remember this sender");
+                // The code binds the SDP, fingerprint included, so this is a
+                // consented pairing worth remembering.
+                if let Some(fp) = signal::sdp_fingerprint(&sdp) {
+                    // Not fatal — the share goes on — but never silent: a store
+                    // that cannot be written is why "remembered" would fail next
+                    // time (B17 hid behind a `let _ =` here).
+                    if let Err(e) = relay_core::peers::remember(
+                        &name,
+                        &fp,
+                        relay_core::peers::Direction::ReceivedFrom,
+                    ) {
+                        warn!(error = %e, sender = %name, "could not remember this sender");
+                    }
+                } else {
+                    warn!(sender = %name, "offer carries no DTLS fingerprint; nothing to remember");
                 }
-            } else {
-                warn!(sender = %name, "offer carries no DTLS fingerprint; nothing to remember");
+                (sdp, name, false)
             }
-            (sdp, name, false)
-        }
-        other => bail!("expected offer, got {other:?}"),
+            other => bail!("expected offer, got {other:?}"),
+        };
+        break (sig, local_ip, offer_json, sender_name, trusted);
     };
     let offer_fp = signal::sdp_fingerprint(&offer_json);
 
