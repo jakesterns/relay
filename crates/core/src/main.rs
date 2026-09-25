@@ -9,6 +9,7 @@
 //! relay-core uninstall [--dry-run] [--delete-data]   remove Relay from this PC
 //! relay-core --data-dir DIR      override the data root (any subcommand)
 //! relay-core --verbose           debug-level logging
+//! relay-core --version           print the version and exit
 //! ```
 //!
 //! This stays a console-subsystem binary. Building it for the GUI subsystem
@@ -74,6 +75,10 @@ fn parse_args() -> Result<Args> {
             "--components-only" => out.components_only = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("relay-core {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             other if other.starts_with('-') => anyhow::bail!("unknown flag `{other}`\n{USAGE}"),
