@@ -276,6 +276,8 @@ pub enum ShareEvent {
     HostClose,
     /// The sender said goodbye: a deliberate stop, not a drop.
     SenderStopped,
+    /// The other PC refused a no-code connection. Final: not a drop.
+    Refused { message: String },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -619,6 +621,11 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
             sender: v.get("sender").and_then(|s| s.as_str()).unwrap_or("").to_string(),
             trusted: v.get("trusted").and_then(|t| t.as_bool()).unwrap_or(false),
         }),
+        Some("error") if v.get("refused").and_then(|r| r.as_bool()) == Some(true) => {
+            Some(ShareEvent::Refused {
+                message: v.get("message").and_then(|m| m.as_str()).unwrap_or("refused").to_string(),
+            })
+        }
         Some("error") => Some(ShareEvent::Error {
             message: v.get("message").and_then(|m| m.as_str()).unwrap_or("error").to_string(),
         }),
@@ -1091,6 +1098,20 @@ mod tests {
         assert!(decode_line("not json at all").is_none());
         assert!(decode_line(r#"{"no_event":true}"#).is_none());
         assert!(decode_line("").is_none());
+    }
+
+    #[test]
+    fn a_refusal_is_its_own_event_and_a_plain_error_is_not() {
+        let line = r#"{"event":"error","where":"fatal","message":"no","refused":true}"#;
+        assert!(
+            matches!(decode_line(line), Some(ShareEvent::Refused { message }) if message == "no")
+        );
+        let line = r#"{"event":"error","where":"fatal","message":"boom","refused":false}"#;
+        assert!(matches!(decode_line(line), Some(ShareEvent::Error { .. })));
+        assert!(matches!(
+            decode_line(r#"{"event":"sender_stopped"}"#),
+            Some(ShareEvent::SenderStopped)
+        ));
     }
 
     #[test]

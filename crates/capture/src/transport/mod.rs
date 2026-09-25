@@ -7,6 +7,20 @@
 //! `sender`/`receiver` are the two ends of a share.
 
 pub mod control;
+
+/// The other PC said no: it does not remember this one, or it is not the PC
+/// remembered by that name. Final -- retrying cannot change the answer, so
+/// the core must not treat it as a drop and reconnect.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
 pub mod depay;
 pub mod discovery;
 pub mod feedback;

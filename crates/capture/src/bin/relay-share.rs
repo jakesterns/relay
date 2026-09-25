@@ -31,6 +31,25 @@ fn share_log_writer() -> Option<relay_core::logging::SharedWriter> {
 }
 
 fn main() -> Result<()> {
+    let result = run();
+    // The core reads stdout, not stderr: a fatal error has to be a line there
+    // or the core only sees an unexplained exit and treats it as a drop.
+    if let Err(e) = &result {
+        let refused = e.downcast_ref::<relay_capture::transport::Refused>().is_some();
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "error",
+                "where": "fatal",
+                "message": e.to_string(),
+                "refused": refused,
+            })
+        );
+    }
+    result
+}
+
+fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("");
 

@@ -415,15 +415,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             // DTLS holds it to that.
             let got = signal::sdp_fingerprint(&sdp).unwrap_or_default();
             if relay_core::peers::norm(&got) != relay_core::peers::norm(expected) {
-                bail!(
+                return Err(super::Refused(format!(
                     "`{name}` is not the PC this one remembers by that name; \
                      pair with its code to trust the new one"
-                );
+                ))
+                .into());
             }
             sdp
         }
         (signal::SigMsg::Bye, Some(_)) => {
-            bail!("`{peer_name}` does not remember this PC; pair with its code once and it will")
+            return Err(super::Refused(format!(
+                "`{peer_name}` does not remember this PC; pair with its code once and it will"
+            ))
+            .into());
         }
         (signal::SigMsg::Answer { name, sdp, mac }, None) => {
             if !signal::verify_mac(&opts.code, &sdp, &mac) {

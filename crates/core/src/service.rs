@@ -1083,6 +1083,8 @@ fn spawn_share(
     std::thread::Builder::new()
         .name("relay-share-pump".into())
         .spawn(move || {
+            // Set by a `refused` error line; read when the engine exits.
+            let mut refused: Option<String> = None;
             crate::share::pump(rx, |ev| match ev {
                 ShareEvent::Stats { data } => {
                     let _ = events2.send(Event::ShareStats { data });
@@ -1144,13 +1146,16 @@ fn spawn_share(
                 | ShareEvent::Host { .. }
                 | ShareEvent::HostClose
                 | ShareEvent::SenderStopped => {}
-                ShareEvent::Exited { ok, code } => on_share_exit(&inner2, &events2, ok, code),
+                ShareEvent::Refused { message } => refused = Some(message),
+                ShareEvent::Exited { ok, code } => {
+                    on_share_exit(&inner2, &events2, ok, code, refused.take())
+                }
             });
             // Channel closed (child stdout closed) without an `Exited` line:
             // treat it as an exit we were not told about.
             let orphaned = inner2.lock().share.is_some();
             if orphaned {
-                on_share_exit(&inner2, &events2, false, None);
+                on_share_exit(&inner2, &events2, false, None, refused.take());
             }
         })
         .ok();
@@ -1172,9 +1177,29 @@ fn on_share_exit(
     events: &broadcast::Sender<Event>,
     ok: bool,
     code: Option<i32>,
+    refused: Option<String>,
 ) {
     let mut g = inner.lock();
     g.share = None;
+    // Refused by the other PC: a final answer, not a drop. No crash record,
+    // no reconnecting -- clear the intent and say why.
+    if let Some(message) = refused {
+        g.send_intent = None;
+        g.send_episode = None;
+        persist_intent(&g);
+        g.state.sharing = crate::types::ShareState::Off;
+        let state = Box::new(g.state.clone());
+        drop(g);
+        info!(%message, "share refused by the receiver");
+        let _ = events.send(Event::ShareStatus {
+            sharing: false,
+            peer: None,
+            message: Some(message),
+            trusted: false,
+        });
+        let _ = events.send(Event::StateChanged { state });
+        return;
+    }
     if !ok {
         let dir = crate::crash::dir(&g.paths);
         let log = g.paths.log_dir().join("share.log");
@@ -1419,6 +1444,8 @@ fn spawn_receive(
                     });
                 }
                 ShareEvent::SenderStopped => ended_by_sender = true,
+                // Only a sender is refused; a receiver never emits it.
+                ShareEvent::Refused { .. } => {}
                 ShareEvent::HostClose => {
                     info!("receiver's popped-out window closed; it re-embeds itself");
                     let _ = events2.send(Event::StreamPopoutClosed);
