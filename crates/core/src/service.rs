@@ -138,6 +138,11 @@ struct Inner {
     /// intent says it should not be.
     send_episode: Option<crate::resilience::Episode>,
     recv_episode: Option<crate::resilience::Episode>,
+    /// The app window the receiver's stream is hosted in. Kept in memory
+    /// only (the record on disk drops it: a window handle is meaningless to
+    /// a fresh core), so a receiver brought back after a share ends is
+    /// embedded again rather than coming up with no window at all.
+    recv_host: Option<u64>,
 }
 
 /// Write the intent to disk, or remove the file when there is none.
@@ -242,6 +247,7 @@ impl Service {
             recv_intent: None,
             send_episode: None,
             recv_episode: None,
+            recv_host: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -533,10 +539,13 @@ impl Service {
             Next::Nothing => {}
             Next::GiveUp(_) => self.give_up_receive(),
             Next::Attempt(n, rec) => {
-                let Some(req) = rec.receive.clone() else {
+                let Some(mut req) = rec.receive.clone() else {
                     self.give_up_receive();
                     return;
                 };
+                if req.host.is_none() {
+                    req.host = self.inner.lock().recv_host;
+                }
                 if let Some(r) = self.inner.lock().recv_intent.as_mut() {
                     r.attempts = n;
                 }
@@ -590,6 +599,7 @@ impl Service {
             message: Some(text.clone()),
             codec: None,
             trusted: false,
+            ended_by_sender: false,
         });
         let _ = self.events.send(Event::Notice { text: text.clone() });
         crate::winloop::balloon("Relay", &text);
@@ -1132,7 +1142,8 @@ fn spawn_share(
                 | ShareEvent::Codec { .. }
                 | ShareEvent::RenderUp { .. }
                 | ShareEvent::Host { .. }
-                | ShareEvent::HostClose => {}
+                | ShareEvent::HostClose
+                | ShareEvent::SenderStopped => {}
                 ShareEvent::Exited { ok, code } => on_share_exit(&inner2, &events2, ok, code),
             });
             // Channel closed (child stdout closed) without an `Exited` line:
@@ -1211,6 +1222,7 @@ fn on_receive_exit(
     events: &broadcast::Sender<Event>,
     last_failure: Option<String>,
     sender: Option<String>,
+    ended_by_sender: bool,
 ) {
     let mut g = inner.lock();
     g.receive = None;
@@ -1233,8 +1245,9 @@ fn on_receive_exit(
         message: last_failure,
         codec: None,
         trusted: false,
+        ended_by_sender,
     });
-    if first {
+    if first && !ended_by_sender {
         let text = match sender {
             Some(s) => format!("The share from {s} dropped. Relay is waiting for it to come back."),
             None => "Receiving stopped on its own. Relay is starting it again.".to_string(),
@@ -1276,6 +1289,9 @@ fn spawn_receive(
         Err(e) => return Reply::Error { message: e.to_string() },
     };
     g.receive = Some(engine);
+    if req.host.is_some_and(|h| h != 0) {
+        g.recv_host = req.host;
+    }
     if by_user {
         g.recv_intent =
             Some(crate::resilience::Record::for_receive(&req, crate::peers::now_unix()));
@@ -1294,6 +1310,7 @@ fn spawn_receive(
             let mut last_failure: Option<String> = None;
             // Who was connected, for the one sentence S38 says if it drops.
             let mut last_sender: Option<String> = None;
+            let mut ended_by_sender = false;
             let mut stream_size: (u32, u32) = (0, 0);
             crate::share::pump(rx, |ev| match ev {
                 // The receiver renders into the app (or its own window), so a
@@ -1308,6 +1325,7 @@ fn spawn_receive(
                         message: None,
                         codec: None,
                         trusted: false,
+                        ended_by_sender: false,
                     });
                 }
                 ShareEvent::Codec { codec } => {
@@ -1318,6 +1336,7 @@ fn spawn_receive(
                         message: None,
                         codec: Some(codec),
                         trusted: false,
+                        ended_by_sender: false,
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
@@ -1337,6 +1356,7 @@ fn spawn_receive(
                         message: None,
                         codec: None,
                         trusted,
+                        ended_by_sender: false,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -1353,6 +1373,7 @@ fn spawn_receive(
                         message: Some(message),
                         codec: None,
                         trusted: false,
+                        ended_by_sender: false,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -1397,6 +1418,7 @@ fn spawn_receive(
                         excluded_from_capture,
                     });
                 }
+                ShareEvent::SenderStopped => ended_by_sender = true,
                 ShareEvent::HostClose => {
                     info!("receiver's popped-out window closed; it re-embeds itself");
                     let _ = events2.send(Event::StreamPopoutClosed);
@@ -1408,7 +1430,13 @@ fn spawn_receive(
             });
             let orphaned = inner2.lock().receive.is_some();
             if orphaned {
-                on_receive_exit(&inner2, &events2, last_failure.take(), last_sender.take());
+                on_receive_exit(
+                    &inner2,
+                    &events2,
+                    last_failure.take(),
+                    last_sender.take(),
+                    ended_by_sender,
+                );
             }
         })
         .ok();
@@ -1442,6 +1470,7 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
         message: None,
         codec: None,
         trusted: false,
+        ended_by_sender: false,
     });
     Reply::Ok
 }
@@ -1637,6 +1666,9 @@ impl IpcHandler {
             Method::HostReceive { mode, owner } => {
                 drop(g);
                 info!(?mode, owner, "host command for the receiver");
+                if owner != 0 {
+                    self.inner.lock().recv_host = Some(owner);
+                }
                 receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner })
             }
             Method::DiscoverReceivers => {

@@ -466,6 +466,8 @@ export function Receive() {
   // say so rather than snapping back to the idle prompt as if nothing
   // happened. A frozen last frame was the old way of "saying" it.
   const [ended, setEnded] = useState<string | null>(null);
+  // The last share ended because its sender stopped it, not a drop.
+  const [endedClean, setEndedClean] = useState(false);
   // The current sender connected without a code, as a remembered PC (S35);
   // and a counter that tells the remembered-PCs card to reload, because a
   // share starting or ending is what changes that list.
@@ -500,7 +502,7 @@ export function Receive() {
         setReceiving(s.receiving);
         if (s.code) setCode(s.code);
         if (s.sender) {
-          setSender(s.sender); setEnded(null);
+          setSender(s.sender); setEnded(null); setEndedClean(false);
           setTrusted(!!s.trusted);
           setPeersTick((t) => t + 1);
         }
@@ -508,6 +510,7 @@ export function Receive() {
         if (s.codec) setCodec(s.codec);
         if (!s.receiving) {
           setSender((was) => { if (was) setEnded(was); return null; });
+          setEndedClean(!!s.ended_by_sender);
           setCode(null); setCodec(null);
           setTrusted(false);
           setPeersTick((t) => t + 1);
@@ -581,7 +584,9 @@ export function Receive() {
           // back on its own" (S38), and it says so rather than pretending
           // this is a fresh wait.
           ? ended
-            ? `The share from ${ended} dropped — waiting for it to come back…`
+            ? endedClean
+              ? `The share from ${ended} ended. Waiting for a sender to pair…`
+              : `The share from ${ended} dropped — waiting for it to come back…`
             : "Waiting for a sender to pair…"
           : ended
             ? `The share from ${ended} ended.`

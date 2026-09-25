@@ -437,6 +437,10 @@ pub enum Event {
         /// DTLS proved it (S35).
         #[serde(default)]
         trusted: bool,
+        /// The share ended because the sender stopped it (it said goodbye),
+        /// not because it dropped. Receiving carries on either way.
+        #[serde(default)]
+        ended_by_sender: bool,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

@@ -274,6 +274,8 @@ pub enum ShareEvent {
     /// The user closed (or pressed Esc in) the popped-out window. It is
     /// hidden, not gone: the shell embeds it again.
     HostClose,
+    /// The sender said goodbye: a deliberate stop, not a drop.
+    SenderStopped,
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -656,6 +658,7 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
                 .unwrap_or(false),
         }),
         Some("host_close") => Some(ShareEvent::HostClose),
+        Some("sender_stopped") => Some(ShareEvent::SenderStopped),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");

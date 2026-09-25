@@ -333,6 +333,8 @@ export interface ReceiveStatus {
   codec?: VideoCodec | null;
   /** The sender connected without a code and DTLS proved it (S35). */
   trusted?: boolean;
+  /** The share ended because the sender stopped it, not because it dropped. */
+  ended_by_sender?: boolean;
 }
 
 /** How the received stream's native window is hosted (S29). `embedded` =

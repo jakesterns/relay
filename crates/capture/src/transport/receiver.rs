@@ -338,6 +338,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         }
                         Ok(signal::SigMsg::Bye) => {
                             info!("sender said goodbye");
+                            println!("{}", serde_json::json!({ "event": "sender_stopped" }));
                             let _ = gone_tx.try_send(());
                             break;
                         }

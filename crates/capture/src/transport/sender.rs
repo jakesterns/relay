@@ -1218,6 +1218,12 @@ fn video_pipeline(
     let mut preview = PreviewTap::new(preview_fps.clone());
     let mut crop: Option<(u32, u32, u32, u32)> = None;
     let mut pacer = crate::pace::FramePacer::new(fps);
+    // The last NV12 handed to the encoder. WGC and DXGI deliver nothing while
+    // the screen is still, and a receiver hearing nothing for 3 s treats the
+    // share as ended, so a still screen is re-encoded every empty 250 ms wait
+    // (4 fps of near-empty P-frames). Converter ring textures stay valid
+    // until further converts, and none happen while this is repeating.
+    let mut last_nv12: Option<windows::Win32::Graphics::Direct3D11::ID3D11Texture2D> = None;
     while !stop.load(Ordering::Relaxed) {
         match enc.next_event()? {
             EncoderEvent::NeedInput => {
@@ -1237,6 +1243,7 @@ fn video_pipeline(
                             src = new_src;
                             conv_in = src.size();
                             conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            last_nv12 = None;
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
                             preview.invalidate();
@@ -1278,6 +1285,11 @@ fn video_pipeline(
                 };
                 let Some(frame) = frame else {
                     tracing::debug!("no capture frame in 250ms");
+                    if let Some(nv12) = last_nv12.as_ref() {
+                        let pts = time::qpc_now_100ns();
+                        enc.submit(nv12, pts)?;
+                        inflight.insert(pts, pts);
+                    }
                     continue;
                 };
                 // A captured window can resize (or a display can change
@@ -1292,6 +1304,7 @@ fn video_pipeline(
                             src = new_src;
                             conv_in = src.size();
                             conv = crate::encode::convert::Converter::new(&gpu, conv_in, size)?;
+                            last_nv12 = None;
                             conv.set_source_rect(new_crop);
                             crop = new_crop;
                             preview.invalidate();
@@ -1333,6 +1346,7 @@ fn video_pipeline(
                     }
                 }
                 enc.submit(&nv12, frame.qpc_100ns)?;
+                last_nv12 = Some(nv12);
                 inflight.insert(frame.qpc_100ns, time::qpc_now_100ns());
                 stats.dropped.store(src.dropped(), Ordering::Relaxed);
             }
