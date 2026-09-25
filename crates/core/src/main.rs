@@ -501,15 +501,19 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
             "restore" => Method::RestoreAll,
             "share-start" => {
                 // `relay-core share-start <code>`; peer from RELAY_PEER, else mDNS.
-                let code = arg
-                    .map(str::to_string)
-                    .or_else(|| std::env::var("RELAY_CODE").ok())
-                    .ok_or_else(|| anyhow::anyhow!("usage: relay-core share-start <code>"))?;
+                // RELAY_PEER_ID shares to a remembered receiver with no code.
+                let peer_id = std::env::var("RELAY_PEER_ID").ok();
+                let code =
+                    match arg.map(str::to_string).or_else(|| std::env::var("RELAY_CODE").ok()) {
+                        Some(c) => c,
+                        None if peer_id.is_some() => String::new(),
+                        None => anyhow::bail!("usage: relay-core share-start <code>"),
+                    };
                 Method::StartShare {
                     request: Box::new(ShareRequest {
                         peer: std::env::var("RELAY_PEER").ok(),
                         code,
-                        peer_id: None,
+                        peer_id,
                         trusted: None,
                         bitrate_mbps: std::env::var("RELAY_BITRATE_MBPS")
                             .ok()
