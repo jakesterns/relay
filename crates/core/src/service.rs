@@ -1375,6 +1375,18 @@ fn spawn_receive(
                 // already on screen.
                 ShareEvent::Preview { .. } => {}
                 ShareEvent::Waiting { code, .. } => {
+                    // Keep the code in the record, so a receive brought back
+                    // after a crash, an update or a reboot shows the code the
+                    // user may already have read out, not a new one.
+                    {
+                        let mut ig = inner2.lock();
+                        let req = ig.recv_intent.as_mut().and_then(|r| r.receive.as_mut());
+                        if let Some(req) = req.filter(|q| q.code.as_deref() != Some(code.as_str()))
+                        {
+                            req.code = Some(code.clone());
+                            persist_intent(&ig);
+                        }
+                    }
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: Some(code),
@@ -1431,6 +1443,15 @@ fn spawn_receive(
                     // Remember it: if the engine then exits, this is the only
                     // explanation the user will ever get.
                     last_failure = Some(message.clone());
+                    // A wrong code must still cost the guesser this code.
+                    if message.contains("code mismatch") {
+                        let mut ig = inner2.lock();
+                        if let Some(req) = ig.recv_intent.as_mut().and_then(|r| r.receive.as_mut())
+                        {
+                            req.code = None;
+                            persist_intent(&ig);
+                        }
+                    }
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
