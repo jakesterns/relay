@@ -722,6 +722,25 @@ fn spawn_event_bridge(app: AppHandle) {
                                     );
                                     if let Some(w) = app.get_webview_window("main") {
                                         stream_host::apply(&w.as_ref().window());
+                                        // A stream window nobody hosts: the receive
+                                        // outlived the window that started it (closed
+                                        // and reopened, or resumed after a reboot).
+                                        // This window is here now, so take it in.
+                                        if mode == "none" && hwnd != 0 {
+                                            if let Some(owner) = host_hwnd(&w.as_ref().window()) {
+                                                tracing::info!(
+                                                    owner,
+                                                    "embedding an unhosted stream window"
+                                                );
+                                                tauri::async_runtime::spawn(async move {
+                                                    let _ = call(Method::HostReceive {
+                                                        mode: relay_core::share::HostMode::Embedded,
+                                                        owner,
+                                                    })
+                                                    .await;
+                                                });
+                                            }
+                                        }
                                     }
                                     let _ = app.emit("core://stream", stream_host::status());
                                 }

@@ -1367,6 +1367,7 @@ fn spawn_receive(
             // of wiping it: a sender-less line after `paired` made the screen
             // forget "remembered, no code" 0.4 s into every trusted share.
             let mut last_trusted = false;
+            let mut streaming = false;
             let mut stream_size: (u32, u32) = (0, 0);
             crate::share::pump(rx, |ev| match ev {
                 // The receiver renders into the app (or its own window), so a
@@ -1400,14 +1401,6 @@ fn spawn_receive(
                 ShareEvent::Paired { sender, trusted } => {
                     last_sender = Some(sender.clone());
                     last_trusted = trusted;
-                    {
-                        // Paired again: the episode, if any, is over.
-                        let mut ig = inner2.lock();
-                        ig.recv_episode = None;
-                        if let Some(r) = ig.recv_intent.as_mut() {
-                            r.attempts = 0;
-                        }
-                    }
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -1420,6 +1413,18 @@ fn spawn_receive(
                     });
                 }
                 ShareEvent::Stats { data } => {
+                    // Media is flowing: the episode, if any, is over. Not on
+                    // `paired` -- a receiver that pairs and then dies the same
+                    // way every time (a dead host window, say) reset the
+                    // counter on each try and never backed off or gave up.
+                    if !streaming {
+                        streaming = true;
+                        let mut ig = inner2.lock();
+                        ig.recv_episode = None;
+                        if let Some(r) = ig.recv_intent.as_mut() {
+                            r.attempts = 0;
+                        }
+                    }
                     let _ = events2.send(Event::ShareStats { data });
                 }
                 ShareEvent::Error { message } => {

@@ -26,10 +26,19 @@
   ; also restores the user's audio and display settings, which is what we
   ; want before swapping binaries underneath them.
   ${If} ${FileExists} "$INSTDIR\relay-core.exe"
+    ; A clean shutdown clears data\active-stream.json, which would make the
+    ; update end a share or receive the user left running. Keep a copy and put
+    ; it back, so the new core resumes it (S38; an update never resets
+    ; anything). Done here, not by a core flag, because this runs the OLD core.
+    InitPluginsDir
+    CopyFiles /SILENT "$INSTDIR\data\active-stream.json" "$PLUGINSDIR\active-stream.json"
     DetailPrint "Stopping the running Relay core..."
     nsExec::ExecToLog '"$INSTDIR\relay-core.exe" shutdown'
     Pop $0
     Sleep 1500
+    ${If} ${FileExists} "$PLUGINSDIR\active-stream.json"
+      CopyFiles /SILENT "$PLUGINSDIR\active-stream.json" "$INSTDIR\data\active-stream.json"
+    ${EndIf}
   ${EndIf}
 !macroend
 

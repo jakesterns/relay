@@ -44,6 +44,10 @@ struct Args {
     keep_data: bool,
     /// `uninstall`: only the HKLM component steps (the elevated phase).
     components_only: bool,
+    /// `shutdown`: keep `active-stream.json`, so the next start resumes the
+    /// share or receive. The installer stops the core this way: an update
+    /// must not end what the user left running.
+    keep_stream: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -59,6 +63,7 @@ fn parse_args() -> Result<Args> {
         silent: false,
         keep_data: true,
         components_only: false,
+        keep_stream: false,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -73,6 +78,7 @@ fn parse_args() -> Result<Args> {
             "--keep-data" => out.keep_data = true,
             "--delete-data" => out.keep_data = false,
             "--components-only" => out.components_only = true,
+            "--keep-stream" => out.keep_stream = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -113,7 +119,23 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "status" | "restore" | "shutdown" | "share-start" | "share-stop" => {
             logging::init_console(args.verbose);
-            client_command(&args.cmd, args.arg.as_deref(), args.json)
+            let path = relay_core::resilience::path_in(&args.paths);
+            let kept = (args.cmd == "shutdown" && args.keep_stream)
+                .then(|| std::fs::read(&path).ok())
+                .flatten();
+            let result = client_command(&args.cmd, args.arg.as_deref(), args.json);
+            if let Some(bytes) = kept {
+                // A clean shutdown clears the record on its way out; put it
+                // back once the core is gone.
+                for _ in 0..50 {
+                    if !path.exists() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                std::fs::write(&path, bytes)?;
+            }
+            result
         }
         // Direct (no running service needed): the VM runbook drives these
         // from an elevated prompt. The livereg write gate applies.

@@ -116,6 +116,11 @@ impl WindowThread {
         link: Arc<HostLink>,
         quit: Arc<AtomicBool>,
     ) -> Result<Self> {
+        // An owner that has since closed (the app window was closed and
+        // reopened, and a restart still carries the old handle) must not be
+        // fatal: come up unhosted and let the app embed it again.
+        // SAFETY: IsWindow accepts any handle value.
+        let owner = owner.filter(|&o| unsafe { IsWindow(Some(HWND(o as *mut _))) }.as_bool());
         let (tx, rx) = std::sync::mpsc::channel::<Result<(isize, bool)>>();
         let quit2 = quit.clone();
         let join =
