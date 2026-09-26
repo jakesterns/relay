@@ -468,6 +468,8 @@ export function Receive() {
   const [ended, setEnded] = useState<string | null>(null);
   // The last share ended because its sender stopped it, not a drop.
   const [endedClean, setEndedClean] = useState(false);
+  // This PC pressed Stop receiving: it ended the share, not the sender.
+  const [stoppedHere, setStoppedHere] = useState(false);
   // The current sender connected without a code, as a remembered PC (S35);
   // and a counter that tells the remembered-PCs card to reload, because a
   // share starting or ending is what changes that list.
@@ -537,7 +539,7 @@ export function Receive() {
   }, []);
 
   const start = async () => {
-    setBusy(true); setError(null); setEnded(null);
+    setBusy(true); setError(null); setEnded(null); setStoppedHere(false);
     health.current.reset(); setHealthState("ok"); setLive(null);
     try {
       await api.startReceive(callApp ? { return_pid: callApp.pid } : {});
@@ -547,7 +549,7 @@ export function Receive() {
     finally { setBusy(false); }
   };
   const stop = async () => {
-    setBusy(true);
+    setBusy(true); setStoppedHere(true);
     try { await api.stopReceive(); } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
@@ -591,7 +593,7 @@ export function Receive() {
               : `The share from ${ended} dropped — waiting for it to come back…`
             : "Waiting for a sender to pair…"
           : ended
-            ? `The share from ${ended} ended.`
+            ? stoppedHere ? `You stopped receiving from ${ended}.` : `The share from ${ended} ended.`
             : "Press Start receiving, then enter the code on the sending PC.";
 
   return (

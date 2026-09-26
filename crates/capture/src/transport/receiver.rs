@@ -186,8 +186,35 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // it must not be able to make the receiver restart and rotate the code
     // the user is reading off the screen. A wrong code still ends the wait
     // (and so rotates the code), which is what keeps guessing expensive.
+    // The core's commands, read from here on: while waiting a `stop` ends
+    // the wait (the installer's shutdown used to time out here and kill the
+    // engine, which read as a crash on every update), and a `host` updates
+    // where the stream window will go.
+    let mut stdin_lines = crate::render::stdin_lines();
+    let mut stdin_open = true;
+    let mut host = opts.host;
     let (mut sig, local_ip, offer_json, sender_name, trusted) = loop {
-        let (tcp, from) = listener.accept().await?;
+        let (tcp, from) = loop {
+            tokio::select! {
+                r = listener.accept() => break r?,
+                line = stdin_lines.next_line(), if stdin_open => match line {
+                    Ok(Some(l)) => match crate::command::parse_line(&l) {
+                        Some(crate::command::EngineCmd::Stop) => {
+                            info!("stop command received while waiting for a sender");
+                            return Ok(());
+                        }
+                        Some(crate::command::EngineCmd::Host { mode, owner }) => {
+                            host = match mode {
+                                crate::command::HostMode::Embedded if owner != 0 => Some(owner),
+                                _ => None,
+                            };
+                        }
+                        _ => {}
+                    },
+                    _ => stdin_open = false,
+                },
+            }
+        };
         tcp.set_nodelay(true)?;
         let local_ip = tcp.local_addr()?.ip();
         info!(%from, "sender connected");
@@ -578,11 +605,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    let render_opts = crate::render::RenderOpts {
-        vcam: opts.vcam,
-        mic_route: opts.mic_route.clone(),
-        host: opts.host,
-    };
+    let render_opts =
+        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone(), host };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.
     let (end_tx, end_rx) = mpsc::channel::<()>(1);
@@ -596,8 +620,19 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             let _ = end_tx.send(()).await;
         });
     }
-    crate::render::run(au_rx, opus_rx, mic_rx, rest_rx, stats, end_rx, pc, render_opts, abort_tx)
-        .await
+    crate::render::run(
+        au_rx,
+        opus_rx,
+        mic_rx,
+        rest_rx,
+        stats,
+        end_rx,
+        pc,
+        render_opts,
+        abort_tx,
+        stdin_lines,
+    )
+    .await
 }
 
 /// What the reorder buffer's output does to the access unit being built.

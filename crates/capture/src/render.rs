@@ -112,6 +112,17 @@ impl HostLink {
     }
 }
 
+/// The engine's one reader of the core's commands. The receiver opens it
+/// before it starts waiting for a sender and hands it on here, so a `stop`
+/// is heard while waiting too and no line is lost between two readers.
+pub type StdinLines = tokio::io::Lines<tokio::io::BufReader<tokio::io::Stdin>>;
+
+/// Open the command reader.
+pub fn stdin_lines() -> StdinLines {
+    use tokio::io::AsyncBufReadExt;
+    tokio::io::BufReader::new(tokio::io::stdin()).lines()
+}
+
 /// Entry point used by the transport when not headless.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -124,6 +135,7 @@ pub async fn run(
     pc: impl webrtc::peer_connection::PeerConnection,
     opts: RenderOpts,
     abort: AbortTx,
+    stdin_lines: StdinLines,
 ) -> Result<()> {
     // Audio playback thread (best-effort; a decode failure must not kill video).
     let (audio_stop_tx, audio_stop_rx) = std::sync::mpsc::channel::<()>();
@@ -173,10 +185,7 @@ pub async fn run(
     // Commands from the core on stdin: `stop`, and `host` to move the window
     // between the app and a window of its own. The receiver never read stdin
     // before S29, so a stop had to wait out the core's 3 s grace and a kill.
-    let mut stdin_lines = {
-        use tokio::io::AsyncBufReadExt;
-        tokio::io::BufReader::new(tokio::io::stdin()).lines()
-    };
+    let mut stdin_lines = stdin_lines;
     let spawned_by_core = std::env::var("RELAY_SPAWNED").is_ok();
     let mut stdin_open = true;
 
