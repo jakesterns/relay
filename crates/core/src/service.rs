@@ -190,6 +190,11 @@ fn resume_send_request(
 pub struct Service {
     inner: Arc<Mutex<Inner>>,
     events: broadcast::Sender<Event>,
+    /// The newest receive status that went past. Events are not replayed, so
+    /// a window opened while a receive is already running -- after a resume
+    /// from `active-stream.json`, or just reopening the app -- would show Idle
+    /// and offer Start receiving over a live receiver. Re-sent on Subscribe.
+    last_recv: Arc<std::sync::Mutex<Option<Event>>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
 }
 
@@ -251,7 +256,24 @@ impl Service {
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
-        let service = Service { inner, events, shutdown: tx.clone() };
+        let last_recv = Arc::new(std::sync::Mutex::new(None));
+        {
+            let mut rx = events.subscribe();
+            let last = last_recv.clone();
+            std::thread::Builder::new()
+                .name("relay-last-receive".into())
+                .stack_size(64 * 1024)
+                .spawn(move || loop {
+                    match rx.blocking_recv() {
+                        Ok(ev @ Event::ReceiveStatus { .. }) => {
+                            *last.lock().unwrap() = Some(ev);
+                        }
+                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                })?;
+        }
+        let service = Service { inner, events, last_recv, shutdown: tx.clone() };
 
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let result = rt.block_on(service.main(tx, rx));
@@ -310,6 +332,7 @@ impl Service {
             inner: self.inner.clone(),
             shutdown: self.shutdown.clone(),
             events: self.events.clone(),
+            last_recv: self.last_recv.clone(),
         });
         let events_tx = self.events.clone();
         #[cfg(windows)]
@@ -865,6 +888,7 @@ struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
     events: broadcast::Sender<Event>,
+    last_recv: Arc<std::sync::Mutex<Option<Event>>>,
 }
 
 /// The monitor hosting `hmonitor`, falling back to the primary (monitors are
@@ -2053,7 +2077,14 @@ impl IpcHandler {
                 }
                 Err(e) => Reply::Error { message: format!("{e:#}") },
             },
-            Method::Subscribe => Reply::Ok,
+            Method::Subscribe => {
+                drop(g);
+                let last = self.last_recv.lock().unwrap().clone();
+                if let Some(ev) = last {
+                    let _ = self.events.send(ev);
+                }
+                Reply::Ok
+            }
             // S38: the window closed and the core is staying. Say so where
             // the user can see it, every time, unless they turned it off.
             Method::WindowClosed => {
@@ -2124,6 +2155,7 @@ impl crate::ipc::server::Handler for IpcHandler {
                 inner: self.inner.clone(),
                 shutdown: self.shutdown.clone(),
                 events: self.events.clone(),
+                last_recv: self.last_recv.clone(),
             };
             return tokio::task::spawn_blocking(move || handler.run_elevated(&paths, op))
                 .await
