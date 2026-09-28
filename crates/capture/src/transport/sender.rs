@@ -416,7 +416,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             let got = signal::sdp_fingerprint(&sdp).unwrap_or_default();
             if relay_core::peers::norm(&got) != relay_core::peers::norm(expected) {
                 return Err(super::Refused(format!(
-                    "`{name}` is not the PC this one remembers by that name; \
+                    "{name} is not the PC this one remembers by that name; \
                      pair with its code to trust the new one"
                 ))
                 .into());
@@ -425,7 +425,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }
         (signal::SigMsg::Bye, Some(_)) => {
             return Err(super::Refused(format!(
-                "`{peer_name}` does not remember this PC; pair with its code once and it will"
+                "{peer_name} does not remember this PC; pair with its code once and it will"
             ))
             .into());
         }
@@ -450,7 +450,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         // be wrong again, and every retry would cost the receiver its code.
         (signal::SigMsg::Bye, None) => {
             return Err(super::Refused(format!(
-                "`{peer_name}` did not accept that code; check the six digits on the receiving PC"
+                "{peer_name} did not accept that code; check the six digits on the receiving PC"
             ))
             .into());
         }

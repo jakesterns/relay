@@ -1527,7 +1527,7 @@ fn spawn_receive(
                 ShareEvent::Refused { .. } => {}
                 ShareEvent::WrongCode { name } => {
                     let who =
-                        if name.is_empty() { "A PC".to_string() } else { format!("`{name}`") };
+                        if name.is_empty() { "A PC".to_string() } else { name.clone() };
                     let text = format!(
                         "{who} tried to connect with the wrong code. The code has changed."
                     );
