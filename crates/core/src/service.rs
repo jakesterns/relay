@@ -1526,8 +1526,7 @@ fn spawn_receive(
                 // Only a sender is refused; a receiver never emits it.
                 ShareEvent::Refused { .. } => {}
                 ShareEvent::WrongCode { name } => {
-                    let who =
-                        if name.is_empty() { "A PC".to_string() } else { name.clone() };
+                    let who = if name.is_empty() { "A PC".to_string() } else { name.clone() };
                     let text = format!(
                         "{who} tried to connect with the wrong code. The code has changed."
                     );

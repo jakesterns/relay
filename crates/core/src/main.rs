@@ -544,9 +544,13 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         fps: 60,
                         size: None,
                         audio: std::env::var("RELAY_NO_AUDIO").is_err(),
-                        audio_pid: None,
-                        mic: false,
-                        rest: false,
+                        // S37/S19 two-PC automation: the same choices the
+                        // Share screen makes, from the environment.
+                        audio_pid: std::env::var("RELAY_AUDIO_PID")
+                            .ok()
+                            .and_then(|s| s.parse().ok()),
+                        mic: std::env::var("RELAY_MIC").is_ok(),
+                        rest: std::env::var("RELAY_REST").is_ok(),
                         vcam: false,
                         cursor: true,
                         preset: None,
