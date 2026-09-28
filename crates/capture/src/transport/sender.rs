@@ -446,6 +446,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             }
             sdp
         }
+        // The receiver hangs up on a wrong code. Final: the same code will
+        // be wrong again, and every retry would cost the receiver its code.
+        (signal::SigMsg::Bye, None) => {
+            return Err(super::Refused(format!(
+                "`{peer_name}` did not accept that code; check the six digits on the receiving PC"
+            ))
+            .into());
+        }
         (other, _) => bail!("expected answer, got {other:?}"),
     };
     let answer: RTCSessionDescription = serde_json::from_str(&answer_json)?;
