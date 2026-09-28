@@ -311,7 +311,7 @@ export function Share() {
               onClick={() => {
                 setShowWindows((v) => !v);
                 setShowRegion(false);
-                void api.listProcesses().then(setWindows).catch(() => {});
+                void api.listProcesses().then((ps) => setWindows(ps.filter((p) => p.hwnd))).catch(() => {});
               }}>
               Window…
             </button>

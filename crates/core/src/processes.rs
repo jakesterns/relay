@@ -61,6 +61,32 @@ pub fn list_windowed() -> Vec<ProcessInfo> {
     Vec::new()
 }
 
+/// Windowed processes plus every process playing sound on the default
+/// output, whether or not it has a window. A call app minimised to the tray
+/// (Discord usually is) has no visible window but does have an active audio
+/// session, and the Receive screen's call-app picker must be able to offer
+/// it -- the two-PC pass found a windowless audio process could not be picked.
+pub fn list_windowed_and_audible() -> Vec<ProcessInfo> {
+    let mut out = list_windowed();
+    #[cfg(windows)]
+    if let Ok(s) = relay_audio::sessions::probe_default_render() {
+        let own = std::process::id();
+        for pid in s.active_pids {
+            if pid == 0 || pid == own || out.iter().any(|p| p.pid == pid) {
+                continue;
+            }
+            let Some(path) = crate::winloop::process_image_path(pid) else { continue };
+            let exe = crate::winloop::exe_name(&path);
+            if exe.is_empty() {
+                continue;
+            }
+            out.push(ProcessInfo { pid, exe, title: "Playing sound".into(), hwnd: 0 });
+        }
+        out.sort_by(|a, b| a.exe.to_lowercase().cmp(&b.exe.to_lowercase()).then(a.pid.cmp(&b.pid)));
+    }
+    out
+}
+
 /// Every running process' exe name, whether or not it owns a window — the
 /// uninstaller has to find `relay-ui.exe` even when its window is hidden.
 #[cfg(windows)]

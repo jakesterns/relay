@@ -1681,7 +1681,7 @@ impl IpcHandler {
                 Err(e) => Reply::Error { message: e.to_string() },
             },
             Method::ListProcesses => {
-                Reply::Processes { processes: crate::processes::list_windowed() }
+                Reply::Processes { processes: crate::processes::list_windowed_and_audible() }
             }
             Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
             Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {

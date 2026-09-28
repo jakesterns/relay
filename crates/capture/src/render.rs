@@ -680,9 +680,10 @@ fn video_thread(
             // scary number on the health card for the first sample of every
             // share, so latency is reported from the second second on.
             const WARMUP_FRAMES: u64 = 60;
-            if let Some(cap_ns) = au.capture_local_ns.filter(|_| {
-                stats.video_presented.load(Ordering::Relaxed) > WARMUP_FRAMES
-            }) {
+            if let Some(cap_ns) = au
+                .capture_local_ns
+                .filter(|_| stats.video_presented.load(Ordering::Relaxed) > WARMUP_FRAMES)
+            {
                 present_latency.store((signal_now_ns() - cap_ns) / 1_000, Ordering::Relaxed);
             }
         }
