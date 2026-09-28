@@ -495,7 +495,7 @@ describe("stream health", () => {
     await stats({ fps: 59.9, bitrate_mbps: 38.2, capture_to_present_ms: 1.3,
       audio: { buffered_ms: 44 }, rtp_lost: 0, rtp_recovered: 0 });
     expect(kv("Latency")).toBe("1.3 ms");
-    expect(kv("Audio delay")).toBe("44 ms");
+    expect(kv("Audio buffer")).toBe("44 ms");
     expect(kv("Frame rate")).toBe("59.9 fps");
   });
 });

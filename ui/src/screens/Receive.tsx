@@ -319,7 +319,7 @@ function StreamHealthCard(
       {/* Latency is safe to show since B14: the clock is re-estimated during
           the share, so this no longer drifts and no longer goes negative. */}
       {latency !== null && <Kv k="Latency" v={`${latency.toFixed(1)} ms`} mono />}
-      {audioMs !== null && <Kv k="Audio delay" v={`${audioMs.toFixed(0)} ms`} mono />}
+      {audioMs !== null && <Kv k="Audio buffer" v={`${audioMs.toFixed(0)} ms`} mono />}
       <Kv k="Repaired" v={recovered.toLocaleString()} mono />
       <Kv k="Lost" v={lost.toLocaleString()} mono />
       {state === "coping" && d.recovered > 0 && (
