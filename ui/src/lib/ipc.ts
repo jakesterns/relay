@@ -337,6 +337,8 @@ export interface ReceiveStatus {
   ended_by_sender?: boolean;
   /** The engine is gone and the core is bringing the receiver straight back. */
   restarting?: boolean;
+  /** The call app the running receiver returns audio from (S19). */
+  return_pid?: number | null;
 }
 
 /** How the received stream's native window is hosted (S29). `embedded` =

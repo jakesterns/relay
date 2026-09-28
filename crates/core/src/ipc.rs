@@ -446,6 +446,11 @@ pub enum Event {
         /// flashing Idle / "ended" before the restart lands.
         #[serde(default)]
         restarting: bool,
+        /// The call app the running receiver is returning audio from (S19),
+        /// whoever started it -- so the Call card shows what the receiver
+        /// is doing, not only what this window picked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_pid: Option<u32>,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

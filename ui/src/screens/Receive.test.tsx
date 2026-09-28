@@ -100,6 +100,18 @@ describe("pairing", () => {
     expect(screen.queryByText(/ended\./)).not.toBeInTheDocument();
   });
 
+  /** Two-PC finding: a receiver started elsewhere (a resume, another window)
+   *  showed "Call app: None" while it was returning audio. */
+  it("shows the running receiver's call app, not only this window's pick", async () => {
+    localStorage.clear();
+    await mount();
+    expect(kv("Call app")).toBe("None");
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: true, code: "418254", return_pid: 1004 }));
+    await settle();
+    expect(kv("Call app")).toBe("discord.exe");
+  });
+
   /** S19: the return route. Off until a call app is picked; then its PID
    *  rides on the receive request, the choice survives a revisit by exe
    *  name, and it is locked while receiving. */

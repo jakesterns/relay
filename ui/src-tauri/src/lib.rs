@@ -762,6 +762,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                     trusted,
                                     ended_by_sender,
                                     restarting,
+                                    return_pid,
                                 } => {
                                     tracing::info!(
                                         receiving,
@@ -791,6 +792,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "trusted": trusted,
                                             "ended_by_sender": ended_by_sender,
                                             "restarting": restarting,
+                                            "return_pid": return_pid,
                                         }),
                                     );
                                 }

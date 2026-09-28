@@ -505,6 +505,15 @@ export function Receive() {
         // Idle and "ended" for the second it takes would contradict itself.
         setReceiving(s.receiving || !!s.restarting);
         if (s.code) setCode(s.code);
+        // The running receiver's call app, whoever started it (a resume, or
+        // another window): the card shows what the receiver is doing.
+        if (s.receiving && s.return_pid) {
+          const pid = s.return_pid;
+          api.listProcesses().then((ps) => {
+            setCallApp(ps.find((x) => x.pid === pid)
+              ?? { pid, exe: `process ${pid}`, title: "", hwnd: 0 });
+          }).catch(() => {});
+        }
         if (s.sender) {
           setSender(s.sender); setEnded(null); setEndedClean(false);
           setTrusted(!!s.trusted);
