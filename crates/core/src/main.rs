@@ -541,8 +541,15 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                             .ok()
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(60),
-                        fps: 60,
-                        size: None,
+                        fps: std::env::var("RELAY_FPS")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(60),
+                        // S32 matrix: RELAY_SIZE=WxH, the encode size.
+                        size: std::env::var("RELAY_SIZE").ok().and_then(|s| {
+                            let (w, h) = s.split_once('x')?;
+                            Some((w.parse().ok()?, h.parse().ok()?))
+                        }),
                         audio: std::env::var("RELAY_NO_AUDIO").is_err(),
                         // S37/S19 two-PC automation: the same choices the
                         // Share screen makes, from the environment.
