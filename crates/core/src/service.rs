@@ -2116,6 +2116,9 @@ impl IpcHandler {
             Method::WindowClosed => {
                 let notice = g.prefs.get().close_notice;
                 drop(g);
+                // Logged either way: the balloon itself leaves no trace, and
+                // the two-PC pass could not otherwise tell whether it fired.
+                info!(close_notice = notice, "window closed; core keeps running");
                 if notice {
                     crate::winloop::balloon(
                         "Relay is still running",
