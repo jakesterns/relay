@@ -60,9 +60,24 @@ pub fn install_panic_hook(dir: PathBuf, binary: &'static str) {
             .unwrap_or_else(|| "unknown".to_string());
         let thread = std::thread::current().name().unwrap_or("unnamed").to_string();
         let body = format!("panic: {message}\nat: {location}\nthread: {thread}");
+        if is_shutdown_panic(&message, &location) {
+            // Windows ending the session, not a crash: saying "did not shut
+            // down cleanly" after every restart would teach users to ignore
+            // the banner.
+            previous(info);
+            return;
+        }
         let _ = write_record(&dir, binary, "panic", &body);
         previous(info);
     }));
+}
+
+/// tao's Windows event loop panics when the session ends underneath it
+/// (seen on PC 2 at a restart: "cannot move state from Destroyed" in
+/// `event_loop/runner.rs`). The window is going away with the session either
+/// way, so it is not recorded as a crash.
+fn is_shutdown_panic(message: &str, location: &str) -> bool {
+    message.contains("cannot move state from Destroyed") && location.contains("tao")
 }
 
 /// The core asked for nothing and the engine exited anyway. `log` is the
@@ -138,6 +153,14 @@ pub fn summary(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_session_end_panic_is_not_a_crash() {
+        let at = r"C:\cargo\registry\src\tao-0.35.3\src\platform_impl\windows\event_loop\runner.rs:371:25";
+        assert!(is_shutdown_panic("cannot move state from Destroyed", at));
+        assert!(!is_shutdown_panic("index out of bounds", at));
+        assert!(!is_shutdown_panic("cannot move state from Destroyed", "src/main.rs:1:1"));
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("relay-crash-{name}-{}", std::process::id()));
