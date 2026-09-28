@@ -356,6 +356,16 @@ fn popout_style() -> WINDOW_STYLE {
 /// is just capturable again. Returns what Windows reports back, not what was
 /// asked for, so the `host` event carries a verified value.
 fn exclude_from_capture(hwnd: HWND) -> bool {
+    // Test only (B16 lip-sync): a meter on the receiving PC reads the
+    // picture's pixels, and the exclusion makes every capture path see black.
+    // Never set by the core or the UI.
+    if std::env::var_os("RELAY_NO_CAPTURE_EXCLUDE").is_some() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            warn!("capture exclusion DISABLED for testing (RELAY_NO_CAPTURE_EXCLUDE)")
+        });
+        return false;
+    }
     // SAFETY: our own window.
     unsafe {
         if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
