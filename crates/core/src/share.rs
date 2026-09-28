@@ -278,6 +278,8 @@ pub enum ShareEvent {
     SenderStopped,
     /// The other PC refused a no-code connection. Final: not a drop.
     Refused { message: String },
+    /// Receiver: a PC tried the wrong code; the wait goes on under a new one.
+    WrongCode { name: String },
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -666,6 +668,9 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         }),
         Some("host_close") => Some(ShareEvent::HostClose),
         Some("sender_stopped") => Some(ShareEvent::SenderStopped),
+        Some("wrong_code") => Some(ShareEvent::WrongCode {
+            name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+        }),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");

@@ -143,6 +143,11 @@ struct Inner {
     /// a fresh core), so a receiver brought back after a share ends is
     /// embedded again rather than coming up with no window at all.
     recv_host: Option<u64>,
+    /// When the current receive engine started. A restarted receiver that
+    /// has stayed up for a while ends the episode even if no share arrived:
+    /// otherwise the episode's clock ran on and the next unrelated failure,
+    /// minutes later, was taken as "three minutes of trying" and gave up.
+    recv_started: Option<std::time::Instant>,
 }
 
 /// Write the intent to disk, or remove the file when there is none.
@@ -253,6 +258,7 @@ impl Service {
             send_episode: None,
             recv_episode: None,
             recv_host: None,
+            recv_started: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -546,6 +552,15 @@ impl Service {
         let next = {
             let mut g = self.inner.lock();
             if g.receive.is_some() {
+                let settled = g
+                    .recv_started
+                    .is_some_and(|t| now.duration_since(t) >= std::time::Duration::from_secs(30));
+                if settled && g.recv_episode.is_some() {
+                    g.recv_episode = None;
+                    if let Some(r) = g.recv_intent.as_mut() {
+                        r.attempts = 0;
+                    }
+                }
                 Next::Nothing
             } else {
                 match (g.recv_intent.clone(), g.recv_episode.as_mut()) {
@@ -1170,7 +1185,8 @@ fn spawn_share(
                 | ShareEvent::RenderUp { .. }
                 | ShareEvent::Host { .. }
                 | ShareEvent::HostClose
-                | ShareEvent::SenderStopped => {}
+                | ShareEvent::SenderStopped
+                | ShareEvent::WrongCode { .. } => {}
                 ShareEvent::Refused { message } => refused = Some(message),
                 ShareEvent::Exited { ok, code } => {
                     on_share_exit(&inner2, &events2, ok, code, refused.take())
@@ -1340,6 +1356,7 @@ fn spawn_receive(
         Err(e) => return Reply::Error { message: e.to_string() },
     };
     g.receive = Some(engine);
+    g.recv_started = Some(std::time::Instant::now());
     if req.host.is_some_and(|h| h != 0) {
         g.recv_host = req.host;
     }
@@ -1508,6 +1525,15 @@ fn spawn_receive(
                 ShareEvent::SenderStopped => ended_by_sender = true,
                 // Only a sender is refused; a receiver never emits it.
                 ShareEvent::Refused { .. } => {}
+                ShareEvent::WrongCode { name } => {
+                    let who =
+                        if name.is_empty() { "A PC".to_string() } else { format!("`{name}`") };
+                    let text = format!(
+                        "{who} tried to connect with the wrong code. The code has changed."
+                    );
+                    warn!(%text, "wrong pairing code");
+                    let _ = events2.send(Event::Notice { text });
+                }
                 ShareEvent::HostClose => {
                     info!("receiver's popped-out window closed; it re-embeds itself");
                     let _ = events2.send(Event::StreamPopoutClosed);

@@ -145,7 +145,7 @@ fn return_pipeline(
 }
 
 pub async fn run(opts: RecvOpts) -> Result<()> {
-    let code = opts.code.clone().unwrap_or_else(signal::pairing_code);
+    let mut code = opts.code.clone().unwrap_or_else(signal::pairing_code);
     let name = opts.name.clone().unwrap_or_else(discovery::hostname);
 
     // What goes in the answer. Headless never decodes, so it accepts whatever
@@ -190,6 +190,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // the wait (the installer's shutdown used to time out here and kill the
     // engine, which read as a crash on every update), and a `host` updates
     // where the stream window will go.
+    let own_name = name.clone();
     let mut stdin_lines = crate::render::stdin_lines();
     let mut stdin_open = true;
     let mut host = opts.host;
@@ -253,7 +254,24 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             signal::SigMsg::Offer { name, sdp, mac, trusted: false } => {
                 if !signal::verify_mac(&code, &sdp, &mac) {
                     let _ = sig.send(&signal::SigMsg::Bye).await;
-                    bail!("pairing code mismatch from {from}");
+                    // Not fatal: one mistyped digit on the other PC used to
+                    // stop this one receiving, and any PC on the LAN could
+                    // keep it out of receive mode. The wait goes on under a
+                    // new code, so a guess still costs the code it guessed.
+                    code = signal::pairing_code();
+                    warn!(sender = %name, %from, "pairing code mismatch; waiting on a new code");
+                    println!("{}", serde_json::json!({ "event": "wrong_code", "name": name }));
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "waiting",
+                            "name": own_name,
+                            "port": port,
+                            "code": code,
+                            "codecs": codecs,
+                        })
+                    );
+                    continue;
                 }
                 // The code binds the SDP, fingerprint included, so this is a
                 // consented pairing worth remembering.
