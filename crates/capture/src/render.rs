@@ -217,7 +217,8 @@ pub async fn run(
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "return_packets": stats.return_packets.load(Ordering::Relaxed),
                     "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
-                    "capture_to_present_ms": latency_ms,
+                    // null until the warm-up frames have passed (see WARMUP_FRAMES).
+                    "capture_to_present_ms": (presented > 60).then_some(latency_ms),
                     "rtp_gaps": gaps,
                     "rtp_lost": lost,
                     "rtp_recovered": recovered,
@@ -673,7 +674,15 @@ fn video_thread(
                     vcam_sink = None;
                 }
             }
-            if let Some(cap_ns) = au.capture_local_ns {
+            // The first second of frames after a connect carries decoder
+            // start-up and the wait for the first keyframe: the two-PC matrix
+            // saw 100-290 ms there, then single digits. Reporting it put a
+            // scary number on the health card for the first sample of every
+            // share, so latency is reported from the second second on.
+            const WARMUP_FRAMES: u64 = 60;
+            if let Some(cap_ns) = au.capture_local_ns.filter(|_| {
+                stats.video_presented.load(Ordering::Relaxed) > WARMUP_FRAMES
+            }) {
                 present_latency.store((signal_now_ns() - cap_ns) / 1_000, Ordering::Relaxed);
             }
         }
