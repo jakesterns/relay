@@ -1756,6 +1756,35 @@ shipped. Owed to two PCs: the in-session kill test on each end, and the
 reboot-of-one / reboot-of-both resume.
 
 
+## S39 — Lip-sync measured inside Relay · `feat/av-offset`
+Found by the automated two-PC pass on 2026-09-28 (B16). The receiver measured
+audio **+43 ms late**, stdev 6.3 ms, over 55 flash/click pairs. It did this by
+reading screen pixels and loopback audio, and that only worked with the B9
+capture exclusion switched off by a test-only variable. The health card's
+`audio_ms` turned out to be queue depth, not A/V offset (now labelled "Audio
+buffer"). Relay should know its own A/V offset.
+
+Why it is its own session: video carries a capture timestamp (SEI), but
+audio carries **none**, so the receiver cannot tell when an audio sample was
+captured.
+
+### Definition of Ready
+- Decide how audio capture time travels. Suggested: a periodic signalling
+  message from the sender that maps the program track's RTP timestamp to the
+  capture wall time (on the clock the B14 resync already corrects), because
+  Opus payloads cannot carry it.
+
+### Definition of Done
+- [ ] Receiver computes `av_offset_ms` = audio capture→speaker (decode time +
+      `buffered_ms` + `engine_ms`) − video capture→present, per second, and
+      emits it in the stats line.
+- [ ] The health card shows "Lip sync" with the sign spelled out ("audio 43 ms
+      late").
+- [ ] Matches the two-PC flash/click meter within ±10 ms. The meter lives in
+      the pc2 session's `b16.py` and needs `RELAY_NO_CAPTURE_EXCLUDE=1` on
+      the receiver.
+- [ ] Unit tests for the RTP→capture mapping across wrap and loss.
+
 # Group 5 — v1.1 backlog
 
 Out of v1 scope (`docs/ROADMAP.md:104-108`). Create the worktree when the
