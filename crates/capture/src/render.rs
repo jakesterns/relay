@@ -173,7 +173,9 @@ pub async fn run(
     let host_owner = opts.host;
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
         if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner) {
-            warn!(error = %e, "render thread stopped");
+            // ERROR, and in share.log: the one line someone reads when a
+            // receive dies (the dead-host fatal used to reach core.log only).
+            tracing::error!(error = %e, "receiver failed; telling the sender why");
             *failure2.lock().unwrap() = Some(e.to_string());
             println!(
                 "{}",
@@ -567,8 +569,25 @@ fn video_thread(
     let mut seen_keyframe = false;
     let mut skipped_pre_keyframe: u64 = 0;
     let mut last_au_at = std::time::Instant::now();
+    // Test hook (B3): `RELAY_TEST_FAIL_RENDER=<secs>` fails this thread that
+    // many seconds after the first keyframe, the way a lost GPU would -- the
+    // only clean way to prove a mid-share fatal reaches the sender.
+    let fail_after = std::env::var("RELAY_TEST_FAIL_RENDER")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|s| *s >= 0.0)
+        .map(std::time::Duration::from_secs_f64);
+    if let Some(d) = fail_after {
+        warn!(after = ?d, "TEST: the render thread will fail after the first keyframe");
+    }
+    let mut decoding_since: Option<std::time::Instant> = None;
 
     let result: Result<()> = 'outer: loop {
+        if let (Some(d), Some(t)) = (fail_after, decoding_since) {
+            if t.elapsed() >= d {
+                break Err(anyhow::anyhow!("TEST: render failure injected (RELAY_TEST_FAIL_RENDER)"));
+            }
+        }
         // The window thread asks us to stop (Esc, close, the owner window
         // going away) and the transport does too (stop, connection closed).
         if quit.load(Ordering::Acquire) {
@@ -638,6 +657,7 @@ fn video_thread(
         if !seen_keyframe {
             if au.codec.is_keyframe(&au.data) {
                 seen_keyframe = true;
+                decoding_since = Some(std::time::Instant::now());
                 info!(
                     skipped = skipped_pre_keyframe,
                     codec = au.codec.label(),
