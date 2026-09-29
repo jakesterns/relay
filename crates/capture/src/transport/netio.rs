@@ -337,7 +337,10 @@ struct CountedSocket {
 /// `RELAY_TEST_LOSS=every=N` loses the first arrival of every video packet
 /// whose RTP sequence number is a multiple of N and lets the retransmission
 /// through (the NACK path). `every=N,retx` loses the retransmissions as well
-/// (the give-up / keyframe path). The packet is not removed — a poll-based
+/// (the give-up / keyframe path). Pick N larger than a keyframe with `retx`:
+/// the loss is deterministic, so every keyframe spanning a multiple of N is
+/// damaged every time and the picture never starts (r34, 1440p static screen:
+/// ~900-packet keyframes, `every=200,retx`, nothing ever decoded). The packet is not removed — a poll-based
 /// socket has no clean way to un-receive — it is corrupted, so SRTP
 /// authentication rejects it before any interceptor sees it. SRTP leaves the
 /// RTP header in the clear, which is how the sequence number is read here.
