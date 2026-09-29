@@ -49,6 +49,10 @@ pub struct StreamStatus {
     pub code: Option<String>,
     pub sender: Option<String>,
     pub codec: Option<String>,
+    /// The call app the running receiver returns audio from, so a window
+    /// opened mid-receive names it instead of showing "None".
+    pub return_pid: Option<u32>,
+    pub return_exe: Option<String>,
 }
 
 #[derive(Default)]
@@ -70,6 +74,8 @@ struct Host {
     code: Option<String>,
     sender: Option<String>,
     codec: Option<String>,
+    return_pid: Option<u32>,
+    return_exe: Option<String>,
 }
 
 static HOST: Mutex<Host> = Mutex::new(Host {
@@ -83,6 +89,8 @@ static HOST: Mutex<Host> = Mutex::new(Host {
     code: None,
     sender: None,
     codec: None,
+    return_pid: None,
+    return_exe: None,
 });
 
 pub fn status() -> StreamStatus {
@@ -97,6 +105,8 @@ pub fn status() -> StreamStatus {
         code: g.code.clone(),
         sender: g.sender.clone(),
         codec: g.codec.clone(),
+        return_pid: g.return_pid,
+        return_exe: g.return_exe.clone(),
     }
 }
 
@@ -106,6 +116,8 @@ pub fn on_receive_status(
     code: Option<&str>,
     sender: Option<&str>,
     codec: Option<&str>,
+    return_pid: Option<u32>,
+    return_exe: Option<&str>,
 ) {
     let mut g = HOST.lock().unwrap();
     g.receiving = receiving;
@@ -118,7 +130,13 @@ pub fn on_receive_status(
     if let Some(c) = codec {
         g.codec = Some(c.to_string());
     }
+    if return_pid.is_some() {
+        g.return_pid = return_pid;
+        g.return_exe = return_exe.map(str::to_string);
+    }
     if !receiving {
+        g.return_pid = None;
+        g.return_exe = None;
         g.code = None;
         g.sender = None;
         g.codec = None;

@@ -488,6 +488,17 @@ export function Receive() {
     let live = true;
     // A screen that opens mid-receive learns where things stand from the
     // shell, which saw every event go past; the core does not replay them.
+    // The running receiver's call app, named by its exe. A window opened
+    // mid-receive only learns it from the shell's stream status: the core's
+    // replayed ReceiveStatus goes past before this page is listening.
+    const showReturnApp = (pid?: number | null, exe?: string | null) => {
+      if (!pid) return;
+      api.listProcesses().then((ps) => {
+        if (!live) return;
+        setCallApp(ps.find((x) => x.pid === pid)
+          ?? { pid, exe: exe || "an app that has closed", title: "", hwnd: 0 });
+      }).catch(() => {});
+    };
     api.streamStatus().then((s) => {
       if (!live) return;
       setStream(s);
@@ -496,6 +507,7 @@ export function Receive() {
         if (s.code) setCode(s.code);
         if (s.sender) setSender(s.sender);
         if (s.codec) setCodec(s.codec);
+        showReturnApp(s.return_pid, s.return_exe);
       }
     }).catch(() => {});
     let unsub = () => {};
@@ -507,13 +519,7 @@ export function Receive() {
         if (s.code) setCode(s.code);
         // The running receiver's call app, whoever started it (a resume, or
         // another window): the card shows what the receiver is doing.
-        if (s.receiving && s.return_pid) {
-          const pid = s.return_pid;
-          api.listProcesses().then((ps) => {
-            setCallApp(ps.find((x) => x.pid === pid)
-              ?? { pid, exe: s.return_exe || `process ${pid}`, title: "", hwnd: 0 });
-          }).catch(() => {});
-        }
+        if (s.receiving) showReturnApp(s.return_pid, s.return_exe);
         if (s.sender) {
           setSender(s.sender); setEnded(null); setEndedClean(false);
           setTrusted(!!s.trusted);

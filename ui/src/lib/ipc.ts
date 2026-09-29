@@ -355,6 +355,8 @@ export interface StreamStatus {
   /** The receive state the core last pushed, for a screen that mounts
    *  mid-receive. Absent from a shell that predates it. */
   receiving?: boolean; code?: string | null; sender?: string | null; codec?: VideoCodec | null;
+  /** The running receiver's call app, so a reopened window still names it. */
+  return_pid?: number | null; return_exe?: string | null;
 }
 /** The video area in CSS px, relative to the viewport. */
 export interface VideoArea { x: number; y: number; w: number; h: number }

@@ -778,6 +778,8 @@ fn spawn_event_bridge(app: AppHandle) {
                                         code.as_deref(),
                                         sender.as_deref(),
                                         codec.as_deref(),
+                                        return_pid,
+                                        return_exe.as_deref(),
                                     );
                                     if !receiving {
                                         let _ = app.emit("core://stream", stream_host::status());

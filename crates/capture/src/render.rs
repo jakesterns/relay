@@ -203,6 +203,11 @@ pub async fn run(
                 let presented = stats.video_presented.load(Ordering::Relaxed);
                 let audio = stats.audio_packets.load(Ordering::Relaxed);
                 let latency_ms = present_latency.load(Ordering::Relaxed) as f64 / 1e3;
+                // null until the warm-up frames have passed (see WARMUP_FRAMES).
+                let latency = (presented > 60).then_some(latency_ms);
+                // The log says "warming up" rather than a 0.0 that reads as a
+                // real measurement.
+                let latency_log = latency.map_or_else(|| "warming up".to_string(), |v| format!("{v:.3}"));
                 let gaps = stats.video_gaps.load(Ordering::Relaxed);
                 let lost = stats.video_lost_packets.load(Ordering::Relaxed);
                 let recovered = stats.video_recovered.load(Ordering::Relaxed);
@@ -217,8 +222,7 @@ pub async fn run(
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "return_packets": stats.return_packets.load(Ordering::Relaxed),
                     "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
-                    // null until the warm-up frames have passed (see WARMUP_FRAMES).
-                    "capture_to_present_ms": (presented > 60).then_some(latency_ms),
+                    "capture_to_present_ms": latency,
                     "rtp_gaps": gaps,
                     "rtp_lost": lost,
                     "rtp_recovered": recovered,
@@ -244,13 +248,13 @@ pub async fn run(
                 // the one log someone reads when things go wrong.
                 if presented > 0 && (stalled_aus || stalled_present) {
                     warn!(
-                        aus, presented, audio, audio_ms, latency_ms, pts, slice, gaps, lost,
+                        aus, presented, audio, audio_ms, latency_ms = %latency_log, pts, slice, gaps, lost,
                         arriving = !stalled_aus, presenting = !stalled_present,
                         "receiver stalled"
                     );
                 } else if presented > 0 {
                     info!(
-                        aus, presented, audio, audio_ms, latency_ms, pts, slice, gaps, lost,
+                        aus, presented, audio, audio_ms, latency_ms = %latency_log, pts, slice, gaps, lost,
                         recovered, keyframe_requests, withheld, "receiving"
                     );
                 }

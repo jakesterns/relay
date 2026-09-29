@@ -112,6 +112,25 @@ describe("pairing", () => {
     expect(kv("Call app")).toBe("discord.exe");
   });
 
+  /** r32 two-PC finding: after the UI was closed and reopened mid-receive
+   *  the card read "None" -- the replayed event went past before the page
+   *  listened, and the shell's stream status did not carry the call app. */
+  it("names the call app when the window opens mid-receive", async () => {
+    localStorage.clear();
+    core.stream = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true,
+      receiving: true, code: "418254", return_pid: 1004, return_exe: "discord.exe" };
+    await mount();
+    expect(kv("Call app")).toBe("discord.exe");
+  });
+
+  it("never shows a PID for a call app that has closed", async () => {
+    localStorage.clear();
+    core.stream = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true,
+      receiving: true, code: "418254", return_pid: 99999 };
+    await mount();
+    expect(kv("Call app")).not.toMatch(/process|99999/);
+  });
+
   /** S19: the return route. Off until a call app is picked; then its PID
    *  rides on the receive request, the choice survives a revisit by exe
    *  name, and it is locked while receiving. */
