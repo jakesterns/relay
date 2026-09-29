@@ -324,8 +324,10 @@ function StreamHealthCard(
       <Kv k="Lost" v={lost.toLocaleString()} mono />
       {state === "coping" && d.recovered > 0 && (
         <p className="note" data-testid="health-coping">
-          This link is dropping packets and Relay is repairing them in time. The picture is not
-          affected.
+          {/* Not "dropping": on a clean wired LAN a keyframe burst arrives slightly out of
+              order and counts here too (r36, row 6). */}
+          Some video packets are arriving late or out of order, and Relay is putting them back
+          in time. The picture is not affected.
         </p>
       )}
     </Card>
