@@ -666,6 +666,20 @@ now the first thing to run.
   that turned out to be a missed click. The code path was genuinely wrong and
   the fix stands, but the symptom that prompted it was misattributed.
 
+### B18 — Relay Camera never started for an installed user  |  FIXED 2026-09-29 (`fix/vcam-acl`)
+Found by the first live pass after registration (main PC, Windows 11 26200).
+`MFCreateVirtualCamera` succeeded, but `IMFVirtualCamera::Start` returned
+**0x80070005 E_ACCESSDENIED**. The Frame Server runs as LOCAL SERVICE and loads
+`relay_vdevice.dll` from the install folder, `%LOCALAPPDATA%\Relay`. That
+folder's ACL admits only the user, SYSTEM and Administrators. Granting
+`*S-1-5-19:(RX)` on that one file made `Start` return Ok. With the grant in
+place, a share with `--vcam` showed up as "Relay Camera (Windows Virtual
+Camera)" and delivered live 2560x1440 frames: 31 fps through DirectShow, as
+OBS and Zoom read them, and 18 fps through Media Foundation over a 5 s window
+that included start-up. Fix: `install-camera` grants it after registering, and
+the installer grants it after every install, because a replaced file inherits
+the folder ACL again.
+
 ## Proven working, two machines, real LAN
 
 Recorded because these had never run across two PCs before and were deferred
