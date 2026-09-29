@@ -640,6 +640,7 @@ impl Service {
             ended_by_sender: false,
             restarting: false,
             return_pid: None,
+            return_exe: None,
         });
         let _ = self.events.send(Event::Notice { text: text.clone() });
         crate::winloop::balloon("Relay", &text);
@@ -1315,6 +1316,7 @@ fn on_receive_exit(
         ended_by_sender,
         restarting: resilient,
         return_pid: None,
+        return_exe: None,
     });
     if first && !ended_by_sender {
         let text = match sender {
@@ -1372,6 +1374,13 @@ fn spawn_receive(
 
     // Every status line says which call app this receiver returns from.
     let ret_pid = req.return_pid.filter(|p| *p != 0);
+    #[cfg(windows)]
+    let ret_exe = ret_pid
+        .and_then(crate::winloop::process_image_path)
+        .map(|p| crate::winloop::exe_name(&p))
+        .filter(|e| !e.is_empty());
+    #[cfg(not(windows))]
+    let ret_exe: Option<String> = None;
     let events2 = events.clone();
     let inner2 = inner.clone();
     std::thread::Builder::new()
@@ -1425,6 +1434,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid,
+                        return_exe: ret_exe.clone(),
                     });
                 }
                 ShareEvent::Codec { codec } => {
@@ -1438,6 +1448,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
+                        return_exe: ret_exe.clone(),
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
@@ -1453,6 +1464,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
+                        return_exe: ret_exe.clone(),
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -1493,6 +1505,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
+                        return_exe: ret_exe.clone(),
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -1602,6 +1615,7 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
         ended_by_sender: false,
         restarting: false,
         return_pid: None,
+        return_exe: None,
     });
     Reply::Ok
 }

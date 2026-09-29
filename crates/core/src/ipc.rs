@@ -451,6 +451,10 @@ pub enum Event {
         /// is doing, not only what this window picked.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         return_pid: Option<u32>,
+        /// That call app's exe name, so the card can name it even when it is
+        /// silent (and so missing from the "playing sound" list) right now.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        return_exe: Option<String>,
     },
     /// A base64 JPEG thumbnail of the live capture, for the Share screen's
     /// preview. Only sent while a share was started with previews on.

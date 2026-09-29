@@ -339,6 +339,8 @@ export interface ReceiveStatus {
   restarting?: boolean;
   /** The call app the running receiver returns audio from (S19). */
   return_pid?: number | null;
+  /** That call app's exe name, from the core. */
+  return_exe?: string | null;
 }
 
 /** How the received stream's native window is hosted (S29). `embedded` =

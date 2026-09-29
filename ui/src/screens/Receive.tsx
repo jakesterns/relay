@@ -511,7 +511,7 @@ export function Receive() {
           const pid = s.return_pid;
           api.listProcesses().then((ps) => {
             setCallApp(ps.find((x) => x.pid === pid)
-              ?? { pid, exe: `process ${pid}`, title: "", hwnd: 0 });
+              ?? { pid, exe: s.return_exe || `process ${pid}`, title: "", hwnd: 0 });
           }).catch(() => {});
         }
         if (s.sender) {

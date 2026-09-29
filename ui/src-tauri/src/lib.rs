@@ -763,6 +763,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                     ended_by_sender,
                                     restarting,
                                     return_pid,
+                                    return_exe,
                                 } => {
                                     tracing::info!(
                                         receiving,
@@ -793,6 +794,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                             "ended_by_sender": ended_by_sender,
                                             "restarting": restarting,
                                             "return_pid": return_pid,
+                                            "return_exe": return_exe,
                                         }),
                                     );
                                 }
