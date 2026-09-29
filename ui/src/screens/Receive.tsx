@@ -523,7 +523,9 @@ export function Receive() {
         // another window): the card shows what the receiver is doing.
         if (s.receiving) showReturnApp(s.return_pid, s.return_exe);
         if (s.sender) {
-          setSender(s.sender); setEnded(null); setEndedClean(false);
+          // A new sender paired: an earlier failure is history, not news.
+          // It sat on the idle page through later good shares (r39, B3).
+          setSender(s.sender); setEnded(null); setEndedClean(false); setError(null);
           setTrusted(!!s.trusted);
           setPeersTick((t) => t + 1);
         }

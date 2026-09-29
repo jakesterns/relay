@@ -477,6 +477,14 @@ function PresetCard({ def, locked, onSaved }: {
   onSaved: (select?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<SharePresetDef | null>(null);
+  // Whether this PC can have Relay Camera at all: "Off" on a Windows 10 PC
+  // read as a setting the user could turn on (PC2, r39).
+  const [camOk, setCamOk] = useState(true);
+  useEffect(() => {
+    let live = true;
+    api.vdeviceStatus().then((v) => { if (live) setCamOk(v.camera_supported); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   // Encode size is typed, not picked, and "2560x" is not a valid size — so
   // the text has to live outside the draft. Deriving the field's value from
   // `draft.size` alone makes React reset the box on every keystroke that does
@@ -523,7 +531,8 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
         <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
-        <Kv k="Relay Camera here" v={def.vcam ? "On" : "Off"} />
+        <Kv k="Relay Camera here"
+          v={camOk ? (def.vcam ? "On" : "Off") : "Unavailable (needs Windows 11 22H2+)"} />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );
@@ -598,9 +607,11 @@ function PresetCard({ def, locked, onSaved }: {
         <p className="note">Pick any combination: the microphone travels as its own track alongside the desktop mix, and the person on the other end hears them together. Nothing selected means a silent share.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
+{camOk && (
         <Toggle on={draft.vcam ?? false} onChange={(v) => edit({ vcam: v })}
           label="Also show this share as Relay Camera on this PC"
           sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs Windows 11 and the camera installed in Settings. Video only — the streaming program captures the game's audio itself." />
+        )}
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
           label="Start recording with the share"
           sub="Writes the same bitstream to disk; costs no extra encode." />
