@@ -1311,6 +1311,8 @@ fn on_receive_exit(
         g.recv_episode = Some(crate::resilience::Episode::begin(std::time::Instant::now()));
     }
     drop(g);
+    // Read before `last_failure` moves into the status below.
+    let own = last_failure.is_some() && !crashed;
     let _ = events.send(Event::ReceiveStatus {
         receiving: false,
         code: None,
@@ -1324,7 +1326,12 @@ fn on_receive_exit(
         return_exe: None,
     });
     if first && !ended_by_sender {
+        // A failure this PC reported is this PC's fault, not the sender's:
+        // "the share from X dropped" blamed the wrong machine (r39, B3).
         let text = match sender {
+            Some(s) if own => {
+                format!("This PC stopped showing the share from {s}. Relay is starting it again.")
+            }
             Some(s) => format!("The share from {s} dropped. Relay is waiting for it to come back."),
             None => "Receiving stopped on its own. Relay is starting it again.".to_string(),
         };
