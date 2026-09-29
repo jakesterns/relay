@@ -1291,14 +1291,19 @@ fn on_receive_exit(
     last_failure: Option<String>,
     sender: Option<String>,
     ended_by_sender: bool,
+    crashed: bool,
 ) {
     let mut g = inner.lock();
     g.receive = None;
     if let Some(reason) = last_failure.as_deref() {
-        let dir = crate::crash::dir(&g.paths);
-        let log = g.paths.log_dir().join("share.log");
-        let _ = crate::crash::record_engine_exit(&dir, "relay-share-recv", None, Some(&log));
-        warn!(%reason, "receiver exited unexpectedly");
+        if crashed {
+            let dir = crate::crash::dir(&g.paths);
+            let log = g.paths.log_dir().join("share.log");
+            let _ = crate::crash::record_engine_exit(&dir, "relay-share-recv", None, Some(&log));
+            warn!(%reason, "receiver exited unexpectedly");
+        } else {
+            warn!(%reason, "receiver stopped on an error it reported");
+        }
     }
     let resilient = g.recv_intent.is_some() && g.prefs.get().resilience;
     let first = resilient && g.recv_episode.is_none();
@@ -1389,6 +1394,9 @@ fn spawn_receive(
             // Why the engine stopped, carried to the final ReceiveStatus so a
             // failure is never reported as a plain return to idle.
             let mut last_failure: Option<String> = None;
+            // The process itself exited abnormally. A receiver that reported
+            // why and exited cleanly is a failure, not a crash (B3, r38).
+            let mut crashed = false;
             // Who was connected, for the one sentence S38 says if it drops.
             let mut last_sender: Option<String> = None;
             let mut ended_by_sender = false;
@@ -1514,6 +1522,7 @@ fn spawn_receive(
                 // made "Start receiving" look like it did nothing at all: the
                 // UI flipped straight back to Idle with no reason given.
                 ShareEvent::Exited { ok, code } => {
+                    crashed = !ok;
                     if !ok && last_failure.is_none() {
                         last_failure = Some(match code {
                             Some(c) => format!("the receiver stopped unexpectedly (exit {c})"),
@@ -1578,6 +1587,7 @@ fn spawn_receive(
                     last_failure.take(),
                     last_sender.take(),
                     ended_by_sender,
+                    crashed,
                 );
             }
         })
