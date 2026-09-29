@@ -123,6 +123,34 @@ fn camera_dll_path() -> Result<std::path::PathBuf> {
         .with_context(|| format!("{CAMERA_DLL} not found next to the running binary"))
 }
 
+/// Let the Frame Server read the camera DLL. It runs as LOCAL SERVICE
+/// (S-1-5-19) and loads the media source from where Relay is installed --
+/// `%LOCALAPPDATA%\Relay`, whose ACL admits only the user, SYSTEM and
+/// Administrators. Without this `IMFVirtualCamera::Start` fails with
+/// E_ACCESSDENIED and Relay Camera never appears (found in the 2026-09-29
+/// live pass). Read + execute on this one file only; nothing else in the
+/// folder is exposed. The installer does the same after every update, since
+/// a replaced file inherits the folder ACL again.
+#[cfg(windows)]
+pub fn grant_frameserver_read(dll: &std::path::Path) {
+    let sys = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into());
+    let out = std::process::Command::new(sys.join("System32").join("icacls.exe"))
+        .arg(dll)
+        .args(["/grant", "*S-1-5-19:(RX)"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            tracing::info!(dll = %dll.display(), "Frame Server may read the camera DLL")
+        }
+        Ok(o) => {
+            tracing::warn!(status = ?o.status, "could not grant the Frame Server read access; Relay Camera will not start")
+        }
+        Err(e) => tracing::warn!(error = %e, "could not run icacls; Relay Camera will not start"),
+    }
+}
+
 /// Register the camera media source. Consent-checked, record-then-apply,
 /// idempotent refusal when already recorded.
 #[cfg(windows)]
@@ -145,6 +173,7 @@ pub fn install_camera_live(paths: &Paths) -> Result<()> {
     match relay_vdevice::livereg::apply(&plan.keys) {
         Ok(()) => {
             tracing::info!(dll = %dll.display(), "camera media source registered");
+            grant_frameserver_read(&dll);
             Ok(())
         }
         Err(e) => {

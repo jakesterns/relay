@@ -43,6 +43,14 @@
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
+  ; Relay Camera: the Frame Server (LOCAL SERVICE) must be able to read the
+  ; camera DLL, and a freshly copied file inherits the folder ACL, which
+  ; admits only this user. Read + execute on that one file; no elevation
+  ; needed, since the user owns it. Harmless when the camera is not
+  ; registered -- nothing loads the DLL then.
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\relay_vdevice.dll" /grant *S-1-5-19:(RX)'
+  Pop $0
+
   ; Autostart is opt-in and off by default: this is the one Run-key value
   ; Relay is allowed to create, and only when asked for. The interactive
   ; opt-in lives on the app's first-run screen; /AUTOSTART is here for

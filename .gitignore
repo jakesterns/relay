@@ -27,3 +27,6 @@ Thumbs.db
 /*-err.log
 # Installer payload staged by scripts/stage-bundle.ps1 (built artifacts, not source)
 ui/src-tauri/binaries/
+
+# Per-session git worktrees
+.worktrees/
