@@ -15,8 +15,8 @@ measured by meter, never listened to. Tick a row with its build and date.
 | 6 | Multi-source switch mid-share (display, region, window) -- no renegotiation, fps holds | no | multi-source | **Pass r37** 2026-09-29: display -> region -> window -> display, no reconnect, keyframe 10-14 ms after each switch, 0 stalls. Found and fixed: non-16:9 sources were stretched (r37 pillar/letterboxes; verified on a frame from the encoded stream: round circle, black bars, clean edges). Recording on/off mid-share: no disturbance on PC2 |
 | 7 | Both PCs rebooted mid-share -- each side resumes with no press | no | S38 | |
 | 8 | Relay Camera on the sender (S36) read locally while sharing | no | S36 | |
-| 9 | Mic track: tone into the mic, meter on the Mic fader, isolation from Game/Rest | tone | mic | |
-| 10 | Recording during a two-PC share + replay save; ffprobe both Opus tracks | tone | M6 | |
+| 9 | Mic track: tone into the mic, meter on the Mic fader, isolation from Game/Rest | tone | mic | **Half r42**: desktop tone does not leak into the mic track (mic -96.5 dB RMS while the tone plays). Tone *into* the mic needs a virtual cable (driver install) -- Jake's call |
+| 10 | Recording during a two-PC share + replay save; ffprobe both Opus tracks | tone | M6 | **Pass r42** 2026-09-29: 1 kHz tone shared with mic + recording + replay save. PC2 heard 1 kHz at -14.00 dB every 250 ms window (stdev 0), clicks <= 0.47 (edges only), control bins quiet, nothing at the replay save. Recording (33.5 s) and replay (21.5 s for 20 s) each: H.264 + 'Relay Audio' + 'Relay Microphone' Opus; audio track peak -13.9 / RMS -17.0 (pure tone), mic -96.5 RMS |
 | 11 | Wi-Fi run: loss, bitrate controller, wired/6E notice | no | risk 5 | |
 | 12 | Win10 receiver camera: greyed state explained (no frame-server API) | no | M5 on Win10 | **Pass r39** 2026-09-29: Receive and Settings explain "Needs Windows 11 22H2+ (this PC: build 19045)", Install disabled, OBS VirtualCam detected. r41: Share preset reads "Unavailable" and hides the toggle instead of "Off" |
 
