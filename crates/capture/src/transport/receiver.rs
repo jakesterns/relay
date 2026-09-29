@@ -803,6 +803,8 @@ async fn video_track_loop(
     let mut unknown_pt_logged = false;
     let mut media_ssrc = 0u32;
     let mut last_keyframe_request: Option<Instant> = None;
+    // When the current wait for a keyframe began, to log how long it took.
+    let mut key_wait_since: Option<Instant> = None;
     let mut withholding_since: Option<Instant> = None;
     // Unrepaired loss over ~1 s windows, for the sender's bitrate control.
     let mut window_start = Instant::now();
@@ -900,8 +902,17 @@ async fn video_track_loop(
             withholding_since = None;
         }
 
+        if asm.need_keyframe {
+            key_wait_since.get_or_insert(now);
+        }
         if !asm.need_keyframe {
             last_keyframe_request = None;
+            if let Some(t) = key_wait_since.take() {
+                info!(
+                    ms = now.duration_since(t).as_millis() as u64,
+                    "keyframe arrived; the picture is clean again"
+                );
+            }
         } else if last_keyframe_request.is_none_or(|t| now.duration_since(t) >= KEYFRAME_RETRY) {
             last_keyframe_request = Some(now);
             stats.keyframe_requests.fetch_add(1, Ordering::Relaxed);

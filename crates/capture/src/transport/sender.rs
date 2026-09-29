@@ -1298,6 +1298,12 @@ fn video_pipeline(
                 let Some(frame) = frame else {
                     tracing::debug!("no capture frame in 250ms");
                     if let Some(nv12) = last_nv12.as_ref() {
+                        // A keyframe asked for on a still screen is owed now,
+                        // not at the next screen change: the receiver sat
+                        // paused through five requests for 2.3 s (r34, 2b).
+                        if keyframe_wanted.swap(false, Ordering::Relaxed) {
+                            let _ = enc.request_keyframe();
+                        }
                         let pts = time::qpc_now_100ns();
                         enc.submit(nv12, pts)?;
                         inflight.insert(pts, pts);
