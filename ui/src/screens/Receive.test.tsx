@@ -619,6 +619,17 @@ describe("a receiver brought back on its own", () => {
     expect(screen.queryByText(/ended/)).not.toBeInTheDocument();
   });
 
+  /** r41: after this PC's own failure the status line said the sender
+   *  dropped, beside a notice saying this PC stopped. */
+  it("blames this PC, not the sender, when the receiver reported a failure", async () => {
+    await mount();
+    await paired();
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: false, restarting: true, message: "the decoder failed" }));
+    expect(screen.getByText(/This PC stopped showing the share from studio-pc/)).toBeInTheDocument();
+    expect(screen.queryByText(/dropped/)).not.toBeInTheDocument();
+  });
+
   it("says ended, not dropped, when the sender stopped it", async () => {
     await mount();
     await paired();

@@ -609,7 +609,11 @@ export function Receive() {
           ? ended
             ? endedClean
               ? `The share from ${ended} ended. Waiting for a sender to pair…`
-              : `The share from ${ended} dropped — waiting for it to come back…`
+              // An error here is this PC's own failure (the core sends its
+              // reason); "dropped" contradicted the notice beside it (r41).
+              : error
+                ? `This PC stopped showing the share from ${ended} — starting again…`
+                : `The share from ${ended} dropped — waiting for it to come back…`
             : "Waiting for a sender to pair…"
           : ended
             ? stoppedHere ? `You stopped receiving from ${ended}.` : `The share from ${ended} ended.`
