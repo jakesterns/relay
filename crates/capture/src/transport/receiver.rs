@@ -839,6 +839,16 @@ async fn video_track_loop(
                     stats.video_lost_packets.fetch_add(u64::from(lost), Ordering::Relaxed);
                     warn!(lost, "video packets not recovered in time; waiting for a keyframe");
                     asm.lost();
+                    // A fresh loss after the last request -- usually inside the
+                    // keyframe that answered it -- means that keyframe is broken
+                    // too: ask again now, not at the 500 ms retry (r35: every
+                    // double loss took 534 ms against a 17 ms norm). 20 ms keeps
+                    // one burst's losses to one request.
+                    if last_keyframe_request
+                        .is_some_and(|t| now.duration_since(t) >= Duration::from_millis(20))
+                    {
+                        last_keyframe_request = None;
+                    }
                     continue;
                 }
             };
