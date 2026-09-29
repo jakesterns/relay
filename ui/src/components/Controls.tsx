@@ -60,6 +60,7 @@ export function Slider({ label, value, min, max, step = 1, format, onChange, dis
       <div className="tr" style={{ "--w": `${pct}%` } as React.CSSProperties}>
         {!disabled && (
           <input type="range" min={min} max={max} step={step} value={value} aria-label={label}
+            aria-valuetext={format ? format(value) : undefined}
             onChange={(e) => onChange?.(Number(e.target.value))} />
         )}
       </div>

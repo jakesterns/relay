@@ -178,6 +178,25 @@ pub fn forward_log_crate(debug: bool) {
             if !self.enabled(r.metadata()) {
                 return;
             }
+            // A full track queue logs once per dropped packet: hundreds of
+            // identical ERRORs a second in a doomed connect (PC2, r24/25)
+            // buried everything else. One line a second, with the count.
+            let msg = r.args().to_string();
+            if msg.starts_with("Failed to send RtpPacket") {
+                static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+                static LAST: std::sync::Mutex<Option<std::time::Instant>> =
+                    std::sync::Mutex::new(None);
+                let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                let now = std::time::Instant::now();
+                if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(1)) {
+                    SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                *last = Some(now);
+                let more = SUPPRESSED.swap(0, Ordering::Relaxed);
+                tracing::error!(from = r.target(), suppressed_since_last = more, "{msg}");
+                return;
+            }
             if r.level() == log::Level::Error {
                 tracing::error!(from = r.target(), "{}", r.args());
             } else if r.level() == log::Level::Warn {
