@@ -148,9 +148,11 @@ export function MixerCard({ side, rows, sessionKey, note, devices = [] }: {
     );
   };
 
-  if (rows.length === 0) return null;
   const present = new Set(rows.map((r) => r.key));
   const own = devices.filter((d) => !d.row);
+  // A device that stands on its own (the receiver's Output) is worth showing
+  // before any track exists: pick where it plays, then receive (PC2, r43).
+  if (rows.length === 0 && own.length === 0) return null;
 
   return (
     <Card title="Mixer">

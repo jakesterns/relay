@@ -661,7 +661,9 @@ describe("the mixer", () => {
   it("waits for a sender, then grows a row as each track arrives", async () => {
     await mount();
     await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254" }));
-    expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
+    // Before a sender: the Output pick is there (choose where it plays
+    // first), but no faders yet.
+    expect(screen.queryByRole("slider", { name: "Their audio" })).not.toBeInTheDocument();
 
     await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
     expect(screen.getByRole("slider", { name: "Their audio" })).toBeInTheDocument();

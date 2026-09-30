@@ -81,6 +81,15 @@ as the source, or tones measured by FFT, per the automated-audio rule.
 | 10 | Stop, then start a new share | The picks from 4, 7 and 9 are still selected (`settings.json`), and the engines start on them (look for `--mic-device` / `--output-device` in the core log) |
 | 11 | Endpoint at 44.1 kHz or mono as the new pick | The conversion note is logged once. A/V sync holds (the receiver's latency figure does not drift) |
 
+## Two-PC results
+
+2026-09-29, r43 (`6985e20`), receiver = PC2, 1 kHz tone at amplitude 0.2, loopback meters:
+- **Row 1 pass**: nothing picked, `audio playback up device="default"`, -14.0 dB on the default output.
+- **Row 7 pass**: Output set to Realtek mid-share over IPC; reopened 56 ms after the command, tone moved from the Rodecaster to Realtek at -14.0 dB with no measurable gap, same relay-share pid, no reconnect.
+- **Row 10 pass**: the next share opened straight on Realtek (`recv ... --output-device {...}`); setting System default again removes the flag after a core restart.
+- Fixed after the run: the Output picker only showed while a sender was connected; it now shows whenever the Receive page is open.
+- Sender rows (2-6, 9, 11) are owed: they change this PC's default devices, which Jake uses for other work.
+
 ## Not done / follow-ups
 - A pinned device that is unplugged and plugged back in is not picked up
   again on its own. The track stays on the default until the user picks the

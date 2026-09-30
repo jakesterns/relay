@@ -689,9 +689,8 @@ export function Receive() {
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}
-        {receiving && sender && (
-          <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender}`} devices={RECEIVE_DEVICES} />
-        )}
+        {/* Always shown: the Output pick is wanted before a share arrives. */}
+        <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender ?? "idle"}`} devices={RECEIVE_DEVICES} />
         {mock && <p className="note">Preview only — Relay isn't running.</p>}
         <p className="note">The stream plays here, in this window. Nothing on this PC is changed.</p>
       </aside>
