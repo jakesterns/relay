@@ -173,3 +173,11 @@ Dolby Atmos line when enabled.
 8. Headphones/Speakers split by jack on onboard audio: each endpoint has its
    own list.
 9. Remove a headset from the library: it disappears from every output list.
+
+## Two-PC result (S41b, r45 `2b5a96e`, 2026-09-29, PC2, read-only)
+
+- Realtek: one line, "Realtek audio effects (Realtek Audio Console)" (3 effect CLSIDs; property page and duplicate SFX/MFX gone). Wording: "would add to it" with no active headset; advice once.
+- RODECaster Main and Chat: distinct keys (`ep:c:<container>#<endpoint guid>`), no processing listed; a headset set active on Chat did not appear on Main; survives a core restart; cleaned up.
+- G HUB and iCUE running but attached to no output (PC2 has no Logitech/Corsair outputs). Correct.
+- Spatial sound: off on every PC2 output, and none reported. The positive case (Sonic/Atmos on) is still unverified.
+- Old-key migration not exercised on hardware (nothing was saved under an old key).
