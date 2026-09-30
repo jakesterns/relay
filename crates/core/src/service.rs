@@ -1102,6 +1102,14 @@ fn spawn_share(
             let _ = events.send(Event::Notice { text: why.to_string() });
         }
     }
+    // S40: the mixer's saved device picks, decided here like the other
+    // routing; nothing saved = the System default.
+    {
+        use crate::share::{DeviceTrack, MixerSide};
+        let saved = &g.prefs.prefs().audio_devices;
+        req.mic_device = saved.get(MixerSide::Send, DeviceTrack::Mic).map(str::to_string);
+        req.output_device = saved.get(MixerSide::Send, DeviceTrack::Output).map(str::to_string);
+    }
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
@@ -1358,6 +1366,13 @@ fn spawn_receive(
     // never by the client: no opt-in, no camera, no mic route.
     let mut req = req;
     (req.vcam, req.mic_route) = crate::vdevice::receive_routing(&g.paths);
+    // S40: the saved output pick; nothing saved = the System default.
+    req.output_device = g
+        .prefs
+        .prefs()
+        .audio_devices
+        .get(crate::share::MixerSide::Receive, crate::share::DeviceTrack::Output)
+        .map(str::to_string);
     // S36: the reverse of the rule in `spawn_share` -- a share that is
     // feeding Relay Camera keeps it while it runs.
     if req.vcam && g.share.is_some() && g.last_share.as_ref().is_some_and(|r| r.vcam) {
@@ -1782,6 +1797,40 @@ impl IpcHandler {
             Method::SetMixer { side, faders } => {
                 drop(g);
                 let cmd = crate::share::EngineCmd::Mixer { faders };
+                match side {
+                    crate::share::MixerSide::Send => engine_command(&self.inner, &cmd),
+                    crate::share::MixerSide::Receive => receive_command(&self.inner, &cmd),
+                }
+            }
+            Method::ListAudioDevices => {
+                drop(g);
+                #[cfg(windows)]
+                let devices = crate::hardware::probe_win::list_audio_devices();
+                #[cfg(not(windows))]
+                let devices = crate::share::AudioDevices::default();
+                Reply::AudioDevices { devices }
+            }
+            Method::SetAudioDevice { side, track, device } => {
+                // Saved first, so the pick holds for the next share even when
+                // nothing is running now; then sent live if something is.
+                match g.prefs.set_device(side, track, device.clone()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Reply::Error {
+                            message: "a receiver has no microphone to choose".into(),
+                        }
+                    }
+                    Err(e) => return Reply::Error { message: e.to_string() },
+                }
+                let running = match side {
+                    crate::share::MixerSide::Send => g.share.is_some(),
+                    crate::share::MixerSide::Receive => g.receive.is_some(),
+                };
+                drop(g);
+                if !running {
+                    return Reply::Ok;
+                }
+                let cmd = crate::share::EngineCmd::Device { track, device };
                 match side {
                     crate::share::MixerSide::Send => engine_command(&self.inner, &cmd),
                     crate::share::MixerSide::Receive => receive_command(&self.inner, &cmd),

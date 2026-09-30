@@ -82,6 +82,14 @@ pub struct ShareRequest {
     /// Container for recordings and replay saves.
     #[serde(default)]
     pub container: RecordingContainer,
+    /// The microphone endpoint (S40). The service fills it from the saved
+    /// mixer choice; `None` = the System default. A saved device that is
+    /// unplugged falls back to the default in the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_device: Option<String>,
+    /// Where the call coming back plays (S40); `None` = the System default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
 }
 
 /// Container the recorder muxes into. Both carry the identical HEVC + Opus
@@ -154,13 +162,20 @@ pub enum MixerSide {
 
 /// Mirror of `relay_capture::command::EngineCmd`, serialised onto the
 /// engine's stdin one line at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCmd {
     Stop,
     /// Per-track gain and mute, live, on either engine (S37).
     Mixer {
         faders: FaderSet,
+    },
+    /// Point a device-backed track at an endpoint, or back at the System
+    /// default (`None`), live (S40).
+    Device {
+        track: DeviceTrack,
+        #[serde(default)]
+        device: Option<String>,
     },
     Record {
         on: bool,
@@ -180,6 +195,32 @@ pub enum EngineCmd {
         #[serde(default)]
         owner: u64,
     },
+}
+
+/// Mirror of `relay_capture::command::DeviceTrack` (S40): the sender's mic
+/// input, or where an engine plays audio (the receiver's received mix, the
+/// sender's call return).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrack {
+    Mic,
+    Output,
+}
+
+/// One active audio endpoint, for the mixer's device pickers (S40).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub is_default: bool,
+}
+
+/// Active endpoints in both directions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AudioDevices {
+    pub render: Vec<AudioDevice>,
+    pub capture: Vec<AudioDevice>,
 }
 
 /// Mirror of `relay_capture::command::HostMode`.
@@ -227,6 +268,10 @@ pub struct ReceiveRequest {
     /// pre-S19 record reads as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_pid: Option<u32>,
+    /// Where received audio plays (S40), from the saved mixer choice; `None`
+    /// = the System default. `mic_route` wins when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -564,6 +609,17 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
         args.push("--preview-fps".into());
         args.push(req.preview_fps.to_string());
     }
+    // S40: only a pinned device goes on the line; the default is no flag.
+    if req.mic {
+        if let Some(id) = req.mic_device.as_deref().filter(|d| !d.is_empty()) {
+            args.push("--mic-device".into());
+            args.push(id.into());
+        }
+    }
+    if let Some(id) = req.output_device.as_deref().filter(|d| !d.is_empty()) {
+        args.push("--output-device".into());
+        args.push(id.into());
+    }
     args
 }
 
@@ -592,6 +648,10 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     if let Some(pid) = req.return_pid.filter(|p| *p != 0) {
         args.push("--return-pid".into());
         args.push(pid.to_string());
+    }
+    if let Some(id) = req.output_device.as_deref().filter(|d| !d.is_empty()) {
+        args.push("--output-device".into());
+        args.push(id.into());
     }
     args
 }
@@ -1051,6 +1111,53 @@ mod tests {
         assert_eq!(recv_args(&req), ["recv", "--return-pid", "4242"]);
         let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":0}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
+        // S40: a pinned output goes on the line; the default is no flag.
+        let req: ReceiveRequest = serde_json::from_str(r#"{"output_device":"{spk}"}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv", "--output-device", "{spk}"]);
+        let req: ReceiveRequest = serde_json::from_str(r#"{"output_device":""}"#).unwrap();
+        assert_eq!(recv_args(&req), ["recv"]);
+    }
+
+    #[test]
+    fn send_args_devices_only_when_pinned() {
+        let mut req: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        req.mic_device = Some("{mic}".into());
+        req.output_device = Some("{spk}".into());
+        let args = send_args(&req);
+        // No mic track, no mic device.
+        assert!(!args.iter().any(|a| a == "--mic-device"));
+        assert!(args.ends_with(&["--output-device".to_string(), "{spk}".to_string()]));
+        req.mic = true;
+        let args = send_args(&req);
+        let i = args.iter().position(|a| a == "--mic-device").unwrap();
+        assert_eq!(args[i + 1], "{mic}");
+        req.mic_device = None;
+        req.output_device = Some(String::new());
+        let args = send_args(&req);
+        assert!(!args.iter().any(|a| a.ends_with("-device")));
+    }
+
+    #[test]
+    fn device_wire_shape_is_locked() {
+        // Must match relay_capture::command's own test byte for byte.
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Device {
+                track: DeviceTrack::Mic,
+                device: Some("{0.0.1.00000000}.{abc}".into())
+            })
+            .unwrap(),
+            r#"{"cmd":"device","track":"mic","device":"{0.0.1.00000000}.{abc}"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Device { track: DeviceTrack::Output, device: None })
+                .unwrap(),
+            r#"{"cmd":"device","track":"output","device":null}"#
+        );
+        let d: AudioDevices = serde_json::from_str(
+            r#"{"render":[{"id":"a","name":"Speakers","is_default":true}],"capture":[]}"#,
+        )
+        .unwrap();
+        assert!(d.render[0].is_default);
     }
 
     #[test]

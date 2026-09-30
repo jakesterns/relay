@@ -358,6 +358,9 @@ pub fn to_share_request(
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,
+        // Filled by the service from the saved mixer picks (S40).
+        mic_device: None,
+        output_device: None,
     }
 }
 

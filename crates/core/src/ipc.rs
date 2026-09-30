@@ -97,6 +97,18 @@ pub enum Method {
         side: crate::share::MixerSide,
         faders: crate::share::FaderSet,
     },
+    /// Active render and capture endpoints for the mixer's device pickers
+    /// (S40). Read-only.
+    ListAudioDevices,
+    /// Point one device-backed track at an endpoint, or back at the System
+    /// default (`device` null), live on a running share or receive, and
+    /// saved for the next one (S40).
+    SetAudioDevice {
+        side: crate::share::MixerSide,
+        track: crate::share::DeviceTrack,
+        #[serde(default)]
+        device: Option<String>,
+    },
     /// Presets and recording settings.
     ListPresets,
     SavePreset {
@@ -287,6 +299,10 @@ pub enum Reply {
     },
     UiPrefs {
         prefs: crate::uiprefs::UiPrefs,
+    },
+    /// Reply to `ListAudioDevices` (S40).
+    AudioDevices {
+        devices: crate::share::AudioDevices,
     },
     Receivers {
         receivers: serde_json::Value,
@@ -862,6 +878,33 @@ mod tests {
         .unwrap();
         assert_eq!(v["method"], "import_curve");
         assert_eq!(v["params"]["headset"], "hd560s");
+    }
+
+    #[test]
+    fn audio_device_methods_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (listAudioDevices / setAudioDevice).
+        let m = Method::SetAudioDevice {
+            side: crate::share::MixerSide::Send,
+            track: crate::share::DeviceTrack::Mic,
+            device: Some("{mic}".into()),
+        };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "set_audio_device");
+        assert_eq!(v["params"]["side"], "send");
+        assert_eq!(v["params"]["track"], "mic");
+        assert_eq!(v["params"]["device"], "{mic}");
+        // A missing device is the System default.
+        let r: Request = serde_json::from_str(
+            r#"{"id":2,"method":"set_audio_device","params":{"side":"receive","track":"output"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.method, Method::SetAudioDevice { device: None, .. }));
+        let r: Request = serde_json::from_str(r#"{"id":3,"method":"list_audio_devices"}"#).unwrap();
+        assert!(matches!(r.method, Method::ListAudioDevices));
+        let reply = Reply::AudioDevices { devices: crate::share::AudioDevices::default() };
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(v["type"], "audio_devices");
+        assert!(v["devices"]["render"].is_array() && v["devices"]["capture"].is_array());
     }
 
     #[test]
