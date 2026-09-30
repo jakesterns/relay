@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { screen, within } from "@testing-library/react";
 import { renderScreen, settle } from "../test/render";
 import { card, field, inCard, kv, monoLines } from "../test/dom";
-import { makeFakeCore, type FakeCore } from "../test/fakeCore";
+import { apoStatus, DAC, makeFakeCore, SPDIF, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
 import { Settings } from "./Settings";
 
@@ -124,44 +124,65 @@ describe("the uninstall plan", () => {
   });
 });
 
-describe("the endpoint APO opt-in", () => {
-  it("shows what would change before Windows is ever asked", async () => {
-    const h = await mount();
-    expect(within(installRow(APO)).getByText(/Not installed/)).toBeInTheDocument();
+describe("the endpoint APO opt-in, per output", () => {
+  const HP = "Headphones (USB DAC)";
+  const OPT = "Digital Output (S/PDIF)";
 
-    await h.user.click(within(installRow(APO)).getByRole("button", { name: "Install…" }));
+  it("lists every output with its own install state", async () => {
+    await mount();
+    expect(within(installRow(APO)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByText(/Default output · Not installed/)).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByText(/^Not installed$/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByRole("button", { name: `Install on ${HP}` })).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByRole("button", { name: `Install on ${OPT}` })).toBeInTheDocument();
+  });
+
+  it("shows what would change on that output before Windows is ever asked", async () => {
+    const h = await mount();
+    await h.user.click(within(installRow(OPT)).getByRole("button", { name: `Install on ${OPT}` }));
     await settle();
 
-    // The plan is read-only, and it is on screen while nothing has run.
-    expect(tauri.lastCall("elevation_plan")?.args).toEqual({ op: "install_apo" });
+    // The plan is read-only, names only the chosen output, and nothing has run.
+    expect(tauri.lastCall("elevation_plan")?.args).toEqual({ op: { install_apo: { endpoint: SPDIF } } });
     expect(tauri.lastCall("run_elevated")).toBeUndefined();
-    expect(core.apo.installed).toBe(false);
+    expect(core.apo.endpoints?.every((e) => !e.installed)).toBe(true);
 
     const lines = monoLines(card("What Relay installs"));
-    expect(lines.some((l) => l.includes("FxProperties"))).toBe(true);
-    expect(lines.some((l) => l.startsWith("backup:") && l.includes("apo-backup"))).toBe(true);
+    expect(lines.some((l) => l.includes("FxProperties") && l.includes(SPDIF))).toBe(true);
+    expect(lines.some((l) => l.startsWith("backup:") && l.includes(`${SPDIF}.json`))).toBe(true);
+    expect(lines.some((l) => l.includes(DAC))).toBe(false);
     expect(screen.getByText(/Windows will ask for permission before any of this happens/)).toBeInTheDocument();
     h.expectClean();
   });
 
-  it("installs only after the prompt is accepted, then reports it installed", async () => {
+  it("installs on the chosen output only, after the prompt is accepted", async () => {
     const h = await mount();
-    await h.user.click(within(installRow(APO)).getByRole("button", { name: "Install…" }));
+    await h.user.click(within(installRow(OPT)).getByRole("button", { name: `Install on ${OPT}` }));
     await settle();
     await h.user.click(screen.getByRole("button", { name: "Install now" }));
     await settle();
 
-    expect(tauri.lastCall("run_elevated")?.args).toEqual({ op: "install_apo" });
-    expect(core.apo.installed).toBe(true);
-    expect(within(installRow(APO)).getByText(/Installed on your headset endpoint · active/)).toBeInTheDocument();
-    expect(within(installRow(APO)).getByRole("button", { name: "Remove…" })).toBeInTheDocument();
+    expect(tauri.lastCall("run_elevated")?.args).toEqual({ op: { install_apo: { endpoint: SPDIF } } });
+    expect(within(installRow(OPT)).getByText(/Installed · active/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(within(installRow(APO)).getByText(/Installed on 1 output · active/)).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByRole("button", { name: `Remove on ${OPT}` })).toBeInTheDocument();
     h.expectClean();
+  });
+
+  it("carries the APO on two outputs at once", async () => {
+    core.apo = apoStatus((core.apo.endpoints ?? []).map((e) => ({ ...e, installed: true, backed_up: true })));
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(within(installRow(APO)).getByText(/Installed on 2 outputs/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByRole("button", { name: `Remove on ${HP}` })).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByRole("button", { name: `Remove on ${OPT}` })).toBeInTheDocument();
   });
 
   it("leaves the machine untouched when the prompt is declined, and says so", async () => {
     core.elevation.decline = true;
     const h = await mount();
-    await h.user.click(within(installRow(APO)).getByRole("button", { name: "Install…" }));
+    await h.user.click(within(installRow(HP)).getByRole("button", { name: `Install on ${HP}` }));
     await settle();
     await h.user.click(screen.getByRole("button", { name: "Install now" }));
     await settle();
@@ -170,45 +191,56 @@ describe("the endpoint APO opt-in", () => {
     // and the user is told in plain words rather than shown a failure.
     expect(core.apo.installed).toBe(false);
     expect(screen.getByText(/Windows permission was declined\. Nothing on this PC was changed\./)).toBeInTheDocument();
-    expect(within(installRow(APO)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByText(/Not installed/)).toBeInTheDocument();
     h.expectClean();
   });
 
   it("surfaces a helper that failed, instead of appearing to have installed", async () => {
     core.fail.set("run_elevated", "the elevated helper exited with code 5 (access denied)");
     const h = await mount();
-    await h.user.click(within(installRow(APO)).getByRole("button", { name: "Install…" }));
+    await h.user.click(within(installRow(HP)).getByRole("button", { name: `Install on ${HP}` }));
     await settle();
     await h.user.click(screen.getByRole("button", { name: "Install now" }));
     await settle();
 
     expect(screen.getByText(/exited with code 5/)).toBeInTheDocument();
     expect(core.apo.installed).toBe(false);
-    expect(within(installRow(APO)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(within(installRow(HP)).getByText(/Not installed/)).toBeInTheDocument();
   });
 
-  it("removes it through the same prompt, showing the restore plan first", async () => {
-    core.apo = { installed: true, endpoint: "ep:dac", running: false };
+  it("removes it from one output through the same prompt, leaving the other", async () => {
+    core.apo = apoStatus((core.apo.endpoints ?? []).map((e) => ({ ...e, installed: true, backed_up: true })));
     tauri.useFakeCore(core.handler);
     const h = await mount();
 
-    await h.user.click(within(installRow(APO)).getByRole("button", { name: "Remove…" }));
+    await h.user.click(within(installRow(HP)).getByRole("button", { name: `Remove on ${HP}` }));
     await settle();
-    expect(tauri.lastCall("elevation_plan")?.args).toEqual({ op: "uninstall_apo" });
+    expect(tauri.lastCall("elevation_plan")?.args).toEqual({ op: { uninstall_apo: { endpoint: DAC } } });
     expect(monoLines(card("What Relay installs")).some((l) => l.includes("Restore the endpoint audio chain"))).toBe(true);
     expect(core.apo.installed).toBe(true);
 
     await h.user.click(screen.getByRole("button", { name: "Remove now" }));
     await settle();
-    expect(tauri.lastCall("run_elevated")?.args).toEqual({ op: "uninstall_apo" });
-    expect(within(installRow(APO)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(tauri.lastCall("run_elevated")?.args).toEqual({ op: { uninstall_apo: { endpoint: DAC } } });
+    expect(within(installRow(HP)).getByText(/Not installed/)).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByText(/Installed/)).toBeInTheDocument();
     h.expectClean();
   });
 
-  it("will not offer the prompt until the core has answered with a status", async () => {
+  it("offers a restore for a backup whose output no longer carries the APO", async () => {
+    core.apo = apoStatus((core.apo.endpoints ?? []).map((e) =>
+      e.endpoint === SPDIF ? { ...e, backed_up: true } : e));
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(within(installRow(OPT)).getByText(/Backup on disk/)).toBeInTheDocument();
+    expect(within(installRow(OPT)).getByRole("button", { name: `Remove on ${OPT}` })).toBeInTheDocument();
+  });
+
+  it("offers no prompt until the core has answered with a status", async () => {
     tauri.useOfflineCore();
     await mount();
-    expect(within(installRow(APO)).getByRole("button", { name: "Install…" })).toBeDisabled();
+    expect(within(installRow(APO)).queryByRole("button")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Install on / })).toBeNull();
     expect(within(installRow(APO)).getByText(/Relay is not running — status unknown/)).toBeInTheDocument();
   });
 });

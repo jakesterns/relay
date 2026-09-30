@@ -3,7 +3,7 @@ import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Toggle } from "../c
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
-import { api, type ApoStatus, type ElevatedOp, type ElevationResult, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
+import { api, installApoOp, uninstallApoOp, type ApoStatus, type ElevatedOp, type ElevationResult, type EndpointApo, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
   const { state, refresh, offline, mock } = useCore();
@@ -340,47 +340,72 @@ function PlanLines({ lines }: { lines: string[] | null }) {
 function ApoConsentRow() {
   const { offline, mock } = useCore();
   const [status, setStatus] = useState<ApoStatus | null>(null);
-  const [mode, setMode] = useState<"idle" | "install" | "remove">("idle");
+  // One open panel at a time: which output, and which direction.
+  const [open, setOpen] = useState<{ endpoint: string; mode: "install" | "remove" } | null>(null);
 
   const refreshStatus = () => {
     api.apoStatus().then(setStatus).catch(() => setStatus(null));
   };
   useEffect(refreshStatus, [offline]);
 
-  const installed = status?.installed === true;
+  // An older core answers without the per-output list: show its default.
+  const endpoints: EndpointApo[] = status === null ? [] : status.endpoints
+    ?? (status.endpoint ? [{
+      endpoint: status.endpoint, name: "Default output", is_default: true,
+      installed: status.installed, backed_up: status.installed, running: status.running,
+    }] : []);
+  const carrying = endpoints.filter((e) => e.installed);
   const sub = status === null
-    ? (offline && !mock ? "Relay is not running — status unknown." : "Per-game EQ and spatial audio on one headset.")
-    : installed
-      ? `Installed on your headset endpoint${status.running ? " · active" : ""}. Only that endpoint carries it.`
-      : "Per-game EQ and spatial audio on one headset. Not installed.";
+    ? (offline && !mock ? "Relay is not running — status unknown." : "Per-game EQ and spatial audio, per output.")
+    : carrying.length > 0
+      ? `Installed on ${carrying.length} output${carrying.length === 1 ? "" : "s"}${carrying.some((e) => e.running) ? " · active" : ""}. Only those outputs carry it.`
+      : "Per-game EQ and spatial audio, per output. Not installed.";
 
   return (
     <>
       <div className="tog">
         <div><b>Endpoint audio processor (APO)</b><small>{sub}</small></div>
-        <button className="btn q" disabled={status === null}
-          onClick={() => setMode(mode === "idle" ? (installed ? "remove" : "install") : "idle")}>
-          {installed ? "Remove…" : "Install…"}
-        </button>
       </div>
-      {mode !== "idle" && (
-        <ElevatedPanel
-          op={mode === "install" ? "install_apo" : "uninstall_apo"}
-          onDone={() => { refreshStatus(); }}
-          onClose={() => setMode("idle")}
-          verb={mode === "install" ? "Install" : "Remove"}
-          blurb={mode === "install" ? (
-            <>
-              <p className="p"><b>What this installs:</b> one audio-effect DLL registered on your headset's
-                render endpoint only. Your endpoint's complete prior state is saved to
-                <span className="mono"> %LOCALAPPDATA%\Relay\apo-backup</span> before anything is written.
-                These are the exact values that change:</p>
-            </>
-          ) : (
-            <p className="p"><b>What this removes:</b> the saved state is written back byte-for-byte and the
-              registration is deleted. No other endpoint, app or global setting is touched.</p>
-          )} />
-      )}
+      {endpoints.map((e) => {
+        // A backup without the CLSID (half-removed, or the chain was reset by
+        // a driver update) still has a restore to run, so it offers Remove.
+        const removable = e.installed || e.backed_up;
+        const state = e.installed
+          ? `Installed${e.running ? " · active" : ""}`
+          : e.backed_up ? "Backup on disk — remove to restore it" : "Not installed";
+        const mode = removable ? "remove" : "install";
+        const isOpen = open?.endpoint === e.endpoint;
+        return (
+          <div key={e.endpoint} className="apo-ep">
+            <div className="tog">
+              <div>
+                <b>{e.name}</b>
+                <small>{e.is_default ? "Default output · " : ""}{state}</small>
+              </div>
+              <button className="btn q" aria-label={`${removable ? "Remove" : "Install"} on ${e.name}`}
+                onClick={() => setOpen(isOpen ? null : { endpoint: e.endpoint, mode })}>
+                {removable ? "Remove…" : "Install…"}
+              </button>
+            </div>
+            {isOpen && (
+              <ElevatedPanel
+                op={open.mode === "install" ? installApoOp(e.endpoint) : uninstallApoOp(e.endpoint)}
+                onDone={() => { refreshStatus(); }}
+                onClose={() => setOpen(null)}
+                verb={open.mode === "install" ? "Install" : "Remove"}
+                blurb={open.mode === "install" ? (
+                  <p className="p"><b>What this installs:</b> one audio-effect DLL registered on
+                    <b> {e.name}</b> only. That output's complete prior state is saved to
+                    <span className="mono"> %LOCALAPPDATA%\Relay\apo-backup</span> before anything is written.
+                    These are the exact values that change:</p>
+                ) : (
+                  <p className="p"><b>What this removes:</b> the saved state of <b>{e.name}</b> is written back
+                    byte-for-byte. No other output, app or global setting is touched.</p>
+                )} />
+            )}
+          </div>
+        );
+      })}
     </>
   );
 }
@@ -462,7 +487,8 @@ function ElevatedPanel({ op, verb, blurb, onClose, onDone, before, after }: {
 }) {
   const { plan, busy, note, error, loadPlan, run, clearError } = useElevation(op, onDone);
   const [prepError, setPrepError] = useState<string | null>(null);
-  useEffect(loadPlan, [op]);
+  const opKey = JSON.stringify(op);
+  useEffect(loadPlan, [opKey]);
 
   const go = async () => {
     setPrepError(null);

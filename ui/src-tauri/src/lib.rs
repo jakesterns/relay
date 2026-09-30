@@ -536,16 +536,16 @@ async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
 }
 
 #[tauri::command]
-async fn install_apo() -> CmdResult<()> {
-    match call(Method::InstallApo).await? {
+async fn install_apo(endpoint: Option<String>) -> CmdResult<()> {
+    match call(Method::InstallApo { endpoint }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
 }
 
 #[tauri::command]
-async fn uninstall_apo() -> CmdResult<()> {
-    match call(Method::UninstallApo).await? {
+async fn uninstall_apo(endpoint: Option<String>) -> CmdResult<()> {
+    match call(Method::UninstallApo { endpoint }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }

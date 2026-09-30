@@ -48,6 +48,11 @@ struct Args {
     /// share or receive. The installer stops the core this way: an update
     /// must not end what the user left running.
     keep_stream: bool,
+    /// `apo` / `elevate`: target render endpoint GUID (S42). Default output
+    /// when absent.
+    endpoint: Option<String>,
+    /// `apo uninstall`: restore every recorded endpoint.
+    all: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -64,6 +69,8 @@ fn parse_args() -> Result<Args> {
         keep_data: true,
         components_only: false,
         keep_stream: false,
+        endpoint: None,
+        all: false,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -79,6 +86,12 @@ fn parse_args() -> Result<Args> {
             "--delete-data" => out.keep_data = false,
             "--components-only" => out.components_only = true,
             "--keep-stream" => out.keep_stream = true,
+            "--endpoint" => {
+                let ep = args.next().ok_or_else(|| anyhow::anyhow!("--endpoint needs a GUID"))?;
+                relay_core::elevate::vet_endpoint_guid(&ep).map_err(anyhow::Error::msg)?;
+                out.endpoint = Some(ep);
+            }
+            "--all" => out.all = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -142,22 +155,41 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "apo" => {
             logging::init_console(args.verbose);
+            let dir = args.paths.apo_backup_dir();
+            let ep = args.endpoint.as_deref();
             match args.arg.as_deref() {
                 None | Some("status") => {
-                    let s = relay_core::audio_apo::apo_status();
-                    println!(
-                        "endpoint: {}\ninstalled: {}\nparams section: {}",
-                        s.endpoint.as_deref().unwrap_or("none"),
-                        s.installed,
-                        if s.running { "reachable" } else { "not reachable" },
-                    );
+                    let s = relay_core::audio_apo::apo_status(&dir);
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&s)?);
+                        return Ok(());
+                    }
+                    for e in s
+                        .endpoints
+                        .iter()
+                        .filter(|e| ep.is_none_or(|w| w.eq_ignore_ascii_case(&e.endpoint)))
+                    {
+                        println!(
+                            "{}{} {}\n  installed: {}  backup: {}  params section: {}",
+                            e.endpoint,
+                            if e.is_default { " (default)" } else { "" },
+                            e.name,
+                            e.installed,
+                            if e.backed_up { "yes" } else { "no" },
+                            if e.running { "reachable" } else { "not reachable" },
+                        );
+                    }
                 }
                 Some("install") => {
-                    let ep = relay_core::audio_apo::install_live(&args.paths.apo_backup_dir())?;
+                    let ep = relay_core::audio_apo::install_live(&dir, ep)?;
                     println!("registered on {ep}; restart audiosrv to pick it up");
                 }
+                Some("uninstall") if args.all => {
+                    let eps = relay_core::audio_apo::uninstall_all_live(&dir)?;
+                    println!("restored {} endpoint(s) to their pre-install state", eps.len());
+                }
                 Some("uninstall") => {
-                    let ep = relay_core::audio_apo::uninstall_live(&args.paths.apo_backup_dir())?;
+                    let ep = relay_core::audio_apo::uninstall_live(&dir, ep)?;
                     println!("restored {ep} to its pre-install state");
                 }
                 Some(other) => {
@@ -295,13 +327,14 @@ fn main() -> Result<()> {
                     "elevate takes `plan <op>` or `run <op>`, where <op> is one of                      install-apo, uninstall-apo, install-camera, uninstall-camera"
                 ),
             };
-            let Some(op) = ElevatedOp::parse(op) else {
+            let Some(op) = ElevatedOp::parse(op).map(|o| o.with_endpoint(args.endpoint.clone()))
+            else {
                 anyhow::bail!(
                     "`{op}` is not one of install-apo, uninstall-apo, install-camera,                      uninstall-camera"
                 )
             };
             if sub == "plan" {
-                for line in elevate::plan_lines(&args.paths, op) {
+                for line in elevate::plan_lines(&args.paths, &op) {
                     println!("{line}");
                 }
                 return Ok(());
@@ -487,8 +520,10 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   autostart  show, enable or disable start-at-login (HKCU Run key only)
   share-start <code>  spawn the share engine (RELAY_PEER, RELAY_BITRATE_MBPS optional)
   share-stop          stop the running share engine
-  apo [status|install|uninstall]  endpoint-APO registration (install/uninstall
-             are VM / installer only: they refuse without
+  apo [status|install|uninstall] [--endpoint <guid>] [--all]
+             endpoint-APO registration per output (default output when no
+             --endpoint; `uninstall --all` restores every recorded output).
+             install/uninstall are VM / installer only: they refuse without
              RELAY_APO_ALLOW_LIVE_WRITE=1 and an elevated prompt)
   vdevice [status|dry-run|consent-camera|install|uninstall]  virtual-camera
              registration (install/uninstall refuse without

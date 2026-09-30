@@ -342,15 +342,48 @@ export interface FirewallStatus {
  *  the elevated helper will do. There is no free-form variant: this is the
  *  allow-list, and the core refuses anything else. */
 export type ElevatedOp =
-  | "install_apo" | "uninstall_apo" | "install_camera" | "uninstall_camera"
+  | { install_apo: { endpoint: string | null } }
+  | { uninstall_apo: { endpoint: string | null } }
+  | "install_camera" | "uninstall_camera"
   | "allow_firewall" | "remove_firewall";
+
+/** The APO ops name one render endpoint by GUID (S42). `null` = the default
+ *  output (install) / every recorded output (uninstall). */
+export const installApoOp = (endpoint: string | null): ElevatedOp => ({ install_apo: { endpoint } });
+export const uninstallApoOp = (endpoint: string | null): ElevatedOp => ({ uninstall_apo: { endpoint } });
+
+/** Stable spelling of an op, for switch statements and effect deps. */
+export function opKind(op: ElevatedOp): string {
+  return typeof op === "string" ? op : Object.keys(op)[0];
+}
+/** The endpoint an APO op names, if any. */
+export function opEndpoint(op: ElevatedOp): string | null {
+  if (typeof op === "string") return null;
+  return "install_apo" in op ? op.install_apo.endpoint : op.uninstall_apo.endpoint;
+}
 
 /** Result of one `runElevated`. `declined` means the user dismissed the UAC
  *  prompt, which is a normal answer: nothing was attempted. */
 export interface ElevationResult { declined: boolean; ok: boolean; lines: string[] }
 
-/** Mirror of relay-core's `audio_apo::ApoStatus`. */
-export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
+/** Mirror of relay-core's `audio_apo::EndpointApo`: one render endpoint on
+ *  the Settings APO card. */
+export interface EndpointApo {
+  endpoint: string;
+  name: string;
+  is_default: boolean;
+  installed: boolean;
+  backed_up: boolean;
+  running: boolean;
+}
+/** Mirror of relay-core's `audio_apo::ApoStatus`. The first three fields
+ *  describe the default output; `endpoints` lists every output (S42). */
+export interface ApoStatus {
+  installed: boolean;
+  endpoint: string | null;
+  running: boolean;
+  endpoints?: EndpointApo[];
+}
 /** Mirror of relay-vdevice's `installed::Consent`. */
 export interface VdeviceConsent { decided_at: string; apo: boolean; camera: boolean; microphone: boolean }
 export type MicTargetKind = "vb_cable" | "voice_meeter";
@@ -551,20 +584,21 @@ const mockVdevice: VdeviceStatus = {
  *  be read without a core. The real lines come from the uninstall planner and
  *  the live FX store. */
 function mockElevationPlan(op: ElevatedOp): string[] {
+  const ep = opEndpoint(op) ?? "{endpoint}";
   const cam = "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}";
   const tail = ["", "Windows will ask for permission before any of this happens. Decline and nothing on this PC changes."];
-  switch (op) {
+  switch (opKind(op)) {
     case "install_apo":
       return [
-        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{endpoint}\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + ep + "\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
         "HKLM\\SOFTWARE\\Classes\\CLSID\\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
-        "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\{endpoint}.json (written before anything is changed)",
+        "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\" + ep + ".json (written before anything is changed)",
         ...tail,
       ];
     case "install_camera":
       return [cam, cam + "\\InprocServer32", ...tail];
     case "uninstall_apo":
-      return ["[x] Restore the endpoint audio chain — {endpoint} (needs admin)", ...tail];
+      return ["[x] Restore the endpoint audio chain — " + ep + " (needs admin)", ...tail];
     default:
       return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
   }
@@ -873,22 +907,30 @@ export const api = {
     }
     return invoke<FirewallStatus>("firewall_status");
   },
-  /** Read-only probe: is the Relay APO on the default render endpoint? */
+  /** Read-only probe: is the Relay APO installed, per render endpoint? */
   async apoStatus(): Promise<ApoStatus> {
-    if (!isTauri()) return { installed: false, endpoint: null, running: false };
+    if (!isTauri()) {
+      return {
+        installed: false, endpoint: "{mock-headphones}", running: false,
+        endpoints: [
+          { endpoint: "{mock-headphones}", name: "Headphones (USB DAC)", is_default: true, installed: false, backed_up: false, running: false },
+          { endpoint: "{mock-spdif}", name: "Digital Output (S/PDIF)", is_default: false, installed: false, backed_up: false, running: false },
+        ],
+      };
+    }
     return invoke<ApoStatus>("apo_status");
   },
   /** Register the APO (backup-then-apply). Direct, unelevated path — the
    *  Settings card goes through `runElevated` instead. Kept for the CLI and
    *  the VM runbook, where the gates are already armed. */
-  async installApo(): Promise<void> {
+  async installApo(endpoint: string | null = null): Promise<void> {
     if (!isTauri()) throw new Error("Installing the APO needs the Relay core");
-    return invoke<void>("install_apo");
+    return invoke<void>("install_apo", { endpoint });
   },
-  /** Restore the endpoint's FX chain from the install backup and unregister. */
-  async uninstallApo(): Promise<void> {
+  /** Restore one endpoint's FX chain from its install backup. */
+  async uninstallApo(endpoint: string | null = null): Promise<void> {
     if (!isTauri()) throw new Error("Removing the APO needs the Relay core");
-    return invoke<void>("uninstall_apo");
+    return invoke<void>("uninstall_apo", { endpoint });
   },
   /** Exactly what an elevated op would change on this PC. Read-only, and the
    *  listing the user reads *before* the Windows permission prompt. */

@@ -72,12 +72,12 @@ async fn every_op_can_be_previewed_before_the_prompt() {
     let mut client = core.connect().await;
 
     for op in [
-        ElevatedOp::InstallApo,
-        ElevatedOp::UninstallApo,
+        ElevatedOp::InstallApo { endpoint: None },
+        ElevatedOp::UninstallApo { endpoint: None },
         ElevatedOp::InstallCamera,
         ElevatedOp::UninstallCamera,
     ] {
-        let reply = client.call(Method::ElevationPlan { op }).await.expect("plan");
+        let reply = client.call(Method::ElevationPlan { op: op.clone() }).await.expect("plan");
         let lines = match reply {
             Reply::DryRun { lines } => lines,
             other => panic!("{op:?}: unexpected reply {other:?}"),
@@ -114,8 +114,10 @@ async fn the_apo_listing_names_the_real_endpoint_and_our_clsid() {
     let mut core = Core::spawn(&root, &format!("elevipc2{}", std::process::id()));
     let mut client = core.connect().await;
 
-    let reply =
-        client.call(Method::ElevationPlan { op: ElevatedOp::InstallApo }).await.expect("plan");
+    let reply = client
+        .call(Method::ElevationPlan { op: ElevatedOp::InstallApo { endpoint: None } })
+        .await
+        .expect("plan");
     let Reply::DryRun { lines } = reply else { panic!("unexpected reply") };
     let text = lines.join("\n");
     assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
