@@ -482,15 +482,10 @@ mod tests {
         // Consented: exactly the three vetted keys, and the record is kept.
         set_consent(&paths, false, true, false).unwrap();
         let mut wrote = 0;
-        install_dshow_with(
-            &paths,
-            fake_dll,
-            |_| true,
-            |keys| {
-                wrote = keys.len();
-                Ok(())
-            },
-        )
+        install_dshow_with(&paths, fake_dll, |_| true, |keys| {
+            wrote = keys.len();
+            Ok(())
+        })
         .unwrap();
         assert_eq!(wrote, 3);
         assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
@@ -597,8 +592,8 @@ mod tests {
         rec.hkcu_created_parents = vec![r"Software\Classes\CLSID".into()];
         file.record(rec);
         save(&paths, &file).unwrap();
-        let err =
-            uninstall_dshow_with(&paths, |_| panic!("tree"), |_| panic!("empty")).unwrap_err();
+        let err = uninstall_dshow_with(&paths, |_| panic!("tree"), |_| panic!("empty"))
+            .unwrap_err();
         assert!(err.to_string().contains("refusing"), "{err}");
         let _ = std::fs::remove_dir_all(paths.root());
     }

@@ -997,12 +997,8 @@ fn sync_receive_vcam(inner: &Arc<Mutex<Inner>>) {
         g.recv_vcam = Some(camera_ok);
         if let Some(engine) = g.receive.as_mut() {
             match engine.command(&cmd) {
-                Ok(()) => {
-                    tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver")
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver")
-                }
+                Ok(()) => tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver"),
+                Err(e) => tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver"),
             }
         }
     }

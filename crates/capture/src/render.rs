@@ -643,9 +643,7 @@ fn video_thread(
     let result: Result<()> = 'outer: loop {
         if let (Some(d), Some(t)) = (fail_after, decoding_since) {
             if t.elapsed() >= d {
-                break Err(anyhow::anyhow!(
-                    "TEST: render failure injected (RELAY_TEST_FAIL_RENDER)"
-                ));
+                break Err(anyhow::anyhow!("TEST: render failure injected (RELAY_TEST_FAIL_RENDER)"));
             }
         }
         // The window thread asks us to stop (Esc, close, the owner window
