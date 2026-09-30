@@ -63,7 +63,8 @@ pub const HELPER_EXE: &str = "relay-elevate.exe";
 
 /// Request-format version. The helper refuses anything else, so a stale
 /// request left by an older build can never be replayed against a new one.
-pub const REQUEST_VERSION: u32 = 1;
+/// v2 (S42): the two APO ops carry the target endpoint GUID.
+pub const REQUEST_VERSION: u32 = 2;
 
 /// How long a request stays actionable. Long enough for a slow UAC prompt,
 /// short enough that a file left behind by a crash is dead on arrival.
@@ -71,13 +72,25 @@ pub const MAX_REQUEST_AGE_SECS: u64 = 300;
 
 /// The complete set of things the elevated helper will do. There is no
 /// "other" variant on purpose: this enum *is* the allow-list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The APO ops name their render endpoint by GUID and nothing else (S42);
+/// the helper vets that it is a GUID *and* an active render endpoint before
+/// touching anything, and derives every registry path itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ElevatedOp {
-    /// Register the APO on the default render endpoint (backup first).
-    InstallApo,
-    /// Restore that endpoint's FX property store from the install backup.
-    UninstallApo,
+    /// Register the APO on one render endpoint (the default when `None`),
+    /// backup first.
+    InstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
+    /// Restore one endpoint's FX property store from its install backup.
+    /// `None` restores *every* recorded endpoint — the uninstaller's case.
+    UninstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
     /// Register the camera media source's COM class.
     InstallCamera,
     /// Delete exactly the camera keys recorded in `installed.json`.
@@ -91,10 +104,10 @@ pub enum ElevatedOp {
 
 impl ElevatedOp {
     /// Plain-English name, used in the UI and in every report line.
-    pub fn label(self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
-            ElevatedOp::InstallApo => "Install the endpoint audio processor",
-            ElevatedOp::UninstallApo => "Restore the endpoint audio chain",
+            ElevatedOp::InstallApo { .. } => "Install the endpoint audio processor",
+            ElevatedOp::UninstallApo { .. } => "Restore the endpoint audio chain",
             ElevatedOp::InstallCamera => "Register the virtual camera",
             ElevatedOp::UninstallCamera => "Unregister the virtual camera",
             ElevatedOp::AllowFirewall => "Allow Relay through Windows Firewall",
@@ -103,10 +116,10 @@ impl ElevatedOp {
     }
 
     /// CLI/IPC spelling.
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            ElevatedOp::InstallApo => "install-apo",
-            ElevatedOp::UninstallApo => "uninstall-apo",
+            ElevatedOp::InstallApo { .. } => "install-apo",
+            ElevatedOp::UninstallApo { .. } => "uninstall-apo",
             ElevatedOp::InstallCamera => "install-camera",
             ElevatedOp::UninstallCamera => "uninstall-camera",
             ElevatedOp::AllowFirewall => "allow-firewall",
@@ -114,15 +127,37 @@ impl ElevatedOp {
         }
     }
 
+    /// The endpoint an APO op names, if any.
+    pub fn endpoint(&self) -> Option<&str> {
+        match self {
+            ElevatedOp::InstallApo { endpoint } | ElevatedOp::UninstallApo { endpoint } => {
+                endpoint.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    /// Parse the CLI spelling. APO ops come back targeting the default
+    /// endpoint (install) or every recorded one (uninstall); see
+    /// [`ElevatedOp::with_endpoint`].
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "install-apo" => Some(ElevatedOp::InstallApo),
-            "uninstall-apo" => Some(ElevatedOp::UninstallApo),
+            "install-apo" => Some(ElevatedOp::InstallApo { endpoint: None }),
+            "uninstall-apo" => Some(ElevatedOp::UninstallApo { endpoint: None }),
             "install-camera" => Some(ElevatedOp::InstallCamera),
             "uninstall-camera" => Some(ElevatedOp::UninstallCamera),
             "allow-firewall" => Some(ElevatedOp::AllowFirewall),
             "remove-firewall" => Some(ElevatedOp::RemoveFirewall),
             _ => None,
+        }
+    }
+
+    /// Point an APO op at one endpoint. No-op for the other ops.
+    pub fn with_endpoint(self, ep: Option<String>) -> Self {
+        match self {
+            ElevatedOp::InstallApo { .. } => ElevatedOp::InstallApo { endpoint: ep },
+            ElevatedOp::UninstallApo { .. } => ElevatedOp::UninstallApo { endpoint: ep },
+            other => other,
         }
     }
 }
@@ -267,6 +302,24 @@ pub fn vet_endpoint_guid(guid: &str) -> Result<(), String> {
     }
 }
 
+/// Refuse an APO install target that is not an active render endpoint.
+/// `devices` is a read-only MMDevice enumeration of *active* endpoints, so
+/// an unplugged/disabled output and a recording device both fail here — the
+/// helper never writes an FX store for something Windows is not rendering to.
+pub fn vet_apo_target(guid: &str, devices: &crate::share::AudioDevices) -> Result<(), String> {
+    vet_endpoint_guid(guid)?;
+    let is = |list: &[crate::share::AudioDevice]| {
+        list.iter().any(|d| crate::hardware::fx_guid_of(&d.id).eq_ignore_ascii_case(guid))
+    };
+    if is(&devices.render) {
+        Ok(())
+    } else if is(&devices.capture) {
+        Err(format!("{guid} is a recording device, not an output"))
+    } else {
+        Err(format!("{guid} is not an active output on this PC"))
+    }
+}
+
 impl Request {
     /// Everything about a request that can be judged without touching the
     /// machine: format, freshness, and that it asks for something at all.
@@ -279,6 +332,11 @@ impl Request {
         }
         if self.ops.is_empty() {
             return Err("the request asks for nothing".into());
+        }
+        for op in &self.ops {
+            if let Some(ep) = op.endpoint() {
+                vet_endpoint_guid(ep)?;
+            }
         }
         if self.nonce.is_empty()
             || !self.nonce.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -339,12 +397,21 @@ fn make_nonce() -> String {
 /// Read-only: the APO listing reads the live FX store, the camera listing is
 /// a pure planner call, and neither writes anything.
 #[cfg(windows)]
-pub fn plan_lines(paths: &Paths, op: ElevatedOp) -> Vec<String> {
+pub fn plan_lines(paths: &Paths, op: &ElevatedOp) -> Vec<String> {
     let mut lines = match op {
-        ElevatedOp::InstallApo => crate::audio_apo::install_dry_run(&paths.apo_backup_dir()),
+        ElevatedOp::InstallApo { endpoint } => {
+            crate::audio_apo::install_dry_run(&paths.apo_backup_dir(), endpoint.as_deref())
+        }
         ElevatedOp::InstallCamera => crate::vdevice::camera_dry_run(),
-        ElevatedOp::UninstallApo => {
-            uninstall_step_lines(paths, crate::uninstall::StepKind::RestoreApo)
+        ElevatedOp::UninstallApo { endpoint } => {
+            let mut l = uninstall_step_lines(paths, crate::uninstall::StepKind::RestoreApo);
+            if let Some(ep) = endpoint {
+                l.retain(|line| line.contains(ep.as_str()));
+                if l.is_empty() {
+                    l.push(format!("{ep}: no install backup — nothing to restore"));
+                }
+            }
+            l
         }
         ElevatedOp::UninstallCamera => {
             uninstall_step_lines(paths, crate::uninstall::StepKind::RemoveVcam)
@@ -366,7 +433,7 @@ pub fn plan_lines(paths: &Paths, op: ElevatedOp) -> Vec<String> {
 }
 
 #[cfg(not(windows))]
-pub fn plan_lines(_paths: &Paths, _op: ElevatedOp) -> Vec<String> {
+pub fn plan_lines(_paths: &Paths, _op: &ElevatedOp) -> Vec<String> {
     vec!["Elevated installs are Windows-only.".into()]
 }
 
@@ -551,7 +618,7 @@ mod imp {
                 .ops
                 .iter()
                 .map(|op| OpResult {
-                    op: *op,
+                    op: op.clone(),
                     outcome: OpOutcome::Refused { reason: reason.clone() },
                 })
                 .collect();
@@ -559,13 +626,13 @@ mod imp {
         }
 
         for op in &request.ops {
-            let outcome = run_op(&paths, *op);
+            let outcome = run_op(&paths, op);
             match &outcome {
                 OpOutcome::Refused { reason } => warn!(op = op.as_str(), %reason, "refused"),
                 OpOutcome::Failed { error } => warn!(op = op.as_str(), %error, "failed"),
                 _ => info!(op = op.as_str(), "ran"),
             }
-            response.results.push(OpResult { op: *op, outcome });
+            response.results.push(OpResult { op: op.clone(), outcome });
         }
         response
     }
@@ -607,10 +674,11 @@ mod imp {
     const VCAM_GATE: &str = "RELAY_VDEVICE_ALLOW_LIVE_WRITE";
     const FIREWALL_GATE: &str = crate::firewall::LIVE_WRITE_GATE;
 
-    fn run_op(paths: &Paths, op: ElevatedOp) -> OpOutcome {
+    fn run_op(paths: &Paths, op: &ElevatedOp) -> OpOutcome {
         match op {
-            ElevatedOp::InstallApo => install_apo(paths),
-            ElevatedOp::UninstallApo => uninstall_apo(paths),
+            ElevatedOp::InstallApo { endpoint } => install_apo(paths, endpoint.as_deref()),
+            ElevatedOp::UninstallApo { endpoint: Some(ep) } => uninstall_apo(paths, ep),
+            ElevatedOp::UninstallApo { endpoint: None } => uninstall_all_apo(paths),
             ElevatedOp::InstallCamera => install_camera(paths),
             ElevatedOp::UninstallCamera => uninstall_camera(paths),
             ElevatedOp::AllowFirewall => allow_firewall(paths),
@@ -668,52 +736,91 @@ mod imp {
         }
     }
 
-    fn install_apo(paths: &Paths) -> OpOutcome {
-        let status = crate::audio_apo::apo_status();
-        if status.installed {
-            return OpOutcome::Skipped { reason: "the APO is already registered".into() };
-        }
-        let Some(endpoint) = status.endpoint else {
-            return OpOutcome::Failed { error: "no default render endpoint".into() };
+    fn install_apo(paths: &Paths, endpoint: Option<&str>) -> OpOutcome {
+        // Resolve the target (named, else the default output), then vet it
+        // against a read-only enumeration of active endpoints before anything
+        // else happens: a GUID, an output, and one Windows is rendering to.
+        let endpoint = match endpoint {
+            Some(e) => e.to_owned(),
+            None => match relay_audio::sessions::default_render_endpoint_guid() {
+                Ok(g) => g,
+                Err(_) => return OpOutcome::Failed { error: "no default render endpoint".into() },
+            },
         };
-        if let Err(reason) = vet_endpoint_guid(&endpoint) {
+        let devices = crate::hardware::probe_win::list_audio_devices();
+        if let Err(reason) = vet_apo_target(&endpoint, &devices) {
             return OpOutcome::Refused { reason };
+        }
+        if crate::audio_apo::fx_has_relay(&endpoint) {
+            return OpOutcome::Skipped {
+                reason: format!("the APO is already registered on {endpoint}"),
+            };
         }
         // `install_live` re-derives the plan and the DLL path from this
         // process' own directory, writes the backup first, and only then
         // calls the gated live registry.
-        match armed(APO_GATE, || crate::audio_apo::install_live(&paths.apo_backup_dir())) {
+        match armed(APO_GATE, || {
+            crate::audio_apo::install_live(&paths.apo_backup_dir(), Some(&endpoint))
+        }) {
             Ok(ep) => OpOutcome::Done { detail: format!("registered on {ep}") },
             Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
         }
     }
 
-    fn uninstall_apo(paths: &Paths) -> OpOutcome {
-        let dir = paths.apo_backup_dir();
-        let Ok(endpoint) = relay_audio::sessions::default_render_endpoint_guid() else {
-            return OpOutcome::Failed { error: "no default render endpoint".into() };
-        };
-        let backup_file = dir.join(format!("{endpoint}.json"));
-        if !backup_file.exists() {
-            return OpOutcome::Skipped { reason: format!("no install backup for {endpoint}") };
-        }
-        // Vet what the backup will drive before handing it to the registry.
+    /// Vet what one backup file will drive before handing it to the registry.
+    fn vet_backup(dir: &Path, endpoint: &str) -> Result<(), OpOutcome> {
+        let backup_file = crate::audio_apo::backup_file(dir, endpoint);
         match std::fs::read(&backup_file).map_err(|e| e.to_string()).and_then(|b| {
             serde_json::from_slice::<relay_apo::fxstore::Backup>(&b).map_err(|e| e.to_string())
         }) {
             Ok(backup) => {
-                if let Err(reason) = vet_endpoint_guid(&backup.endpoint_guid)
-                    .and_then(|()| vet_com_keys(&backup.com_keys, relay_apo::ids::APO_CLSID))
-                {
-                    return OpOutcome::Refused { reason };
+                if !backup.endpoint_guid.eq_ignore_ascii_case(endpoint) {
+                    return Err(OpOutcome::Refused {
+                        reason: format!("the backup for {endpoint} names another endpoint"),
+                    });
                 }
+                vet_endpoint_guid(&backup.endpoint_guid)
+                    .and_then(|()| vet_com_keys(&backup.com_keys, relay_apo::ids::APO_CLSID))
+                    .map_err(|reason| OpOutcome::Refused { reason })
             }
-            Err(error) => {
-                return OpOutcome::Failed { error: format!("reading the backup: {error}") }
+            Err(error) => Err(OpOutcome::Failed { error: format!("reading the backup: {error}") }),
+        }
+    }
+
+    fn uninstall_apo(paths: &Paths, endpoint: &str) -> OpOutcome {
+        let dir = paths.apo_backup_dir();
+        if let Err(reason) = vet_endpoint_guid(endpoint) {
+            return OpOutcome::Refused { reason };
+        }
+        // No "active" check here: an unplugged output must still be
+        // restorable. The backup is the authority, and it is vetted.
+        if !crate::audio_apo::backup_file(&dir, endpoint).exists() {
+            return OpOutcome::Skipped { reason: format!("no install backup for {endpoint}") };
+        }
+        if let Err(outcome) = vet_backup(&dir, endpoint) {
+            return outcome;
+        }
+        match armed(APO_GATE, || crate::audio_apo::uninstall_live(&dir, Some(endpoint))) {
+            Ok(ep) => OpOutcome::Done { detail: format!("{ep} restored to its pre-install state") },
+            Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
+        }
+    }
+
+    fn uninstall_all_apo(paths: &Paths) -> OpOutcome {
+        let dir = paths.apo_backup_dir();
+        let recorded = crate::audio_apo::recorded_endpoints(&dir);
+        if recorded.is_empty() {
+            return OpOutcome::Skipped { reason: "no install backup for any output".into() };
+        }
+        for ep in &recorded {
+            if let Err(outcome) = vet_backup(&dir, ep) {
+                return outcome;
             }
         }
-        match armed(APO_GATE, || crate::audio_apo::uninstall_live(&dir)) {
-            Ok(ep) => OpOutcome::Done { detail: format!("{ep} restored to its pre-install state") },
+        match armed(APO_GATE, || crate::audio_apo::uninstall_all_live(&dir)) {
+            Ok(eps) => OpOutcome::Done {
+                detail: format!("{} restored to the pre-install state", eps.join(", ")),
+            },
             Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
         }
     }
@@ -760,8 +867,8 @@ mod tests {
     #[test]
     fn op_names_round_trip() {
         for op in [
-            ElevatedOp::InstallApo,
-            ElevatedOp::UninstallApo,
+            ElevatedOp::InstallApo { endpoint: None },
+            ElevatedOp::UninstallApo { endpoint: None },
             ElevatedOp::InstallCamera,
             ElevatedOp::UninstallCamera,
             ElevatedOp::AllowFirewall,
@@ -812,6 +919,80 @@ mod tests {
         }
     }
 
+    const OUT: &str = "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}";
+    const MIC: &str = "{0a1b2c3d-a4e3-45ab-97fc-3977dad232d1}";
+
+    fn devices() -> crate::share::AudioDevices {
+        use crate::share::AudioDevice;
+        crate::share::AudioDevices {
+            render: vec![AudioDevice {
+                id: format!("{{0.0.0.00000000}}.{OUT}"),
+                name: "Headphones".into(),
+                is_default: true,
+            }],
+            capture: vec![AudioDevice {
+                id: format!("{{0.0.1.00000000}}.{MIC}"),
+                name: "Mic".into(),
+                is_default: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn apo_target_must_be_an_active_render_endpoint() {
+        let d = devices();
+        assert!(vet_apo_target(OUT, &d).is_ok());
+        assert!(vet_apo_target(&OUT.to_uppercase(), &d).is_ok());
+        // Bad GUID: refused before the enumeration is even consulted.
+        assert!(vet_apo_target(r"{f8ae226b}\..\..\SYSTEM", &d)
+            .unwrap_err()
+            .contains("not an endpoint GUID"));
+        // A recording endpoint is not an output.
+        assert!(vet_apo_target(MIC, &d).unwrap_err().contains("recording device"));
+        // Well-formed but not in the active list: unplugged, disabled or made up.
+        let inactive = "{99999999-a4e3-45ab-97fc-3977dad232d1}";
+        assert!(vet_apo_target(inactive, &d).unwrap_err().contains("not an active output"));
+        assert!(vet_apo_target(OUT, &crate::share::AudioDevices::default()).is_err());
+    }
+
+    #[test]
+    fn apo_ops_carry_only_an_endpoint_guid_on_the_wire() {
+        let op = ElevatedOp::InstallApo { endpoint: Some(OUT.into()) };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(v, serde_json::json!({ "install_apo": { "endpoint": OUT } }));
+        assert_eq!(serde_json::from_value::<ElevatedOp>(v).unwrap(), op);
+        // Endpoint omitted = default output (install) / every backup (uninstall).
+        let u: ElevatedOp = serde_json::from_str(r#"{"uninstall_apo":{}}"#).unwrap();
+        assert_eq!(u, ElevatedOp::UninstallApo { endpoint: None });
+        // Unit ops keep their plain spelling.
+        assert_eq!(serde_json::to_value(ElevatedOp::InstallCamera).unwrap(), "install_camera");
+        // No smuggled registry path or DLL: unknown fields are just ignored
+        // data — the helper never reads them — and the op is still only a GUID.
+        let smuggled: ElevatedOp = serde_json::from_str(
+            r#"{"install_apo":{"endpoint":null,"dll":"C:\\evil.dll","key":"SYSTEM"}}"#,
+        )
+        .unwrap();
+        assert_eq!(smuggled, ElevatedOp::InstallApo { endpoint: None });
+        assert_eq!(ElevatedOp::parse("install-apo").unwrap().with_endpoint(Some(OUT.into())), op);
+        assert_eq!(
+            ElevatedOp::InstallCamera.with_endpoint(Some(OUT.into())),
+            ElevatedOp::InstallCamera
+        );
+    }
+
+    #[test]
+    fn a_request_naming_a_non_guid_endpoint_is_refused() {
+        let bad =
+            req(vec![ElevatedOp::UninstallApo { endpoint: Some(r"..\..\SYSTEM".into()) }], 1_000);
+        assert!(bad.vet(1_000).unwrap_err().contains("not an endpoint GUID"));
+        let good = req(vec![ElevatedOp::InstallApo { endpoint: Some(OUT.into()) }], 1_000);
+        assert!(good.vet(1_000).is_ok());
+        // A v1 request (pre-S42 shape) is refused on version alone.
+        let mut v1 = good;
+        v1.version = 1;
+        assert!(v1.vet(1_000).is_err());
+    }
+
     fn req(ops: Vec<ElevatedOp>, created_at: u64) -> Request {
         Request {
             version: REQUEST_VERSION,
@@ -824,25 +1005,25 @@ mod tests {
 
     #[test]
     fn a_fresh_well_formed_request_passes() {
-        assert!(req(vec![ElevatedOp::InstallApo], 1_000).vet(1_010).is_ok());
+        assert!(req(vec![ElevatedOp::InstallApo { endpoint: None }], 1_000).vet(1_010).is_ok());
     }
 
     #[test]
     fn stale_future_empty_and_wrong_version_requests_are_refused() {
         // Stale: a request file left behind by a crash is dead on arrival.
-        assert!(req(vec![ElevatedOp::InstallApo], 1_000)
+        assert!(req(vec![ElevatedOp::InstallApo { endpoint: None }], 1_000)
             .vet(1_000 + MAX_REQUEST_AGE_SECS + 1)
             .is_err());
         // Dated in the future beyond clock slop.
-        assert!(req(vec![ElevatedOp::InstallApo], 5_000).vet(1_000).is_err());
+        assert!(req(vec![ElevatedOp::InstallApo { endpoint: None }], 5_000).vet(1_000).is_err());
         // Asks for nothing.
         assert!(req(vec![], 1_000).vet(1_000).is_err());
         // Another build's format.
-        let mut r = req(vec![ElevatedOp::InstallApo], 1_000);
+        let mut r = req(vec![ElevatedOp::InstallApo { endpoint: None }], 1_000);
         r.version = REQUEST_VERSION + 1;
         assert!(r.vet(1_000).is_err());
         // Path characters in the id, which is also a file name.
-        let mut r = req(vec![ElevatedOp::InstallApo], 1_000);
+        let mut r = req(vec![ElevatedOp::InstallApo { endpoint: None }], 1_000);
         r.nonce = r"..\..\evil".into();
         assert!(r.vet(1_000).is_err());
     }
@@ -855,7 +1036,7 @@ mod tests {
             elevated: true,
             results: vec![
                 OpResult {
-                    op: ElevatedOp::InstallApo,
+                    op: ElevatedOp::InstallApo { endpoint: None },
                     outcome: OpOutcome::Done { detail: "registered on {guid}".into() },
                 },
                 OpResult {
@@ -870,7 +1051,7 @@ mod tests {
 
         let refused = Response {
             results: vec![OpResult {
-                op: ElevatedOp::InstallApo,
+                op: ElevatedOp::InstallApo { endpoint: None },
                 outcome: OpOutcome::Refused { reason: "stale".into() },
             }],
             ..r.clone()

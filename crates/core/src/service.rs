@@ -72,7 +72,7 @@ impl Backends {
                 #[cfg(windows)]
                 {
                     Self {
-                        audio: Arc::new(crate::audio_apo::ApoAudioControl),
+                        audio: Arc::new(crate::audio_apo::ApoAudioControl::default()),
                         hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
                         display: Arc::new(crate::display_backend::WinDisplay::new()),
                     }
@@ -2295,14 +2295,15 @@ impl IpcHandler {
                 }
             }
             Method::ApoStatus => {
-                drop(g);
-                Reply::Apo { status: crate::audio_apo::apo_status() }
-            }
-            #[cfg(windows)]
-            Method::InstallApo => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
-                match crate::audio_apo::install_live(&dir) {
+                Reply::Apo { status: crate::audio_apo::apo_status(&dir) }
+            }
+            #[cfg(windows)]
+            Method::InstallApo { endpoint } => {
+                let dir = g.apo_backup_dir.clone();
+                drop(g);
+                match crate::audio_apo::install_live(&dir, endpoint.as_deref()) {
                     Ok(endpoint) => {
                         let _ = self.events.send(Event::Notice {
                             text: format!("Relay APO registered on {endpoint}"),
@@ -2313,10 +2314,10 @@ impl IpcHandler {
                 }
             }
             #[cfg(windows)]
-            Method::UninstallApo => {
+            Method::UninstallApo { endpoint } => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
-                match crate::audio_apo::uninstall_live(&dir) {
+                match crate::audio_apo::uninstall_live(&dir, endpoint.as_deref()) {
                     Ok(endpoint) => {
                         let _ = self.events.send(Event::Notice {
                             text: format!("Endpoint {endpoint} restored to its original state"),
@@ -2327,7 +2328,7 @@ impl IpcHandler {
                 }
             }
             #[cfg(not(windows))]
-            Method::InstallApo | Method::UninstallApo => {
+            Method::InstallApo { .. } | Method::UninstallApo { .. } => {
                 Reply::Error { message: "Windows only".into() }
             }
             Method::VdeviceStatus => {
@@ -2384,7 +2385,7 @@ impl IpcHandler {
             Method::ElevationPlan { op } => {
                 let paths = g.paths.clone();
                 drop(g);
-                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, op) }
+                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, &op) }
             }
             // Handled ahead of this match (it blocks on a UAC prompt), and
             // only reachable if that dispatch is ever removed.

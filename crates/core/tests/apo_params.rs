@@ -32,7 +32,7 @@ fn apply_writes_params_and_restore_bypasses() {
     assert!(apo_side.created, "test must own a fresh section");
     assert!(apo_side.block().bypass(), "resting state is bypass");
 
-    let control = ApoAudioControl;
+    let control = ApoAudioControl::default();
 
     // capture() before anything: honest snapshot of the resting state.
     let original = control.capture().expect("capture");

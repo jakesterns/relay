@@ -209,15 +209,23 @@ pub enum Method {
     /// policy reads, no elevation and no prompt. Cheap enough to call when a
     /// screen opens, but not on a timer.
     FirewallStatus,
-    /// Is the endpoint APO registered on the default render endpoint?
-    /// Read-only registry probe.
+    /// Is the endpoint APO registered, per render endpoint (S42)? Read-only
+    /// registry probe plus the backups on disk.
     ApoStatus,
-    /// Register the APO (backup-then-apply). Refused unless the live-write
-    /// gate is set — VM / installer only.
-    InstallApo,
-    /// Restore the endpoint's FX property store from the install backup and
-    /// unregister. Same gate.
-    UninstallApo,
+    /// Register the APO on one render endpoint (default output when
+    /// `endpoint` is absent), backup-then-apply. Refused unless the
+    /// live-write gate is set — VM / installer only; the UI goes through
+    /// `RunElevated`.
+    InstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
+    /// Restore one endpoint's FX property store from its install backup.
+    /// Same gate.
+    UninstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
     /// Virtual-device state: Windows support, registration, consent, OBS /
     /// VB-Cable detection. Read-only.
     VdeviceStatus,
@@ -857,6 +865,60 @@ mod tests {
     }
 
     /// Locks the wire shape that `ui/src/lib/ipc.ts` mirrors.
+    #[test]
+    fn apo_methods_wire_shape() {
+        let ep = "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}";
+        let r: Request = serde_json::from_str(&format!(
+            r#"{{"id":1,"method":"install_apo","params":{{"endpoint":"{ep}"}}}}"#
+        ))
+        .unwrap();
+        assert!(matches!(r.method, Method::InstallApo { endpoint: Some(ref e) } if e == ep));
+        let r: Request =
+            serde_json::from_str(r#"{"id":2,"method":"uninstall_apo","params":{}}"#).unwrap();
+        assert!(matches!(r.method, Method::UninstallApo { endpoint: None }));
+        let r: Request = serde_json::from_str(&format!(
+            r#"{{"id":3,"method":"run_elevated","params":{{"op":{{"install_apo":{{"endpoint":"{ep}"}}}}}}}}"#
+        ))
+        .unwrap();
+        match r.method {
+            Method::RunElevated { op } => assert_eq!(op.endpoint(), Some(ep)),
+            other => panic!("{other:?}"),
+        }
+        let r: Request = serde_json::from_str(
+            r#"{"id":4,"method":"elevation_plan","params":{"op":"install_camera"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r.method,
+            Method::ElevationPlan { op: crate::elevate::ElevatedOp::InstallCamera }
+        ));
+        let v = serde_json::to_value(Method::InstallApo { endpoint: None }).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "method": "install_apo", "params": { "endpoint": null } })
+        );
+        let reply = serde_json::to_value(Reply::Apo {
+            status: crate::audio_apo::ApoStatus {
+                installed: false,
+                endpoint: None,
+                running: false,
+                endpoints: vec![crate::audio_apo::EndpointApo {
+                    endpoint: ep.into(),
+                    name: "Headphones".into(),
+                    is_default: true,
+                    installed: true,
+                    backed_up: true,
+                    running: false,
+                }],
+            },
+        })
+        .unwrap();
+        let e = &reply["status"]["endpoints"][0];
+        for k in ["endpoint", "name", "is_default", "installed", "backed_up", "running"] {
+            assert!(e.get(k).is_some(), "missing {k}");
+        }
+    }
+
     #[test]
     fn hardware_methods_wire_shape() {
         use crate::hardware::{Headset, HeadsetKind};
