@@ -10,16 +10,21 @@ import {
 const SPEAKERS: ListeningDevice = { kind: "speakers" };
 const SPEAKERS_LABEL = "Speakers / home theater (no correction)";
 
-/** The sentence shown for one other processor on an output. */
+/** The one line shown for one other processor on an output. */
 export function processingLine(p: OtherProcessor): string {
-  if (p.kind === "apo") {
-    return `${p.name} is also processing this output. Relay's correction adds to it; ${lowerFirst(p.advice)}.`;
-  }
-  return `${p.name} is running and may also be processing this output. Relay's correction adds to it; ${p.advice} for accurate correction.`;
+  if (p.kind === "apo") return `${p.name} is processing this output.`;
+  if (p.kind === "spatial") return `${p.name} is on for this output.`;
+  return `${p.name} is running and may be processing this output.`;
 }
 
-function lowerFirst(s: string): string {
-  return s ? s[0].toLowerCase() + s.slice(1) : s;
+/** The advice, said once for all of an output's processors. `correcting`:
+ *  a headphone correction is in use on this output right now; otherwise
+ *  Relay's correction only would add to it once one is. */
+export function processingAdvice(ps: OtherProcessor[], correcting: boolean): string {
+  const it = ps.length > 1 ? "them" : "it";
+  const verb = correcting ? "adds to" : "would add to";
+  const advice = [...new Set(ps.map((p) => p.advice))].join("; ");
+  return `Relay's correction ${verb} ${it}. For accurate correction, ${advice}.`;
 }
 
 /**
@@ -144,8 +149,11 @@ function Output({ ep, devices, active, processors, library, nameOf, onSet, onUse
         <p className="note">Not in your library. Add it under Headsets &amp; IEMs first.</p>
       )}
       {processors.map((p) => (
-        <div className="offline" key={p.name + (p.clsid ?? "")}><i />{processingLine(p)}</div>
+        <div className="offline" key={p.kind + p.name}><i />{processingLine(p)}</div>
       ))}
+      {processors.length > 0 && (
+        <p className="note">{processingAdvice(processors, active?.kind === "headset")}</p>
+      )}
     </div>
   );
 }

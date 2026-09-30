@@ -77,15 +77,15 @@ export type ListeningDevice = { kind: "headset"; id: HeadsetId } | { kind: "spea
 /** What one output feeds. Mirrors `hardware::listening::EndpointListening`. */
 export interface EndpointListening { endpoint: string; devices: ListeningDevice[]; active?: ListeningDevice | null }
 /** Other processing seen on an output. Mirrors `hardware::other_processing`. */
-export interface OtherProcessor { name: string; kind: "apo" | "software"; advice: string; clsid?: string }
+export interface OtherProcessor { name: string; kind: "apo" | "spatial" | "software"; advice: string; clsids?: string[] }
 export interface EndpointProcessing { endpoint: string; processors: OtherProcessor[] }
 
 /** The key listening devices are stored under; mirrors
- *  `hardware::listening::listening_key`. Endpoints of one physical device
- *  share a container key, so when two outputs in the list share it the
- *  friendly name tells them apart. */
-export function listeningKey(all: EndpointInfo[], ep: EndpointInfo): string {
-  return all.filter((e) => e.key === ep.key).length > 1 ? `${ep.key}#${ep.name}` : ep.key;
+ *  `hardware::listening::listening_key`. Since S41b the core makes every
+ *  endpoint key unique (outputs of one device get `#<endpoint guid>`), so
+ *  this is the endpoint's own key. */
+export function listeningKey(_all: EndpointInfo[], ep: EndpointInfo): string {
+  return ep.key;
 }
 
 export function sameListening(a: ListeningDevice | null | undefined, b: ListeningDevice | null | undefined): boolean {
