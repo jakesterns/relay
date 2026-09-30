@@ -53,6 +53,11 @@ pub struct UiPrefs {
     /// The mixer's device picks (S40). Absent or empty = System default.
     #[serde(default)]
     pub audio_devices: AudioDevicePrefs,
+    /// Ctrl+Alt+L cycles the default output's listening devices (S41). Off
+    /// by default: a global hotkey is only taken when asked for. Takes effect
+    /// the next time the core starts.
+    #[serde(default)]
+    pub cycle_listening_hotkey: bool,
 }
 
 /// Per-track device choices from the mixer (S40). `None` = System default,
@@ -117,6 +122,7 @@ impl Default for UiPrefs {
             resilience: true,
             close_notice: true,
             audio_devices: AudioDevicePrefs::default(),
+            cycle_listening_hotkey: false,
         }
     }
 }

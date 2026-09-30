@@ -66,13 +66,56 @@ export interface CatalogEntry { name: string; source: string; rig: string; path:
 /** A base64 JPEG thumbnail of the live capture (Event::SharePreview). */
 export interface SharePreview { width: number; height: number; jpeg: string }
 export interface AudioInterface { id: string; name: string }
-export interface EndpointInfo { key: string; name: string; default: boolean }
+export interface EndpointInfo {
+  key: string; name: string; default: boolean;
+  /** MMDevices endpoint GUID; where its FX store lives (read-only, S41). */
+  fx_guid?: string;
+}
+/** Something a person listens on through an output (S41). Mirrors
+ *  `hardware::listening::ListeningDevice`. */
+export type ListeningDevice = { kind: "headset"; id: HeadsetId } | { kind: "speakers" };
+/** What one output feeds. Mirrors `hardware::listening::EndpointListening`. */
+export interface EndpointListening { endpoint: string; devices: ListeningDevice[]; active?: ListeningDevice | null }
+/** Other processing seen on an output. Mirrors `hardware::other_processing`. */
+export interface OtherProcessor { name: string; kind: "apo" | "software"; advice: string; clsid?: string }
+export interface EndpointProcessing { endpoint: string; processors: OtherProcessor[] }
+
+/** The key listening devices are stored under; mirrors
+ *  `hardware::listening::listening_key`. Endpoints of one physical device
+ *  share a container key, so when two outputs in the list share it the
+ *  friendly name tells them apart. */
+export function listeningKey(all: EndpointInfo[], ep: EndpointInfo): string {
+  return all.filter((e) => e.key === ep.key).length > 1 ? `${ep.key}#${ep.name}` : ep.key;
+}
+
+export function sameListening(a: ListeningDevice | null | undefined, b: ListeningDevice | null | undefined): boolean {
+  if (!a || !b) return false;
+  if (a.kind === "speakers" || b.kind === "speakers") return a.kind === b.kind;
+  return a.id === b.id;
+}
+
+/** The device correction uses on one output; mirrors `EndpointListening::active`:
+ *  one entry is active by itself, several need a pick that is still listed. */
+export function activeListening(l: EndpointListening | undefined): ListeningDevice | null {
+  if (!l || l.devices.length === 0) return null;
+  if (l.devices.length === 1) return l.devices[0];
+  return l.devices.find((d) => sameListening(d, l.active)) ?? null;
+}
 export interface MonitorProbe {
   id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
   primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[]; color?: ColorInfo;
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
-export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }
+export interface HardwareView {
+  endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null;
+  /** What each output feeds (S41), keyed by `listeningKey`. */
+  listening?: EndpointListening[];
+  /** The default output's listening key. */
+  default_listening?: string | null;
+  active_listening?: ListeningDevice | null;
+  /** Third-party APOs and vendor audio software seen per output (read-only). */
+  other_processing?: EndpointProcessing[];
+}
 /** Vendor-private DDC/CI controls the core has a *verified* opcode for on one
  *  monitor. Mirrors `hardware::MonitorVendorControls`. The core decides: the
  *  quirks table and the evidence behind each opcode live in Rust, so the UI
@@ -332,6 +375,9 @@ export interface UiPrefs {
   close_notice: boolean;
   /** The mixer's device picks (S40). Absent in a pre-S40 core. */
   audio_devices?: AudioDevicePrefs;
+  /** Ctrl+Alt+L cycles the default output's listening devices (S41). Off by
+   *  default; takes effect the next time Relay starts. */
+  cycle_listening_hotkey?: boolean;
 }
 
 export interface ShareStatus {
@@ -435,6 +481,10 @@ export const mockHardware: HardwareReply = {
       { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", native: [3840, 2160], refresh_hz: 144, primary: true, hmonitor: 65537, gdi_name: "\\\\.\\DISPLAY1" },
     ],
     headset: "hd560s",
+    listening: [],
+    default_listening: "ep:c:31f634a2-usb-dac",
+    active_listening: null,
+    other_processing: [],
   },
 };
 
@@ -756,6 +806,27 @@ export const api = {
       return;
     }
     return invoke<void>("delete_hardware", { id });
+  },
+  /** Replace what an output feeds (S41). */
+  async setListeningDevices(endpoint: string, devices: ListeningDevice[]): Promise<void> {
+    if (!isTauri()) {
+      const c = mockHardware.connected;
+      const rest = (c.listening ?? []).filter((l) => l.endpoint !== endpoint);
+      const prev = (c.listening ?? []).find((l) => l.endpoint === endpoint);
+      const active = prev?.active && devices.some((d) => sameListening(d, prev.active)) ? prev.active : null;
+      c.listening = devices.length ? [...rest, { endpoint, devices: structuredClone(devices), active }] : rest;
+      return;
+    }
+    return invoke<void>("set_listening_devices", { endpoint, devices });
+  },
+  /** Mark which listening device on an output is in use: the quick switch. */
+  async setActiveListening(endpoint: string, device: ListeningDevice): Promise<void> {
+    if (!isTauri()) {
+      const l = (mockHardware.connected.listening ?? []).find((x) => x.endpoint === endpoint);
+      if (l) l.active = structuredClone(device);
+      return;
+    }
+    return invoke<void>("set_active_listening", { endpoint, device });
   },
   async probeHardware(): Promise<ProbeReport> {
     if (!isTauri()) return structuredClone(mockHardware.connected);

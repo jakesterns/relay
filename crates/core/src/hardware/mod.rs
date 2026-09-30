@@ -20,12 +20,15 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::types::{HeadsetId, MonitorId};
+pub use listening::{EndpointListening, ListeningDevice};
 
 pub mod autoeq;
 pub mod catalog;
 pub mod ddc;
 pub mod edid;
 pub mod edid_color;
+pub mod listening;
+pub mod other_processing;
 #[cfg(windows)]
 pub mod probe_win;
 #[cfg(windows)]
@@ -56,6 +59,10 @@ pub struct EndpointInfo {
     pub name: String,
     /// This is the current default render endpoint.
     pub default: bool,
+    /// The MMDevices endpoint GUID (`{...}`, the last brace group of the
+    /// endpoint id): where its FX property store lives. Read-only use (S41).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub fx_guid: String,
 }
 
 /// One attached monitor as seen by the probe.
@@ -114,12 +121,40 @@ pub struct HardwareView {
     pub monitors: Vec<MonitorProbe>,
     /// Library headset bound to the default endpoint, if any.
     pub headset: Option<HeadsetId>,
+    /// What each output feeds, as the user described it (S41). Keyed by
+    /// [`listening::listening_key`].
+    #[serde(default)]
+    pub listening: Vec<EndpointListening>,
+    /// The default output's listening key, so the UI and the tray know which
+    /// list is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_listening: Option<String>,
+    /// The default output's active listening device, resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_listening: Option<ListeningDevice>,
+    /// Other processing seen on each output: third-party APOs in its FX
+    /// store and known vendor audio software running (read-only scan).
+    #[serde(default)]
+    pub other_processing: Vec<other_processing::EndpointProcessing>,
 }
 
 impl HardwareView {
     pub fn from_report(report: ProbeReport, library: &HardwareStore) -> Self {
         let headset = library.connected(&report).headset;
-        Self { endpoints: report.endpoints, monitors: report.monitors, headset }
+        let default_listening = listening::default_listening_key(&report);
+        let active_listening = default_listening
+            .as_deref()
+            .and_then(|k| library.listening_for(k))
+            .and_then(|l| l.active().cloned());
+        Self {
+            endpoints: report.endpoints,
+            monitors: report.monitors,
+            headset,
+            listening: library.listening.clone(),
+            default_listening,
+            active_listening,
+            other_processing: Vec::new(),
+        }
     }
 }
 
@@ -139,6 +174,16 @@ pub struct NoopHardwareProbe;
 impl HardwareProbe for NoopHardwareProbe {
     fn probe(&self, _with_ddc: bool) -> ProbeReport {
         ProbeReport::default()
+    }
+}
+
+/// The MMDevices GUID of an endpoint id (`{0.0.0.00000000}.{guid}` gives `{guid}`),
+/// the name of its key under the MMDevices render root. Empty when the id
+/// has no brace group.
+pub fn fx_guid_of(endpoint_id: &str) -> String {
+    match endpoint_id.rfind('{') {
+        Some(i) if endpoint_id.ends_with('}') => endpoint_id[i..].to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -284,6 +329,8 @@ struct HardwareFile {
     monitors: Vec<Monitor>,
     #[serde(default)]
     interfaces: Vec<AudioInterface>,
+    #[serde(default)]
+    listening: Vec<EndpointListening>,
 }
 
 const FILE_VERSION: u32 = 1;
@@ -295,6 +342,8 @@ pub struct HardwareStore {
     pub headsets: Vec<Headset>,
     pub monitors: Vec<Monitor>,
     pub interfaces: Vec<AudioInterface>,
+    /// Per output: what the user listens on through it (S41).
+    pub listening: Vec<EndpointListening>,
 }
 
 impl HardwareStore {
@@ -312,6 +361,7 @@ impl HardwareStore {
             headsets: file.headsets,
             monitors: file.monitors,
             interfaces: file.interfaces,
+            listening: file.listening,
         })
     }
 
@@ -328,6 +378,7 @@ impl HardwareStore {
             headsets: self.headsets.clone(),
             monitors: self.monitors.clone(),
             interfaces: self.interfaces.clone(),
+            listening: self.listening.clone(),
         };
         crate::profiles::write_atomic(&self.path, &serde_json::to_vec_pretty(&file)?)
     }
@@ -356,6 +407,16 @@ impl HardwareStore {
         self.headsets.retain(|h| h.id.0 != id);
         self.monitors.retain(|m| m.id.0 != id);
         self.interfaces.retain(|i| i.id != id);
+        // A removed headset cannot stay listed as connected to anything.
+        for l in &mut self.listening {
+            let keep: Vec<ListeningDevice> = l
+                .devices
+                .iter()
+                .filter(|d| d.headset().is_none_or(|h| h.0 != id))
+                .cloned()
+                .collect();
+            l.set_devices(keep);
+        }
         before != self.headsets.len() + self.monitors.len() + self.interfaces.len()
     }
 
@@ -372,12 +433,39 @@ impl HardwareStore {
         self.headsets.iter().find(|h| h.endpoints.iter().any(|e| e == key))
     }
 
+    /// The listening list stored for an output, if the user made one.
+    pub fn listening_for(&self, key: &str) -> Option<&EndpointListening> {
+        self.listening.iter().find(|l| l.endpoint == key)
+    }
+
+    /// The listening list for an output, created empty on first use.
+    pub fn listening_entry(&mut self, key: &str) -> &mut EndpointListening {
+        if let Some(i) = self.listening.iter().position(|l| l.endpoint == key) {
+            return &mut self.listening[i];
+        }
+        self.listening.push(EndpointListening {
+            endpoint: key.to_owned(),
+            devices: Vec::new(),
+            active: None,
+        });
+        self.listening.last_mut().expect("just pushed")
+    }
+
     /// Reduce a probe report to what profile selection consumes.
+    ///
+    /// The headset is the default output's ACTIVE listening device (S41)
+    /// when the user has listed what that output feeds: a headset entry
+    /// resolves to it, `Speakers` or an unresolved pick to none. Outputs
+    /// with no list fall back to the M1 binding (a headset bound to the
+    /// endpoint key), so existing libraries keep working.
     pub fn connected(&self, report: &ProbeReport) -> ConnectedHardware {
-        let headset = report
-            .default_endpoint()
-            .and_then(|ep| self.headset_for_endpoint(&ep.key))
-            .map(|h| h.id.clone());
+        let headset = report.default_endpoint().and_then(|ep| {
+            let key = listening::listening_key(&report.endpoints, ep);
+            match self.listening_for(&key).filter(|l| !l.devices.is_empty()) {
+                Some(l) => l.active().and_then(|d| d.headset()).cloned(),
+                None => self.headset_for_endpoint(&ep.key).map(|h| h.id.clone()),
+            }
+        });
         ConnectedHardware {
             headset,
             monitors: report.monitors.iter().map(|m| m.id.clone()).collect(),
@@ -449,8 +537,18 @@ mod tests {
 
         let report = ProbeReport {
             endpoints: vec![
-                EndpointInfo { key: "ep:c:cccc".into(), name: "HDMI".into(), default: false },
-                EndpointInfo { key: "ep:c:bbbb".into(), name: "Dongle".into(), default: true },
+                EndpointInfo {
+                    key: "ep:c:cccc".into(),
+                    name: "HDMI".into(),
+                    default: false,
+                    fx_guid: String::new(),
+                },
+                EndpointInfo {
+                    key: "ep:c:bbbb".into(),
+                    name: "Dongle".into(),
+                    default: true,
+                    fx_guid: String::new(),
+                },
             ],
             monitors: vec![],
         };
@@ -463,6 +561,7 @@ mod tests {
                 key: "ep:c:cccc".into(),
                 name: "HDMI".into(),
                 default: true,
+                fx_guid: String::new(),
             }],
             monitors: vec![],
         };
@@ -493,6 +592,32 @@ mod tests {
         assert_eq!(again.monitors[0].ddcci, Some(vec![0x10, 0x12, 0x60]));
         assert!(again.remove("hd560s"));
         assert!(!again.remove("hd560s"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn listening_lists_persist_and_lose_removed_headsets() {
+        let dir = std::env::temp_dir().join(format!("relay-hwtest-{}", uuid::Uuid::new_v4()));
+        let path = dir.join("hardware.json");
+        let mut store = HardwareStore::load(&path).unwrap();
+        store.upsert_headset(headset("hd560s", &[]));
+        let hd = ListeningDevice::Headset { id: HeadsetId("hd560s".into()) };
+        let l = store.listening_entry("ep:c:rode");
+        l.set_devices(vec![hd.clone(), ListeningDevice::Speakers]);
+        l.set_active(&hd);
+        store.save().unwrap();
+
+        let mut again = HardwareStore::load(&path).unwrap();
+        let l = again.listening_for("ep:c:rode").unwrap();
+        assert_eq!(l.devices.len(), 2);
+        assert_eq!(l.active(), Some(&hd));
+
+        assert!(again.remove("hd560s"));
+        let l = again.listening_for("ep:c:rode").unwrap();
+        assert_eq!(l.devices, vec![ListeningDevice::Speakers]);
+        assert_eq!(l.active(), Some(&ListeningDevice::Speakers));
+        assert_eq!(fx_guid_of("{0.0.0.00000000}.{9d47ae05-2c1c}"), "{9d47ae05-2c1c}");
+        assert_eq!(fx_guid_of("nothing"), "");
         assert_eq!(again.headsets.len(), 0);
         let _ = std::fs::remove_dir_all(dir);
     }

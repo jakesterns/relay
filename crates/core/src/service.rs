@@ -222,8 +222,11 @@ impl Service {
         let library = HardwareStore::load(paths.hardware_file())?;
         let report = backends.hardware.probe(false);
         let connected = library.connected(&report);
+        let mut hardware = HardwareView::from_report(report.clone(), &library);
+        hardware.other_processing = crate::hardware::other_processing::scan(&report);
+        crate::tray::set_listening_menu(tray_listening(&hardware, &library));
         let state = CoreState {
-            hardware: HardwareView::from_report(report.clone(), &library),
+            hardware,
             build: crate::types::BuildInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 data_dir: paths.root().display().to_string(),
@@ -319,7 +322,10 @@ impl Service {
         tx: mpsc::UnboundedSender<CoreEvent>,
         mut rx: mpsc::UnboundedReceiver<CoreEvent>,
     ) -> Result<()> {
-        let winloop = WinLoop::spawn(tx.clone(), hotkeys::defaults())?;
+        let winloop = WinLoop::spawn(
+            tx.clone(),
+            hotkeys::with_prefs(self.inner.lock().prefs.get().cycle_listening_hotkey),
+        )?;
 
         // WASAPI endpoint notifications (default switch, plug/unplug). Display
         // changes arrive via the winloop's hidden window. Keep the handle
@@ -430,6 +436,17 @@ impl Service {
                 drop(g);
                 let _ = self.events.send(Event::StateChanged { state });
                 let _ = self.events.send(Event::Notice { text });
+                false
+            }
+            TrayCommand::Listen(i) => {
+                match pick_listening(&self.inner, &self.events, None, ListenPick::Index(i)) {
+                    Ok(label) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: format!("Listening on {label}. Correction follows it."),
+                        });
+                    }
+                    Err(e) => warn!(error = %e, "tray listening pick not applied"),
+                }
                 false
             }
             TrayCommand::Quit => {
@@ -676,8 +693,8 @@ impl Service {
             "hardware changed"
         );
         g.connected = g.library.connected(&report);
-        g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
         g.last_report = report;
+        rebuild_hardware_view(&mut g, true);
         drop(g);
         reselect(&self.inner, &self.events);
         crate::footprint::trim_working_set();
@@ -825,6 +842,14 @@ impl Service {
     fn on_hotkey(&self, action: HotkeyAction) {
         info!(?action, "hotkey");
         match action {
+            HotkeyAction::CycleListening => {
+                match pick_listening(&self.inner, &self.events, None, ListenPick::Next) {
+                    Ok(label) => {
+                        crate::winloop::balloon("Relay", &format!("Listening on {label}"));
+                    }
+                    Err(e) => warn!(error = %e, "cycle listening hotkey did nothing"),
+                }
+            }
             HotkeyAction::ToggleProfile => {
                 let mut g = self.inner.lock();
                 if g.applier.is_applied() {
@@ -996,8 +1021,8 @@ fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
     if !profile.audio.headset_correction {
         return None;
     }
-    let id = profile.headset.as_ref().or(g.connected.headset.as_ref())?;
-    g.library.headsets.iter().find(|h| &h.id == id)?.curve.clone()
+    crate::audio_bridge::correction_curve(&g.library, profile.headset.as_ref(), &g.connected)
+        .map(<[(f32, f32)]>::to_vec)
 }
 
 /// connected-hardware view. Mutates state only; the caller broadcasts.
@@ -1063,9 +1088,91 @@ fn reselect(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
 fn library_changed(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
     let mut g = inner.lock();
     g.connected = g.library.connected(&g.last_report);
-    g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
+    rebuild_hardware_view(&mut g, false);
     drop(g);
     reselect(inner, events);
+}
+
+/// Rebuild `state.hardware` from the last probe and the library. `rescan`
+/// re-reads the other-processing findings (FX stores and the process list,
+/// read-only); otherwise the previous findings carry over. Also refreshes the
+/// tray's listening-device list.
+fn rebuild_hardware_view(g: &mut Inner, rescan: bool) {
+    let prev = std::mem::take(&mut g.state.hardware.other_processing);
+    g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
+    g.state.hardware.other_processing =
+        if rescan { crate::hardware::other_processing::scan(&g.last_report) } else { prev };
+    crate::tray::set_listening_menu(tray_listening(&g.state.hardware, &g.library));
+}
+
+/// The default output's listening devices as tray menu lines.
+fn tray_listening(view: &HardwareView, library: &HardwareStore) -> Vec<crate::tray::ListenItem> {
+    let Some(l) = view.default_listening.as_deref().and_then(|k| library.listening_for(k)) else {
+        return Vec::new();
+    };
+    let active = l.active();
+    l.devices
+        .iter()
+        .map(|d| crate::tray::ListenItem {
+            label: listening_label(d, library),
+            active: Some(d) == active,
+        })
+        .collect()
+}
+
+/// What to call a listening device in the tray and notices.
+fn listening_label(d: &crate::hardware::ListeningDevice, library: &HardwareStore) -> String {
+    match d {
+        crate::hardware::ListeningDevice::Headset { id } => {
+            library.headset(id).map(|h| h.name.clone()).unwrap_or_else(|| id.0.clone())
+        }
+        crate::hardware::ListeningDevice::Speakers => "Speakers / home theater".to_owned(),
+    }
+}
+
+/// How a listening-device change is chosen: by the UI naming it, by the
+/// tray's n-th line, or by the cycle hotkey.
+enum ListenPick {
+    Device(crate::hardware::ListeningDevice),
+    Index(usize),
+    Next,
+}
+
+/// Make a listening device active on `endpoint` (default output when
+/// `None`), save, and reselect so the correction and profile follow at once.
+/// Returns the new device's label.
+fn pick_listening(
+    inner: &Arc<Mutex<Inner>>,
+    events: &broadcast::Sender<Event>,
+    endpoint: Option<String>,
+    pick: ListenPick,
+) -> Result<String, String> {
+    let mut g = inner.lock();
+    let key = endpoint
+        .or_else(|| g.state.hardware.default_listening.clone())
+        .ok_or_else(|| "no default output".to_string())?;
+    let Some(entry) = g.library.listening.iter_mut().find(|l| l.endpoint == key) else {
+        return Err("nothing is listed for that output yet".into());
+    };
+    let chosen = match pick {
+        ListenPick::Device(d) => {
+            if !entry.set_active(&d) {
+                return Err("that device is not listed for this output".into());
+            }
+            d
+        }
+        ListenPick::Index(i) => {
+            let d = entry.devices.get(i).cloned().ok_or_else(|| "no such entry".to_string())?;
+            entry.set_active(&d);
+            d
+        }
+        ListenPick::Next => entry.cycle().cloned().ok_or_else(|| "nothing to cycle".to_string())?,
+    };
+    let label = listening_label(&chosen, &g.library);
+    g.library.save().map_err(|e| e.to_string())?;
+    drop(g);
+    library_changed(inner, events);
+    Ok(label)
 }
 
 /// Turn a `peer_id` into what the engine needs, or say why a request cannot
@@ -1951,16 +2058,55 @@ impl IpcHandler {
                 drop(g);
                 edit_peers(|s| s.set_favourite(&id, favourite))
             }
-            Method::ListHardware => Reply::Hardware {
-                headsets: g.library.headsets.clone(),
-                monitors: g.library.monitors.clone(),
-                interfaces: g.library.interfaces.clone(),
-                vendor_controls: crate::hardware::vendor_controls(
-                    &g.library.monitors,
-                    &g.state.hardware.monitors,
-                ),
-                connected: Box::new(g.state.hardware.clone()),
-            },
+            Method::ListHardware => {
+                rebuild_hardware_view(&mut g, true);
+                Reply::Hardware {
+                    headsets: g.library.headsets.clone(),
+                    monitors: g.library.monitors.clone(),
+                    interfaces: g.library.interfaces.clone(),
+                    vendor_controls: crate::hardware::vendor_controls(
+                        &g.library.monitors,
+                        &g.state.hardware.monitors,
+                    ),
+                    connected: Box::new(g.state.hardware.clone()),
+                }
+            }
+            Method::SetListeningDevices { endpoint, devices } => {
+                if endpoint.trim().is_empty() {
+                    return Reply::Error { message: "which output?".into() };
+                }
+                if let Some(missing) = devices
+                    .iter()
+                    .filter_map(|d| d.headset())
+                    .find(|id| g.library.headset(id).is_none())
+                {
+                    return Reply::Error {
+                        message: format!("{} is not in the hardware library", missing.0),
+                    };
+                }
+                g.library.listening_entry(&endpoint).set_devices(devices);
+                g.library.listening.retain(|l| !l.devices.is_empty());
+                match g.library.save() {
+                    Ok(()) => {
+                        drop(g);
+                        library_changed(&self.inner, &self.events);
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::SetActiveListening { endpoint, device } => {
+                drop(g);
+                match pick_listening(
+                    &self.inner,
+                    &self.events,
+                    Some(endpoint),
+                    ListenPick::Device(device),
+                ) {
+                    Ok(_) => Reply::Ok,
+                    Err(message) => Reply::Error { message },
+                }
+            }
             Method::SaveHardware { item } => {
                 match item {
                     crate::ipc::HardwareItem::Headset(h) => {
@@ -2032,8 +2178,8 @@ impl IpcHandler {
                     }
                 }
                 g.connected = g.library.connected(&report);
-                g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
                 g.last_report = report.clone();
+                rebuild_hardware_view(&mut g, true);
                 drop(g);
                 reselect(&self.inner, &self.events);
                 Reply::Probe { report: Box::new(report) }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
+import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import {
@@ -176,6 +177,7 @@ export function Profiles() {
             </div>
           ))}
         </Card>
+        <ListeningCard />
         <Card title="Monitors" action="Add" onAction={() => setAdding("monitor")}>
           {hardware.monitors.length === 0 ? (
             <div className="empty">Library is empty</div>
