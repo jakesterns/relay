@@ -388,3 +388,9 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .fader { display: flex; align-items: center; gap: 10px; }
 .fader .sl { flex: 1; min-width: 0; }
 .fader .btn.on { border-color: var(--brass); color: var(--brass); }
+
+/* S41: per-output listening devices. Spacing only; colours come from the tokens. */
+.listen { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.listen:last-of-type { border-bottom: 0; }
+.listen .field { margin: 6px 0; }
+.catalog-lite { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }

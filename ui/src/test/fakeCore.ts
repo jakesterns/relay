@@ -8,7 +8,7 @@
  * assert that Save actually reached the core and that a re-read sees it.
  */
 import type {
-  ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
+  ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
   ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus,
@@ -242,6 +242,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         else core.hardware.monitors.push(structuredClone(item.value));
       }
     },
+    set_listening_devices: (a) => {
+      const c = core.hardware.connected;
+      const devices = a.devices as ListeningDevice[];
+      const rest = (c.listening ?? []).filter((l) => l.endpoint !== a.endpoint);
+      c.listening = devices.length ? [...rest, { endpoint: a.endpoint as string, devices: structuredClone(devices), active: null }] : rest;
+    },
+    set_active_listening: (a) => {
+      const l = (core.hardware.connected.listening ?? []).find((x) => x.endpoint === a.endpoint);
+      if (!l) throw new Error("nothing is listed for that output yet");
+      l.active = structuredClone(a.device as ListeningDevice);
+    },
     delete_hardware: (a) => {
       core.hardware.headsets = core.hardware.headsets.filter((h) => h.id !== a.id);
       core.hardware.monitors = core.hardware.monitors.filter((m) => m.id !== a.id);
@@ -406,7 +417,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "switch_source", "set_mixer", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
-  "save_hardware", "delete_hardware", "probe_hardware", "import_curve",
+  "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",

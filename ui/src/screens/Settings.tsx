@@ -144,6 +144,15 @@ export function Settings() {
               : prefs.resilience
                 ? "If a share you started dies — a crash, a dropped link, a reboot — Relay reconnects, keeps trying for three minutes, and tells you what it is doing. Stop sharing ends it as usual."
                 : "A share that dies stays dead until you start it again. Relay still records what happened."} />
+          <Toggle
+            on={prefs?.cycle_listening_hotkey ?? false}
+            onChange={prefs === null ? undefined : (v) => void setPref({ cycle_listening_hotkey: v })}
+            label="Ctrl+Alt+L switches what I am listening on"
+            sub={prefs === null
+              ? "Reading…"
+              : prefs.cycle_listening_hotkey
+                ? "Steps through the listening devices you listed for the current output, and headphone correction follows. Takes effect the next time Relay starts."
+                : "Off. Switch from the Profiles screen or the icon by the clock instead."} />
           {prefsErr && <div className="offline"><i />{prefsErr}</div>}
         </Card>
         <Card title="What Relay installs">
