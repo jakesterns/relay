@@ -1,6 +1,6 @@
 //! The APO COM object audiodg loads: `IAudioProcessingObject`,
 //! `IAudioProcessingObjectRT`, `IAudioProcessingObjectConfiguration` and the
-//! `IAudioSystemEffects` marker, hosting `relay_audio::dsp::Chain`.
+//! `IAudioSystemEffects{,2}` markers, hosting `relay_audio::dsp::Chain`.
 //!
 //! Real-time rules:
 //! - `APOProcess` never locks, never allocates, never frees. It reads the
@@ -36,13 +36,14 @@ use windows::Win32::Foundation::{
     WAIT_OBJECT_0,
 };
 use windows::Win32::Media::Audio::Apo::{
-    APOInitSystemEffects2, IAudioMediaType, IAudioProcessingObject,
-    IAudioProcessingObjectConfiguration, IAudioProcessingObjectConfiguration_Impl,
-    IAudioProcessingObjectRT, IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl,
-    IAudioSystemEffects, IAudioSystemEffects_Impl, APOERR_ALREADY_INITIALIZED,
-    APOERR_ALREADY_UNLOCKED, APOERR_FORMAT_NOT_SUPPORTED, APOERR_NOT_INITIALIZED,
-    APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_FLAG_DEFAULT, APO_REG_PROPERTIES,
-    UNCOMPRESSEDAUDIOFORMAT,
+    APOInitSystemEffects, APOInitSystemEffects2, APOInitSystemEffects3, IAudioMediaType,
+    IAudioProcessingObject, IAudioProcessingObjectConfiguration,
+    IAudioProcessingObjectConfiguration_Impl, IAudioProcessingObjectRT,
+    IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, IAudioSystemEffects,
+    IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects_Impl,
+    APOERR_ALREADY_INITIALIZED, APOERR_ALREADY_UNLOCKED, APOERR_FORMAT_NOT_SUPPORTED,
+    APOERR_NOT_INITIALIZED, APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_FLAG_DEFAULT,
+    APO_REG_PROPERTIES, UNCOMPRESSEDAUDIOFORMAT,
 };
 use windows::Win32::Media::Audio::PKEY_AudioEndpoint_GUID;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -168,7 +169,8 @@ struct Initialized {
     IAudioProcessingObject,
     IAudioProcessingObjectRT,
     IAudioProcessingObjectConfiguration,
-    IAudioSystemEffects
+    IAudioSystemEffects,
+    IAudioSystemEffects2
 )]
 pub struct RelayApo {
     init: Mutex<Option<Initialized>>,
@@ -200,7 +202,15 @@ impl RelayApo {
         } else {
             name
         };
-        match SharedParams::create(&name) {
+        let r = SharedParams::create(&name);
+        crate::diag!(
+            "shm create {name}: {}",
+            match &r {
+                Ok(_) => "S_OK".to_string(),
+                Err(e) => format!("{:#010x} {}", e.code().0 as u32, e.message()),
+            }
+        );
+        match r {
             Ok(s) => {
                 self.shared.block.store(
                     s.block() as *const _ as *mut relay_audio::shm::ParamBlock,
@@ -233,15 +243,15 @@ fn uncompressed(mt: &IAudioMediaType) -> windows::core::Result<UNCOMPRESSEDAUDIO
 /// Shared input/output negotiation: float32 stereo at one unchanging rate.
 /// When an opposite-side format exists its rate must match (never resample).
 fn negotiate(
-    opposite: Ref<IAudioMediaType>,
-    requested: Ref<IAudioMediaType>,
+    opposite: Option<&IAudioMediaType>,
+    requested: Option<&IAudioMediaType>,
 ) -> windows::core::Result<IAudioMediaType> {
-    let req = requested.as_ref().ok_or_else(|| windows::core::Error::from_hresult(E_POINTER))?;
+    let req = requested.ok_or_else(|| windows::core::Error::from_hresult(E_POINTER))?;
     let f = uncompressed(req)?;
     if !format_ok(&f) {
         return Err(windows::core::Error::from_hresult(APOERR_FORMAT_NOT_SUPPORTED));
     }
-    if let Some(opp) = opposite.as_ref() {
+    if let Some(opp) = opposite {
         if let Ok(of) = uncompressed(opp) {
             if of.fFramesPerSecond != f.fFramesPerSecond {
                 return Err(windows::core::Error::from_hresult(APOERR_FORMAT_NOT_SUPPORTED));
@@ -282,6 +292,7 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
             u32NumAPOInterfaces: 1,
             iidAPOInterfaceList: [IAudioProcessingObject::IID],
         };
+        crate::diag!("GetRegistrationProperties flags={:#x}", props.Flags.0);
         for (dst, src) in
             props.szFriendlyName.iter_mut().zip(crate::ids::APO_FRIENDLY_NAME.encode_utf16())
         {
@@ -302,19 +313,41 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         if g.is_some() {
             return Err(windows::core::Error::from_hresult(APOERR_ALREADY_INITIALIZED));
         }
-        // APOInitSystemEffects2 carries the endpoint property store we need
-        // for the section name; anything smaller means no endpoint identity,
-        // which we treat as discovery (stay a wire, refuse nothing).
+        // Which struct the engine hands us depends on the interfaces we
+        // expose: APOInitSystemEffects (no IAudioSystemEffects2),
+        // APOInitSystemEffects2 (IAudioSystemEffects2), APOInitSystemEffects3
+        // (IAudioSystemEffects3, Win11). All three carry the endpoint
+        // property store at the same offset. S42c: we used to require the
+        // v2 size and silently dropped the endpoint for v1, so the params
+        // section was never created.
         let mut endpoint_guid: Option<String> = None;
         let mut discovery_only = false;
-        if !pbydata.is_null() && cbdatasize as usize >= std::mem::size_of::<APOInitSystemEffects2>()
-        {
-            // SAFETY: the engine hands us at least cbdatasize readable bytes;
-            // size was checked against the struct we read. The ManuallyDrop
-            // interface fields are borrowed, never dropped here.
-            let fx: &APOInitSystemEffects2 = unsafe { &*(pbydata as *const APOInitSystemEffects2) };
-            discovery_only = fx.InitializeForDiscoveryOnly.as_bool();
-            if let Some(store) = fx.pAPOEndpointProperties.as_ref() {
+        let kind = init_kind(cbdatasize as usize);
+        crate::diag!("Initialize cbDataSize={cbdatasize} kind={kind:?} null={}", pbydata.is_null());
+        if pbydata.is_null() && cbdatasize != 0 {
+            crate::diag!("Initialize -> E_INVALIDARG");
+            return Err(windows::core::Error::from_hresult(E_INVALIDARG));
+        }
+        if !pbydata.is_null() && kind != InitKind::None {
+            // SAFETY: the engine hands us at least cbdatasize readable bytes
+            // and `kind` was chosen by size, so each read stays in bounds.
+            // Interface fields are borrowed, never dropped here.
+            let store = unsafe {
+                let base = &*(pbydata as *const APOInitSystemEffects);
+                match kind {
+                    InitKind::V2 => {
+                        let fx = &*(pbydata as *const APOInitSystemEffects2);
+                        discovery_only = fx.InitializeForDiscoveryOnly.as_bool();
+                    }
+                    InitKind::V3 => {
+                        let fx = &*(pbydata as *const APOInitSystemEffects3);
+                        discovery_only = fx.InitializeForDiscoveryOnly.as_bool();
+                    }
+                    _ => {}
+                }
+                base.pAPOEndpointProperties.as_ref()
+            };
+            if let Some(store) = store {
                 // SAFETY: VT_LPWSTR PROPVARIANT out of a live store; cleared
                 // after copying the string out.
                 unsafe {
@@ -330,9 +363,8 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
                     }
                 }
             }
-        } else if pbydata.is_null() && cbdatasize != 0 {
-            return Err(windows::core::Error::from_hresult(E_INVALIDARG));
         }
+        crate::diag!("Initialize endpoint={endpoint_guid:?} discovery={discovery_only}");
 
         // Test rig: in-process tests have no audiodg property store to hand
         // us an endpoint; they name one explicitly.
@@ -344,6 +376,7 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
             _ => None,
         };
         *g = Some(Initialized { shm });
+        crate::diag!("Initialize -> S_OK");
         Ok(())
     }
 
@@ -352,7 +385,10 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         opposite: Ref<IAudioMediaType>,
         requested: Ref<IAudioMediaType>,
     ) -> windows::core::Result<IAudioMediaType> {
-        negotiate(opposite, requested)
+        let (opposite, requested) = (opposite.as_ref(), requested.as_ref());
+        let r = negotiate(opposite, requested);
+        diag_format("IsInputFormatSupported", opposite, requested, &r);
+        r
     }
 
     fn IsOutputFormatSupported(
@@ -360,7 +396,10 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         opposite: Ref<IAudioMediaType>,
         requested: Ref<IAudioMediaType>,
     ) -> windows::core::Result<IAudioMediaType> {
-        negotiate(opposite, requested)
+        let (opposite, requested) = (opposite.as_ref(), requested.as_ref());
+        let r = negotiate(opposite, requested);
+        diag_format("IsOutputFormatSupported", opposite, requested, &r);
+        r
     }
 
     fn GetInputChannelCount(&self) -> windows::core::Result<u32> {
@@ -397,6 +436,7 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
             (f.fFramesPerSecond as u32, d.u32MaxFrameCount as usize)
         };
         let max_frames = max_frames.max(1);
+        crate::diag!("LockForProcess rate={rate} max_frames={max_frames}");
 
         // Initial chain, then the control thread for live updates.
         let first = build_chain(&self.shared, rate, max_frames);
@@ -534,6 +574,113 @@ impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
 
 impl IAudioSystemEffects_Impl for RelayApo_Impl {}
 
+impl IAudioSystemEffects2_Impl for RelayApo_Impl {
+    #[allow(clippy::not_unsafe_ptr_arg_deref)] // COM out-pointers, checked.
+    /// We expose no user-toggleable effects (Relay's UI owns them), so the
+    /// list is empty. Implementing the interface is what matters: the engine
+    /// hands a mode-aware APO the richer APOInitSystemEffects2.
+    fn GetEffectsList(
+        &self,
+        ids: *mut *mut GUID,
+        count: *mut u32,
+        _event: windows::Win32::Foundation::HANDLE,
+    ) -> windows::core::Result<()> {
+        if ids.is_null() || count.is_null() {
+            return Err(windows::core::Error::from_hresult(E_POINTER));
+        }
+        // SAFETY: checked non-null out-pointers.
+        unsafe {
+            *ids = std::ptr::null_mut();
+            *count = 0;
+        }
+        crate::diag!("GetEffectsList -> 0 effects");
+        Ok(())
+    }
+}
+
+/// Which Initialize payload the engine sent, by size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitKind {
+    /// Too small (or empty): no endpoint identity.
+    None,
+    V1,
+    V2,
+    V3,
+}
+
+/// Classify an Initialize payload size. v3 is smaller than v2 (one pointer
+/// fewer), so match it exactly before the >= v2 test.
+pub fn init_kind(size: usize) -> InitKind {
+    if size == std::mem::size_of::<APOInitSystemEffects3>() {
+        InitKind::V3
+    } else if size >= std::mem::size_of::<APOInitSystemEffects2>() {
+        InitKind::V2
+    } else if size >= std::mem::size_of::<APOInitSystemEffects>() {
+        InitKind::V1
+    } else {
+        InitKind::None
+    }
+}
+
+fn fmt_desc(mt: Option<&IAudioMediaType>) -> String {
+    match mt.map(uncompressed) {
+        None => "none".into(),
+        Some(Err(e)) => format!("err {:#010x}", e.code().0 as u32),
+        Some(Ok(f)) => format!(
+            "{:?} ch={} bytes={} bits={} rate={}",
+            f.guidFormatType,
+            f.dwSamplesPerFrame,
+            f.dwBytesPerSampleContainer,
+            f.dwValidBitsPerSample,
+            f.fFramesPerSecond
+        ),
+    }
+}
+
+fn diag_format(
+    what: &str,
+    opposite: Option<&IAudioMediaType>,
+    requested: Option<&IAudioMediaType>,
+    r: &windows::core::Result<IAudioMediaType>,
+) {
+    crate::diag!(
+        "{what} opposite=[{}] requested=[{}] -> {}",
+        fmt_desc(opposite),
+        fmt_desc(requested),
+        match r {
+            Ok(_) => "S_OK".to_string(),
+            Err(e) => format!("{:#010x}", e.code().0 as u32),
+        }
+    );
+}
+
+/// Interfaces the engine may ask for; used for the CreateInstance probe log
+/// and the QI-table test.
+pub fn expected_iids() -> [(&'static str, GUID); 6] {
+    [
+        ("IUnknown", windows::core::IUnknown::IID),
+        ("IAudioProcessingObject", IAudioProcessingObject::IID),
+        ("IAudioProcessingObjectRT", IAudioProcessingObjectRT::IID),
+        ("IAudioProcessingObjectConfiguration", IAudioProcessingObjectConfiguration::IID),
+        ("IAudioSystemEffects", IAudioSystemEffects::IID),
+        ("IAudioSystemEffects2", IAudioSystemEffects2::IID),
+    ]
+}
+
+/// QI `obj` for `id`; true on S_OK (the reference is released).
+pub fn answers(obj: &windows::core::IUnknown, id: &GUID) -> bool {
+    let mut p = std::ptr::null_mut();
+    // SAFETY: valid object, out-pointer to a local; a returned reference is
+    // adopted and dropped (released).
+    unsafe {
+        let hr = obj.query(id, &mut p);
+        if !p.is_null() {
+            drop(windows::core::IUnknown::from_raw(p));
+        }
+        hr == S_OK
+    }
+}
+
 impl Drop for RelayApo {
     fn drop(&mut self) {
         // Normally UnlockForProcess ran; make release-order explicit anyway:
@@ -575,12 +722,24 @@ impl IClassFactory_Impl for Factory_Impl {
         if object.is_null() || iid.is_null() {
             return Err(windows::core::Error::from_hresult(E_POINTER));
         }
+        // SAFETY: iid checked non-null.
+        crate::diag!("CreateInstance iid={:?} outer={}", unsafe { *iid }, outer.is_some());
         if outer.is_some() {
+            crate::diag!("CreateInstance -> CLASS_E_NOAGGREGATION");
             return Err(windows::core::Error::from_hresult(CLASS_E_NOAGGREGATION));
         }
         let apo: IAudioProcessingObject = RelayApo::default().into();
+        if crate::diag::enabled() {
+            let unk: windows::core::IUnknown = apo.cast()?;
+            for (name, id) in expected_iids() {
+                let ok = answers(&unk, &id);
+                crate::diag!("  QI {name} -> {}", if ok { "S_OK" } else { "E_NOINTERFACE" });
+            }
+        }
         // SAFETY: iid/object checked non-null above.
-        unsafe { apo.query(iid, object).ok() }
+        let hr = unsafe { apo.query(iid, object) };
+        crate::diag!("CreateInstance -> {:#010x}", hr.0 as u32);
+        hr.ok()
     }
 
     fn LockServer(&self, _lock: windows::core::BOOL) -> windows::core::Result<()> {
@@ -606,13 +765,33 @@ extern "system" fn DllGetClassObject(
     }
     // SAFETY: checked non-null; the engine passes valid GUID pointers.
     unsafe {
+        crate::diag!("DllGetClassObject clsid={:?} riid={:?}", *rclsid, *riid);
         if *rclsid != CLSID_RELAY_APO {
+            crate::diag!("DllGetClassObject -> CLASS_E_CLASSNOTAVAILABLE");
             return CLASS_E_CLASSNOTAVAILABLE;
         }
         let factory: IClassFactory = Factory.into();
-        match factory.query(riid, ppv) {
-            hr if hr == S_OK => S_OK,
-            hr => hr,
-        }
+        let hr = factory.query(riid, ppv);
+        crate::diag!("DllGetClassObject -> {:#010x}", hr.0 as u32);
+        hr
     }
+}
+
+/// Only the attach is logged (proof audiodg mapped us); no other work under
+/// the loader lock.
+#[no_mangle]
+extern "system" fn DllMain(
+    _hinst: *mut core::ffi::c_void,
+    reason: u32,
+    _reserved: *mut core::ffi::c_void,
+) -> windows::core::BOOL {
+    const DLL_PROCESS_ATTACH: u32 = 1;
+    if reason == DLL_PROCESS_ATTACH {
+        crate::diag!(
+            "DllMain attach exe={:?} TEMP={:?}",
+            std::env::current_exe().ok(),
+            std::env::var_os("TEMP")
+        );
+    }
+    true.into()
 }

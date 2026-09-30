@@ -20,5 +20,7 @@ pub mod regfile;
 
 #[cfg(all(windows, feature = "com"))]
 pub mod com;
+#[cfg(all(windows, feature = "com"))]
+pub mod diag;
 #[cfg(windows)]
 pub mod livereg;

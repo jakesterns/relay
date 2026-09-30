@@ -118,6 +118,67 @@ in (22 others were there).
    and `params section: reachable`.
 5. Uninstall: `reg export` again, diff against `ae-before.reg` → empty.
 
+## S42c — load diagnostics + init audit (branch `feat/s42c-apo-diag`)
+
+**Live symptom (2026-09-30, Win11 26200).** Registration correct (COM class,
+audio-engine key Flags 0x0e / APOInterface0 = IAudioProcessingObject,
+FxProperties ,7 + ,15 + MODE_DEFAULT), Audiosrv restarted, audio played to
+the S/PDIF endpoint, yet `Global\Relay.APO.<endpoint>` never appeared and
+CodeIntegrity was silent.
+
+**Top suspect, fixed.** We implemented `IAudioSystemEffects` but not
+`IAudioSystemEffects2`. The engine picks the Initialize payload from the
+interfaces an APO exposes: no `IAudioSystemEffects2` -> `APOInitSystemEffects`
+(v1). `Initialize` only read the endpoint store when `cbDataSize >=
+sizeof(APOInitSystemEffects2)`, so on v1 it quietly became a wire and never
+created the section — exactly the symptom. Mode-aware EFX registrations
+(`{d3993a3f…},7`) also expect `IAudioSystemEffects2`.
+- `Initialize` now classifies v1/v2/v3 by size (`com::init_kind`) and reads
+  `pAPOEndpointProperties`, which sits at the same offset in all three.
+- `IAudioSystemEffects2` implemented (`GetEffectsList` -> empty list). Not
+  `IAudioSystemEffects3` (it would change the payload to v3; handled anyway).
+
+**Audit, no change needed.**
+- QI: IUnknown, IAudioProcessingObject{,RT,Configuration},
+  IAudioSystemEffects{,2} all answer (`tests/apo_init.rs`); v3 says no.
+- `GetRegistrationProperties`: clsid, Flags 0x0e, 1 interface
+  (IAudioProcessingObject), 1/1 connections — equals the registry values
+  (asserted). The registry interface list is the *APO* interface list
+  (`RegisterAPO` writes IAudioProcessingObject only); IAudioSystemEffects is a
+  QI marker, not listed there. Confirm against Equalizer APO on the dev PC:
+  `reg query HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects /s` and
+  compare its key (count, interface, flags) with ours.
+- Format: float32 stereo, rate equal to the opposite side, S_OK with the same
+  type. Non-float or non-stereo is refused with APOERR_FORMAT_NOT_SUPPORTED
+  (no S_FALSE proposal). If the diag log shows the S/PDIF mix format is not
+  float32 stereo, that refusal is the next suspect.
+- Class factory refuses aggregation (CLASS_E_NOAGGREGATION, correct for APOs);
+  ThreadingModel Both in the COM registration.
+- Section: created by LOCAL SERVICE (holds SeCreateGlobalPrivilege) with DACL
+  SY/LS/IU full — the interactive core can open it.
+
+**Diag switch.** Create `%ProgramData%\Relay\apo-diag.on` (any content;
+`RELAY_APO_DIAG` env for tests). Checked on each line, so no audiodg restart
+is needed to toggle; delete it to go silent. Lines go to the first writable of
+`%ProgramData%\Relay\apo-diag.log`,
+`C:\Windows\ServiceProfiles\LocalService\AppData\Local\Temp\relay-apo-diag.log`
+(audiodg's %TEMP%), `%SystemRoot%\Temp\relay-apo-diag.log`; 256 KB cap each.
+If an admin created `C:\ProgramData\Relay`, LOCAL SERVICE may not be able to
+write there — check the fallbacks. Logged: DllMain attach, DllGetClassObject,
+CreateInstance (+ QI probe of every interface), Initialize (size, kind,
+endpoint, discovery), GetRegistrationProperties, GetEffectsList, format
+negotiation (both formats + answer), LockForProcess, shm create (name +
+HRESULT). Never APOProcess.
+
+**Next live step (with Jake).** Rebuild + reinstall the DLL on the S/PDIF
+endpoint, create `C:\ProgramData\Relay\apo-diag.on`, restart
+AudioEndpointBuilder, play speech/music to S/PDIF, then read the log:
+- no file anywhere -> never loaded (compare the Equalizer APO registration);
+- DllMain but no CreateInstance -> class/registry mismatch;
+- Initialize with an endpoint but shm error -> section/privilege;
+- format refusals -> negotiation;
+- `shm create … S_OK` -> `relay-core apo status` should read `reachable`.
+
 ## Live test plan (VM or Jake's machine, with Jake — NOT unattended)
 
 Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per
