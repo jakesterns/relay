@@ -423,6 +423,28 @@ async fn save_hardware(item: relay_core::ipc::HardwareItem) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn set_listening_devices(
+    endpoint: String,
+    devices: Vec<relay_core::hardware::ListeningDevice>,
+) -> CmdResult<()> {
+    match call(Method::SetListeningDevices { endpoint, devices }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_active_listening(
+    endpoint: String,
+    device: relay_core::hardware::ListeningDevice,
+) -> CmdResult<()> {
+    match call(Method::SetActiveListening { endpoint, device }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn delete_hardware(id: String) -> CmdResult<()> {
     match call(Method::DeleteHardware { id }).await? {
         Reply::Ok => Ok(()),
@@ -1039,6 +1061,8 @@ pub fn run() {
             list_hardware,
             save_hardware,
             delete_hardware,
+            set_listening_devices,
+            set_active_listening,
             probe_hardware,
             import_curve,
             render_preview,

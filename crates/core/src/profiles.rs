@@ -241,11 +241,13 @@ mod tests {
                     key: dac_key.clone(),
                     name: "USB Audio 2.0".into(),
                     default: default_key == dac_key,
+                    fx_guid: String::new(),
                 },
                 EndpointInfo {
                     key: dongle_key.clone(),
                     name: "USB-C dongle".into(),
                     default: default_key == dongle_key,
+                    fx_guid: String::new(),
                 },
             ],
             monitors: vec![lg.clone()],
@@ -264,11 +266,55 @@ mod tests {
                 key: "ep:c:hdmi".into(),
                 name: "HDMI".into(),
                 default: true,
+                fx_guid: String::new(),
             }],
             monitors: vec![lg.clone()],
         };
         let on_hdmi = lib.connected(&unbound);
         assert_eq!(store.select("cod.exe", "", &on_hdmi).unwrap().name, "CoD any");
+    }
+
+    /// S41: one interface output, two things plugged into it on different
+    /// days. The active listening device, not the endpoint, picks the row;
+    /// speakers fall through to the Any row.
+    #[test]
+    fn selection_follows_the_active_listening_device() {
+        use crate::hardware::{EndpointInfo, HardwareStore, ListeningDevice, ProbeReport};
+
+        let mut lib = HardwareStore::in_memory();
+        let report = ProbeReport {
+            endpoints: vec![EndpointInfo {
+                key: "ep:c:rode".into(),
+                name: "RODECaster".into(),
+                default: true,
+                fx_guid: String::new(),
+            }],
+            monitors: vec![],
+        };
+        let store = ProfileStore::in_memory(vec![
+            ready("CoD HD560S", "cod.exe", Some("hd560s"), None),
+            ready("CoD IEM", "cod.exe", Some("blessing3"), None),
+            ready("CoD any", "cod.exe", None, None),
+        ]);
+        let iem = ListeningDevice::Headset { id: HeadsetId("blessing3".into()) };
+        let hd = ListeningDevice::Headset { id: HeadsetId("hd560s".into()) };
+
+        // Exactly one listed: active without a pick.
+        lib.listening_entry("ep:c:rode").set_devices(vec![iem.clone()]);
+        assert_eq!(store.select("cod.exe", "", &lib.connected(&report)).unwrap().name, "CoD IEM");
+
+        lib.listening_entry("ep:c:rode").set_devices(vec![
+            iem.clone(),
+            hd.clone(),
+            ListeningDevice::Speakers,
+        ]);
+        lib.listening_entry("ep:c:rode").set_active(&hd);
+        assert_eq!(
+            store.select("cod.exe", "", &lib.connected(&report)).unwrap().name,
+            "CoD HD560S"
+        );
+        lib.listening_entry("ep:c:rode").set_active(&ListeningDevice::Speakers);
+        assert_eq!(store.select("cod.exe", "", &lib.connected(&report)).unwrap().name, "CoD any");
     }
 
     #[test]

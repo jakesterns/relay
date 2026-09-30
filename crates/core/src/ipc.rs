@@ -144,6 +144,20 @@ pub enum Method {
     DeleteHardware {
         id: String,
     },
+    /// Replace what an output feeds (S41): the ordered listening devices
+    /// the user said are connected to it. `endpoint` is the listening key
+    /// from `HardwareView::endpoints`/`listening`. Headsets must already be
+    /// in the library.
+    SetListeningDevices {
+        endpoint: String,
+        devices: Vec<crate::hardware::ListeningDevice>,
+    },
+    /// Pick which of an output's listening devices is on the user's head
+    /// (or that it is the speakers) -- the quick switch (S41).
+    SetActiveListening {
+        endpoint: String,
+        device: crate::hardware::ListeningDevice,
+    },
     /// Full re-probe including the slow DDC/CI capability query; refreshes the
     /// cached connected state and stores VCP lists on known library monitors.
     ProbeHardware,
@@ -862,6 +876,36 @@ mod tests {
         .unwrap();
         assert_eq!(v["method"], "import_curve");
         assert_eq!(v["params"]["headset"], "hd560s");
+    }
+
+    /// Locks the S41 listening-device wire shape `ui/src/lib/ipc.ts` mirrors.
+    #[test]
+    fn listening_methods_wire_shape() {
+        use crate::hardware::ListeningDevice;
+        let hd = ListeningDevice::Headset { id: crate::types::HeadsetId("hd560s".into()) };
+        let v = serde_json::to_value(Request {
+            id: 3,
+            method: Method::SetListeningDevices {
+                endpoint: "ep:c:rode".into(),
+                devices: vec![hd.clone(), ListeningDevice::Speakers],
+            },
+        })
+        .unwrap();
+        assert_eq!(v["method"], "set_listening_devices");
+        assert_eq!(v["params"]["endpoint"], "ep:c:rode");
+        assert_eq!(v["params"]["devices"][0]["kind"], "headset");
+        assert_eq!(v["params"]["devices"][0]["id"], "hd560s");
+        assert_eq!(v["params"]["devices"][1]["kind"], "speakers");
+
+        let v = serde_json::to_value(Request {
+            id: 4,
+            method: Method::SetActiveListening { endpoint: "ep:c:rode".into(), device: hd },
+        })
+        .unwrap();
+        assert_eq!(v["method"], "set_active_listening");
+        assert_eq!(v["params"]["device"]["id"], "hd560s");
+        let back: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(back.method, Method::SetActiveListening { .. }));
     }
 
     #[test]

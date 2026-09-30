@@ -115,6 +115,7 @@ fn probe_endpoints() -> windows::core::Result<Vec<EndpointInfo>> {
                 key: endpoint_key(container.as_deref(), &id),
                 name: name.unwrap_or_else(|| "Unknown endpoint".into()),
                 default: !default_id.is_empty() && id == default_id,
+                fx_guid: super::fx_guid_of(&id),
             });
         }
         Ok(out)

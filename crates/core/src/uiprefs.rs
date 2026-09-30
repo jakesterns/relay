@@ -50,6 +50,11 @@ pub struct UiPrefs {
     /// its window has gone should say so, every time, until told not to.
     #[serde(default = "default_true")]
     pub close_notice: bool,
+    /// Ctrl+Alt+L cycles the default output's listening devices (S41). Off
+    /// by default: a global hotkey is only taken when asked for. Takes effect
+    /// the next time the core starts.
+    #[serde(default)]
+    pub cycle_listening_hotkey: bool,
 }
 
 fn default_true() -> bool {
@@ -58,7 +63,12 @@ fn default_true() -> bool {
 
 impl Default for UiPrefs {
     fn default() -> Self {
-        UiPrefs { close_action: CloseAction::default(), resilience: true, close_notice: true }
+        UiPrefs {
+            close_action: CloseAction::default(),
+            resilience: true,
+            close_notice: true,
+            cycle_listening_hotkey: false,
+        }
     }
 }
 
