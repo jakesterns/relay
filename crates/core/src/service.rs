@@ -219,8 +219,13 @@ impl Service {
 
         let presets = PresetStore::load(paths.presets_file())?;
         let prefs = crate::uiprefs::PrefsStore::load(paths.settings_file());
-        let library = HardwareStore::load(paths.hardware_file())?;
+        let mut library = HardwareStore::load(paths.hardware_file())?;
         let report = backends.hardware.probe(false);
+        if library.migrate_listening_keys(&report) {
+            if let Err(e) = library.save() {
+                warn!(error = %e, "could not save migrated listening keys");
+            }
+        }
         let connected = library.connected(&report);
         let mut hardware = HardwareView::from_report(report.clone(), &library);
         hardware.other_processing = crate::hardware::other_processing::scan(&report);
@@ -1098,6 +1103,11 @@ fn library_changed(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>)
 /// read-only); otherwise the previous findings carry over. Also refreshes the
 /// tray's listening-device list.
 fn rebuild_hardware_view(g: &mut Inner, rescan: bool) {
+    if rescan && g.library.migrate_listening_keys(&g.last_report) {
+        if let Err(e) = g.library.save() {
+            warn!(error = %e, "could not save migrated listening keys");
+        }
+    }
     let prev = std::mem::take(&mut g.state.hardware.other_processing);
     g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
     g.state.hardware.other_processing =

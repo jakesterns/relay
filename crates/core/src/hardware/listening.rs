@@ -102,19 +102,52 @@ impl EndpointListening {
     }
 }
 
-/// The key listening devices are stored under. Usually the endpoint key; but
-/// every endpoint of one physical device shares a container key, and a
-/// device can expose several outputs (a RODECaster's "System" and "Chat", a
-/// headset's game and chat channels) that feed different things. When the
-/// report holds more than one endpoint with the same key, the friendly name
-/// tells them apart.
-pub fn listening_key(report_endpoints: &[EndpointInfo], ep: &EndpointInfo) -> String {
-    let shared = report_endpoints.iter().filter(|e| e.key == ep.key).count() > 1;
-    if shared {
-        format!("{}#{}", ep.key, ep.name)
-    } else {
-        ep.key.clone()
+/// The key listening devices are stored under: the endpoint's own key.
+/// Since S41b [`unique_endpoint_keys`] makes every endpoint key in a report
+/// unique, so this is `ep.key`; kept as one function so every caller
+/// (listening, other processing, profile selection) agrees.
+pub fn listening_key(_report_endpoints: &[EndpointInfo], ep: &EndpointInfo) -> String {
+    ep.key.clone()
+}
+
+/// The device part of a key: `ep:c:<container>` for `ep:c:<container>#<endpoint>`.
+pub fn base_key(key: &str) -> &str {
+    key.split_once('#').map_or(key, |(b, _)| b)
+}
+
+/// Make every endpoint key in `endpoints` unique. Every endpoint of one
+/// physical device shares its container key, and a device can expose several
+/// outputs (a RODECaster's "Main" and "Chat", a headset's game and chat
+/// channels) that feed different things. Those get `<container key>#<endpoint
+/// guid>` (the MMDevices GUID, stable across renames); a device with one
+/// output keeps the plain container key. Idempotent.
+pub fn unique_endpoint_keys(endpoints: &mut [EndpointInfo]) {
+    let bases: Vec<String> = endpoints.iter().map(|e| base_key(&e.key).to_owned()).collect();
+    for (i, ep) in endpoints.iter_mut().enumerate() {
+        let shared = bases.iter().filter(|b| **b == bases[i]).count() > 1;
+        if !shared {
+            ep.key = bases[i].clone();
+            continue;
+        }
+        let tag = ep.fx_guid.trim_matches(|c| c == '{' || c == '}').to_ascii_lowercase();
+        let tag = if tag.is_empty() { ep.name.clone() } else { tag };
+        ep.key = format!("{}#{}", bases[i], tag);
     }
+}
+
+/// Keys a saved listening list may still carry for `ep` (S41 forms):
+/// `<container>#<friendly name>` for shared containers, and the bare
+/// container key. The bare key goes to one endpoint of the group only: the
+/// default one if it is in the group, otherwise the first.
+pub fn legacy_keys(all: &[EndpointInfo], ep: &EndpointInfo) -> Vec<String> {
+    let base = base_key(&ep.key);
+    let mut out = vec![format!("{base}#{}", ep.name)];
+    let group: Vec<&EndpointInfo> = all.iter().filter(|e| base_key(&e.key) == base).collect();
+    let owner = group.iter().find(|e| e.default).or(group.first()).copied();
+    if owner.is_some_and(|o| o.key == ep.key) && ep.key != base {
+        out.push(base.to_owned());
+    }
+    out
 }
 
 /// The default output's listening key, if there is a default output.
@@ -195,13 +228,34 @@ mod tests {
             default: false,
             fx_guid: String::new(),
         };
-        let all = vec![
-            ep("ep:c:rode", "System (RODECaster Pro II)"),
-            ep("ep:c:rode", "Chat (RODECaster Pro II)"),
+        let mut all = vec![
+            ep("ep:c:rode", "Main (RODECaster Duo)"),
+            ep("ep:c:rode", "Chat (RODECaster Duo)"),
             ep("ep:c:dac", "Speakers (USB DAC)"),
         ];
-        assert_eq!(listening_key(&all, &all[0]), "ep:c:rode#System (RODECaster Pro II)");
-        assert_eq!(listening_key(&all, &all[1]), "ep:c:rode#Chat (RODECaster Pro II)");
-        assert_eq!(listening_key(&all, &all[2]), "ep:c:dac");
+        all[0].fx_guid = "{AAAA}".into();
+        all[1].fx_guid = "{bbbb}".into();
+        all[1].default = true;
+        unique_endpoint_keys(&mut all);
+        assert_eq!(all[0].key, "ep:c:rode#aaaa");
+        assert_eq!(all[1].key, "ep:c:rode#bbbb");
+        assert_eq!(all[2].key, "ep:c:dac");
+        let before = all.clone();
+        unique_endpoint_keys(&mut all);
+        assert_eq!(all, before, "idempotent");
+        assert_eq!(listening_key(&all, &all[0]), all[0].key);
+        assert_eq!(base_key(&all[0].key), "ep:c:rode");
+
+        // The S41 forms still map to exactly one endpoint each.
+        assert_eq!(legacy_keys(&all, &all[0]), vec!["ep:c:rode#Main (RODECaster Duo)".to_owned()]);
+        assert_eq!(
+            legacy_keys(&all, &all[1]),
+            vec!["ep:c:rode#Chat (RODECaster Duo)".to_owned(), "ep:c:rode".to_owned()]
+        );
+
+        // One output left: back to the plain key.
+        let mut one = vec![before[0].clone()];
+        unique_endpoint_keys(&mut one);
+        assert_eq!(one[0].key, "ep:c:rode");
     }
 }

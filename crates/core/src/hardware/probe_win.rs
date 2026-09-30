@@ -119,6 +119,7 @@ fn probe_endpoints() -> windows::core::Result<Vec<EndpointInfo>> {
                 fx_guid: super::fx_guid_of(&id),
             });
         }
+        super::listening::unique_endpoint_keys(&mut out);
         Ok(out)
     }
 }

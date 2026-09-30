@@ -139,7 +139,8 @@ pub struct HardwareView {
 }
 
 impl HardwareView {
-    pub fn from_report(report: ProbeReport, library: &HardwareStore) -> Self {
+    pub fn from_report(mut report: ProbeReport, library: &HardwareStore) -> Self {
+        listening::unique_endpoint_keys(&mut report.endpoints);
         let headset = library.connected(&report).headset;
         let default_listening = listening::default_listening_key(&report);
         let active_listening = default_listening
@@ -430,7 +431,41 @@ impl HardwareStore {
 
     /// The library headset bound to this endpoint key, if any.
     pub fn headset_for_endpoint(&self, key: &str) -> Option<&Headset> {
-        self.headsets.iter().find(|h| h.endpoints.iter().any(|e| e == key))
+        // M1 bindings carry the device key; an endpoint key may add `#<endpoint>`.
+        let base = listening::base_key(key);
+        self.headsets
+            .iter()
+            .find(|h| h.endpoints.iter().any(|e| e == key))
+            .or_else(|| self.headsets.iter().find(|h| h.endpoints.iter().any(|e| e == base)))
+    }
+
+    /// Rename listening lists saved under an S41 key form to the endpoint's
+    /// current key (see [`listening::legacy_keys`]). Never overwrites a list
+    /// already stored under the current key. True if anything changed.
+    pub fn migrate_listening_keys(&mut self, report: &ProbeReport) -> bool {
+        let mut eps = report.endpoints.clone();
+        listening::unique_endpoint_keys(&mut eps);
+        let mut changed = false;
+        for ep in &eps {
+            if self.listening_for(&ep.key).is_some() {
+                continue;
+            }
+            for old in listening::legacy_keys(&eps, ep) {
+                if old == ep.key {
+                    continue;
+                }
+                // An old key that is some other endpoint's current key stays.
+                if eps.iter().any(|e| e.key == old) {
+                    continue;
+                }
+                if let Some(l) = self.listening.iter_mut().find(|l| l.endpoint == old) {
+                    l.endpoint = ep.key.clone();
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        changed
     }
 
     /// The listening list stored for an output, if the user made one.
@@ -459,8 +494,10 @@ impl HardwareStore {
     /// with no list fall back to the M1 binding (a headset bound to the
     /// endpoint key), so existing libraries keep working.
     pub fn connected(&self, report: &ProbeReport) -> ConnectedHardware {
-        let headset = report.default_endpoint().and_then(|ep| {
-            let key = listening::listening_key(&report.endpoints, ep);
+        let mut eps = report.endpoints.clone();
+        listening::unique_endpoint_keys(&mut eps);
+        let headset = eps.iter().find(|e| e.default).and_then(|ep| {
+            let key = listening::listening_key(&eps, ep);
             match self.listening_for(&key).filter(|l| !l.devices.is_empty()) {
                 Some(l) => l.active().and_then(|d| d.headset()).cloned(),
                 None => self.headset_for_endpoint(&ep.key).map(|h| h.id.clone()),
@@ -620,5 +657,78 @@ mod tests {
         assert_eq!(fx_guid_of("nothing"), "");
         assert_eq!(again.headsets.len(), 0);
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod key_migration_tests {
+    use super::*;
+
+    fn ep(key: &str, name: &str, fx: &str, default: bool) -> EndpointInfo {
+        EndpointInfo { key: key.into(), name: name.into(), default, fx_guid: fx.into() }
+    }
+
+    fn hs(id: &str) -> ListeningDevice {
+        ListeningDevice::Headset { id: HeadsetId(id.into()) }
+    }
+
+    /// The RODECaster Duo on the second PC: Main and Chat share a container.
+    fn rode_report() -> ProbeReport {
+        ProbeReport {
+            endpoints: vec![
+                ep("ep:c:rode", "Main (RODECaster Duo)", "{aaaa}", true),
+                ep("ep:c:rode", "Chat (RODECaster Duo)", "{bbbb}", false),
+            ],
+            monitors: vec![],
+        }
+    }
+
+    #[test]
+    fn view_keys_are_unique_and_match_listening_and_selection() {
+        let mut lib = HardwareStore::in_memory();
+        lib.listening_entry("ep:c:rode#aaaa").set_devices(vec![hs("hd560s")]);
+        lib.listening_entry("ep:c:rode#bbbb").set_devices(vec![hs("blessing3")]);
+        let view = HardwareView::from_report(rode_report(), &lib);
+        assert_eq!(view.endpoints[0].key, "ep:c:rode#aaaa");
+        assert_eq!(view.endpoints[1].key, "ep:c:rode#bbbb");
+        assert_eq!(view.default_listening.as_deref(), Some("ep:c:rode#aaaa"));
+        assert_eq!(lib.connected(&rode_report()).headset, Some(HeadsetId("hd560s".into())));
+    }
+
+    #[test]
+    fn s41_named_and_bare_keys_migrate_to_the_new_form() {
+        let mut lib = HardwareStore::in_memory();
+        lib.listening_entry("ep:c:rode#Chat (RODECaster Duo)").set_devices(vec![hs("blessing3")]);
+        lib.listening_entry("ep:c:rode").set_devices(vec![hs("hd560s")]);
+        assert!(lib.migrate_listening_keys(&rode_report()));
+        assert!(lib.listening_for("ep:c:rode#bbbb").is_some());
+        // The bare key went to the default endpoint of the group.
+        assert_eq!(lib.listening_for("ep:c:rode#aaaa").unwrap().devices, vec![hs("hd560s")]);
+        assert!(!lib.migrate_listening_keys(&rode_report()), "second run is a no-op");
+    }
+
+    #[test]
+    fn migration_never_overwrites_a_current_list() {
+        let mut lib = HardwareStore::in_memory();
+        lib.listening_entry("ep:c:rode#aaaa").set_devices(vec![hs("new")]);
+        lib.listening_entry("ep:c:rode").set_devices(vec![hs("old")]);
+        lib.listening_entry("ep:c:rode#Chat (RODECaster Duo)").set_devices(vec![hs("chat")]);
+        lib.migrate_listening_keys(&rode_report());
+        assert_eq!(lib.listening_for("ep:c:rode#aaaa").unwrap().devices, vec![hs("new")]);
+        assert_eq!(lib.listening_for("ep:c:rode#bbbb").unwrap().devices, vec![hs("chat")]);
+    }
+
+    #[test]
+    fn m1_headset_bindings_on_the_device_key_still_resolve() {
+        let mut lib = HardwareStore::in_memory();
+        lib.upsert_headset(Headset {
+            id: HeadsetId("hd560s".into()),
+            name: "HD 560S".into(),
+            kind: HeadsetKind::Headphone,
+            curve: None,
+            source: String::new(),
+            endpoints: vec!["ep:c:rode".into()],
+        });
+        assert_eq!(lib.connected(&rode_report()).headset, Some(HeadsetId("hd560s".into())));
     }
 }
