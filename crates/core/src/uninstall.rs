@@ -52,6 +52,9 @@ pub enum StepKind {
     RestoreApo,
     /// Delete the camera media source's COM registration.
     RemoveVcam,
+    /// Delete the per-user DirectShow camera filter registration (the
+    /// Windows 10 path, S43). HKCU only, so no elevation.
+    RemoveVcamFilter,
     /// Remove the inbound Windows Firewall rule for `relay-share.exe`.
     RemoveFirewallRule,
     /// Remove `HKCU\...\Run\Relay`.
@@ -75,6 +78,7 @@ impl StepKind {
             StepKind::StopCore => "Stop the core (restores your audio and display settings)",
             StepKind::RestoreApo => "Restore the endpoint audio chain",
             StepKind::RemoveVcam => "Unregister the virtual camera",
+            StepKind::RemoveVcamFilter => "Unregister the virtual camera (per-user filter)",
             StepKind::RemoveFirewallRule => "Remove the Windows Firewall rule",
             StepKind::RemoveRunKey => "Remove the start-at-login entry",
             StepKind::RemoveFiles => "Delete the program files",
@@ -154,6 +158,9 @@ pub struct MachineState {
     pub apo_backup: Option<PathBuf>,
     /// Camera COM keys recorded in `installed.json`, deepest first.
     pub vcam_keys: Vec<String>,
+    /// Per-user (HKCU) camera filter keys recorded in `installed.json`,
+    /// deepest first and vetted.
+    pub vcam_user_keys: Vec<String>,
     /// Relay's firewall rule is on the machine, or `firewall.json` records
     /// that we added one. Carries the rule name, which is the handle the
     /// removal uses.
@@ -224,6 +231,22 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
     // Present when the rule is on the machine *or* when the record says we
     // added one — either alone is enough to have something to clean up, and
     // a rule left behind would fail the clean-VM diff like any other trace.
+    if state.vcam_user_keys.is_empty() {
+        steps.push(Step {
+            kind: StepKind::RemoveVcamFilter,
+            target: "not installed".into(),
+            present: false,
+        });
+    } else {
+        for key in &state.vcam_user_keys {
+            steps.push(Step {
+                kind: StepKind::RemoveVcamFilter,
+                target: format!(r"HKCU\{key}"),
+                present: true,
+            });
+        }
+    }
+
     steps.push(Step {
         kind: StepKind::RemoveFirewallRule,
         target: state.firewall_rule.clone().unwrap_or_else(|| "not installed".into()),
@@ -351,6 +374,7 @@ mod imp {
             apo_endpoint: if apo.installed { apo.endpoint } else { None },
             apo_backup,
             vcam_keys,
+            vcam_user_keys: crate::vdevice::recorded_dshow_keys(paths),
             firewall_rule: firewall_rule(paths),
             run_key: crate::autostart::is_enabled().unwrap_or(false),
             install_dir: std::env::current_exe()
@@ -442,6 +466,14 @@ mod imp {
                             other => other,
                         }
                     }),
+                    StepKind::RemoveVcamFilter => {
+                        // Same idempotence as RemoveVcam: the first step removes
+                        // every recorded key, the rest find nothing left.
+                        run_step(match crate::vdevice::uninstall_dshow_live(paths) {
+                            Err(e) if e.to_string().contains("nothing to uninstall") => Ok(()),
+                            other => other,
+                        })
+                    }
                     StepKind::RemoveFirewallRule => {
                         elevated_step(|| crate::firewall::uninstall_live(paths).map(|_| ()))
                     }
@@ -638,6 +670,10 @@ mod tests {
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}\InprocServer32".into(),
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}".into(),
             ],
+            vcam_user_keys: vec![
+                r"Software\Classes\CLSID\{5E0B7C1F}\InprocServer32".into(),
+                r"Software\Classes\CLSID\{5E0B7C1F}".into(),
+            ],
             firewall_rule: Some(r"Relay (relay-share) — C:\d\Relay\relay-share.exe".into()),
             run_key: true,
             install_dir: Some(PathBuf::from(r"C:\d\Relay")),
@@ -702,6 +738,7 @@ mod tests {
             StepKind::StopCore,
             StepKind::RestoreApo,
             StepKind::RemoveVcam,
+            StepKind::RemoveVcamFilter,
             StepKind::RemoveFirewallRule,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
@@ -783,6 +820,21 @@ mod tests {
     }
 
     #[test]
+    fn per_user_camera_filter_keys_get_steps_without_elevation() {
+        let state = MachineState {
+            vcam_user_keys: vec![r"Software\Classes\CLSID\{5E0B7C1F}".into()],
+            ..Default::default()
+        };
+        let plan = plan_from(&state, false);
+        let steps: Vec<_> =
+            plan.steps.iter().filter(|s| s.kind == StepKind::RemoveVcamFilter).collect();
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].present);
+        assert_eq!(steps[0].target, r"HKCU\Software\Classes\CLSID\{5E0B7C1F}");
+        assert!(!plan.needs_elevation(), "a Windows 10 camera never asks for admin");
+    }
+
+    #[test]
     fn only_the_hklm_steps_ask_for_elevation() {
         assert!(StepKind::RestoreApo.needs_elevation());
         assert!(StepKind::RemoveVcam.needs_elevation());
@@ -791,6 +843,7 @@ mod tests {
         for kind in [
             StepKind::StopUi,
             StepKind::StopCore,
+            StepKind::RemoveVcamFilter,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
             StepKind::RemoveData,

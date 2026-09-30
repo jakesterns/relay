@@ -1114,23 +1114,9 @@ const RTP_OUTBOUND_MTU: usize = 1200;
 /// the camera is registered. Every failure is reported as a `vcam_error` line
 /// and answered with `None`: a webcam is never a reason to lose the share.
 fn start_vcam_sink(size: (u32, u32), fps: u32) -> Option<crate::vcam_sink::VcamSink> {
-    // `MFCreateVirtualCamera` is delay-loaded; on a Windows without it the
-    // call is a structured exception, not an error. Same guard as the receiver.
-    if !relay_vdevice::detect::frameserver_supported() {
-        let build = relay_vdevice::detect::windows_build();
-        warn!(?build, "MFCreateVirtualCamera not present; sharing without Relay Camera");
-        println!(
-            "{}",
-            serde_json::json!({
-                "event": "vcam_error",
-                "message": format!(
-                    "this PC has no virtual camera API (Windows build {}); the share still goes out",
-                    build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
-                ),
-            })
-        );
-        return None;
-    }
+    // `VcamSink::start` picks the path: the frame-server camera where the API
+    // exists, the DirectShow ring (S43) on Windows 10. It never calls the
+    // delay-loaded MFCreateVirtualCamera where the export is missing.
     match crate::vcam_sink::VcamSink::start(size.0, size.1, fps) {
         Ok(sink) => {
             println!(

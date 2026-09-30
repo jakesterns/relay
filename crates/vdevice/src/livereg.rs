@@ -17,8 +17,8 @@ use thiserror::Error;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_LOCAL_MACHINE,
-    KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
 
 use crate::reg::RegKeySpec;
@@ -72,13 +72,13 @@ impl Drop for Key {
 }
 
 impl Key {
-    fn create(path: &str) -> Result<Self, LiveRegError> {
+    fn create(root: HKEY, path: &str) -> Result<Self, LiveRegError> {
         let path_w = wide(path);
         let mut hkey = HKEY::default();
         // SAFETY: NUL-terminated path; valid out-pointer.
         let err = unsafe {
             RegCreateKeyExW(
-                HKEY_LOCAL_MACHINE,
+                root,
                 PCWSTR(path_w.as_ptr()),
                 None,
                 PCWSTR::null(),
@@ -114,9 +114,26 @@ impl Key {
 /// the `installed.json` record first (backup-then-apply, same contract as
 /// the APO installer). **Gated + elevated only.**
 pub fn apply(keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
+    apply_under(HKEY_LOCAL_MACHINE, keys)
+}
+
+/// Per-user twin of [`apply`] for the DirectShow filter (HKCU, no
+/// elevation). Same gate: nothing is written unless
+/// RELAY_VDEVICE_ALLOW_LIVE_WRITE=1. The caller vets the keys
+/// (`reg::vet_dshow_keys`) and records them first.
+pub fn apply_user(keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
+    apply_under(HKEY_CURRENT_USER, keys)
+}
+
+/// Per-user twin of [`remove`]. Same gate.
+pub fn remove_user(paths: &[String]) -> Result<(), LiveRegError> {
+    remove_under(HKEY_CURRENT_USER, paths)
+}
+
+fn apply_under(root: HKEY, keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
     assert_writes_allowed()?;
     for spec in keys {
-        let key = Key::create(&spec.path)?;
+        let key = Key::create(root, &spec.path)?;
         for (name, data) in &spec.values {
             key.set_sz(name, data)?;
         }
@@ -128,11 +145,15 @@ pub fn apply(keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
 /// deepest first). A key that is already gone is not an error — uninstall
 /// must be idempotent. **Gated + elevated only.**
 pub fn remove(paths: &[String]) -> Result<(), LiveRegError> {
+    remove_under(HKEY_LOCAL_MACHINE, paths)
+}
+
+fn remove_under(root: HKEY, paths: &[String]) -> Result<(), LiveRegError> {
     assert_writes_allowed()?;
     for path in paths {
         let path_w = wide(path);
         // SAFETY: NUL-terminated path.
-        let err = unsafe { RegDeleteTreeW(HKEY_LOCAL_MACHINE, PCWSTR(path_w.as_ptr())) };
+        let err = unsafe { RegDeleteTreeW(root, PCWSTR(path_w.as_ptr())) };
         if err != ERROR_FILE_NOT_FOUND {
             check(err)?;
         }
@@ -150,5 +171,7 @@ mod tests {
         // before touching any registry API.
         assert!(matches!(apply(&[]), Err(LiveRegError::WritesDisabled)));
         assert!(matches!(remove(&[]), Err(LiveRegError::WritesDisabled)));
+        assert!(matches!(apply_user(&[]), Err(LiveRegError::WritesDisabled)));
+        assert!(matches!(remove_user(&[]), Err(LiveRegError::WritesDisabled)));
     }
 }

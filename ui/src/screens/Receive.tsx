@@ -234,6 +234,10 @@ function VirtualDeviceCard() {
       {vd.obs_virtualcam && !vd.camera_registered && (
         <p className="note">OBS VirtualCam is installed on this PC, but Relay does not feed it.</p>
       )}
+      {vd.camera_registered && vd.camera_path === "direct_show" && (
+        <p className="note">On Windows 10 Relay Camera shows up in apps that list webcams the classic
+          way — Zoom, Discord, Teams, Chrome and Edge. The Windows Camera app does not list it.</p>
+      )}
     </Card>
   );
 }

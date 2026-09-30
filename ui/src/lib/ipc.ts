@@ -356,9 +356,15 @@ export interface VdeviceConsent { decided_at: string; apo: boolean; camera: bool
 export type MicTargetKind = "vb_cable" | "voice_meeter";
 export interface MicTarget { endpoint_id: string; name: string; kind: MicTargetKind }
 /** Mirror of relay-core's `vdevice::VdeviceStatus`. */
+/** How Relay Camera exists on this PC (S43): the Windows 11 22H2+ frame-server
+ *  camera (HKLM, one admin prompt) or, on Windows 10, a DirectShow filter
+ *  registered for this user only (no prompt). */
+export type CameraPath = "frame_server" | "direct_show";
 export interface VdeviceStatus {
   windows_build: number | null;
   camera_supported: boolean;
+  /** Absent from cores older than S43, which only knew the frame server. */
+  camera_path?: CameraPath | null;
   camera_registered: boolean;
   obs_virtualcam: string | null;
   mic_targets: MicTarget[];
@@ -538,6 +544,7 @@ let mockAutostart = false;
 const mockVdevice: VdeviceStatus = {
   windows_build: 26200,
   camera_supported: true,
+  camera_path: "frame_server",
   camera_registered: false,
   obs_virtualcam: null,
   mic_targets: [

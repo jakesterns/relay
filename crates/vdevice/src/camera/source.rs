@@ -825,10 +825,14 @@ pub extern "system" fn RelayVdeviceDllGetClassObject(
     }
     // SAFETY: checked non-null; the caller passes valid GUID pointers.
     unsafe {
-        if *rclsid != CLSID_RELAY_VCAM {
+        let factory: IClassFactory = if *rclsid == CLSID_RELAY_VCAM {
+            Factory.into()
+        } else if *rclsid == super::CLSID_RELAY_DSHOW {
+            // Same DLL, second class: the Windows 10 DirectShow filter.
+            super::dshow::Factory.into()
+        } else {
             return CLASS_E_CLASSNOTAVAILABLE;
-        }
-        let factory: IClassFactory = Factory.into();
+        };
         match factory.query(riid, ppv) {
             hr if hr == S_OK => S_OK,
             hr => hr,

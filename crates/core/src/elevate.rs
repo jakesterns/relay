@@ -719,6 +719,15 @@ mod imp {
     }
 
     fn install_camera(paths: &Paths) -> OpOutcome {
+        // Windows 10 (no frame-server API): Relay Camera is the per-user
+        // DirectShow filter, installed by the core without elevation. The
+        // HKLM media source would be dead weight there, so refuse it.
+        if relay_vdevice::detect::camera_path() == relay_vdevice::reg::CameraPath::DirectShow {
+            return OpOutcome::Refused {
+                reason: "this Windows uses the per-user camera, which needs no administrator"
+                    .into(),
+            };
+        }
         // Vet the keys the planner will actually create, against our own
         // CLSID, using this process' own DLL — nothing from the request.
         let planned: Vec<String> = crate::vdevice::camera_plan_keys();
