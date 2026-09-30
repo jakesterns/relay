@@ -765,9 +765,12 @@ impl Service {
                 // GetForegroundWindow every tick disagreed with the hook (it
                 // named another app with no foreground event) and undid a
                 // profile that was still wanted.
-                let applied_pid = g.state.foreground.as_ref().map(|f| f.pid).filter(|p| *p != 0);
-                applied_pid
-                    .filter(|pid| crate::winloop::process_image_path(*pid).is_none())
+                // By window, not process: IsWindow touches nothing in the
+                // game, where opening its process every 100 ms would be the
+                // kind of access anti-cheat watches for.
+                let applied = g.state.foreground.as_ref().map(|f| f.hwnd).filter(|h| *h != 0);
+                applied
+                    .filter(|h| !crate::winloop::window_alive(*h))
                     .map(|_| crate::winloop::current_foreground())
             };
             if let Some(now) = stale {
@@ -776,6 +779,7 @@ impl Service {
                     exe: String::new(),
                     title: String::new(),
                     hmonitor: 0,
+                    hwnd: 0,
                 });
                 info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
                 self.on_foreground(fg);

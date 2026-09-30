@@ -87,6 +87,23 @@ impl Drop for WinLoop {
 
 /// Full image path of a process, or `None` if it cannot be queried.
 #[cfg(windows)]
+/// Whether a window still exists. A plain user32 query on the window
+/// handle: nothing is opened in the owning process.
+pub fn window_alive(hwnd: u64) -> bool {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+        // SAFETY: IsWindow accepts any value, including stale handles.
+        unsafe { IsWindow(Some(HWND(hwnd as *mut _))).as_bool() }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        true
+    }
+}
+
 pub fn process_image_path(pid: u32) -> Option<String> {
     // SAFETY: only limited-information access is requested; see `imp::process_image`.
     unsafe { imp::process_image(pid) }
@@ -502,7 +519,7 @@ mod imp {
 
         let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as i64;
 
-        Some(Foreground { pid, exe, title, hmonitor })
+        Some(Foreground { pid, exe, title, hmonitor, hwnd: hwnd.0 as u64 })
     }
 
     pub(super) unsafe fn process_image(pid: u32) -> Option<String> {
