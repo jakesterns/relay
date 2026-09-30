@@ -108,6 +108,17 @@ fn apo_end_to_end_in_process() {
         let props = apo_obj.GetRegistrationProperties().expect("reg props");
         assert_eq!((*props).clsid, CLSID_RELAY_APO);
         assert_eq!((*props).u32MaxInputConnections, 1);
+        // The audio-engine registration the installer writes must say the
+        // same thing the object reports (S42b).
+        assert_eq!((*props).Flags.0 as u32, relay_apo::ids::APO_REG_FLAGS);
+        assert_eq!((*props).u32MajorVersion, relay_apo::ids::APO_MAJOR_VERSION);
+        assert_eq!((*props).u32MinorVersion, relay_apo::ids::APO_MINOR_VERSION);
+        assert_eq!((*props).u32NumAPOInterfaces, 1);
+        assert_eq!(
+            format!("{{{:?}}}", (*props).iidAPOInterfaceList[0]),
+            relay_apo::ids::IID_IAUDIO_PROCESSING_OBJECT
+        );
+        assert_eq!((*props).u32MaxInstances, u32::MAX);
     }
 
     // Initialize with no engine payload: endpoint comes from the override,

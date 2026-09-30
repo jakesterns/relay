@@ -68,7 +68,13 @@ fn an_unelevated_helper_refuses_everything_and_changes_nothing() {
     let req = write_raw(
         &root,
         nonce,
-        &request_json(&root, nonce, r#"["install_apo","install_camera"]"#, now(), REQUEST_VERSION),
+        &request_json(
+            &root,
+            nonce,
+            r#"[{"install_apo":{}},"install_camera"]"#,
+            now(),
+            REQUEST_VERSION,
+        ),
     );
 
     let out = run_helper(&req);
@@ -190,7 +196,7 @@ fn a_data_dir_run_stays_in_its_own_root() {
     let req = write_raw(
         &root,
         nonce,
-        &request_json(&root, nonce, r#"["uninstall_apo"]"#, now(), REQUEST_VERSION),
+        &request_json(&root, nonce, r#"[{"uninstall_apo":{}}]"#, now(), REQUEST_VERSION),
     );
     let _ = run_helper(&req);
     assert!(elevate_dir(&root).join(format!("{nonce}.result.json")).exists());

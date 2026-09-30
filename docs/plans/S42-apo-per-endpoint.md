@@ -63,6 +63,61 @@ the same plan-then-UAC flow.
 - UI: per-output list, plan and run for the chosen output only, two outputs at
   once, remove one leaves the other, orphaned backup, offline.
 
+## S42b — audio-engine registration (branch `feat/s42b-apo-registration`)
+
+**Live finding (dev PC, 2026-09-30).** Installed on an unused S/PDIF output:
+FxProperties were right (`{d04e05a6-…},7` and `,15` = Relay's CLSID, modes
+`{d3993a3f-…},7` has MODE_DEFAULT) and the COM class existed under
+`HKLM\SOFTWARE\Classes\CLSID\{5A8E9C3B-…}`. After restarting
+AudioEndpointBuilder/Audiosrv and playing to that output the APO never loaded
+(no shm section, no CodeIntegrity events). Cause: no key at
+`HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{5A8E9C3B-…}` —
+the `RegisterAPO` / `APO_REG_PROPERTIES` registration audiodg looks APOs up
+in (22 others were there).
+
+**Fix.**
+- `fxstore::plan_install` adds that key to the machine-wide keys
+  (`com_keys`, recorded in the backup) with `audio_engine_values()`: in
+  `RegisterAPO`'s order and types (checked against the WM audio GFX APO's
+  export on the dev PC) — FriendlyName, Copyright (REG_SZ), MajorVersion 1,
+  MinorVersion 0, Flags 0x0e, Min/Max Input/Output Connections 1,
+  MaxInstances 0xffffffff, NumAPOInterfaces 1 (REG_DWORD), APOInterface0 =
+  `{FD7F2B29-…}` IID_IAudioProcessingObject (REG_SZ). Every number comes from
+  `ids` and `com::GetRegistrationProperties` uses the same constants;
+  `tests/apo_com.rs` asserts they agree.
+- Flags 0x0e = `APO_FLAG_DEFAULT` (samples-per-frame, frames-per-second,
+  bits-per-sample must match): negotiation accepts only f32 stereo both
+  sides at the opposite side's rate, frames are 1:1. Not INPLACE.
+- Same lifetime rule as the COM class: created on the first install, kept
+  while another endpoint carries the APO, removed with the last (also in
+  the failed-install rollback and uninstall-all). `restore_backup_for` adds
+  the key to a last-endpoint restore even when the backup predates S42b.
+  `livereg::restore` treats an already-absent key as done.
+- `elevate::vet_apo_machine_keys`: only our CLSID subtree and exactly our
+  audio-engine key; another APO's key, the root, a sub-key or `..` is
+  refused. Applied to on-disk backups before uninstall and to the derived
+  plan inside `install_live`.
+- Dry run (`plan_lines`) lists the key; `relay-core apo status` prints
+  `audio-engine registration: present / values differ / missing`
+  (`ApoStatus.audio_engine`, TS mirror). S41b's reader still classifies
+  Relay's CLSID as Relay.
+- Fixture: `crates/audio/tests/fixtures/audioengine-apos-baseline.reg`
+  (read-only export of the dev PC); install → uninstall reproduces it
+  byte-for-byte.
+- Also fixed: `tests/elevate_helper.rs` still sent pre-S42 string ops.
+
+**Live retest (with Jake).**
+1. `reg export HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects ae-before.reg`
+   plus the Render export.
+2. Uninstall the S42 install on the S/PDIF output (restores FxProperties and
+   the COM class), rebuild, `elevate plan install-apo --endpoint <guid>` —
+   the listing names the audio-engine key.
+3. Install, then `relay-core apo status` → `audio-engine registration: present`.
+4. `Restart-Service AudioEndpointBuilder -Force` (restarts Audiosrv), play
+   speech/music to S/PDIF; `tasklist /m relay_apo.dll /fi "imagename eq audiodg.exe"`
+   and `params section: reachable`.
+5. Uninstall: `reg export` again, diff against `ae-before.reg` → empty.
+
 ## Live test plan (VM or Jake's machine, with Jake — NOT unattended)
 
 Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per

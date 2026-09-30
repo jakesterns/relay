@@ -27,6 +27,40 @@ pub fn clsid_key(clsid: &str) -> String {
     format!(r"SOFTWARE\Classes\CLSID\{clsid}")
 }
 
+/// Root of the audio engine's APO registry (relative to HKLM). audiodg only
+/// instantiates an APO that has a key here — the `RegisterAPO` /
+/// `APO_REG_PROPERTIES` registration. Live finding 2026-09-30: with only
+/// the COM class and the FxProperties values, the APO never loaded.
+pub const AUDIO_ENGINE_APO_ROOT: &str = r"SOFTWARE\Classes\AudioEngine\AudioProcessingObjects";
+
+/// The audio-engine registration key of one APO (relative to HKLM).
+pub fn audio_engine_key(clsid: &str) -> String {
+    format!(r"{AUDIO_ENGINE_APO_ROOT}\{clsid}")
+}
+
+/// Copyright string, as `GetRegistrationProperties` reports it and the
+/// audio-engine registration records it.
+pub const APO_COPYRIGHT: &str = "\u{a9} Relay";
+
+/// `APO_REG_PROPERTIES.Flags` — `APO_FLAG_DEFAULT` (0x0e) =
+/// `SAMPLESPERFRAME_MUST_MATCH` (2) | `FRAMESPERSECOND_MUST_MATCH` (4) |
+/// `BITSPERSAMPLE_MUST_MATCH` (8). Each is true of the code: `negotiate`
+/// accepts only float32 stereo on both sides and refuses a rate that differs
+/// from the opposite side, and `CalcInput/OutputFrames` are 1:1. Not
+/// `INPLACE` (1): `APOProcess` reads the input connection and writes the
+/// output connection as separate buffers. Must equal what
+/// `com::GetRegistrationProperties` returns (asserted in `tests/apo_com.rs`).
+pub const APO_REG_FLAGS: u32 = 0x0000_000e;
+
+/// `APO_REG_PROPERTIES` version fields (match `GetRegistrationProperties`).
+pub const APO_MAJOR_VERSION: u32 = 1;
+pub const APO_MINOR_VERSION: u32 = 0;
+
+/// The one interface `GetRegistrationProperties` lists:
+/// `IID_IAudioProcessingObject`, uppercase as `RegisterAPO` writes it for
+/// the third-party APOs registered on the dev PC.
+pub const IID_IAUDIO_PROCESSING_OBJECT: &str = "{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}";
+
 // Value names inside FxProperties. A property key serialises in the registry
 // as "{fmtid},pid" (lowercase braces/hex, no space) — the shapes below match
 // `reg export` output byte-for-byte.
@@ -50,5 +84,9 @@ mod tests {
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\{f8ae226b-a4e3-45ab-97fc-3977dad232d1}\FxProperties"
         );
         assert!(clsid_key(APO_CLSID).ends_with(APO_CLSID));
+        assert_eq!(
+            audio_engine_key(APO_CLSID),
+            r"SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}"
+        );
     }
 }

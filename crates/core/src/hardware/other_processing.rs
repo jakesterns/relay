@@ -777,6 +777,31 @@ mod tests {
         assert_eq!(found[0].clsids.len(), 2);
     }
 
+    /// S42b: Relay now registers under AudioEngine\AudioProcessingObjects
+    /// like any other APO, so `reg_of` finds it — it must still read as
+    /// Relay, never as somebody else's processing. Installed Relay store:
+    /// legacy EFX + composite EFX both name our CLSID.
+    #[test]
+    fn relay_with_its_audio_engine_registration_is_not_other() {
+        let plan = relay_apo::fxstore::plan_install(
+            &FxStore::empty(),
+            "{11111111-2222-3333-4444-555555555555}",
+            r"C:\x.dll",
+        );
+        let registered = |c: &str| {
+            c.eq_ignore_ascii_case(relay_apo::ids::APO_CLSID)
+                .then(|| apo(relay_apo::ids::APO_FRIENDLY_NAME))
+                .flatten()
+        };
+        assert!(effect_clsids(&plan.new_store)
+            .contains(&relay_apo::ids::APO_CLSID.to_ascii_lowercase()));
+        assert!(third_party_apos(&plan.new_store, registered).is_empty());
+        assert_eq!(
+            classify_clsid(&relay_apo::ids::APO_CLSID.to_ascii_lowercase()),
+            ApoClass::Relay
+        );
+    }
+
     #[test]
     fn a_clsid_not_registered_as_an_apo_is_not_reported() {
         // Even in an effect slot: e.g. a property page a driver put there.

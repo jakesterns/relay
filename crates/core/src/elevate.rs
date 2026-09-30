@@ -33,7 +33,9 @@
 //!    APO's from `relay_apo::fxstore::plan_install`, and both DLL paths come
 //!    from the helper's *own* directory — so a tampered request cannot point
 //!    the registration at somebody else's binary.
-//! 3. **Scope vetting before every write.** [`vet_com_keys`] refuses any COM
+//! 3. **Scope vetting before every write.** [`vet_apo_machine_keys`] limits
+//!    the APO's machine-wide keys to its COM class and its one audio-engine
+//!    registration key (S42b); [`vet_com_keys`] refuses any COM
 //!    key that is not at or under our own CLSID, and [`vet_endpoint_guid`]
 //!    refuses an endpoint id that is not a GUID. The uninstall paths read
 //!    their key lists off disk (`installed.json`, `apo-backup\*.json`), which
@@ -283,6 +285,25 @@ pub fn vet_com_keys(keys: &[String], clsid: &str) -> Result<(), String> {
         if !in_scope || k.contains("..") {
             return Err(format!(r"{key} is outside HKLM\{}", clsid_root(clsid)));
         }
+    }
+    Ok(())
+}
+
+/// The APO's machine-wide keys: its COM class subtree, plus exactly one
+/// audio-engine registration key — `SOFTWARE\Classes\AudioEngine\
+/// AudioProcessingObjects\{APO CLSID}` itself, nothing under it and no other
+/// APO's (S42b). Anything else in a backup's list is refused, so a tampered
+/// `apo-backup\<endpoint>.json` cannot delete another APO's registration.
+pub fn vet_apo_machine_keys(keys: &[String]) -> Result<(), String> {
+    let clsid = relay_apo::ids::APO_CLSID;
+    let ae = relay_apo::ids::audio_engine_key(clsid).to_ascii_lowercase();
+    for key in keys {
+        let k = key.trim().to_ascii_lowercase();
+        if k == ae {
+            continue;
+        }
+        vet_com_keys(std::slice::from_ref(key), clsid)
+            .map_err(|_| format!(r"{key} is outside HKLM\{} and HKLM\{}", clsid_root(clsid), ae))?;
     }
     Ok(())
 }
@@ -780,7 +801,7 @@ mod imp {
                     });
                 }
                 vet_endpoint_guid(&backup.endpoint_guid)
-                    .and_then(|()| vet_com_keys(&backup.com_keys, relay_apo::ids::APO_CLSID))
+                    .and_then(|()| vet_apo_machine_keys(&backup.com_keys))
                     .map_err(|reason| OpOutcome::Refused { reason })
             }
             Err(error) => Err(OpOutcome::Failed { error: format!("reading the backup: {error}") }),
@@ -915,6 +936,36 @@ mod tests {
             &format!("{}-evil", clsid_root(ours)),
         ] {
             assert!(vet_com_keys(&[bad.to_string()], ours).is_err(), "{bad} should be refused");
+        }
+    }
+
+    #[test]
+    fn apo_machine_keys_allow_only_our_class_and_our_audio_engine_key() {
+        use relay_apo::ids::{audio_engine_key, APO_CLSID, AUDIO_ENGINE_APO_ROOT};
+        // What a real install records passes.
+        let plan = relay_apo::fxstore::plan_install(
+            &relay_apo::fxstore::FxStore::empty(),
+            "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}",
+            r"C:\x\relay_apo.dll",
+        );
+        assert!(vet_apo_machine_keys(&plan.backup.com_keys).is_ok());
+        assert!(vet_apo_machine_keys(&[audio_engine_key(APO_CLSID).to_uppercase()]).is_ok());
+
+        for bad in [
+            // Another APO's registration (CAudioVolume).
+            format!(r"{AUDIO_ENGINE_APO_ROOT}\{{06587E71-F043-403A-BF49-CB591BA6E103}}"),
+            // The whole APO registry.
+            AUDIO_ENGINE_APO_ROOT.to_string(),
+            // Under ours: RegisterAPO never makes sub-keys, and neither do we.
+            format!(r"{}\sub", audio_engine_key(APO_CLSID)),
+            format!(r"{}\..\{{06587E71-F043-403A-BF49-CB591BA6E103}}", audio_engine_key(APO_CLSID)),
+            format!("{}-evil", audio_engine_key(APO_CLSID)),
+            r"SOFTWARE\Classes\AudioEngine".to_string(),
+        ] {
+            assert!(
+                vet_apo_machine_keys(std::slice::from_ref(&bad)).is_err(),
+                "{bad} should be refused"
+            );
         }
     }
 

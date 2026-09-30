@@ -179,6 +179,17 @@ fn main() -> Result<()> {
                             if e.running { "reachable" } else { "not reachable" },
                         );
                     }
+                    println!(
+                        "audio-engine registration (HKLM\\{}): {}",
+                        relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID),
+                        match s.audio_engine {
+                            relay_core::audio_apo::AudioEngineRegistration::Registered => "present",
+                            relay_core::audio_apo::AudioEngineRegistration::Mismatch =>
+                                "present, values differ from this build",
+                            relay_core::audio_apo::AudioEngineRegistration::Missing =>
+                                "missing (audiodg will not load the APO)",
+                        }
+                    );
                 }
                 Some("install") => {
                     let ep = relay_core::audio_apo::install_live(&dir, ep)?;

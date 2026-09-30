@@ -272,8 +272,8 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
             Flags: APO_FLAG_DEFAULT,
             szFriendlyName: [0; 256],
             szCopyrightInfo: [0; 256],
-            u32MajorVersion: 1,
-            u32MinorVersion: 0,
+            u32MajorVersion: crate::ids::APO_MAJOR_VERSION,
+            u32MinorVersion: crate::ids::APO_MINOR_VERSION,
             u32MinInputConnections: 1,
             u32MaxInputConnections: 1,
             u32MinOutputConnections: 1,
@@ -287,7 +287,9 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         {
             *dst = src;
         }
-        for (dst, src) in props.szCopyrightInfo.iter_mut().zip("© Relay".encode_utf16()) {
+        for (dst, src) in
+            props.szCopyrightInfo.iter_mut().zip(crate::ids::APO_COPYRIGHT.encode_utf16())
+        {
             *dst = src;
         }
         // SAFETY: `p` is a valid allocation of the right size.

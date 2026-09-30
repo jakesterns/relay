@@ -72,6 +72,10 @@ pub struct ApoStatus {
     /// is no longer active (so an unplugged device can still be restored).
     #[serde(default)]
     pub endpoints: Vec<EndpointApo>,
+    /// The machine-wide audio-engine registration audiodg needs to load the
+    /// APO at all (S42b).
+    #[serde(default)]
+    pub audio_engine: AudioEngineRegistration,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,8 +115,48 @@ pub fn restore_backup_for(
     let mut b = backup.clone();
     if others_installed {
         b.com_keys.clear();
+    } else {
+        // The last endpoint takes every machine-wide key with it — including
+        // the audio-engine registration (S42b), which a backup taken before
+        // S42b does not list even though a later install on another endpoint
+        // wrote it.
+        let ae = relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID);
+        if !b.com_keys.iter().any(|k| k.eq_ignore_ascii_case(&ae)) {
+            b.com_keys.push(ae);
+        }
     }
     b
+}
+
+/// Is Relay's audio-engine registration present *and* does it match what
+/// the installer writes? Pure: the live values are passed in. `None` =
+/// absent (audiodg will not instantiate the APO on any endpoint).
+pub fn audio_engine_state(live: Option<&relay_apo::regfile::ValueMap>) -> AudioEngineRegistration {
+    match live {
+        None => AudioEngineRegistration::Missing,
+        Some(v) => {
+            // Order-insensitive: enumeration order is not ours to promise.
+            let want = relay_apo::fxstore::audio_engine_values();
+            if v.len() == want.len() && want.iter().all(|(n, x)| v.get(n) == Some(x)) {
+                AudioEngineRegistration::Registered
+            } else {
+                AudioEngineRegistration::Mismatch
+            }
+        }
+    }
+}
+
+/// State of `HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{APO}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioEngineRegistration {
+    /// Present with exactly the values the installer writes.
+    Registered,
+    /// Present, but the values differ (an older build, or edited).
+    Mismatch,
+    /// Absent: the APO cannot load anywhere.
+    #[default]
+    Missing,
 }
 
 /// The name of one endpoint's parameter section. Per endpoint by
@@ -130,6 +174,29 @@ pub fn params_section(endpoint: &str, instance: &str, local: bool) -> String {
 /// Does this FX chain text name Relay's CLSID?
 fn names_relay(text: &str) -> bool {
     text.to_ascii_lowercase().contains(&relay_apo::ids::APO_CLSID.to_ascii_lowercase())
+}
+
+/// The registry lines of an install plan, as the pre-UAC listing shows
+/// them: each FxProperties value that changes, then each machine-wide key
+/// (COM class, InprocServer32, audio-engine registration). Pure.
+pub fn plan_lines(plan: &relay_apo::fxstore::InstallPlan) -> Vec<String> {
+    let mut lines = Vec::new();
+    let fx_root = relay_apo::ids::fx_key(&plan.backup.endpoint_guid);
+    for (rel, name) in relay_apo::fxstore::diff(&plan.backup.store, &plan.new_store) {
+        let key = if rel.is_empty() { fx_root.clone() } else { format!(r"{fx_root}\{rel}") };
+        lines.push(format!(r"HKLM\{key} :: {name}"));
+    }
+    let ae = relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID);
+    for path in plan.com_keys.keys() {
+        if path.eq_ignore_ascii_case(&ae) {
+            lines.push(format!(
+                r"HKLM\{path} (audio-engine registration; shared by every output, removed with the last)"
+            ));
+        } else {
+            lines.push(format!(r"HKLM\{path}"));
+        }
+    }
+    lines
 }
 
 /// Merge the active render endpoints with the recorded backups into the
@@ -233,12 +300,21 @@ pub fn apo_status(backup_dir: &Path) -> ApoStatus {
         endpoint: default.map(|e| e.endpoint.clone()),
         running: default.is_some_and(|e| e.running),
         endpoints,
+        audio_engine: audio_engine_state(
+            relay_apo::livereg::LiveRegistry::read_audio_engine_registration().as_ref(),
+        ),
     }
 }
 
 #[cfg(not(windows))]
 pub fn apo_status(_backup_dir: &Path) -> ApoStatus {
-    ApoStatus { installed: false, endpoint: None, running: false, endpoints: Vec::new() }
+    ApoStatus {
+        installed: false,
+        endpoint: None,
+        running: false,
+        endpoints: Vec::new(),
+        audio_engine: AudioEngineRegistration::Missing,
+    }
 }
 
 /// The endpoint an op targets: the one named, or the default output.
@@ -278,15 +354,7 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
     match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
         Ok(current) => {
             let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll_text);
-            let fx_root = relay_apo::ids::fx_key(&endpoint);
-            for (rel, name) in relay_apo::fxstore::diff(&plan.backup.store, &plan.new_store) {
-                let key =
-                    if rel.is_empty() { fx_root.clone() } else { format!(r"{fx_root}\{rel}") };
-                lines.push(format!(r"HKLM\{key} :: {name}"));
-            }
-            for path in plan.com_keys.keys() {
-                lines.push(format!(r"HKLM\{path}"));
-            }
+            lines.extend(plan_lines(&plan));
         }
         Err(e) => lines.push(format!("Could not read the endpoint's FX chain: {e}")),
     }
@@ -330,6 +398,11 @@ pub fn install_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<String>
     let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
         .with_context(|| format!("reading FX store of {endpoint}"))?;
     let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll.to_string_lossy());
+    // The machine-wide keys (COM class + audio-engine registration) are
+    // derived here, never taken from a request — and still vetted, so no
+    // plan can write outside the APO's own two CLSID keys.
+    let machine_keys: Vec<String> = plan.com_keys.keys().map(str::to_owned).collect();
+    crate::elevate::vet_apo_machine_keys(&machine_keys).map_err(anyhow::Error::msg)?;
     let others = !recorded_endpoints(backup_dir).is_empty();
 
     std::fs::create_dir_all(backup_dir)?;
@@ -577,14 +650,69 @@ mod tests {
         let s: ApoStatus =
             serde_json::from_str(r#"{"installed":false,"endpoint":null,"running":false}"#).unwrap();
         assert!(s.endpoints.is_empty());
+        assert_eq!(s.audio_engine, AudioEngineRegistration::Missing);
         let v = serde_json::to_value(ApoStatus {
             installed: true,
             endpoint: Some(A.into()),
             running: false,
             endpoints: merge_endpoints(&[(A.into(), "X".into(), true)], &[], |_| true, |_| false),
+            audio_engine: AudioEngineRegistration::Registered,
         })
         .unwrap();
         assert_eq!(v["endpoints"][0]["endpoint"], A);
         assert_eq!(v["endpoints"][0]["backed_up"], false);
+        assert_eq!(v["audio_engine"], "registered");
+    }
+
+    #[test]
+    fn dry_run_lines_name_the_audio_engine_key() {
+        let plan = relay_apo::fxstore::plan_install(
+            &relay_apo::fxstore::FxStore::empty(),
+            A,
+            r"C:\x\relay_apo.dll",
+        );
+        let lines = plan_lines(&plan);
+        let ae = format!(
+            r"HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{}",
+            relay_apo::ids::APO_CLSID
+        );
+        assert_eq!(lines.iter().filter(|l| l.starts_with(&ae)).count(), 1, "{lines:#?}");
+        assert!(lines
+            .iter()
+            .any(|l| l == &format!(r"HKLM\SOFTWARE\Classes\CLSID\{}", relay_apo::ids::APO_CLSID)));
+        assert_eq!(lines.iter().filter(|l| l.contains(" :: ")).count(), 3);
+        assert_eq!(lines.len(), 6);
+    }
+
+    #[test]
+    fn audio_engine_state_reads_missing_registered_and_mismatch() {
+        use relay_apo::regfile::{RegKind, RegValue};
+        assert_eq!(audio_engine_state(None), AudioEngineRegistration::Missing);
+        let want = relay_apo::fxstore::audio_engine_values();
+        assert_eq!(audio_engine_state(Some(&want)), AudioEngineRegistration::Registered);
+        // Enumeration order does not matter.
+        let mut pairs: Vec<_> = want.iter().map(|(k, v)| (k.to_owned(), v.clone())).collect();
+        pairs.reverse();
+        let reversed: relay_apo::regfile::ValueMap = pairs.into_iter().collect();
+        assert_eq!(audio_engine_state(Some(&reversed)), AudioEngineRegistration::Registered);
+        let mut other = want.clone();
+        other.insert("Flags".into(), RegValue { kind: RegKind::Dword, data: vec![0xf, 0, 0, 0] });
+        assert_eq!(audio_engine_state(Some(&other)), AudioEngineRegistration::Mismatch);
+    }
+
+    #[test]
+    fn last_endpoint_restore_removes_the_audio_engine_key_even_from_an_old_backup() {
+        let ae = relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID);
+        let mut b = backup(A);
+        assert!(b.com_keys.contains(&ae), "new installs record the audio-engine key");
+        // Kept while another endpoint carries the APO.
+        assert!(!restore_backup_for(&b, true).com_keys.contains(&ae));
+        // A pre-S42b backup lacks it; the last restore still removes it.
+        b.com_keys.retain(|k| k != &ae);
+        let last = restore_backup_for(&b, false);
+        assert_eq!(last.com_keys.iter().filter(|k| **k == ae).count(), 1);
+        // And a current backup does not list it twice.
+        let last = restore_backup_for(&backup(A), false);
+        assert_eq!(last.com_keys.iter().filter(|k| **k == ae).count(), 1);
     }
 }

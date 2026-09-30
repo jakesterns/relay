@@ -158,8 +158,7 @@ fn open_read(root: HKEY, path: &str) -> Option<Key> {
     let path_w = wide(path);
     let mut hkey = HKEY::default();
     // SAFETY: NUL-terminated path; valid out-pointer.
-    let err =
-        unsafe { RegOpenKeyExW(root, PCWSTR(path_w.as_ptr()), None, KEY_READ, &mut hkey) };
+    let err = unsafe { RegOpenKeyExW(root, PCWSTR(path_w.as_ptr()), None, KEY_READ, &mut hkey) };
     (err == ERROR_SUCCESS).then_some(Key(hkey))
 }
 

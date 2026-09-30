@@ -910,6 +910,7 @@ mod tests {
                     backed_up: true,
                     running: false,
                 }],
+                audio_engine: crate::audio_apo::AudioEngineRegistration::Registered,
             },
         })
         .unwrap();
