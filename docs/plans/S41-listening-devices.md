@@ -99,8 +99,52 @@ tokens only; the four new CSS rules are spacing.
 - Vendor exe names in `VENDOR_APPS` are from public knowledge, not verified on
   this rig except where noted in the live pass below.
 - The hotkey needs a core restart after toggling.
-- No per-output advice for vendor apps that create their own virtual outputs
-  (Sonar): the finding appears on every output.
+
+## S41b: detection fixes after the second-PC check (branch feat/s41b-detection)
+
+The second PC (Realtek HD Audio 6.0.1.8666 + Audio Console, RODECaster Duo,
+G HUB, iCUE, Dolby Access) showed false positives, duplicates, apps on every
+output, a key collision and wrong wording. Fixed:
+
+1. **Only real APOs.** Only the FX effect slots are read (pids 1, 2, 5, 6, 7,
+   11–15; the UI/property-page slot 3 held "RtkAdvPropPage Class"), and a
+   CLSID is reported only if `HKLM\SOFTWARE\Classes\AudioEngine\
+   AudioProcessingObjects\{clsid}` exists (read-only). Name from its
+   `FriendlyName`, else the COM class name. Nil GUID, Microsoft and Relay
+   CLSIDs still ignored.
+2. **One line per vendor.** Dedupe by CLSID, then group via `APO_VENDORS`
+   (Realtek, Nahimic/A-Volute, Dolby, DTS, Waves, Sonar, Razer THX, Creative,
+   Conexant/Synaptics, B&O): "Realtek audio effects (Realtek Audio Console)".
+3. **Apps by hardware.** `VENDOR_APPS` carry a scope: `Devices` (endpoint
+   name words or `VID_`/`VEN_` in the endpoint's hardware id, read from its
+   MMDevices `Properties` `{b3f8fa53-…},2`; VIDs Logitech 046D, Astro 9886,
+   Corsair 1B1C, SteelSeries 1038, Razer 1532, HyperX 0951/03F0, Turtle
+   Beach 10F5, RODE 19F7, Realtek 0BDA/10EC) or `OwnEndpoints` (Sonar,
+   Nahimic, Voicemeeter, FxSound, Dolby). No match, no line. An app already
+   named in an APO line is not repeated.
+4. **Spatial sound.** `Properties` value
+   `{f8d2c69d-0989-4cc6-b197-a9e152f3b5d3},3` holds the spatial format CLSID
+   (Windows Sonic `{b53b4c27-…}`; Dolby/DTS named via their COM class).
+   Reported as kind `spatial`: "Dolby Atmos for Headphones is on for this
+   output."
+5. **Unique endpoint keys.** Outputs sharing a container get
+   `ep:c:<container>#<endpoint guid>` in the probe, view, listening, other
+   processing and selection (`listening::unique_endpoint_keys`). Saved lists
+   under the S41 `#<name>` form, or the bare container key (goes to the
+   group's default output), are renamed on probe
+   (`HardwareStore::migrate_listening_keys`); M1 headset bindings on the
+   device key still resolve.
+6. **Wording.** One line per processor; the advice once per output. "Relay's
+   correction adds to it" only when a headset is the active listening device
+   on that output, otherwise "would add to it".
+7. **IPC.** The tagged `ListeningDevice` stays; a test parses the exact UI
+   payload and rejects bare id strings.
+
+Unverified: the spatial-format property key and Windows Sonic CLSID come
+from public sources and were not seen enabled on the dev PC; Dolby/DTS
+spatial CLSIDs are named by registry lookup, not a table. Re-run the second
+PC check: Realtek one line, RODECaster Main/Chat separate, no G HUB/iCUE,
+Dolby Atmos line when enabled.
 
 ## Live test list (Jake, two-PC rig; no audio played by the session)
 
