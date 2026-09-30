@@ -924,6 +924,24 @@ mod tests {
         assert!(matches!(back.method, Method::SetActiveListening { .. }));
     }
 
+    /// The exact payload `api.setListeningDevices` sends (ui/src/lib/ipc.ts,
+    /// locked there by Listening.test.tsx) parses; bare id strings do not.
+    #[test]
+    fn listening_devices_parse_from_the_ui_payload_only() {
+        use crate::hardware::ListeningDevice;
+        let ui = r#"{"id":1,"method":"set_listening_devices","params":{"endpoint":"ep:c:rode#aaaa","devices":[{"kind":"headset","id":"hd560s"},{"kind":"speakers"}]}}"#;
+        let r: Request = serde_json::from_str(ui).unwrap();
+        match r.method {
+            Method::SetListeningDevices { endpoint, devices } => {
+                assert_eq!(endpoint, "ep:c:rode#aaaa");
+                assert_eq!(devices[1], ListeningDevice::Speakers);
+            }
+            other => panic!("{other:?}"),
+        }
+        let bare = r#"{"id":1,"method":"set_listening_devices","params":{"endpoint":"x","devices":["hd560s"]}}"#;
+        assert!(serde_json::from_str::<Request>(bare).is_err());
+    }
+
     #[test]
     fn audio_device_methods_wire_shape() {
         // Mirrored by ui/src/lib/ipc.ts (listAudioDevices / setAudioDevice).
