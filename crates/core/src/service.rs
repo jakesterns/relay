@@ -364,8 +364,16 @@ impl Service {
         // profile with audio processing is active); footprint every 5th tick.
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut ticks = 0u32;
+        // Watches for the profiled app exiting, which fires no foreground
+        // event when nothing else takes focus. 100 ms keeps restore-on-exit
+        // inside the 200 ms budget; the branch is disabled while no profile
+        // is applied, so an idle core never wakes for it.
+        let mut exit_watch = tokio::time::interval(Duration::from_millis(100));
+        exit_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let profiled = self.inner.lock().state.active_profile.is_some();
             tokio::select! {
+                _ = exit_watch.tick(), if profiled => self.recheck_focus(),
                 ev = rx.recv() => {
                     match ev {
                         Some(CoreEvent::ForegroundChanged(fg)) => self.on_foreground(fg),
@@ -738,6 +746,41 @@ impl Service {
         // Catch a WASAPI-exclusive stream right at game launch, not only on
         // the next watcher tick (the DoD asks for detection within 1 s).
         self.refresh_audio_chain();
+    }
+
+    /// While a profile is applied, make sure the app it was applied for is
+    /// still the one in front. Closing the game often hands the foreground to
+    /// no window at all, and then no foreground event ever fires: the live
+    /// test closed Notepad and its profile stayed on the monitor until the
+    /// guard undid it (2026-09-29). The brief says restore on exit too.
+    fn recheck_focus(&self) {
+        #[cfg(windows)]
+        {
+            let stale = {
+                let g = self.inner.lock();
+                if g.state.active_profile.is_none() {
+                    return;
+                }
+                // Only the process exiting counts. Comparing against
+                // GetForegroundWindow every tick disagreed with the hook (it
+                // named another app with no foreground event) and undid a
+                // profile that was still wanted.
+                let applied_pid = g.state.foreground.as_ref().map(|f| f.pid).filter(|p| *p != 0);
+                applied_pid
+                    .filter(|pid| crate::winloop::process_image_path(*pid).is_none())
+                    .map(|_| crate::winloop::current_foreground())
+            };
+            if let Some(now) = stale {
+                let fg = now.unwrap_or(Foreground {
+                    pid: 0,
+                    exe: String::new(),
+                    title: String::new(),
+                    hmonitor: 0,
+                });
+                info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
+                self.on_foreground(fg);
+            }
+        }
     }
 
     /// While a profile with audio processing is active, probe the default

@@ -163,7 +163,11 @@ fn log_time(line: &str) -> Option<f64> {
 fn restore_latency_ms(log: &str) -> Option<f64> {
     let lines: Vec<&str> = log.lines().collect();
     let restored = lines.iter().rposition(|l| l.contains("original state restored"))?;
-    let blurred = lines[..restored].iter().rposition(|l| l.contains("foreground changed"))?;
+    // Focus leaving is a foreground event; the app exiting with nothing else
+    // taking focus fires none, and the core's exit watch logs this instead.
+    let blurred = lines[..restored]
+        .iter()
+        .rposition(|l| l.contains("foreground changed") || l.contains("the profiled app exited"))?;
     Some((log_time(lines[restored])? - log_time(lines[blurred])?) * 1000.0)
 }
 

@@ -30,3 +30,4 @@ ui/src-tauri/binaries/
 
 # Per-session git worktrees
 .worktrees/
+.claude/worktrees/
