@@ -388,3 +388,15 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .fader { display: flex; align-items: center; gap: 10px; }
 .fader .sl { flex: 1; min-width: 0; }
 .fader .btn.on { border-color: var(--brass); color: var(--brass); }
+/* Device pickers (S40): the .field select, compacted to sit in a fader row.
+   Capped so a long endpoint name cannot squeeze the slider out. */
+.devsel {
+  font: inherit; font-size: 12px; color: var(--mute); background: var(--raised);
+  border: 1px solid var(--line2); border-radius: 6px; padding: 5px 8px; outline: none;
+  min-width: 0; max-width: 190px; flex: none; text-overflow: ellipsis;
+  transition: border-color .25s var(--ease);
+}
+.devsel:focus { border-color: rgba(201,169,106,.5); }
+.devsel option { background: var(--raised); color: var(--ink); }
+.devrow { display: flex; align-items: center; gap: 10px; }
+.devrow > span { flex: 1; color: var(--mute); font-size: 12px; }

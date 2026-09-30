@@ -11,9 +11,9 @@ import type {
   ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
   ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
-  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus,
+  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import { newProfile, summarize } from "../lib/ipc";
+import { devicePrefKey, newProfile, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 export interface FakeCore {
@@ -38,6 +38,8 @@ export interface FakeCore {
   autostart: boolean;
   /** `settings.json`: what closing the window means. */
   prefs: UiPrefs;
+  /** Active audio endpoints (S40), both directions. */
+  audioDevices: AudioDevices;
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
@@ -147,7 +149,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
     peers: [],
     autostart: false,
-    prefs: { close_action: "keep_running", resilience: true, close_notice: true },
+    prefs: { close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {} },
+    audioDevices: {
+      render: [
+        { id: "{spk}", name: "Speakers (USB Audio 2.0)", is_default: true },
+        { id: "{hdmi}", name: "LG ULTRAGEAR+ (NVIDIA HDA)", is_default: false },
+      ],
+      capture: [
+        { id: "{rode}", name: "Microphone (Rodecaster)", is_default: true },
+        { id: "{cam}", name: "Webcam microphone", is_default: false },
+      ],
+    },
     elevation: { decline: false },
     fail: new Map(),
     handler: () => undefined,
@@ -212,6 +224,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     save_replay: () => undefined,
     switch_source: () => undefined,
     set_mixer: () => undefined,
+    list_audio_devices: () => structuredClone(core.audioDevices),
+    set_audio_device: (a) => {
+      // As the service does: saved in settings, whether or not anything runs.
+      const key = devicePrefKey(a.side as MixerSide, a.track as DeviceTrack);
+      if (!key) throw new Error("a receiver has no microphone to choose");
+      core.prefs = { ...core.prefs, audio_devices: { ...core.prefs.audio_devices, [key]: (a.device as string | null) ?? undefined } };
+    },
     list_presets: (): PresetsReply => structuredClone({ presets: core.presets, recording: core.recording }),
     save_preset: (a) => {
       const p = a.preset as SharePresetDef;
@@ -403,7 +422,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
-  "switch_source", "set_mixer", "list_presets", "save_preset", "delete_preset",
+  "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
   "save_hardware", "delete_hardware", "probe_hardware", "import_curve",

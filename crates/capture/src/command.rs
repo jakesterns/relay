@@ -41,8 +41,18 @@ pub struct FaderSet {
     pub call: Option<FaderLevel>,
 }
 
+/// A device-backed track the user can point at an endpoint (S40). `Mic` is
+/// the sender's microphone input; `Output` is where this engine plays audio
+/// (the receiver's received mix, the sender's call return).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceTrack {
+    Mic,
+    Output,
+}
+
 // `PartialEq` but not `Eq`: `FaderLevel::gain` is an f32.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum EngineCmd {
     Stop,
@@ -50,6 +60,13 @@ pub enum EngineCmd {
     /// applies it before encoding, the receiver before its one mix.
     Mixer {
         faders: FaderSet,
+    },
+    /// Point a device-backed track at an endpoint id, or back at the System
+    /// default (`device` absent or null), live, without restarting (S40).
+    Device {
+        track: DeviceTrack,
+        #[serde(default)]
+        device: Option<String>,
     },
     /// Toggle continuous recording.
     Record {
@@ -160,6 +177,29 @@ mod tests {
     }
 
     #[test]
+    fn device_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Device {
+                track: DeviceTrack::Mic,
+                device: Some("{0.0.1.00000000}.{abc}".into())
+            })
+            .unwrap(),
+            r#"{"cmd":"device","track":"mic","device":"{0.0.1.00000000}.{abc}"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Device { track: DeviceTrack::Output, device: None })
+                .unwrap(),
+            r#"{"cmd":"device","track":"output","device":null}"#
+        );
+        // Absent means the default, the same as null.
+        assert_eq!(
+            parse_line(r#"{"cmd":"device","track":"output"}"#),
+            Some(EngineCmd::Device { track: DeviceTrack::Output, device: None })
+        );
+        assert_eq!(parse_line(r#"{"cmd":"device","track":"speaker"}"#), None);
+    }
+
+    #[test]
     fn round_trips_and_rejects_junk() {
         for cmd in [
             EngineCmd::Stop,
@@ -167,9 +207,10 @@ mod tests {
             EngineCmd::ReplaySave,
             EngineCmd::Switch { target: SourceTarget::Display { index: 1 } },
             EngineCmd::Preview { fps: 0 },
+            EngineCmd::Device { track: DeviceTrack::Mic, device: Some("x".into()) },
         ] {
             let s = serde_json::to_string(&cmd).unwrap();
-            assert_eq!(parse_line(&s), Some(cmd), "{s}");
+            assert_eq!(parse_line(&s), Some(cmd.clone()), "{s}");
         }
         assert_eq!(parse_line(""), None);
         assert_eq!(parse_line("start"), None);

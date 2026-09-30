@@ -197,9 +197,10 @@ describe("what keeps running after the window closes", () => {
     await settle();
 
     // The whole object goes, not a patch: the core replaces the file with
-    // what it is sent, so a partial write would reset the S38 switches.
+    // what it is sent, so a partial write would reset the S38 switches
+    // and the S40 device picks.
     expect(tauri.lastCall("set_ui_prefs")?.args).toEqual({
-      prefs: { close_action: "quit_relay", resilience: true, close_notice: true },
+      prefs: { close_action: "quit_relay", resilience: true, close_notice: true, audio_devices: {} },
     });
     expect(core.prefs.close_action).toBe("quit_relay");
     // And the explanation switches to what now happens.

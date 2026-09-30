@@ -262,6 +262,28 @@ async fn set_mixer(
     }
 }
 
+/// Active audio endpoints for the mixer's device pickers (S40).
+#[tauri::command]
+async fn list_audio_devices() -> CmdResult<relay_core::share::AudioDevices> {
+    match call(Method::ListAudioDevices).await? {
+        Reply::AudioDevices { devices } => Ok(devices),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// One track's device, live and saved (S40). `device` null = System default.
+#[tauri::command]
+async fn set_audio_device(
+    side: relay_core::share::MixerSide,
+    track: relay_core::share::DeviceTrack,
+    device: Option<String>,
+) -> CmdResult<()> {
+    match call(Method::SetAudioDevice { side, track, device }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Mirrors `Reply::Presets`; the frontend gets one object.
 #[derive(Debug, serde::Serialize)]
 struct PresetsReply {
@@ -1022,6 +1044,8 @@ pub fn run() {
             save_replay,
             switch_source,
             set_mixer,
+            list_audio_devices,
+            set_audio_device,
             list_presets,
             save_preset,
             delete_preset,

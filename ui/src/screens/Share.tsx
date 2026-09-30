@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
-import { MixerCard, type MixerRow } from "../components/Mixer";
+import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
@@ -12,6 +12,13 @@ import {
   type DesktopAudio, type DiscoveredReceiver, type Peer, type ProcessInfo, type ShareCapabilities,
   type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
+
+/** S40: the mic picks its input; the call coming back picks where it plays.
+ *  Each shows only while its fader row does. */
+const SEND_DEVICES: MixerDevice[] = [
+  { track: "mic", row: "mic", label: "Microphone input" },
+  { track: "output", row: "call", label: "Call output" },
+];
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
 interface Strip {
@@ -445,6 +452,7 @@ export function Share() {
             the preset the engine read at start, so they match the wire. */}
         {sharing && (
           <MixerCard side="send" rows={sendRows(runningDef?.audio, strip.callLive)} sessionKey={`send-${running ?? ""}`}
+            devices={SEND_DEVICES}
             note={[
               runningDef?.audio.rest && runningDef.audio.desktop === "game"
                 ? "Recordings keep the game and the microphone; everything else is sent live but not written to disk."
