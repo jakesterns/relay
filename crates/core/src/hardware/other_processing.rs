@@ -145,6 +145,9 @@ pub fn third_party_apos(
 ) -> Vec<OtherProcessor> {
     effect_clsids(store)
         .into_iter()
+        // The all-zero GUID is an empty slot some drivers write, not an
+        // effect (the Realtek SPDIF output on the dev PC, 2026-09-29).
+        .filter(|c| c != "{00000000-0000-0000-0000-000000000000}")
         .filter(|c| classify_clsid(c) == ApoClass::Other)
         .map(|c| {
             let name = name_of(&c)
@@ -484,5 +487,17 @@ mod tests {
     fn guid_scan_ignores_malformed_groups() {
         assert!(guids_in("{not-a-guid}").is_empty());
         assert_eq!(guids_in("x{62DC1A93-AE24-464C-A43E-452F824C4250}y").len(), 1);
+    }
+
+    #[test]
+    fn the_nil_guid_is_not_an_effect() {
+        let s = store(vec![(
+            "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5",
+            RegValue {
+                kind: RegKind::Sz,
+                data: sz_bytes("{00000000-0000-0000-0000-000000000000}"),
+            },
+        )]);
+        assert!(third_party_apos(&s, |_| None).is_empty());
     }
 }
