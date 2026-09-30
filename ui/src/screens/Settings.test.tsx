@@ -344,6 +344,9 @@ describe("the virtual camera opt-in", () => {
     expect(core.vdevice.camera_registered).toBe(false);
     expect(core.vdevice.consent?.camera).toBe(false);
     expect(tauri.lastCall("run_elevated")).toBeUndefined();
+    // The panel closes when the call resolves; its removal list is gone.
+    expect(screen.queryByText(/What this removes/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove now" })).toBeNull();
     h.expectClean();
   });
 

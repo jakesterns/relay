@@ -197,6 +197,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let mut stdin_lines = crate::render::stdin_lines();
     let mut stdin_open = true;
     let mut host = opts.host;
+    // Relay Camera can be switched on or off while waiting (S43b): the
+    // choice is carried into the render thread when a sender connects.
+    let mut vcam = opts.vcam;
     // Where received audio plays (S40). Made here so a pick while waiting
     // for a sender is kept; the virtual-mic route, when set, is the output.
     let output = crate::devices::DeviceSlot::shared(
@@ -220,6 +223,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         }
                         Some(crate::command::EngineCmd::Device { track, device }) => {
                             crate::render::apply_device(&output, opts.mic_route.is_some(), track, device);
+                        }
+                        Some(crate::command::EngineCmd::Vcam { on }) => {
+                            info!(on, "vcam command received while waiting for a sender");
+                            vcam = on;
                         }
                         _ => {}
                     },
@@ -635,7 +642,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
 
     // Full receive mode is attached by the caller (decode + present + audio).
     let render_opts = crate::render::RenderOpts {
-        vcam: opts.vcam,
+        vcam,
         mic_route: opts.mic_route.clone(),
         host,
         output: output.clone(),

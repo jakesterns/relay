@@ -193,7 +193,10 @@ pub async fn run(
     let present_latency = Arc::new(AtomicI64::new(0));
     let pl = present_latency.clone();
     let stats2 = stats.clone();
-    let vcam = opts.vcam;
+    // Wanted state of Relay Camera, flipped live by a `vcam` command (S43b);
+    // the render thread follows it through `VcamSwitch`.
+    let vcam = Arc::new(AtomicBool::new(opts.vcam));
+    let vcam_cmd = vcam.clone();
     let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let failure2 = failure.clone();
     let quit = Arc::new(AtomicBool::new(false));
@@ -300,6 +303,10 @@ pub async fn run(
                         Some(EngineCmd::Host { mode, owner }) => {
                             info!(?mode, owner, "host command received on stdin");
                             link.post(mode, owner)
+                        }
+                        Some(EngineCmd::Vcam { on }) => {
+                            info!(on, "vcam command received; Relay Camera follows live");
+                            vcam_cmd.store(on, Ordering::Release);
                         }
                         Some(EngineCmd::Mixer { faders: set }) => {
                             faders.apply(&set);
@@ -498,12 +505,62 @@ impl Surface {
     }
 }
 
+/// Edge detector for the live Relay Camera toggle (S43b): acts once per
+/// change of the wanted state, so a start that fails (no registration) is
+/// reported once and not retried every frame until the wanted state changes.
+#[derive(Debug, Default)]
+pub(crate) struct VcamSwitch {
+    applied: bool,
+}
+
+impl VcamSwitch {
+    /// `Some(on)` when the sink must be started (`true`) or stopped.
+    pub(crate) fn step(&mut self, wanted: bool) -> Option<bool> {
+        (wanted != self.applied).then(|| {
+            self.applied = wanted;
+            wanted
+        })
+    }
+}
+
+fn follow_vcam(
+    switch: &mut VcamSwitch,
+    wanted: &AtomicBool,
+    sink: &mut Option<crate::vcam_sink::VcamSink>,
+    w: u32,
+    h: u32,
+) {
+    match switch.step(wanted.load(Ordering::Acquire)) {
+        Some(true) => match crate::vcam_sink::VcamSink::start(w, h, 60) {
+            Ok(s) => {
+                info!(w, h, "Relay Camera on");
+                println!("{}", serde_json::json!({ "event": "vcam_up", "width": w, "height": h }));
+                *sink = Some(s);
+            }
+            Err(e) => {
+                warn!(error = %e, "virtual camera unavailable");
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "vcam_error", "message": e.to_string() })
+                );
+            }
+        },
+        Some(false) => {
+            if sink.take().is_some() {
+                info!("Relay Camera off");
+                println!("{}", serde_json::json!({ "event": "vcam_down" }));
+            }
+        }
+        None => {}
+    }
+}
+
 /// Decode + present. Owns the D3D objects; the window is on its own thread.
 fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
     present_latency: Arc<AtomicI64>,
-    vcam: bool,
+    vcam: Arc<AtomicBool>,
     quit: Arc<AtomicBool>,
     link: Arc<HostLink>,
     host_owner: Option<u64>,
@@ -559,25 +616,11 @@ fn video_thread(
     // not an error).
 
     // Virtual camera (opt-in): best-effort — a missing registration or an
-    // unsupported build reports once and the window carries on alone.
-    let mut vcam_sink = if vcam {
-        match crate::vcam_sink::VcamSink::start(w, h, 60) {
-            Ok(sink) => {
-                println!("{}", serde_json::json!({ "event": "vcam_up", "width": w, "height": h }));
-                Some(sink)
-            }
-            Err(e) => {
-                warn!(error = %e, "virtual camera unavailable");
-                println!(
-                    "{}",
-                    serde_json::json!({ "event": "vcam_error", "message": e.to_string() })
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // unsupported build reports once and the window carries on alone. The
+    // wanted state can flip live (S43b), so this is re-checked every frame.
+    let mut vcam_switch = VcamSwitch::default();
+    let mut vcam_sink: Option<crate::vcam_sink::VcamSink> = None;
+    follow_vcam(&mut vcam_switch, &vcam, &mut vcam_sink, w, h);
 
     let mut pending: Option<AccessUnit> = Some(first);
     // Nothing is decoded until the first keyframe: see the gate in the loop.
@@ -707,6 +750,7 @@ fn video_thread(
                 break 'outer Err(e);
             }
             stats.video_presented.fetch_add(1, Ordering::Relaxed);
+            follow_vcam(&mut vcam_switch, &vcam, &mut vcam_sink, w, h);
             if let Some(sink) = vcam_sink.as_mut() {
                 if let Err(e) = sink.push(&surface.device, &surface.context, &frame) {
                     warn!(error = %e, "virtual camera sink stopped");
@@ -972,5 +1016,27 @@ fn hue(t: f32) -> (f32, f32, f32) {
         3 => (0.0, 1.0 - f, 1.0),
         4 => (f, 0.0, 1.0),
         _ => (1.0, 0.0, 1.0 - f),
+    }
+}
+
+#[cfg(test)]
+mod vcam_switch_tests {
+    use super::VcamSwitch;
+
+    #[test]
+    fn acts_once_per_change() {
+        let mut s = VcamSwitch::default();
+        assert_eq!(s.step(false), None, "off at spawn: nothing to do");
+        assert_eq!(s.step(true), Some(true), "installed mid-share: start");
+        assert_eq!(s.step(true), None, "a failed start is not retried every frame");
+        assert_eq!(s.step(false), Some(false), "uninstalled: stop");
+        assert_eq!(s.step(false), None);
+        assert_eq!(s.step(true), Some(true));
+    }
+
+    #[test]
+    fn on_at_spawn_starts_on_first_frame() {
+        let mut s = VcamSwitch::default();
+        assert_eq!(s.step(true), Some(true));
     }
 }

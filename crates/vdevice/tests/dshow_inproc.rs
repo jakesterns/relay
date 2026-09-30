@@ -45,6 +45,9 @@ struct Log {
     connected: Option<(GUID, i32, i32)>,
     /// (start, end, bytes) per received sample.
     samples: Vec<(i64, i64, Vec<u8>)>,
+    /// Samples that carried a media-type change (dynamic format change the
+    /// app never agreed to). Must stay 0.
+    type_changes: u32,
 }
 
 #[implement(IPin, IMemInputPin)]
@@ -146,6 +149,13 @@ impl IMemInputPin_Impl for Sink_Impl {
             let len = sample.GetActualDataLength() as usize;
             let bytes = std::slice::from_raw_parts(sample.GetPointer()?, len).to_vec();
             let mut log = self.log.lock().unwrap();
+            if let Ok(mt) = sample.GetMediaType() {
+                if !mt.is_null() {
+                    log.type_changes += 1;
+                    free_media_type(mt);
+                    CoTaskMemFree(Some(mt as *const _));
+                }
+            }
             if log.samples.len() < 200 {
                 log.samples.push((s, e, bytes));
             }
@@ -391,6 +401,52 @@ fn streams_ring_frames_in_every_format_with_monotonic_timestamps() {
         Some(&waiting),
         "waiting still after the producer stops"
     );
+
+    // 6. S43b: no size announced. The first advertised type is 720p NV12
+    //    (1080p's 3.1 MB frame overran ffmpeg's default buffer on the Win10
+    //    pass). A client that takes it, then sees the stream start at some
+    //    other size, keeps its 720p type and gets the stream scaled into it:
+    //    no reconnect and no media-type change it did not ask for.
+    ring.block().set_geometry_hint(0, 0, 0);
+    let first_offer = |pin: &IPin| unsafe {
+        let sc: IAMStreamConfig = pin.cast().unwrap();
+        let mut caps = VIDEO_STREAM_CONFIG_CAPS::default();
+        let mut mt: *mut AM_MEDIA_TYPE = std::ptr::null_mut();
+        sc.GetStreamCaps(0, &mut mt, &mut caps as *mut _ as *mut u8).unwrap();
+        let vih = &*((*mt).pbFormat as *const VIDEOINFOHEADER);
+        let got = ((*mt).subtype, vih.bmiHeader.biWidth, vih.bmiHeader.biHeight);
+        free_media_type(mt);
+        CoTaskMemFree(Some(mt as *const _));
+        got
+    };
+    let late = {
+        let (frame, name) = (frame.clone(), dshow_section_name_from_env());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            let ring = SharedFrames::create(&name).expect("late writer ring");
+            let (y, uv) = frame.split_at((w * h) as usize);
+            for i in 0..70 {
+                ring.block().write_frame(w, h, i * 333_333, y, w as usize, uv, w as usize);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let (log, _) = run_with_sink(MEDIASUBTYPE_NV12, 1000, |pin| {
+        assert_eq!(first_offer(pin), (MEDIASUBTYPE_NV12, 1280, 720), "idle: 720p NV12 first");
+    });
+    late.join().unwrap();
+    assert_eq!(log.connected, Some((MEDIASUBTYPE_NV12, 1280, 720)));
+    let n720 = picture::nv12_bytes(1280, 720);
+    assert!(log.samples.iter().all(|s| s.2.len() == n720), "every sample stays 720p NV12");
+    let mut scaled = vec![0u8; n720];
+    picture::scale_nv12(&frame, w, h, &mut scaled, 1280, 720);
+    assert!(log.samples.iter().any(|s| s.2 == scaled), "late 320x180 stream scaled to 720p");
+    assert_eq!(log.type_changes, 0, "no media-type change mid-run");
+
+    // With a size announced, the stream's own size is first again.
+    ring.block().set_geometry_hint(w, h, 30);
+    let filter = filter_via_class_factory();
+    assert_eq!(first_offer(&output_pin(&filter)), (MEDIASUBTYPE_NV12, w as i32, h as i32));
     drop(ring);
 }
 

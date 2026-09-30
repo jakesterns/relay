@@ -257,7 +257,12 @@ pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
 /// vetting are the gates, so Install works in the shipped app.
 #[cfg(windows)]
 pub fn install_dshow_live(paths: &Paths) -> Result<()> {
-    install_dshow_with(paths, camera_dll_path, relay_vdevice::livereg::apply_user_consented)
+    install_dshow_with(
+        paths,
+        camera_dll_path,
+        relay_vdevice::livereg::user_key_exists,
+        relay_vdevice::livereg::apply_user_consented,
+    )
 }
 
 /// [`install_dshow_live`] with the DLL lookup and the registry writer
@@ -268,6 +273,7 @@ pub fn install_dshow_live(paths: &Paths) -> Result<()> {
 fn install_dshow_with(
     paths: &Paths,
     dll_path: impl FnOnce() -> Result<std::path::PathBuf>,
+    exists: impl Fn(&str) -> bool,
     write: impl FnOnce(
         &[relay_vdevice::reg::RegKeySpec],
     ) -> Result<(), relay_vdevice::livereg::LiveRegError>,
@@ -280,8 +286,11 @@ fn install_dshow_with(
         bail!("the camera filter is already recorded as registered; uninstall first");
     }
     let dll = dll_path()?;
-    let plan = relay_vdevice::reg::plan_dshow_install(&dll.to_string_lossy());
+    let mut plan = relay_vdevice::reg::plan_dshow_install(&dll.to_string_lossy());
     relay_vdevice::reg::vet_dshow_keys(&plan.record.hkcu_keys).map_err(anyhow::Error::msg)?;
+    // Record which category parents this write will create, so uninstall
+    // can take them away again (only if still empty) -- S43b.
+    plan.record.hkcu_created_parents = relay_vdevice::reg::dshow_parents_to_create(exists);
 
     file.record(plan.record.clone());
     save(paths, &file)?;
@@ -304,20 +313,34 @@ fn install_dshow_with(
 /// keys, after vetting them against the three the filter may own.
 #[cfg(windows)]
 pub fn uninstall_dshow_live(paths: &Paths) -> Result<()> {
-    uninstall_dshow_with(paths, relay_vdevice::livereg::remove_user_consented)
+    uninstall_dshow_with(
+        paths,
+        relay_vdevice::livereg::remove_user_consented,
+        relay_vdevice::livereg::remove_user_empty_consented,
+    )
 }
 
 #[cfg(windows)]
 fn uninstall_dshow_with(
     paths: &Paths,
     remove: impl FnOnce(&[String]) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+    remove_if_empty: impl FnOnce(&[String]) -> Result<(), relay_vdevice::livereg::LiveRegError>,
 ) -> Result<()> {
     let mut file = load(paths)?;
     let Some(record) = file.component(CAMERA_DSHOW_FILTER).cloned() else {
         bail!("no camera filter registration recorded; nothing to uninstall");
     };
     let keys = relay_vdevice::reg::plan_dshow_uninstall(&record).map_err(anyhow::Error::msg)?;
+    let parents =
+        relay_vdevice::reg::plan_dshow_parent_cleanup(&record).map_err(anyhow::Error::msg)?;
     remove(&keys).context("removing the camera filter keys")?;
+    // Parents the install created, deepest first, and only while empty. A
+    // failure here leaves an empty key, not a camera: log it and go on.
+    if !parents.is_empty() {
+        if let Err(e) = remove_if_empty(&parents) {
+            tracing::warn!(error = %e, "could not remove the empty category keys Relay created");
+        }
+    }
     file.remove(CAMERA_DSHOW_FILTER);
     save(paths, &file)?;
     tracing::info!("camera filter unregistered");
@@ -450,15 +473,16 @@ mod tests {
         // Never the real registry: a fake writer counts what would be written.
         let paths = temp_paths("dsgate");
         let fake_dll = || Ok(std::path::PathBuf::from("C:/Relay/relay_vdevice.dll"));
-        let err = install_dshow_with(&paths, fake_dll, |_| panic!("wrote without consent"))
-            .unwrap_err();
+        let err =
+            install_dshow_with(&paths, fake_dll, |_| false, |_| panic!("wrote without consent"))
+                .unwrap_err();
         assert!(err.to_string().contains("consent"), "{err}");
         assert!(installed::load(&paths.installed_file()).unwrap().components.is_empty());
 
         // Consented: exactly the three vetted keys, and the record is kept.
         set_consent(&paths, false, true, false).unwrap();
         let mut wrote = 0;
-        install_dshow_with(&paths, fake_dll, |keys| {
+        install_dshow_with(&paths, fake_dll, |_| true, |keys| {
             wrote = keys.len();
             Ok(())
         })
@@ -495,21 +519,82 @@ mod tests {
         installed::save(&paths.installed_file(), &file).unwrap();
         assert_eq!(recorded_dshow_keys(&paths).len(), 3);
         // A failed delete keeps the record for a later retry.
-        let err = uninstall_dshow_with(&paths, |_| {
-            Err(relay_vdevice::livereg::LiveRegError::WritesDisabled)
-        })
+        let err = uninstall_dshow_with(
+            &paths,
+            |_| Err(relay_vdevice::livereg::LiveRegError::WritesDisabled),
+            |_| panic!("parents before the keys"),
+        )
         .unwrap_err();
         assert!(format!("{err:#}").contains("removing"), "{err:#}");
         assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
         // A good one removes the three keys and forgets the record.
         let mut removed = 0;
-        uninstall_dshow_with(&paths, |keys| {
-            removed = keys.len();
-            Ok(())
-        })
+        uninstall_dshow_with(
+            &paths,
+            |keys| {
+                removed = keys.len();
+                Ok(())
+            },
+            |_| panic!("no parents recorded, none removed"),
+        )
         .unwrap();
         assert_eq!(removed, 3);
         assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_none());
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    /// S43b: the category keys the install created are recorded, and on
+    /// uninstall only those go, after the filter keys, through the empty-only
+    /// remover. Pre-existing parents are never recorded, so never removed.
+    #[cfg(windows)]
+    #[test]
+    fn dshow_created_parents_are_recorded_and_removed_empty_only() {
+        let paths = temp_paths("dsparents");
+        set_consent(&paths, false, true, false).unwrap();
+        let fake_dll = || Ok(std::path::PathBuf::from("C:/Relay/relay_vdevice.dll"));
+        let [instance, category] = relay_vdevice::reg::dshow_parent_keys();
+        // Fresh PC: neither category key exists before the write.
+        install_dshow_with(&paths, fake_dll, |_| false, |_| Ok(())).unwrap();
+        let rec = load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).cloned().unwrap();
+        assert_eq!(rec.hkcu_created_parents, vec![instance.clone(), category.clone()]);
+
+        let order = std::cell::RefCell::new(Vec::<String>::new());
+        uninstall_dshow_with(
+            &paths,
+            |keys| {
+                order.borrow_mut().push(format!("tree:{}", keys.len()));
+                Ok(())
+            },
+            |parents| {
+                for p in parents {
+                    order.borrow_mut().push(format!("empty:{p}"));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            order.into_inner(),
+            vec!["tree:3".to_string(), format!("empty:{instance}"), format!("empty:{category}")]
+        );
+
+        // Another camera already owns the category: nothing recorded, and
+        // uninstall never calls the parent remover.
+        install_dshow_with(&paths, fake_dll, |_| true, |_| Ok(())).unwrap();
+        let rec = load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).cloned().unwrap();
+        assert!(rec.hkcu_created_parents.is_empty());
+        uninstall_dshow_with(&paths, |_| Ok(()), |_| panic!("pre-existing parents touched"))
+            .unwrap();
+
+        // A tampered parent list is refused before any registry call.
+        let mut file = load(&paths).unwrap();
+        let mut rec = relay_vdevice::reg::plan_dshow_install("x.dll").record;
+        rec.hkcu_created_parents = vec![r"Software\Classes\CLSID".into()];
+        file.record(rec);
+        save(&paths, &file).unwrap();
+        let err = uninstall_dshow_with(&paths, |_| panic!("tree"), |_| panic!("empty"))
+            .unwrap_err();
+        assert!(err.to_string().contains("refusing"), "{err}");
         let _ = std::fs::remove_dir_all(paths.root());
     }
 

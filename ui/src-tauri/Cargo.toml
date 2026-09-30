@@ -29,6 +29,9 @@ tauri = { version = "2.11", features = ["protocol-asset"] }
 # And the stream window (stream_host.rs): positioning the engine's window
 # over the video area.
 [target.'cfg(windows)'.dependencies]
+# The WebView2 PermissionRequested handler (permissions.rs). Same version
+# wry already links, so this adds no second copy.
+webview2-com = "0.38"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

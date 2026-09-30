@@ -978,6 +978,23 @@ fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> 
     }
 }
 
+/// S43b: after the camera is installed or removed, or consent changes, tell
+/// a running receiver (waiting or mid-share) to start or stop Relay Camera
+/// by the same rule that decides `--vcam` at spawn. Best effort.
+fn sync_receive_vcam(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    let receiving = g.receive.is_some();
+    let camera_ok = receiving && crate::vdevice::receive_routing(&g.paths).0;
+    if let Some(cmd) = crate::share::receive_vcam_sync(receiving, camera_ok) {
+        if let Some(engine) = g.receive.as_mut() {
+            match engine.command(&cmd) {
+                Ok(()) => tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver"),
+                Err(e) => tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver"),
+            }
+        }
+    }
+}
+
 struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
@@ -2353,7 +2370,10 @@ impl IpcHandler {
                 let paths = g.paths.clone();
                 drop(g);
                 match crate::vdevice::set_consent(&paths, apo, camera, microphone) {
-                    Ok(_) => Reply::Ok,
+                    Ok(_) => {
+                        sync_receive_vcam(&self.inner);
+                        Reply::Ok
+                    }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
@@ -2370,6 +2390,7 @@ impl IpcHandler {
                         let _ = self
                             .events
                             .send(Event::Notice { text: "Relay Camera registered".into() });
+                        sync_receive_vcam(&self.inner);
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
@@ -2383,6 +2404,7 @@ impl IpcHandler {
                     Ok(()) => {
                         let _ =
                             self.events.send(Event::Notice { text: "Relay Camera removed".into() });
+                        sync_receive_vcam(&self.inner);
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
@@ -2479,6 +2501,9 @@ impl IpcHandler {
                 for line in &lines {
                     let _ = self.events.send(Event::Notice { text: line.clone() });
                 }
+                // A camera op through the helper changes what a running
+                // receiver should do (S43b); other ops leave it as it was.
+                sync_receive_vcam(&self.inner);
                 Reply::Elevation { declined: false, ok: response.ok(), lines }
             }
             Err(crate::elevate::LaunchError::Declined) => Reply::Elevation {

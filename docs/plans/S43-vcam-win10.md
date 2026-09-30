@@ -161,3 +161,54 @@ Needs a build with the post-commit installer, or a manual copy of
 9. `relay-core uninstall --dry-run` on a registered PC lists the three
    "Unregister the virtual camera (per-user filter)" steps and does **not**
    ask for elevation.
+
+## Live results (PC2, Win10 19045, r46) and S43b fixes
+Measured on the second PC with the shipped build:
+- ffmpeg (`-f dshow -list_devices true`) lists **"Relay Camera"**.
+- Idle (no producer): the waiting still at 30 fps; `signalstats` YAVG 28.75.
+- Live receive with `--vcam`: NV12 2560x1440, about 54 fps read by ffmpeg.
+- WebView2 / Edge on Win10 does **not** list DirectShow-only cameras (the
+  same as OBS VirtualCam and NVIDIA Broadcast there).
+- Uninstall passed, apart from item 3 below.
+
+Found and fixed in S43b (`feat/s43b-vcam-live`):
+1. **Install/remove while receiving had no effect until respawn.** New engine
+   command `{"cmd":"vcam","on":bool}` (`relay_capture::command` and the core
+   mirror in `share.rs`). The receiver follows it live, both while waiting
+   for a sender (carried into the render thread) and mid-share (the render
+   thread starts or drops its `VcamSink` through `VcamSwitch`, an edge
+   detector, so a failed start is reported once, not every frame). No
+   reconnect. Each toggle is logged to share.log and emits `vcam_up` /
+   `vcam_down`. The core sends it after `InstallVcam`, `UninstallVcam`,
+   `SetVdeviceConsent` and any `RunElevated` op, by the same rule
+   (`receive_routing`) that decides `--vcam` at spawn
+   (`share::receive_vcam_sync`). The S36 sender "Relay Camera here" stays
+   decided at spawn: the core arbitrates the single ring writer between a
+   share and a receive, so the sender logs and ignores the command.
+2. **Idle first type was 1080p NV12 (3.1 MB/frame)**; ffmpeg dropped 2 frames
+   with its default buffer. With no size hint the first advertised type is
+   now 1280x720 NV12; with a hint the stream's own size stays first.
+   `dshow_inproc.rs` stage 6 proves a client that negotiated 720p while idle
+   keeps its 720p type when the stream starts at another size: every sample
+   is 720p NV12, the stream is scaled into it, and no sample carries a
+   media-type change.
+3. **Empty leftover keys after uninstall**:
+   `HKCU\Software\Classes\CLSID\{860BB310-...}\Instance` and its parent. The
+   install now records, in the component's `hkcu_created_parents`, which of
+   those two did not exist beforehand; uninstall removes those only, deepest
+   first, after the filter keys, and only while empty (no values, no
+   subkeys; `RegDeleteKeyW`, not recursive). Pre-existing or non-empty keys
+   are never touched, and a tampered list is refused before any registry
+   call (`reg::plan_dshow_parent_cleanup`). Fixture-tested with fake
+   writers; no test touches the registry.
+4. The per-user "Remove now" panel closes as soon as the call resolves.
+5. Relay's own WebView2 answers every `PermissionRequested` with Deny,
+   silently (`ui/src-tauri/src/permissions.rs`; empty allow-list). Manual
+   check: in a debug build's devtools,
+   `navigator.mediaDevices.getUserMedia({video:true})` rejects with
+   NotAllowedError and no dialog appears.
+
+Owed live: toggle the camera from Settings while a receive is waiting and
+while one is playing, and check ffmpeg picks the stream up with no respawn;
+reinstall then uninstall on PC2 and `reg query` that the category keys are
+gone (on a PC with no other DirectShow camera).

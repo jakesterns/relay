@@ -515,7 +515,12 @@ function PerUserCameraPanel({ install, consent, onClose, onDone }: {
       } else {
         await api.uninstallVcam();
         await api.setVdeviceConsent(consent?.apo ?? false, false, false);
-        setDone("Relay Camera removed. Nothing else on your PC was changed.");
+        // Close as soon as the removal resolves: the "What this removes"
+        // list must not linger over keys that are already gone (S43b). The
+        // row's status line then says "Not installed".
+        onDone();
+        onClose();
+        return;
       }
       onDone();
     } catch (e) {

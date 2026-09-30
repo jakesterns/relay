@@ -3579,6 +3579,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "webview2-com",
  "windows 0.62.2",
 ]
 

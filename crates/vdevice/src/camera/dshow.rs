@@ -17,7 +17,7 @@
 //!   app's own threads never touch the ring and never wait on it.
 //!
 //! Formats: NV12 (the ring's own), YUY2 and RGB24 for apps that insist, at
-//! the size the producer announced in the ring header (fallback 1080p) plus
+//! the size the producer announced in the ring header (fallback 720p) plus
 //! 1080p / 720p / 360p. A stream of another size is scaled to what was
 //! negotiated. Timestamps are stream time from the run's start, strictly
 //! increasing.
@@ -75,8 +75,10 @@ use crate::frames::{dshow_section_name_from_env, SharedFrames, MAX_HEIGHT, MAX_W
 const KSPROPERTY_SUPPORT_GET: u32 = 1;
 /// Pin name / id apps see.
 const PIN_NAME: &str = "Capture";
-/// Size when no producer has announced one yet.
-const FALLBACK: (u32, u32, u32) = (1920, 1080, 30);
+/// Size when no producer has announced one yet: 720p, whose NV12 frame
+/// (1.4 MB) fits the default buffers of clients that take the first type
+/// (ffmpeg dropped frames at 1080p on the Win10 pass, S43b).
+const FALLBACK: (u32, u32, u32) = (1280, 720, 30);
 /// The ring is considered gone when its frame counter has not moved for
 /// this long; the app then gets the waiting still instead of a frozen frame.
 const STALE_AFTER: Duration = Duration::from_secs(2);
@@ -1232,8 +1234,9 @@ mod tests {
         assert_eq!(offers[2].fmt, PixFmt::Rgb24);
         // Hint equal to a standard size is not listed twice.
         assert_eq!(offered_formats(Some((1280, 720, 30))).len(), 9);
-        // No producer yet: 1080p30.
-        assert_eq!(offered_formats(None)[0].width, 1920);
+        // No producer yet: 720p30, then 1080p and 360p.
+        assert_eq!(offered_formats(None)[0].width, 1280);
+        assert_eq!(offered_formats(None)[0].height, 720);
         assert_eq!(offered_formats(None)[0].fps, 30);
     }
 

@@ -73,6 +73,7 @@ pub fn plan_camera_install(dll_path: &str) -> CameraInstallPlan {
         dll_path: dll_path.to_owned(),
         hklm_keys: keys.iter().map(|k| k.path.clone()).collect(),
         hkcu_keys: Vec::new(),
+        hkcu_created_parents: Vec::new(),
     };
     CameraInstallPlan { keys, record }
 }
@@ -150,6 +151,37 @@ pub fn dshow_allowed_keys() -> [String; 3] {
     [dshow_clsid_key(), format!(r"{}\InprocServer32", dshow_clsid_key()), dshow_category_key()]
 }
 
+/// The only parent keys the installer may record as its own creation, and
+/// so the only ones uninstall may delete (empty only), deepest first: the
+/// video-input category's `Instance` and the category CLSID key itself.
+/// Never `Software\Classes\CLSID` or anything above.
+pub fn dshow_parent_keys() -> [String; 2] {
+    [
+        format!(r"Software\Classes\CLSID\{VIDEO_INPUT_CATEGORY}\Instance"),
+        format!(r"Software\Classes\CLSID\{VIDEO_INPUT_CATEGORY}"),
+    ]
+}
+
+/// Which of [`dshow_parent_keys`] the install is about to create, given an
+/// existence probe of the live (or fake) registry. Deepest first.
+pub fn dshow_parents_to_create(exists: impl Fn(&str) -> bool) -> Vec<String> {
+    dshow_parent_keys().into_iter().filter(|k| !exists(k)).collect()
+}
+
+/// Vet and order recorded parents for the empty-only delete: refuses
+/// anything that is not one of [`dshow_parent_keys`].
+pub fn plan_dshow_parent_cleanup(record: &Component) -> Result<Vec<String>, String> {
+    let allowed = dshow_parent_keys();
+    for k in &record.hkcu_created_parents {
+        if !allowed.iter().any(|a| a.eq_ignore_ascii_case(k)) {
+            return Err(format!("refusing to touch {k}: not a Relay Camera parent key"));
+        }
+    }
+    let mut keys = record.hkcu_created_parents.clone();
+    keys.sort_by_key(|k| std::cmp::Reverse(k.matches('\\').count()));
+    Ok(keys)
+}
+
 /// Plan the per-user registration of the DirectShow filter. Pure.
 pub fn plan_dshow_install(dll_path: &str) -> CameraInstallPlan {
     let [clsid, inproc, category] = dshow_allowed_keys();
@@ -176,6 +208,8 @@ pub fn plan_dshow_install(dll_path: &str) -> CameraInstallPlan {
         dll_path: dll_path.to_owned(),
         hklm_keys: Vec::new(),
         hkcu_keys: keys.iter().map(|k| k.path.clone()).collect(),
+        // Filled by the installer from what exists at install time.
+        hkcu_created_parents: Vec::new(),
     };
     CameraInstallPlan { keys, record }
 }
@@ -203,6 +237,26 @@ pub fn plan_dshow_uninstall(record: &Component) -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dshow_parents_recorded_only_when_absent_and_vetted() {
+        use super::*;
+        let [instance, category] = dshow_parent_keys();
+        // A PC with no other DirectShow camera: both are new.
+        assert_eq!(dshow_parents_to_create(|_| false), vec![instance.clone(), category.clone()]);
+        // Category exists (another camera), Instance too: nothing recorded.
+        assert!(dshow_parents_to_create(|_| true).is_empty());
+        // Category exists, Instance does not: only Instance.
+        assert_eq!(dshow_parents_to_create(|k| k == category), vec![instance.clone()]);
+
+        let mut rec = plan_dshow_install("x.dll").record;
+        rec.hkcu_created_parents = vec![category.clone(), instance.clone()];
+        assert_eq!(plan_dshow_parent_cleanup(&rec).unwrap(), vec![instance, category]);
+        for bad in [r"Software\Classes\CLSID", r"Software\Classes", r"Software\Microsoft"] {
+            rec.hkcu_created_parents = vec![bad.into()];
+            assert!(plan_dshow_parent_cleanup(&rec).is_err(), "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]

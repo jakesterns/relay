@@ -17,8 +17,9 @@ use thiserror::Error;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-    HKEY_LOCAL_MACHINE, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
+    RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegDeleteTreeW, RegOpenKeyExW, RegQueryInfoKeyW,
+    RegSetValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WRITE,
+    REG_OPTION_NON_VOLATILE, REG_SZ, REG_VALUE_TYPE,
 };
 
 use crate::reg::RegKeySpec;
@@ -145,6 +146,62 @@ pub fn apply_user_consented(keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
 /// vetted keys.
 pub fn remove_user_consented(paths: &[String]) -> Result<(), LiveRegError> {
     delete_keys(HKEY_CURRENT_USER, paths)
+}
+
+/// Whether an HKCU key exists (read-only). Used at install to record which
+/// parent keys the install itself creates (S43b).
+pub fn user_key_exists(path: &str) -> bool {
+    open_read(HKEY_CURRENT_USER, path).is_some()
+}
+
+fn open_read(root: HKEY, path: &str) -> Option<Key> {
+    let path_w = wide(path);
+    let mut hkey = HKEY::default();
+    // SAFETY: NUL-terminated path; valid out-pointer.
+    let err =
+        unsafe { RegOpenKeyExW(root, PCWSTR(path_w.as_ptr()), None, KEY_READ, &mut hkey) };
+    (err == ERROR_SUCCESS).then_some(Key(hkey))
+}
+
+/// Delete each HKCU key, in the order given, only if it exists and is
+/// empty: no values (default included) and no subkeys. A key with anything
+/// in it, or already gone, is left alone and is not an error. Callers pass
+/// only vetted, recorded parents (`reg::plan_dshow_parent_cleanup`).
+pub fn remove_user_empty_consented(paths: &[String]) -> Result<(), LiveRegError> {
+    for path in paths {
+        let Some(key) = open_read(HKEY_CURRENT_USER, path) else { continue };
+        let (mut subkeys, mut values) = (0u32, 0u32);
+        // SAFETY: open key; only the two counts are requested.
+        let err = unsafe {
+            RegQueryInfoKeyW(
+                key.0,
+                None,
+                None,
+                None,
+                Some(&mut subkeys),
+                None,
+                None,
+                Some(&mut values),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        check(err)?;
+        drop(key);
+        if subkeys != 0 || values != 0 {
+            continue;
+        }
+        let path_w = wide(path);
+        // SAFETY: NUL-terminated path. RegDeleteKeyW is not recursive: it
+        // fails on a key that gained a subkey since the check.
+        let err = unsafe { RegDeleteKeyW(HKEY_CURRENT_USER, PCWSTR(path_w.as_ptr())) };
+        if err != ERROR_FILE_NOT_FOUND {
+            check(err)?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_under(root: HKEY, keys: &[RegKeySpec]) -> Result<(), LiveRegError> {

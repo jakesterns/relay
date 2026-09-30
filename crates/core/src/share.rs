@@ -184,6 +184,11 @@ pub enum EngineCmd {
     Switch {
         target: SourceTarget,
     },
+    /// Receiver only (S43b): start or stop Relay Camera live, waiting or
+    /// mid-share, with no reconnect.
+    Vcam {
+        on: bool,
+    },
     /// Retune the in-app preview: thumbnails per second, 0 = off.
     Preview {
         fps: u32,
@@ -623,6 +628,14 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     args
 }
 
+/// S43b: the command that brings a running receiver in line with the camera
+/// routing rule (`vdevice::receive_routing`, the same rule `--vcam` is
+/// decided by at spawn). `None` when nothing is receiving. The receiver acts
+/// only on a change, so sending the current state again is harmless.
+pub fn receive_vcam_sync(receiving: bool, camera_ok: bool) -> Option<EngineCmd> {
+    receiving.then_some(EngineCmd::Vcam { on: camera_ok })
+}
+
 /// The `relay-share recv` command line for a request.
 fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     let mut args = vec!["recv".to_string()];
@@ -764,6 +777,18 @@ pub fn pump(rx: Receiver<ShareEvent>, mut on_event: impl FnMut(ShareEvent)) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn vcam_command_wire_shape_and_when_sent() {
+        // Must match relay_capture::command's own test byte for byte.
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Vcam { on: true }).unwrap(),
+            r#"{"cmd":"vcam","on":true}"#
+        );
+        assert_eq!(receive_vcam_sync(false, true), None, "nothing receiving: nothing sent");
+        assert_eq!(receive_vcam_sync(true, true), Some(EngineCmd::Vcam { on: true }));
+        assert_eq!(receive_vcam_sync(true, false), Some(EngineCmd::Vcam { on: false }));
+    }
+
     use super::*;
 
     #[test]

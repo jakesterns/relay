@@ -1050,6 +1050,13 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         Some(EngineCmd::Host { .. }) => {
                             debug!("host is a receiver command; ignored by the sender");
                         }
+                        // S36's "Relay Camera here" stays decided at spawn:
+                        // the core arbitrates the one ring writer between a
+                        // share and a receive, so a live toggle is receiver
+                        // only (S43b; docs/plans/S43-vcam-win10.md).
+                        Some(EngineCmd::Vcam { on }) => {
+                            info!(on, "vcam is a receiver command; ignored by the sender");
+                        }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");
                         }

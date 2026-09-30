@@ -10,6 +10,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod permissions;
 mod stream_host;
 mod window_state;
 
@@ -975,6 +977,9 @@ pub fn run() {
         .setup(|app| {
             if let Some(w) = app.get_webview_window("main") {
                 window_state::restore(&w.as_ref().window());
+                // No device or permission prompt from our own webview (S43b).
+                #[cfg(windows)]
+                permissions::deny_all(&w);
             }
             spawn_event_bridge(app.handle().clone());
             spawn_core_autostart(app.handle().clone());

@@ -59,6 +59,13 @@ pub struct Component {
     /// HKLM ones). Same rule: uninstall deletes exactly these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hkcu_keys: Vec<String>,
+    /// HKCU parent keys that did not exist before install and were created
+    /// only as the path to a recorded key (S43b: the video-input category's
+    /// `CLSID\{860BB310-...}` and its `Instance` on a PC with no other
+    /// DirectShow camera). Uninstall deletes these deepest first, and only
+    /// while they are empty; a key that gained anything is left alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hkcu_created_parents: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +183,7 @@ mod tests {
             dll_path: r"C:\somewhere\relay_vdevice.dll".into(),
             hklm_keys: vec![r"SOFTWARE\Classes\CLSID\{X}".into()],
             hkcu_keys: vec![],
+            hkcu_created_parents: vec![],
         });
         save(&path, &f).expect("save");
         assert_eq!(load(&path).expect("load"), f);
@@ -187,6 +195,7 @@ mod tests {
             dll_path: "elsewhere.dll".into(),
             hklm_keys: vec![],
             hkcu_keys: vec![],
+            hkcu_created_parents: vec![],
         });
         assert_eq!(f.components.len(), 1);
         f.remove(CAMERA_MEDIA_SOURCE);

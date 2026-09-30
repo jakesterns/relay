@@ -68,6 +68,13 @@ pub enum EngineCmd {
         #[serde(default)]
         device: Option<String>,
     },
+    /// Receiver only (S43b): start or stop mirroring into Relay Camera,
+    /// live, while waiting for a sender or mid-share, with no reconnect. The
+    /// core sends it after the camera is installed or removed, or consent
+    /// changes, by the same rule that decides `--vcam` at spawn.
+    Vcam {
+        on: bool,
+    },
     /// Toggle continuous recording.
     Record {
         on: bool,
@@ -174,6 +181,16 @@ mod tests {
             serde_json::to_string(&EngineCmd::Preview { fps: 2 }).unwrap(),
             r#"{"cmd":"preview","fps":2}"#
         );
+    }
+
+    #[test]
+    fn vcam_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Vcam { on: true }).unwrap(),
+            r#"{"cmd":"vcam","on":true}"#
+        );
+        assert_eq!(parse_line(r#"{"cmd":"vcam","on":false}"#), Some(EngineCmd::Vcam { on: false }));
+        assert_eq!(parse_line(r#"{"cmd":"vcam"}"#), None);
     }
 
     #[test]
