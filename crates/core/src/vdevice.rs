@@ -253,10 +253,25 @@ pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
 
 /// Register the DirectShow camera filter for this user (the Windows 10
 /// path, S43). Consent-checked, vetted, record-then-apply like the media
-/// source — but HKCU only, so no elevation and no helper. Live writes stay
-/// behind `RELAY_VDEVICE_ALLOW_LIVE_WRITE=1`.
+/// source — but HKCU only, so no elevation and no helper. Consent plus key
+/// vetting are the gates, so Install works in the shipped app.
 #[cfg(windows)]
 pub fn install_dshow_live(paths: &Paths) -> Result<()> {
+    install_dshow_with(paths, camera_dll_path, relay_vdevice::livereg::apply_user_consented)
+}
+
+/// [`install_dshow_live`] with the DLL lookup and the registry writer
+/// passed in, so tests exercise every gate without touching the real
+/// registry (a test that reached the live writer once registered a camera
+/// on the dev PC, 2026-09-30).
+#[cfg(windows)]
+fn install_dshow_with(
+    paths: &Paths,
+    dll_path: impl FnOnce() -> Result<std::path::PathBuf>,
+    write: impl FnOnce(
+        &[relay_vdevice::reg::RegKeySpec],
+    ) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+) -> Result<()> {
     let mut file = load(paths)?;
     if !file.consent.as_ref().is_some_and(|c| c.camera) {
         bail!("no recorded consent for the virtual camera — opt in first");
@@ -264,13 +279,13 @@ pub fn install_dshow_live(paths: &Paths) -> Result<()> {
     if file.component(CAMERA_DSHOW_FILTER).is_some() {
         bail!("the camera filter is already recorded as registered; uninstall first");
     }
-    let dll = camera_dll_path()?;
+    let dll = dll_path()?;
     let plan = relay_vdevice::reg::plan_dshow_install(&dll.to_string_lossy());
     relay_vdevice::reg::vet_dshow_keys(&plan.record.hkcu_keys).map_err(anyhow::Error::msg)?;
 
     file.record(plan.record.clone());
     save(paths, &file)?;
-    match relay_vdevice::livereg::apply_user(&plan.keys) {
+    match write(&plan.keys) {
         Ok(()) => {
             tracing::info!(dll = %dll.display(), "camera filter registered for this user");
             Ok(())
@@ -280,7 +295,7 @@ pub fn install_dshow_live(paths: &Paths) -> Result<()> {
                 file.remove(CAMERA_DSHOW_FILTER);
                 save(paths, &file)?;
             }
-            Err(e).context("registering the camera filter (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate)")
+            Err(e).context("registering the camera filter")
         }
     }
 }
@@ -289,13 +304,20 @@ pub fn install_dshow_live(paths: &Paths) -> Result<()> {
 /// keys, after vetting them against the three the filter may own.
 #[cfg(windows)]
 pub fn uninstall_dshow_live(paths: &Paths) -> Result<()> {
+    uninstall_dshow_with(paths, relay_vdevice::livereg::remove_user_consented)
+}
+
+#[cfg(windows)]
+fn uninstall_dshow_with(
+    paths: &Paths,
+    remove: impl FnOnce(&[String]) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+) -> Result<()> {
     let mut file = load(paths)?;
     let Some(record) = file.component(CAMERA_DSHOW_FILTER).cloned() else {
         bail!("no camera filter registration recorded; nothing to uninstall");
     };
     let keys = relay_vdevice::reg::plan_dshow_uninstall(&record).map_err(anyhow::Error::msg)?;
-    relay_vdevice::livereg::remove_user(&keys)
-        .context("removing the camera filter keys (RELAY_VDEVICE_ALLOW_LIVE_WRITE gate)")?;
+    remove(&keys).context("removing the camera filter keys")?;
     file.remove(CAMERA_DSHOW_FILTER);
     save(paths, &file)?;
     tracing::info!("camera filter unregistered");
@@ -425,15 +447,24 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn dshow_install_refuses_without_consent_and_records_nothing() {
+        // Never the real registry: a fake writer counts what would be written.
         let paths = temp_paths("dsgate");
-        let err = install_dshow_live(&paths).unwrap_err();
+        let fake_dll = || Ok(std::path::PathBuf::from("C:/Relay/relay_vdevice.dll"));
+        let err = install_dshow_with(&paths, fake_dll, |_| panic!("wrote without consent"))
+            .unwrap_err();
         assert!(err.to_string().contains("consent"), "{err}");
-        // Consent, but no DLL beside the test binary: refused before the
-        // registry, nothing recorded, the gate never reached.
+        assert!(installed::load(&paths.installed_file()).unwrap().components.is_empty());
+
+        // Consented: exactly the three vetted keys, and the record is kept.
         set_consent(&paths, false, true, false).unwrap();
-        let _ = install_dshow_live(&paths).unwrap_err();
-        let file = installed::load(&paths.installed_file()).unwrap();
-        assert!(file.components.is_empty());
+        let mut wrote = 0;
+        install_dshow_with(&paths, fake_dll, |keys| {
+            wrote = keys.len();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(wrote, 3);
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
         let _ = std::fs::remove_dir_all(paths.root());
     }
 
@@ -456,17 +487,29 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn dshow_uninstall_with_a_good_record_stops_at_the_gate() {
-        // The gate env var is never set in tests: the vetted delete is
-        // refused by livereg and the record is kept for a later retry.
+    fn dshow_uninstall_removes_exactly_the_record_and_keeps_it_on_failure() {
+        // A fake remover: never the real registry.
         let paths = temp_paths("dsgood");
         let mut file = InstalledFile::default();
         file.record(relay_vdevice::reg::plan_dshow_install("x.dll").record);
         installed::save(&paths.installed_file(), &file).unwrap();
         assert_eq!(recorded_dshow_keys(&paths).len(), 3);
-        let err = uninstall_vcam(&paths).unwrap_err();
-        assert!(format!("{err:#}").contains("RELAY_VDEVICE_ALLOW_LIVE_WRITE"), "{err:#}");
+        // A failed delete keeps the record for a later retry.
+        let err = uninstall_dshow_with(&paths, |_| {
+            Err(relay_vdevice::livereg::LiveRegError::WritesDisabled)
+        })
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("removing"), "{err:#}");
         assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
+        // A good one removes the three keys and forgets the record.
+        let mut removed = 0;
+        uninstall_dshow_with(&paths, |keys| {
+            removed = keys.len();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(removed, 3);
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_none());
         let _ = std::fs::remove_dir_all(paths.root());
     }
 

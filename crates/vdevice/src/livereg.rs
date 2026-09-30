@@ -130,8 +130,29 @@ pub fn remove_user(paths: &[String]) -> Result<(), LiveRegError> {
     remove_under(HKEY_CURRENT_USER, paths)
 }
 
+/// The product path for the Windows 10 camera (approved by Jake 2026-09-29):
+/// HKCU only, no elevation, called by the core only after the user's recorded
+/// consent and after `reg::vet_dshow_keys` accepted exactly these keys. The
+/// environment gate guards against an accidental write in development; a
+/// per-user camera the user asked for must work in the shipped app with no
+/// setup, and the core cannot safely set an environment variable while other
+/// threads run.
+pub fn apply_user_consented(keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
+    write_keys(HKEY_CURRENT_USER, keys)
+}
+
+/// Counterpart of [`apply_user_consented`]: removes exactly the recorded,
+/// vetted keys.
+pub fn remove_user_consented(paths: &[String]) -> Result<(), LiveRegError> {
+    delete_keys(HKEY_CURRENT_USER, paths)
+}
+
 fn apply_under(root: HKEY, keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
     assert_writes_allowed()?;
+    write_keys(root, keys)
+}
+
+fn write_keys(root: HKEY, keys: &[RegKeySpec]) -> Result<(), LiveRegError> {
     for spec in keys {
         let key = Key::create(root, &spec.path)?;
         for (name, data) in &spec.values {
@@ -150,6 +171,10 @@ pub fn remove(paths: &[String]) -> Result<(), LiveRegError> {
 
 fn remove_under(root: HKEY, paths: &[String]) -> Result<(), LiveRegError> {
     assert_writes_allowed()?;
+    delete_keys(root, paths)
+}
+
+fn delete_keys(root: HKEY, paths: &[String]) -> Result<(), LiveRegError> {
     for path in paths {
         let path_w = wide(path);
         // SAFETY: NUL-terminated path.
