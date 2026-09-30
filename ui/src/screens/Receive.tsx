@@ -4,13 +4,16 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
-import { MixerCard, type MixerRow } from "../components/Mixer";
+import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import type { ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
   type ShareStats, type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
+
+/** S40: where the received audio plays, as a row of its own. */
+const RECEIVE_DEVICES: MixerDevice[] = [{ track: "output", label: "Output" }];
 
 /** Warn before the user tries, not after it fails.
  *
@@ -687,7 +690,7 @@ export function Receive() {
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}
         {receiving && sender && (
-          <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender}`} />
+          <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender}`} devices={RECEIVE_DEVICES} />
         )}
         {mock && <p className="note">Preview only — Relay isn't running.</p>}
         <p className="note">The stream plays here, in this window. Nothing on this PC is changed.</p>

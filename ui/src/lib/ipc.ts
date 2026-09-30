@@ -162,6 +162,16 @@ export type MixerTrack = "app" | "rest" | "mic" | "call";
 /** `gain` is linear, 0–2 (unity 1). */
 export interface FaderLevel { gain: number; mute: boolean }
 export type FaderSet = Partial<Record<MixerTrack, FaderLevel>>;
+/** Device-backed tracks (S40): the sender's mic input, or where an engine
+ *  plays (the receiver's received mix, the sender's call return). */
+export type DeviceTrack = "mic" | "output";
+/** One active endpoint. Mirrors `share::AudioDevice`. */
+export interface AudioDevice { id: string; name: string; is_default: boolean }
+export interface AudioDevices { render: AudioDevice[]; capture: AudioDevice[] }
+/** Saved picks; absent = System default. Mirrors `uiprefs::AudioDevicePrefs`. */
+export interface AudioDevicePrefs {
+  send_mic?: string | null; send_output?: string | null; receive_output?: string | null;
+}
 /**
  * Recording container. Same video + Opus bitstream either way — the choice
  * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
@@ -320,6 +330,8 @@ export interface UiPrefs {
   resilience: boolean;
   /** Say in the notification area that Relay kept running on close (S38). */
   close_notice: boolean;
+  /** The mixer's device picks (S40). Absent in a pre-S40 core. */
+  audio_devices?: AudioDevicePrefs;
 }
 
 export interface ShareStatus {
@@ -526,7 +538,26 @@ const mockCatalog: CatalogEntry[] = [
 ];
 
 /** Browser-mode stand-in for `settings.json`. */
-let mockUiPrefs: UiPrefs = { close_action: "keep_running", resilience: true, close_notice: true };
+let mockUiPrefs: UiPrefs = {
+  close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
+};
+/** Browser-mode stand-in for the endpoint list (S40). */
+const mockAudioDevices: AudioDevices = {
+  render: [
+    { id: "{0.0.0.00000000}.{spk}", name: "Speakers (USB Audio 2.0)", is_default: true },
+    { id: "{0.0.0.00000000}.{hdmi}", name: "LG ULTRAGEAR+ (NVIDIA HDA)", is_default: false },
+  ],
+  capture: [
+    { id: "{0.0.1.00000000}.{mic}", name: "Microphone (Rodecaster)", is_default: true },
+    { id: "{0.0.1.00000000}.{cam}", name: "Webcam microphone", is_default: false },
+  ],
+};
+
+/** The saved-prefs key for one track. A receiver has no mic. */
+export function devicePrefKey(side: MixerSide, track: DeviceTrack): keyof AudioDevicePrefs | null {
+  if (side === "receive" && track === "mic") return null;
+  return `${side}_${track}` as keyof AudioDevicePrefs;
+}
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -632,6 +663,20 @@ export const api = {
   async setMixer(side: MixerSide, faders: FaderSet): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("set_mixer", { side, faders });
+  },
+  /** Active render and capture endpoints (S40). */
+  async listAudioDevices(): Promise<AudioDevices> {
+    if (!isTauri()) return structuredClone(mockAudioDevices);
+    return invoke<AudioDevices>("list_audio_devices");
+  },
+  /** One track's device, live and saved (S40). `null` = System default. */
+  async setAudioDevice(side: MixerSide, track: DeviceTrack, device: string | null): Promise<void> {
+    if (!isTauri()) {
+      const key = devicePrefKey(side, track);
+      if (key) mockUiPrefs = { ...mockUiPrefs, audio_devices: { ...mockUiPrefs.audio_devices, [key]: device } };
+      return;
+    }
+    return invoke<void>("set_audio_device", { side, track, device });
   },
   async listPresets(): Promise<PresetsReply> {
     if (!isTauri()) return structuredClone({ presets: mockPresets, recording: mockRecording });
