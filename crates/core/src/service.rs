@@ -143,6 +143,10 @@ struct Inner {
     /// a fresh core), so a receiver brought back after a share ends is
     /// embedded again rather than coming up with no window at all.
     recv_host: Option<u64>,
+    /// Relay Camera state the running receiver was last given (at spawn
+    /// or by a toggle), so a toggle is sent only when it changes: install
+    /// and uninstall each sent it twice (PC2, r47).
+    recv_vcam: Option<bool>,
     /// When the current receive engine started. A restarted receiver that
     /// has stayed up for a while ends the episode even if no share arrived:
     /// otherwise the episode's clock ran on and the next unrelated failure,
@@ -266,6 +270,7 @@ impl Service {
             send_episode: None,
             recv_episode: None,
             recv_host: None,
+            recv_vcam: None,
             recv_started: None,
         }));
         let (events, _) = broadcast::channel(64);
@@ -985,7 +990,11 @@ fn sync_receive_vcam(inner: &Arc<Mutex<Inner>>) {
     let mut g = inner.lock();
     let receiving = g.receive.is_some();
     let camera_ok = receiving && crate::vdevice::receive_routing(&g.paths).0;
+    if g.recv_vcam == Some(camera_ok) {
+        return;
+    }
     if let Some(cmd) = crate::share::receive_vcam_sync(receiving, camera_ok) {
+        g.recv_vcam = Some(camera_ok);
         if let Some(engine) = g.receive.as_mut() {
             match engine.command(&cmd) {
                 Ok(()) => tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver"),
@@ -1562,6 +1571,7 @@ fn spawn_receive(
             text: "Relay Camera is showing the share this PC is sending; the incoming share plays in Relay only.".into(),
         });
     }
+    g.recv_vcam = Some(req.vcam);
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,

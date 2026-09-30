@@ -52,12 +52,16 @@ pub(crate) fn deny_all(window: &tauri::WebviewWindow) {
                     let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
                     args.PermissionKind(&mut kind)?;
                     args.SetState(decide(kind))?;
+                    // Proof for a live check: a stored "Block" answers
+                    // without ever reaching this handler.
+                    tracing::info!(kind = kind.0, "webview permission request denied");
                 }
                 Ok(())
             }));
             let mut token = 0i64;
-            if let Err(e) = core.add_PermissionRequested(&handler, &mut token) {
-                tracing::warn!("could not set the permission handler: {e}");
+            match core.add_PermissionRequested(&handler, &mut token) {
+                Ok(()) => tracing::info!("webview permission requests are denied"),
+                Err(e) => tracing::warn!("could not set the permission handler: {e}"),
             }
         }
     });

@@ -532,7 +532,9 @@ function PerUserCameraPanel({ install, consent, onClose, onDone }: {
 
   return (
     <div className="consent">
-      {install ? (
+      {/* Once installed, only the result stays: the list of what it will do
+          lingered under the card (PC2, r47). */}
+      {done !== null ? null : install ? (
         <p className="p"><b>What this installs</b> — a camera filter registered for your Windows
           account only, so Zoom, Discord, Teams and Chrome can list “Relay Camera”. No
           administrator prompt, no driver; the DLL stays where it is:</p>
@@ -540,7 +542,7 @@ function PerUserCameraPanel({ install, consent, onClose, onDone }: {
         <p className="p"><b>What this removes</b> — exactly the keys recorded in
           <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span>, and nothing else:</p>
       )}
-      {install && <PlanLines lines={plan} />}
+      {install && done === null && <PlanLines lines={plan} />}
       {done === null ? (
         <div className="ab">
           <button className="btn acc" disabled={busy || (install && plan === null)} onClick={() => void go()}>
