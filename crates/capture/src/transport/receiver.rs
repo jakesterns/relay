@@ -41,6 +41,9 @@ pub struct RecvOpts {
     /// other participants — back to the sender as one more Opus track
     /// (S19). The service sets it from the user's pick; never inferred.
     pub return_pid: Option<u32>,
+    /// Play received audio on this endpoint (S40); `None` = the System
+    /// default, followed if it changes. `mic_route` wins when both are set.
+    pub output_device: Option<String>,
 }
 
 /// One depacketized video access unit.
@@ -194,6 +197,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let mut stdin_lines = crate::render::stdin_lines();
     let mut stdin_open = true;
     let mut host = opts.host;
+    // Where received audio plays (S40). Made here so a pick while waiting
+    // for a sender is kept; the virtual-mic route, when set, is the output.
+    let output = crate::devices::DeviceSlot::shared(
+        opts.mic_route.clone().or_else(|| opts.output_device.clone()),
+    );
     let (mut sig, local_ip, offer_json, sender_name, trusted) = loop {
         let (tcp, from) = loop {
             tokio::select! {
@@ -209,6 +217,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                                 crate::command::HostMode::Embedded if owner != 0 => Some(owner),
                                 _ => None,
                             };
+                        }
+                        Some(crate::command::EngineCmd::Device { track, device }) => {
+                            crate::render::apply_device(&output, opts.mic_route.is_some(), track, device);
                         }
                         _ => {}
                     },
@@ -623,8 +634,12 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    let render_opts =
-        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone(), host };
+    let render_opts = crate::render::RenderOpts {
+        vcam: opts.vcam,
+        mic_route: opts.mic_route.clone(),
+        host,
+        output: output.clone(),
+    };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.
     let (end_tx, end_rx) = mpsc::channel::<()>(1);

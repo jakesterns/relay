@@ -54,6 +54,34 @@ pub struct RenderOpts {
     /// The app window to embed the stream window in. `None` = a window of
     /// its own, as when run from a console.
     pub host: Option<u64>,
+    /// The output endpoint received audio plays on (S40), changed live by a
+    /// `device` command. Empty = the System default, followed if it moves.
+    pub output: Arc<crate::devices::DeviceSlot>,
+}
+
+/// Apply a `device` command on the receiver. Only `Output` means anything
+/// here, and not while the audio is routed into a virtual mic: that route is
+/// the call's input, and a speaker pick must not silently undo it.
+pub fn apply_device(
+    output: &crate::devices::DeviceSlot,
+    mic_routed: bool,
+    track: crate::command::DeviceTrack,
+    device: Option<String>,
+) {
+    use crate::command::DeviceTrack;
+    match track {
+        DeviceTrack::Output if mic_routed => {
+            info!("output pick ignored: received audio is routed to the virtual mic")
+        }
+        DeviceTrack::Output => {
+            let changed = output.set(device.clone());
+            info!(
+                device = device.as_deref().unwrap_or("System default"),
+                changed, "receiver output device set"
+            );
+        }
+        DeviceTrack::Mic => tracing::debug!("mic device is a sender command; ignored"),
+    }
 }
 
 /// Hands a fatal error to the signalling task, which tells the sender and
@@ -139,7 +167,9 @@ pub async fn run(
 ) -> Result<()> {
     // Audio playback thread (best-effort; a decode failure must not kill video).
     let (audio_stop_tx, audio_stop_rx) = std::sync::mpsc::channel::<()>();
-    let mic_route = opts.mic_route.clone();
+    let output = opts.output.clone();
+    let mic_routed = opts.mic_route.is_some();
+    let output2 = output.clone();
     let audio_stats = Arc::new(crate::playback::PlaybackStats::default());
     let audio_stats2 = audio_stats.clone();
     // Per-track gain and mute (S37): set from stdin here, read by playback.
@@ -151,7 +181,7 @@ pub async fn run(
             if let Err(e) = crate::playback::run(
                 vec![(opus, Track::App), (mic, Track::Mic), (rest, Track::Rest)],
                 audio_stop_rx,
-                mic_route,
+                output2,
                 audio_stats2,
                 faders2,
             ) {
@@ -274,6 +304,9 @@ pub async fn run(
                         Some(EngineCmd::Mixer { faders: set }) => {
                             faders.apply(&set);
                             tracing::debug!(?set, "mixer set");
+                        }
+                        Some(EngineCmd::Device { track, device }) => {
+                            apply_device(&output, mic_routed, track, device);
                         }
                         Some(other) => tracing::debug!(?other, "command not for a receiver"),
                         None => tracing::debug!(line = %l, "unrecognised stdin line ignored"),

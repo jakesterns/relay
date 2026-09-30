@@ -25,7 +25,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+
+use crate::devices::{self, DeviceSlot, Flow, Opened};
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -118,14 +120,16 @@ impl PlaybackStats {
 /// fader it reads. The first stream is the one the depth stats describe.
 pub type Stream = (tokio::sync::mpsc::Receiver<Vec<u8>>, crate::mixer::Track);
 
-/// Decode `streams` and render their fader-weighted sum on `device_id` (the
-/// default render endpoint when `None`) until `stop`. The receiver runs it
-/// with the sender's tracks; since S19 the sender runs it too, with the one
-/// track coming back from the call.
+/// Decode `streams` and render their fader-weighted sum on the endpoint
+/// `device` names (the default render endpoint when it is empty) until
+/// `stop`. The receiver runs it with the sender's tracks; since S19 the
+/// sender runs it too, with the one track coming back from the call. Since
+/// S40 the output reopens in place when `device` changes, or when it follows
+/// the default and the OS default moves.
 pub fn run(
     streams: Vec<Stream>,
     stop: Receiver<()>,
-    device_id: Option<String>,
+    device: Arc<DeviceSlot>,
     stats: Arc<PlaybackStats>,
     faders: Arc<crate::mixer::Faders>,
 ) -> Result<()> {
@@ -133,7 +137,7 @@ pub fn run(
     // SAFETY: COM for this thread; WASAPI render loop; balanced on return.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
-        let result = render_loop(streams, stop, device_id, stats, faders);
+        let result = render_loop(streams, stop, device, stats, faders);
         CoUninitialize();
         result
     }
@@ -315,16 +319,34 @@ fn render_format() -> WAVEFORMATEXTENSIBLE {
     }
 }
 
-unsafe fn render_loop(
-    inputs: Vec<Stream>,
-    stop: Receiver<()>,
-    device_id: Option<String>,
-    stats: Arc<PlaybackStats>,
-    faders: Arc<crate::mixer::Faders>,
-) -> Result<()> {
-    let legacy = std::env::var_os("RELAY_AUDIO_LEGACY").is_some();
-    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
-    let device = match &device_id {
+/// One opened render stream. Dropping it stops the client.
+struct Output {
+    client: IAudioClient,
+    render: IAudioRenderClient,
+    event: HANDLE,
+    buffer_frames: u32,
+    max_padding: u32,
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        // SAFETY: created by `open_output`, released exactly once here.
+        unsafe {
+            self.client.Stop().ok();
+            let _ = CloseHandle(self.event);
+        }
+    }
+}
+
+/// Open and start a 48 kHz stereo render stream on `device_id`, or on the
+/// default render endpoint when `None`.
+unsafe fn open_output(
+    enumerator: &IMMDeviceEnumerator,
+    device_id: Option<&str>,
+    legacy: bool,
+    stats: &PlaybackStats,
+) -> Result<Output> {
+    let device = match device_id {
         Some(id) => {
             let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
             enumerator
@@ -353,25 +375,143 @@ unsafe fn render_loop(
         .context("IAudioClient::Initialize (48 kHz stereo float)")?;
 
     let event = CreateEventW(None, false, false, windows::core::PCWSTR::null())?;
-    client.SetEventHandle(event)?;
-    let render: IAudioRenderClient = client.GetService()?;
-    let buffer_frames = client.GetBufferSize()?;
+    if let Err(e) = client.SetEventHandle(event) {
+        let _ = CloseHandle(event);
+        return Err(e.into());
+    }
+    let render: IAudioRenderClient = match client.GetService() {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = CloseHandle(event);
+            return Err(e.into());
+        }
+    };
+    let buffer_frames = client.GetBufferSize().unwrap_or(0);
     let engine_us = (client.GetStreamLatency().unwrap_or(0) / 10) as u32;
     let max_padding = if legacy { buffer_frames } else { MAX_PADDING_MS * FRAMES_PER_MS as u32 }
         .min(buffer_frames);
     stats.render_buffer_frames.store(buffer_frames, Ordering::Relaxed);
     stats.stream_latency_us.store(engine_us, Ordering::Relaxed);
     tracing::info!(
+        device = device_id.unwrap_or("default"),
         buffer_ms = buffer_frames as f64 / FRAMES_PER_MS as f64,
         max_padding_ms = max_padding as f64 / FRAMES_PER_MS as f64,
         engine_ms = engine_us as f64 / 1e3,
         legacy,
         "audio playback up"
     );
+    let out = Output { client, render, event, buffer_frames, max_padding };
+    out.client.Start()?;
+    Ok(out)
+}
+
+/// Why [`play`] returned without an error.
+enum PlayEnd {
+    Stopped,
+    Reopen,
+}
+
+/// Mixer state that outlives any one render stream, so a reopen onto a new
+/// endpoint picks up exactly where the last one left off.
+struct Mix {
+    streams: Vec<DecodedStream>,
+    tracks: Vec<crate::mixer::Track>,
+    gains: Vec<f32>,
+    steps: Vec<f32>,
+    targets: Vec<f32>,
+    pcm: Vec<f32>,
+}
+
+unsafe fn play(
+    out: &Output,
+    mix: &mut Mix,
+    stop: &Receiver<()>,
+    device: &DeviceSlot,
+    opened: Opened,
+    stats: &PlaybackStats,
+    faders: &crate::mixer::Faders,
+) -> Result<PlayEnd> {
+    let n = mix.streams.len();
+    loop {
+        match stop.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => return Ok(PlayEnd::Stopped),
+            Err(TryRecvError::Empty) => {}
+        }
+        if devices::should_reopen(
+            &opened,
+            device.generation(),
+            devices::default_generation(Flow::Render),
+        ) {
+            return Ok(PlayEnd::Reopen);
+        }
+        let woke = WaitForSingleObject(out.event, 20) == WAIT_OBJECT_0;
+        stats.channel_packets.store(mix.streams[0].rx.len() as u32, Ordering::Relaxed);
+        for s in &mut mix.streams {
+            s.drain(&mut mix.pcm);
+        }
+        if !woke {
+            continue;
+        }
+        let padding = out.client.GetCurrentPadding()?;
+        let room = out.max_padding.saturating_sub(padding).min(out.buffer_frames - padding);
+        if room > 0 {
+            let ptr = out.render.GetBuffer(room)?;
+            let buf = std::slice::from_raw_parts_mut(ptr as *mut f32, room as usize * 2);
+            for i in 0..n {
+                mix.targets[i] = faders.get(mix.tracks[i]).target();
+                mix.steps[i] = (mix.targets[i] - mix.gains[i]) / room as f32;
+            }
+            let mut peak = 0f32;
+            for frame in buf.chunks_exact_mut(2) {
+                let (mut l, mut r) = (0f32, 0f32);
+                for i in 0..n {
+                    mix.gains[i] += mix.steps[i];
+                    let (pl, pr) = mix.streams[i].queue.pop_pair();
+                    l += pl * mix.gains[i];
+                    r += pr * mix.gains[i];
+                }
+                frame[0] = l.clamp(-1.0, 1.0);
+                frame[1] = r.clamp(-1.0, 1.0);
+                peak = peak.max(frame[0].abs()).max(frame[1].abs());
+            }
+            // Land exactly, so float drift over many buffers cannot creep.
+            mix.gains.copy_from_slice(&mix.targets);
+            stats.peak_milli.store((peak * 1e3) as u32, Ordering::Relaxed);
+            out.render.ReleaseBuffer(room, 0)?;
+        }
+
+        let q = &mix.streams[0].queue;
+        stats.render_padding_frames.store(padding + room, Ordering::Relaxed);
+        stats.queue_frames.store(q.frames() as u32, Ordering::Relaxed);
+        stats.underruns.store(q.underruns, Ordering::Relaxed);
+        stats.slew_skipped.store(q.skipped, Ordering::Relaxed);
+        stats.slew_repeated.store(q.repeated, Ordering::Relaxed);
+        stats.dropped_frames.store(q.dropped, Ordering::Relaxed);
+    }
+}
+
+/// Wait up to `ms` for a stop; true when stopped.
+fn stopped_within(stop: &Receiver<()>, ms: u64) -> bool {
+    !matches!(
+        stop.recv_timeout(std::time::Duration::from_millis(ms)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    )
+}
+
+unsafe fn render_loop(
+    inputs: Vec<Stream>,
+    stop: Receiver<()>,
+    device: Arc<DeviceSlot>,
+    stats: Arc<PlaybackStats>,
+    faders: Arc<crate::mixer::Faders>,
+) -> Result<()> {
+    let legacy = std::env::var_os("RELAY_AUDIO_LEGACY").is_some();
+    devices::watch_defaults();
+    let enumerator: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
     // One per incoming track. A sender with no mic or no rest track simply
     // never feeds that stream, which then contributes silence and costs one
-    // add. Order matches `gains` and `tracks` below.
+    // add. Order matches `gains` and `tracks`.
     let mut streams = Vec::with_capacity(inputs.len());
     let mut tracks = Vec::with_capacity(inputs.len());
     for (rx, track) in inputs {
@@ -381,64 +521,67 @@ unsafe fn render_loop(
     let n = streams.len();
     // The gain each stream ended the last buffer on; a fader change ramps
     // from here across the next buffer (S37), so a mute never clicks.
-    let mut gains = vec![1.0f32; n];
-    let mut steps = vec![0f32; n];
-    let mut targets = vec![1.0f32; n];
-    // Room for the longest Opus frame (120 ms), whatever the sender chose.
-    let mut pcm = vec![0f32; 5760 * 2];
+    let mut mix = Mix {
+        streams,
+        tracks,
+        gains: vec![1.0f32; n],
+        steps: vec![0f32; n],
+        targets: vec![1.0f32; n],
+        // Room for the longest Opus frame (120 ms), whatever the sender chose.
+        pcm: vec![0f32; 5760 * 2],
+    };
 
-    client.Start()?;
+    // The first open fails the call, as it always has; after that a lost or
+    // changed endpoint is reopened and the share carries on (S40).
+    let mut first = true;
     loop {
-        match stop.try_recv() {
-            Ok(()) | Err(TryRecvError::Disconnected) => break,
-            Err(TryRecvError::Empty) => {}
-        }
-        let woke = WaitForSingleObject(event, 20) == WAIT_OBJECT_0;
-        stats.channel_packets.store(streams[0].rx.len() as u32, Ordering::Relaxed);
-        for s in &mut streams {
-            s.drain(&mut pcm);
-        }
-        if !woke {
-            continue;
-        }
-        let padding = client.GetCurrentPadding()?;
-        let room = max_padding.saturating_sub(padding).min(buffer_frames - padding);
-        if room > 0 {
-            let ptr = render.GetBuffer(room)?;
-            let out = std::slice::from_raw_parts_mut(ptr as *mut f32, room as usize * 2);
-            for i in 0..n {
-                targets[i] = faders.get(tracks[i]).target();
-                steps[i] = (targets[i] - gains[i]) / room as f32;
+        let (choice, slot_gen) = device.get();
+        let mut opened = Opened {
+            slot_gen,
+            follows_default: choice.is_none(),
+            default_gen: devices::default_generation(Flow::Render),
+        };
+        let out = match open_output(&enumerator, choice.as_deref(), legacy, &stats) {
+            Ok(o) => Ok(o),
+            Err(e) if choice.is_some() => {
+                tracing::warn!(
+                    error = %e, device = ?choice,
+                    "the chosen output would not open; playing on the System default"
+                );
+                opened.follows_default = true;
+                open_output(&enumerator, None, legacy, &stats)
             }
-            let mut peak = 0f32;
-            for frame in out.chunks_exact_mut(2) {
-                let (mut l, mut r) = (0f32, 0f32);
-                for i in 0..n {
-                    gains[i] += steps[i];
-                    let (pl, pr) = streams[i].queue.pop_pair();
-                    l += pl * gains[i];
-                    r += pr * gains[i];
+            Err(e) => Err(e),
+        };
+        let out = match out {
+            Ok(o) => o,
+            Err(e) if first => return Err(e),
+            Err(e) => {
+                tracing::warn!(error = %e, "audio output would not reopen; retrying");
+                if stopped_within(&stop, 500) {
+                    break;
                 }
-                frame[0] = l.clamp(-1.0, 1.0);
-                frame[1] = r.clamp(-1.0, 1.0);
-                peak = peak.max(frame[0].abs()).max(frame[1].abs());
+                continue;
             }
-            // Land exactly, so float drift over many buffers cannot creep.
-            gains.copy_from_slice(&targets);
-            stats.peak_milli.store((peak * 1e3) as u32, Ordering::Relaxed);
-            render.ReleaseBuffer(room, 0)?;
+        };
+        if !first {
+            tracing::info!(device = ?choice, "audio playback reopened");
         }
-
-        let q = &streams[0].queue;
-        stats.render_padding_frames.store(padding + room, Ordering::Relaxed);
-        stats.queue_frames.store(q.frames() as u32, Ordering::Relaxed);
-        stats.underruns.store(q.underruns, Ordering::Relaxed);
-        stats.slew_skipped.store(q.skipped, Ordering::Relaxed);
-        stats.slew_repeated.store(q.repeated, Ordering::Relaxed);
-        stats.dropped_frames.store(q.dropped, Ordering::Relaxed);
+        first = false;
+        match play(&out, &mut mix, &stop, &device, opened, &stats, &faders) {
+            Ok(PlayEnd::Stopped) => break,
+            Ok(PlayEnd::Reopen) => {
+                tracing::info!("audio output: device choice or OS default changed; reopening")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "audio output lost; reopening");
+                drop(out);
+                if stopped_within(&stop, 500) {
+                    break;
+                }
+            }
+        }
     }
-    client.Stop().ok();
-    let _ = CloseHandle(event);
     Ok(())
 }
 

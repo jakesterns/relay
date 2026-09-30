@@ -29,7 +29,7 @@ fn measure(secs: u64) -> (f64, f64, Arc<PlaybackStats>) {
         playback::run(
             vec![(rx, Track::App), (mic_rx, Track::Mic), (rest_rx, Track::Rest)],
             stop_rx,
-            None,
+            relay_capture::devices::DeviceSlot::shared(None),
             stats2,
             faders,
         )
