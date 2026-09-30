@@ -410,8 +410,9 @@ function ApoConsentRow() {
   );
 }
 
-/** The virtual camera & microphone opt-in. The camera's COM class has to live
- *  in HKLM: the Frame Server runs as LOCAL SERVICE and never loads a per-user
+/** The virtual camera & microphone opt-in. On Windows 10 (S43) the camera is a
+ *  per-user DirectShow filter and needs no prompt (`PerUserCameraPanel`). On
+ *  Windows 11 22H2+ the camera's COM class has to live in HKLM: the Frame Server runs as LOCAL SERVICE and never loads a per-user
  *  registration (measured — docs/dev/vcam-live.md), so this is the one write
  *  that genuinely needs the prompt. */
 function VdeviceConsentRow() {
@@ -425,6 +426,8 @@ function VdeviceConsentRow() {
   useEffect(refreshStatus, [offline]);
 
   const registered = status?.camera_registered === true;
+  // Windows 10 (S43): the per-user DirectShow filter — no prompt at all.
+  const perUser = status?.camera_path === "direct_show";
   const micNote = status && status.mic_targets.length > 0
     ? `Mic route: ${status.mic_targets[0].name}.`
     : "Mic: waiting on the signed driver; install VB-Cable for the interim route.";
@@ -434,7 +437,9 @@ function VdeviceConsentRow() {
       ? `Needs Windows 11 22H2+ (this PC: build ${status.windows_build ?? "?"}).${status.obs_virtualcam ? " OBS VirtualCam detected as a fallback." : ""}`
       : registered
         ? `"Relay Camera" registered — it appears in calls while receiving. ${micNote}`
-        : `Not installed. ${micNote}`;
+        : perUser
+          ? `Not installed. On this Windows 10 PC it installs for your account only — no administrator prompt. ${micNote}`
+          : `Not installed. ${micNote}`;
 
   return (
     <>
@@ -446,7 +451,14 @@ function VdeviceConsentRow() {
           {registered ? "Remove…" : "Install…"}
         </button>
       </div>
-      {mode !== "idle" && (
+      {mode !== "idle" && perUser && (
+        <PerUserCameraPanel
+          install={mode === "install"}
+          consent={status?.consent ?? null}
+          onClose={() => setMode("idle")}
+          onDone={refreshStatus} />
+      )}
+      {mode !== "idle" && !perUser && (
         <ElevatedPanel
           op={mode === "install" ? "install_camera" : "uninstall_camera"}
           verb={mode === "install" ? "Install" : "Remove"}
@@ -470,6 +482,75 @@ function VdeviceConsentRow() {
           )} />
       )}
     </>
+  );
+}
+
+/** Windows 10 (S43): Relay Camera is a DirectShow filter registered for this
+ *  user only, so there is no prompt — the core writes three HKCU keys and
+ *  records them first. Same shape as the elevated panel: blurb, the real
+ *  plan, one button. Consent is recorded before the install and withdrawn
+ *  only after the keys are actually gone. */
+function PerUserCameraPanel({ install, consent, onClose, onDone }: {
+  install: boolean;
+  consent: VdeviceStatus["consent"];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [plan, setPlan] = useState<string[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    api.vdeviceDryRun().then(setPlan).catch((e) => setError(errText(e)));
+  }, []);
+
+  const go = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (install) {
+        await api.setVdeviceConsent(consent?.apo ?? false, true, true);
+        await api.installVcam();
+        setDone('"Relay Camera" registered for your account. Apps list it after they restart.');
+      } else {
+        await api.uninstallVcam();
+        await api.setVdeviceConsent(consent?.apo ?? false, false, false);
+        setDone("Relay Camera removed. Nothing else on your PC was changed.");
+      }
+      onDone();
+    } catch (e) {
+      setError(errText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="consent">
+      {install ? (
+        <p className="p"><b>What this installs</b> — a camera filter registered for your Windows
+          account only, so Zoom, Discord, Teams and Chrome can list “Relay Camera”. No
+          administrator prompt, no driver; the DLL stays where it is:</p>
+      ) : (
+        <p className="p"><b>What this removes</b> — exactly the keys recorded in
+          <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span>, and nothing else:</p>
+      )}
+      {install && <PlanLines lines={plan} />}
+      {done === null ? (
+        <div className="ab">
+          <button className="btn acc" disabled={busy || (install && plan === null)} onClick={() => void go()}>
+            {busy ? "Working…" : `${install ? "Install" : "Remove"} now`}
+          </button>
+          <button className="btn q" disabled={busy} onClick={onClose}>Cancel</button>
+        </div>
+      ) : (
+        <>
+          <p className="p small">{done}</p>
+          <div className="ab"><button className="btn q" onClick={onClose}>Close</button></div>
+        </>
+      )}
+      <ErrorNote text={error} onDismiss={() => setError(null)} />
+    </div>
   );
 }
 

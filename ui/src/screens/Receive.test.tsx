@@ -290,6 +290,23 @@ describe("whether a call will see the stream", () => {
     expect(kv("Camera", card("In calls"))).toBe("Needs Windows 11 22H2+ (this PC: build 19045)");
   });
 
+  it("offers the camera on Windows 10 through the per-user filter (S43)", async () => {
+    core.vdevice = { ...core.vdevice, camera_supported: true, camera_path: "direct_show", windows_build: 19045 };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Camera", card("In calls"))).toBe("Not enabled — turn it on in Settings");
+    expect(card("In calls")).not.toHaveTextContent(/Windows 11/);
+  });
+
+  it("says which apps list the Windows 10 camera once it is installed", async () => {
+    core.vdevice = { ...core.vdevice, camera_path: "direct_show", windows_build: 19045, camera_registered: true };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Camera", card("In calls"))).toBe('"Relay Camera" — pick it in Discord, Zoom or Meet');
+    expect(card("In calls")).toHaveTextContent(/Zoom, Discord, Teams, Chrome and Edge/);
+    expect(card("In calls")).toHaveTextContent(/Windows Camera app does not list it/);
+  });
+
   it("says Relay does not feed an OBS camera that happens to be installed", async () => {
     core.vdevice = { ...core.vdevice, obs_virtualcam: "OBS Virtual Camera" };
     tauri.useFakeCore(core.handler);

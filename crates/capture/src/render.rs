@@ -552,29 +552,11 @@ fn video_thread(
 
     let mut vp = VideoPresent::new(&surface, w, h)?;
 
-    // Refuse below Windows 11 22H2 *before* touching the API. mfsensorgroup.dll
-    // is delay-loaded (see build.rs), so a missing MFCreateVirtualCamera raises
-    // a structured exception on first call rather than returning an error —
-    // this check, not the `Err` arm below, is what keeps Windows 10 safe.
-    let vcam = vcam && {
-        let ok = relay_vdevice::detect::frameserver_supported();
-        if !ok {
-            let build = relay_vdevice::detect::windows_build();
-            warn!(?build, "MFCreateVirtualCamera not present; continuing without a camera");
-            println!(
-                "{}",
-                serde_json::json!({
-                    "event": "vcam_error",
-                    "message": format!(
-                        "this PC has no virtual camera API (Windows build {}); \
-                         the share still plays in Relay",
-                        build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
-                    ),
-                })
-            );
-        }
-        ok
-    };
+    // Which camera: `VcamSink::start` picks the frame-server camera where
+    // MFCreateVirtualCamera exists and the DirectShow ring (S43) everywhere
+    // else. That choice, made by export probe, is what keeps Windows 10 away
+    // from the delay-loaded API (a missing export is a structured exception,
+    // not an error).
 
     // Virtual camera (opt-in): best-effort — a missing registration or an
     // unsupported build reports once and the window carries on alone.

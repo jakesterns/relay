@@ -2365,7 +2365,7 @@ impl IpcHandler {
             Method::InstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
-                match crate::vdevice::install_camera_live(&paths) {
+                match crate::vdevice::install_vcam(&paths) {
                     Ok(()) => {
                         let _ = self
                             .events
@@ -2379,7 +2379,7 @@ impl IpcHandler {
             Method::UninstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
-                match crate::vdevice::uninstall_camera_live(&paths) {
+                match crate::vdevice::uninstall_vcam(&paths) {
                     Ok(()) => {
                         let _ =
                             self.events.send(Event::Notice { text: "Relay Camera removed".into() });

@@ -27,24 +27,40 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 
 use relay_vdevice::camera::control::VirtualCamera;
-use relay_vdevice::frames::{section_name_from_env, SharedFrames};
+use relay_vdevice::detect::CameraPath;
+use relay_vdevice::frames::{dshow_section_name_from_env, section_name_from_env, SharedFrames};
 
 /// How often to retry attaching the frame ring while the camera spins up.
 const ATTACH_RETRY: Duration = Duration::from_millis(500);
 
 /// Staging-copies decoded NV12 textures into the shared frame ring.
-#[derive(Default)]
 pub struct RingWriter {
     ring: Option<SharedFrames>,
+    /// Section to attach to: `Global\` for the frame-server camera,
+    /// `Local\` for the DirectShow one (S43).
+    ring_name: String,
+    /// Geometry announced in the ring header on attach, so the DirectShow
+    /// filter can offer the stream's size before its first frame.
+    hint: Option<(u32, u32, u32)>,
     last_attach: Option<Instant>,
     staging: Option<(ID3D11Texture2D, u32, u32)>,
     frames_written: u64,
 }
 
+impl Default for RingWriter {
+    fn default() -> Self {
+        Self::named(section_name_from_env(), None)
+    }
+}
+
 impl RingWriter {
+    fn named(ring_name: String, hint: Option<(u32, u32, u32)>) -> Self {
+        Self { ring: None, ring_name, hint, last_attach: None, staging: None, frames_written: 0 }
+    }
+
     /// Use an already-mapped section (tests use a `Local\` one they created).
     pub fn with_ring(ring: SharedFrames) -> Self {
-        Self { ring: Some(ring), ..Default::default() }
+        Self { ring: Some(ring), ..Self::named(String::new(), None) }
     }
 
     pub fn frames_written(&self) -> u64 {
@@ -66,8 +82,13 @@ impl RingWriter {
                 return Ok(false);
             }
             self.last_attach = Some(Instant::now());
-            match SharedFrames::create(&section_name_from_env()) {
-                Ok(s) => self.ring = Some(s),
+            match SharedFrames::create(&self.ring_name) {
+                Ok(s) => {
+                    if let Some((w, h, fps)) = self.hint {
+                        s.block().set_geometry_hint(w, h, fps);
+                    }
+                    self.ring = Some(s)
+                }
                 Err(_) => return Ok(false), // camera not consumed yet
             }
         }
@@ -141,7 +162,9 @@ impl RingWriter {
 }
 
 pub struct VcamSink {
-    _camera: VirtualCamera,
+    /// `None` on the DirectShow path: the app that opens Relay Camera
+    /// loads the filter itself; this side only writes the ring.
+    _camera: Option<VirtualCamera>,
     writer: RingWriter,
 }
 
@@ -150,10 +173,27 @@ impl VcamSink {
     /// Requires the media source registered (HKLM) and Windows 11 22H2+;
     /// the caller reports the error and continues without a camera.
     pub fn start(width: u32, height: u32, fps: u32) -> Result<Self> {
-        let camera = VirtualCamera::start(width, height, fps)
-            .context("MFCreateVirtualCamera (is the camera registered and Windows 22H2+?)")?;
-        info!(width, height, fps, "virtual camera started");
-        Ok(Self { _camera: camera, writer: RingWriter::default() })
+        match relay_vdevice::detect::camera_path() {
+            CameraPath::FrameServer => {
+                let camera = VirtualCamera::start(width, height, fps)
+                    .context("MFCreateVirtualCamera (is the camera registered?)")?;
+                info!(width, height, fps, "virtual camera started (frame server)");
+                Ok(Self { _camera: Some(camera), writer: RingWriter::default() })
+            }
+            CameraPath::DirectShow => Ok(Self::start_dshow(width, height, fps)),
+        }
+    }
+
+    /// The Windows 10 path (S43): no camera object to create — the per-user
+    /// DirectShow filter is loaded by whichever app opens "Relay Camera" and
+    /// reads the `Local\` ring this writes. The size is announced in the
+    /// ring header so the app's format list matches the stream.
+    pub fn start_dshow(width: u32, height: u32, fps: u32) -> Self {
+        info!(width, height, fps, "Relay Camera ring up (DirectShow filter path)");
+        Self {
+            _camera: None,
+            writer: RingWriter::named(dshow_section_name_from_env(), Some((width, height, fps))),
+        }
     }
 
     pub fn frames_written(&self) -> u64 {

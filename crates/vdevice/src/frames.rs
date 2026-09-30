@@ -64,6 +64,14 @@ pub fn section_name_from_env() -> String {
     }
 }
 
+/// The section the DirectShow camera (Windows 10 path) uses. The filter runs
+/// inside the calling app, in the user's session, so neither side can create
+/// a Global\ name; Local\ is shared by every process of the session,
+/// which is exactly the receiver/sender and the app that opened the camera.
+pub fn dshow_section_name_from_env() -> String {
+    section_name_from_env().replacen("Global\\", "Local\\", 1)
+}
+
 /// Dimensions and timestamp of one frame in the ring.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameInfo {
@@ -96,7 +104,13 @@ pub struct FrameBlock {
     write_idx: AtomicU32,
     /// Total frames written (diagnostics / liveness).
     frames: AtomicU32,
-    _pad: [u32; 3],
+    /// Stream geometry the writer announces before its first frame (0 =
+    /// unknown). Was padding in layout 1 and old writers leave it zero, so
+    /// this needs no version bump. The DirectShow camera sizes its pin from
+    /// it: an app enumerates formats before any frame exists.
+    hint_width: AtomicU32,
+    hint_height: AtomicU32,
+    hint_fps: AtomicU32,
     slots: [Slot; SLOTS],
 }
 
@@ -120,6 +134,22 @@ impl FrameBlock {
     pub fn is_valid(&self) -> bool {
         self.magic.load(Ordering::Acquire) == MAGIC
             && self.version.load(Ordering::Acquire) == VERSION
+    }
+
+    /// Announce the stream geometry (writer side, before the first frame).
+    pub fn set_geometry_hint(&self, width: u32, height: u32, fps: u32) {
+        self.hint_fps.store(fps, Ordering::Relaxed);
+        self.hint_height.store(height, Ordering::Relaxed);
+        self.hint_width.store(width, Ordering::Release);
+    }
+
+    /// The announced geometry, if any writer set a sane one.
+    pub fn geometry_hint(&self) -> Option<(u32, u32, u32)> {
+        let w = self.hint_width.load(Ordering::Acquire);
+        let h = self.hint_height.load(Ordering::Relaxed);
+        let fps = self.hint_fps.load(Ordering::Relaxed);
+        (w >= 2 && h >= 2 && w <= MAX_WIDTH && h <= MAX_HEIGHT && w % 2 == 0 && h % 2 == 0)
+            .then_some((w, h, fps.clamp(1, 120)))
     }
 
     /// Total frames written so far (0 until the receiver produces one).
@@ -441,6 +471,21 @@ mod tests {
         }
         // Rotation actually rotates and stays in range.
         assert!(seen.len() >= 2 && seen.iter().all(|&i| (i as usize) < SLOTS));
+    }
+
+    #[test]
+    fn geometry_hint_round_trip_and_zero_is_none() {
+        let block = heap_block();
+        assert_eq!(block.geometry_hint(), None, "old writers leave the old padding zero");
+        block.set_geometry_hint(1280, 720, 60);
+        assert_eq!(block.geometry_hint(), Some((1280, 720, 60)));
+        block.set_geometry_hint(1281, 720, 60);
+        assert_eq!(block.geometry_hint(), None, "odd width is not a usable hint");
+    }
+
+    #[test]
+    fn dshow_section_is_local() {
+        assert!(dshow_section_name_from_env().starts_with("Local\\Relay.Cam"));
     }
 
     #[test]

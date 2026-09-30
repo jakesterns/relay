@@ -261,9 +261,17 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&s)?);
                     } else {
                         println!(
-                            "windows build: {} (frame-server camera {})",
+                            "windows build: {} (camera path: {})",
                             s.windows_build.map_or("unknown".into(), |b| b.to_string()),
-                            if s.camera_supported { "supported" } else { "needs 22H2+" },
+                            match s.camera_path {
+                                Some(relay_core::vdevice::CameraPath::FrameServer) => {
+                                    "frame server, HKLM"
+                                }
+                                Some(relay_core::vdevice::CameraPath::DirectShow) => {
+                                    "DirectShow filter, per user"
+                                }
+                                None => "none",
+                            },
                         );
                         println!("camera registered: {}", s.camera_registered);
                         println!(
@@ -299,11 +307,11 @@ fn main() -> Result<()> {
                     println!("recorded: camera {} / microphone {}", c.camera, c.microphone);
                 }
                 Some("install") => {
-                    relay_core::vdevice::install_camera_live(&args.paths)?;
+                    relay_core::vdevice::install_vcam(&args.paths)?;
                     println!("Relay Camera media source registered");
                 }
                 Some("uninstall") => {
-                    relay_core::vdevice::uninstall_camera_live(&args.paths)?;
+                    relay_core::vdevice::uninstall_vcam(&args.paths)?;
                     println!("Relay Camera media source removed; installed.json cleared");
                 }
                 Some(other) => anyhow::bail!(
@@ -527,7 +535,8 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
              RELAY_APO_ALLOW_LIVE_WRITE=1 and an elevated prompt)
   vdevice [status|dry-run|consent-camera|install|uninstall]  virtual-camera
              registration (install/uninstall refuse without
-             RELAY_VDEVICE_ALLOW_LIVE_WRITE=1 and an elevated prompt)
+             RELAY_VDEVICE_ALLOW_LIVE_WRITE=1; the Windows 11 media source also
+             needs an elevated prompt, the Windows 10 filter is per user)
   firewall [status|dry-run|allow|remove]  the inbound rule for relay-share.exe
              (the only Relay binary that listens). `status` and `dry-run` are
              read-only; `allow`/`remove` refuse without

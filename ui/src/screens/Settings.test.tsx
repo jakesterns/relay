@@ -308,6 +308,45 @@ describe("the virtual camera opt-in", () => {
     expect(within(installRow(VDEV)).getByText(/OBS VirtualCam detected as a fallback/)).toBeInTheDocument();
   });
 
+  it("installs the Windows 10 camera for this user with no admin prompt (S43)", async () => {
+    core.vdevice = { ...core.vdevice, camera_supported: true, camera_path: "direct_show", windows_build: 19045 };
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    expect(within(installRow(VDEV)).getByText(/installs for your account only — no administrator prompt/)).toBeInTheDocument();
+    expect(within(installRow(VDEV)).queryByText(/Windows 11/)).toBeNull();
+    await h.user.click(within(installRow(VDEV)).getByRole("button", { name: "Install…" }));
+    await settle();
+    // The real plan: HKCU keys only, including the video-capture category entry.
+    expect(screen.getAllByText(/HKCU\\Software\\Classes\\CLSID/).length).toBe(3);
+    expect(screen.queryByText(/HKLM/)).toBeNull();
+    expect(screen.queryByText(/Windows will ask for permission/)).toBeNull();
+    await h.user.click(screen.getByRole("button", { name: "Install now" }));
+    await settle();
+    // Consent first, then the per-user install — never the elevated helper.
+    expect(core.vdevice.consent?.camera).toBe(true);
+    expect(core.vdevice.camera_registered).toBe(true);
+    expect(tauri.lastCall("run_elevated")).toBeUndefined();
+    expect(screen.getByText(/registered for your account/)).toBeInTheDocument();
+    h.expectClean();
+  });
+
+  it("removes the Windows 10 camera, then withdraws consent", async () => {
+    core.vdevice = {
+      ...core.vdevice, camera_path: "direct_show", windows_build: 19045, camera_registered: true,
+      consent: { decided_at: "x", apo: false, camera: true, microphone: true },
+    };
+    tauri.useFakeCore(core.handler);
+    const h = await mount();
+    await h.user.click(within(installRow(VDEV)).getByRole("button", { name: "Remove…" }));
+    await settle();
+    await h.user.click(screen.getByRole("button", { name: "Remove now" }));
+    await settle();
+    expect(core.vdevice.camera_registered).toBe(false);
+    expect(core.vdevice.consent?.camera).toBe(false);
+    expect(tauri.lastCall("run_elevated")).toBeUndefined();
+    h.expectClean();
+  });
+
   it("withdraws the camera consent after the keys are actually gone", async () => {
     core.vdevice = { ...core.vdevice, camera_registered: true, consent: { decided_at: "x", apo: true, camera: true, microphone: true } };
     tauri.useFakeCore(core.handler);

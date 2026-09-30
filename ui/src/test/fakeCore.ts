@@ -149,6 +149,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     vdevice: {
       windows_build: 26200,
       camera_supported: true,
+      camera_path: "frame_server",
       camera_registered: false,
       obs_virtualcam: null,
       mic_targets: [{ endpoint_id: "{0.0.0}.{cable}", name: "CABLE Input (VB-Audio Virtual Cable)", kind: "vb_cable" }],
@@ -377,7 +378,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         apo: a.apo as boolean, camera: a.camera as boolean, microphone: a.microphone as boolean,
       };
     },
-    vdevice_dry_run: () => [
+    vdevice_dry_run: () => core.vdevice.camera_path === "direct_show" ? [
+      "HKCU\\Software\\Classes\\CLSID\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}",
+      "HKCU\\Software\\Classes\\CLSID\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}\\InprocServer32",
+      "HKCU\\Software\\Classes\\CLSID\\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\Instance\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}",
+      "file: <install dir>\\relay_vdevice.dll (stays in place; only registered)",
+    ] : [
       "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}",
       "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}\\InprocServer32",
       "file: <install dir>\\relay_vdevice.dll (stays in place; only registered)",

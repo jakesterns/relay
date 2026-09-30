@@ -618,7 +618,7 @@ function PresetCard({ def, locked, onSaved }: {
 {camOk && (
         <Toggle on={draft.vcam ?? false} onChange={(v) => edit({ vcam: v })}
           label="Also show this share as Relay Camera on this PC"
-          sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs Windows 11 and the camera installed in Settings. Video only — the streaming program captures the game's audio itself." />
+          sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs the camera installed in Settings — on Windows 10 too. Video only — the streaming program captures the game's audio itself." />
         )}
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
           label="Start recording with the share"
