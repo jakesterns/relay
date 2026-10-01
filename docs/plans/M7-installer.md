@@ -300,7 +300,7 @@ uninstall; core footprint 5.1 MB idle, 6.1 MB while sharing.
 | relay drivers | 0 | 0 | 0 |
 
 **PASS -- the diff is empty except the data folder the user chose to keep**
-(6 entries under `C:\Users\stern\AppData\Local\Relay`).
+(6 entries under `%LOCALAPPDATA%\Relay`).
 
   added  ...\Relay||.
   added  ...\Relay||data
@@ -322,7 +322,7 @@ the core was stopped before the binaries were replaced and restarted after.
 The first keep-data run FAILed on one entry:
 
 ```
-added  HKCU\Software\Relay\Relay || (default) = "C:\Users\stern\AppData\Local\Relay"
+added  HKCU\Software\Relay\Relay || (default) = "%LOCALAPPDATA%\Relay"
 ```
 
 Tauri's template records the install location under `MANUPRODUCTKEY` so a
@@ -351,7 +351,7 @@ relay-svc.exe run --data-dir <tmp>
 costs nothing at runtime. The cycle now asserts the Run value:
 
 ```
-run value: "C:\Users\stern\AppData\Local\Relay\relay-svc.exe" run
+run value: "%LOCALAPPDATA%\Relay\relay-svc.exe" run
 ```
 
 — absolute, inside the install directory, and naming the launcher rather than

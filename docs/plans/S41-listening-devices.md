@@ -146,7 +146,7 @@ spatial CLSIDs are named by registry lookup, not a table. Re-run the second
 PC check: Realtek one line, RODECaster Main/Chat separate, no G HUB/iCUE,
 Dolby Atmos line when enabled.
 
-## Live test list (Jake, two-PC rig; no audio played by the session)
+## Live test list (the owner, two-PC rig; no audio played by the session)
 
 1. Profiles → "What are you listening on?" lists every active output, the
    default first with "Default". Nothing in Windows Sound settings changes.

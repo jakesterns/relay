@@ -1,9 +1,9 @@
 # S36 — Relay Camera on the sending PC
 
-**Branch** `feat/stream-out` · **Worktree** `C:\Users\stern\Documents\Code\relay-camsend`
+**Branch** `feat/stream-out` · **Worktree** `..\relay-camsend`
 
 The local half of `v11-stream-out.md`, started 2026-09-22 on the assumption
-Jake takes the recommendation there (local first; RTMP/SRT push remains his
+The owner takes the recommendation there (local first; RTMP/SRT push remains his
 decision). Scope: while this PC shares, it can *also* present the same
 picture as "Relay Camera" on this PC, so OBS, Streamlabs, TikTok Live
 Studio or anything else that takes a webcam here can use it with no setup
@@ -16,7 +16,7 @@ beyond picking the camera.
   decoded frames (`render.rs`).
 - **The other direction is already covered**: PC 2 sharing to this PC, with
   OBS here picking "Relay Camera", is M5 as built and needs only the test
-  Jake has queued.
+  The owner has queued.
 
 ## Design
 - The sender's capture loop already holds each frame as an NV12 texture on
@@ -61,7 +61,7 @@ beyond picking the camera.
       service's one-feeder refusal has no unit test — it needs a live engine
       on each side; it is a four-line rule and is proven live.
 - [ ] Live: OBS on this PC shows the share while it is being sent to PC 2.
-      **Owed** — needs the camera registered here (Jake's UAC click).
+      **Owed** — needs the camera registered here (the owner's UAC click).
 - [x] All gates green: fmt, clippy `-D warnings`, 306 UI / 217 core /
       181 capture, footprint.
 
@@ -72,6 +72,6 @@ capture-only mode — `relay-share send` without a peer, or a `relay-share
 camera` command — and it is not a few lines: the engine's lifecycle is
 signalling → connect → capture, and the core's share supervision (intent,
 reconnect, stop) is built around a peer. Same frame path, different
-lifecycle. **A decision for Jake, then its own session**, not a footnote
+lifecycle. **A decision for the owner, then its own session**, not a footnote
 here. What shipped is "Relay Camera while sharing", which is the
 capture-card use case with OBS on the sending side.

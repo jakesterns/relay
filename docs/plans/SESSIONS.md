@@ -116,7 +116,7 @@ Worktrees for S1–S8 already exist and sit on `main` with `pnpm install` done.
 ---
 
 ## S1 — ADLX (AMD) display backend
-**Branch** `feat/adlx-display` · **Worktree** `C:\Users\stern\Documents\Code\relay-adlx`
+**Branch** `feat/adlx-display` · **Worktree** `..\relay-adlx`
 
 Display control is NVIDIA-only. `DisplayIo` is the seam; NvAPI is the reference
 implementation. This dev machine reports an AMD encoder, so some of this is
@@ -136,7 +136,7 @@ verifiable here.
 
 ### Kickoff prompt
 ```
-You are starting session S1 (ADLX/AMD display backend) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S1) and docs/plans/M2-display.md. Work in the worktree C:\Users\stern\Documents\Code\relay-adlx on branch feat/adlx-display.
+You are starting session S1 (ADLX/AMD display backend) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S1) and docs/plans/M2-display.md. Work in the worktree ..\relay-adlx on branch feat/adlx-display.
 
 The display path is NVIDIA-only today. Add the AMD equivalent behind the existing DisplayIo seam so an AMD PC gets the same per-game colour an NVIDIA one does.
 
@@ -149,7 +149,7 @@ The display path is NVIDIA-only today. Add the AMD equivalent behind the existin
 ---
 
 ## S2 — Second Opus track (mic *and* desktop audio) — **DONE 2026-09-14**
-**Branch** `feat/dual-audio` · **Worktree** `C:\Users\stern\Documents\Code\relay-dual-audio`
+**Branch** `feat/dual-audio` · **Worktree** `..\relay-dual-audio`
 
 The sender shipped one audio track, so choosing Microphone *replaced* the
 desktop mix. This was the deferred item most likely to embarrass someone
@@ -187,7 +187,7 @@ Two findings worth carrying forward:
 
 ### Kickoff prompt
 ```
-You are starting session S2 (simultaneous mic and desktop audio) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S2), the Deferred section of docs/plans/M4-share.md and docs/plans/M6-recording-presets.md. Work in the worktree C:\Users\stern\Documents\Code\relay-dual-audio on branch feat/dual-audio.
+You are starting session S2 (simultaneous mic and desktop audio) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S2), the Deferred section of docs/plans/M4-share.md and docs/plans/M6-recording-presets.md. Work in the worktree ..\relay-dual-audio on branch feat/dual-audio.
 
 The sender ships one audio track, so picking Microphone drops the desktop mix. Add a second Opus track so both travel together.
 
@@ -201,7 +201,7 @@ The sender ships one audio track, so picking Microphone drops the desktop mix. A
 ---
 
 ## S3 — Verified vendor VCP opcodes
-**Branch** `feat/monitor-vcp` · **Worktree** `C:\Users\stern\Documents\Code\relay-monitor-vcp`
+**Branch** `feat/monitor-vcp` · **Worktree** `..\relay-monitor-vcp`
 
 Black equalizer and Response are greyed on every panel: `quirks_for` in
 `crates/display/src/vcp.rs` has no verified vendor opcode for any PNP prefix.
@@ -229,7 +229,7 @@ instead of a category-wide guess.
 
 ### Kickoff prompt
 ```
-You are starting session S3 (verified vendor VCP opcodes) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S3) and docs/plans/M2-display.md. Work in the worktree C:\Users\stern\Documents\Code\relay-monitor-vcp on branch feat/monitor-vcp.
+You are starting session S3 (verified vendor VCP opcodes) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S3) and docs/plans/M2-display.md. Work in the worktree ..\relay-monitor-vcp on branch feat/monitor-vcp.
 
 Black equalizer and Response are greyed out on every panel because quirks_for in crates/display/src/vcp.rs has no verified vendor opcode for any PNP prefix.
 
@@ -243,7 +243,7 @@ Black equalizer and Response are greyed out on every panel because quirks_for in
 ---
 
 ## S4 — MKV recording container
-**Branch** `feat/mkv-container` · **Worktree** `C:\Users\stern\Documents\Code\relay-mkv`
+**Branch** `feat/mkv-container` · **Worktree** `..\relay-mkv`
 
 Deferred by *decision*, not by a blocker: fragmented MP4 already covers
 crash-safety. Worth doing for the reason OBS defaults to MKV, but the lowest
@@ -263,7 +263,7 @@ priority in Group 1 — start it only if a real compatibility gap appears.
 
 ### Kickoff prompt
 ```
-You are starting session S4 (MKV recording container) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S4) and docs/plans/M6-recording-presets.md. Work in the worktree C:\Users\stern\Documents\Code\relay-mkv on branch feat/mkv-container.
+You are starting session S4 (MKV recording container) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S4) and docs/plans/M6-recording-presets.md. Work in the worktree ..\relay-mkv on branch feat/mkv-container.
 
 Recording writes fragmented MP4. Add MKV as a per-preset option, for the reason OBS defaults to it: an MKV survives a crash mid-file.
 
@@ -276,7 +276,7 @@ Recording writes fragmented MP4. Add MKV as a per-preset option, for the reason 
 ---
 
 ## S5 — Per-user (HKCU) virtual-camera registration — **done 2026-09-14**
-**Branch** `feat/hkcu-vcam` · **Worktree** `C:\Users\stern\Documents\Code\relay-hkcu-vcam`
+**Branch** `feat/hkcu-vcam` · **Worktree** `..\relay-hkcu-vcam`
 
 **Answer: no.** An HKCU-only registration resolves in the calling process but
 `IMFVirtualCamera::Start` fails `0x80070003` inside the Frame Server, which runs
@@ -306,7 +306,7 @@ S12. It does not, so both stand.
 
 ### Kickoff prompt
 ```
-You are starting session S5 (per-user virtual-camera registration) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S5), docs/plans/M5-vdevices.md and docs/dev/vcam-live.md. Work in the worktree C:\Users\stern\Documents\Code\relay-hkcu-vcam on branch feat/hkcu-vcam.
+You are starting session S5 (per-user virtual-camera registration) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S5), docs/plans/M5-vdevices.md and docs/dev/vcam-live.md. Work in the worktree ..\relay-hkcu-vcam on branch feat/hkcu-vcam.
 
 The virtual camera currently needs one elevated write to HKLM\SOFTWARE\Classes\CLSID. That single requirement is why M5's live pass has never run. Find out whether registering under HKCU\Software\Classes\CLSID works instead — the Frame Server is a service, so it may not see per-user registrations at all, and that is exactly the question.
 
@@ -320,7 +320,7 @@ The virtual camera currently needs one elevated write to HKLM\SOFTWARE\Classes\C
 ---
 
 ## S6 — Elevated install helper
-**Branch** `feat/elevated-install` · **Worktree** `C:\Users\stern\Documents\Code\relay-elevation`
+**Branch** `feat/elevated-install` · **Worktree** `..\relay-elevation`
 
 The core runs unelevated by design. The Settings cards for the APO and the
 virtual camera are wired and honest about failing, but there is no production
@@ -350,7 +350,7 @@ block. And `RegCreateKeyExW(KEY_WRITE)` is denied on an endpoint's
 
 ### Kickoff prompt
 ```
-You are starting session S6 (elevated install helper) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S6), docs/plans/M3b-apo.md and docs/plans/M7-installer.md. Work in the worktree C:\Users\stern\Documents\Code\relay-elevation on branch feat/elevated-install.
+You are starting session S6 (elevated install helper) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S6), docs/plans/M3b-apo.md and docs/plans/M7-installer.md. Work in the worktree ..\relay-elevation on branch feat/elevated-install.
 
 S5 has finished: per-user camera registration does not work (docs/dev/vcam-live.md), so this session covers the camera as well as the APO.
 
@@ -366,7 +366,7 @@ The core runs unelevated by design, so the Settings cards for the APO and camera
 ---
 
 ## S7 — Codec and capture robustness
-**Branch** `feat/codec-robustness` · **Worktree** `C:\Users\stern\Documents\Code\relay-codec`
+**Branch** `feat/codec-robustness` · **Worktree** `..\relay-codec`
 
 Three documented hard edges that all fail the same way — a machine unlike this
 one hits a `bail!` instead of a graceful path.
@@ -385,7 +385,7 @@ one hits a `bail!` instead of a graceful path.
 
 ### Kickoff prompt
 ```
-You are starting session S7 (codec and capture robustness) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S7) and the Deferred section of docs/plans/M4-share.md. Work in the worktree C:\Users\stern\Documents\Code\relay-codec on branch feat/codec-robustness.
+You are starting session S7 (codec and capture robustness) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S7) and the Deferred section of docs/plans/M4-share.md. Work in the worktree ..\relay-codec on branch feat/codec-robustness.
 
 Three documented hard edges all fail the same way — a machine unlike this dev PC hits a bail! instead of a graceful path: the MFT allocator branch at crates/capture/src/encode/mf.rs:230, no software HEVC encode at mf.rs:294, and 48 kHz stereo only at crates/capture/src/audio.rs:258/280/285.
 
@@ -398,7 +398,7 @@ Three documented hard edges all fail the same way — a machine unlike this dev 
 ---
 
 ## S8 — WebView UI test harness
-**Branch** `feat/ui-test-harness` · **Worktree** `C:\Users\stern\Documents\Code\relay-uitest`
+**Branch** `feat/ui-test-harness` · **Worktree** `..\relay-uitest`
 
 No automated test has ever clicked through the actual UI. Every screen bug
 found so far was found by a human reading the code. Note the standing rule:
@@ -423,7 +423,7 @@ be typed into.
 
 ### Kickoff prompt
 ```
-You are starting session S8 (WebView UI test harness) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S8) and docs/plans/M0-foundation.md. Work in the worktree C:\Users\stern\Documents\Code\relay-uitest on branch feat/ui-test-harness.
+You are starting session S8 (WebView UI test harness) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S8) and docs/plans/M0-foundation.md. Work in the worktree ..\relay-uitest on branch feat/ui-test-harness.
 
 No automated test has ever exercised the UI; every screen bug so far was found by reading code. Build the harness.
 
@@ -466,7 +466,7 @@ All three listed drifts were real. Beyond them:
 
 ### Kickoff prompt
 ```
-You are starting session S9 (documentation truth pass) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (section S9). Work in the main tree C:\Users\stern\Documents\Code\Stream Share on branch chore/docs-truth.
+You are starting session S9 (documentation truth pass) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (section S9). Work in the main tree <repo root> on branch chore/docs-truth.
 
 Several plan files no longer match the code. They are the first thing every session reads, so a stale line becomes a wrong decision.
 
@@ -736,7 +736,7 @@ Four deliverables wait on this one certificate: the signed installer, the signed
 ---
 
 ## S22 — Firewall rules in the installer
-**Branch** `feat/firewall-rules` · **Worktree** `C:\Users\stern\Documents\Code\relay-firewall`
+**Branch** `feat/firewall-rules` · **Worktree** `..\relay-firewall`
 **Done 2026-09-15.** `crates/core/src/firewall.rs` is the whole feature: a
 pure parser and verdict over the firewall policy store (reads), `INetFwPolicy2`
 in the elevated helper (writes), `firewall.json` as the record, a new
@@ -815,7 +815,7 @@ feel unfinished in the first ten minutes. **S23 and S24 both touch
 ---
 
 ## S23 — Never look dead
-**Branch** `feat/never-dead` · **Worktree** `C:\Users\stern\Documents\Code\relay-never-dead`
+**Branch** `feat/never-dead` · **Worktree** `..\relay-never-dead`
 
 The worst first impression in the product. Autostart is off by default, the UI
 never starts the core, and the offline banner tells a desktop user to type
@@ -877,7 +877,7 @@ than blank space because a user tests them early and believes them.
 
 ### Kickoff prompt
 ```
-You are starting session S24 (stop the UI lying) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S24). Check first that session S23 has finished — it touches the same files, so do not run alongside it. Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/honest-ui. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
+You are starting session S24 (stop the UI lying) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S24). Check first that session S23 has finished — it touches the same files, so do not run alongside it. Work in the main tree, <repo root>, on a new branch: git checkout -b feat/honest-ui. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 Three parts of the UI render invented content as if it were measured: the Display tab's A/B comparison (both halves are the same scene, so the colour sliders change nothing), the EQ graph's "Headset raw response" (a hard-coded path, shown even when the headset has no curve), and the Share overlay's resolution/fps/encoder labels (hard-coded 4K60 NVENC regardless of preset or GPU).
 
@@ -914,7 +914,7 @@ asks, an unsaved per-game edit survives navigation and a focus change
 
 ### Kickoff prompt
 ```
-You are starting session S25 (keyboard, focus and destructive actions) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S25). Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/ui-safety. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
+You are starting session S25 (keyboard, focus and destructive actions) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S25). Work in the main tree, <repo root>, on a new branch: git checkout -b feat/ui-safety. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 The app is mouse-only — rail nav items are <a> with no href, Toggle puts role="switch" on a non-focusable inner div, profile rows are <tr onClick>, and there are no focus styles anywhere. Global user-select: none also prevents copying paths, the pairing code, and error text.
 
@@ -948,7 +948,7 @@ Small Windows-integration details, none hard, all noticed.
 
 ### Kickoff prompt
 ```
-You are starting session S26 (shell polish) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S26). Work in the main tree, C:\Users\stern\Documents\Code\Stream Share, on a new branch: git checkout -b feat/shell-polish. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
+You are starting session S26 (shell polish) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S26). Work in the main tree, <repo root>, on a new branch: git checkout -b feat/shell-polish. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for your commits.
 
 Small Windows-integration details that are all individually minor and collectively make the app feel unfinished: the window forgets its size and position, a second launch opens a second window (the core has a single-instance mutex, the UI has none), Add/Remove Programs shows the publisher as the lowercase crate name "relay" with no support URL, disabled sliders hide their value behind an em-dash so you cannot read a locked setting, and the pairing-code placeholder renders as six em-dashes at 34 px which reads as an error state.
 
@@ -961,7 +961,7 @@ Small Windows-integration details that are all individually minor and collective
 
 # Group 7 — Free everywhere, everywhere
 
-Two requirements Jake set on 2026-09-16: Relay must be **completely free for
+Two requirements the owner set on 2026-09-16: Relay must be **completely free for
 every user** and must **run on all operating systems**, macOS first.
 
 This supersedes `CLAUDE.md`'s "Single Windows desktop app" framing. That file
@@ -979,7 +979,7 @@ Everything after it does, and that hardware is the gate.
 ---
 
 ## S27 — H.264 fallback: remove the paywall
-**Branch** `feat/h264-fallback` · **Worktree** `C:\Users\stern\Documents\Code\relay-h264`
+**Branch** `feat/h264-fallback` · **Worktree** `..\relay-h264`
 
 Relay sends HEVC only. On Windows without OEM codec entitlement the HEVC
 decoder cannot be installed for free — proven 2026-09-16 on a real Windows 10
@@ -998,29 +998,29 @@ H.264. The cost is bitrate, not capability.
 
 ### Definition of Done
 - [x] Sender offers H.264 **and** HEVC; the pair negotiates HEVC only when both ends decode it, H.264 otherwise. No user-visible codec setting — this is a capability, not a preference. *(Verified on loopback with the receiver restricted to H.264 by a test hook.)*
-- [ ] A receiver with no HEVC decoder completes a share end to end. That is the acceptance test, run against a machine that genuinely lacks the codec (Jake's second PC).
+- [ ] A receiver with no HEVC decoder completes a share end to end. That is the acceptance test, run against a machine that genuinely lacks the codec (the owner's second PC).
 - [x] Both codecs measured at the same resolution: bitrate for equivalent quality, encode latency, CPU. Expect ~30–50% more bitrate for H.264; record what it actually is. *(Measured: +9–11 % by VMAF / +16–21 % by PSNR at 4K60 40–65 Mb/s, rising steeply below 20 Mb/s; H.264 encodes 1–3 ms faster; CPU indistinguishable. M4-share.md, S27.)*
 - [x] The Receive banner stops being a paywall notice. Keep an honest line that HEVC gives better quality per bit where available, but never block on it.
 - [x] `docs/plans/M4-share.md` updated; the HEVC Video Extension deferral there is closed by this.
 
 ### Kickoff prompt
 ```
-You are starting session S27 (H.264 fallback) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S27) and docs/plans/M4-share.md. Work in the main tree C:\Users\stern\Documents\Code\Stream Share on a new branch: git checkout -b feat/h264-fallback. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for commits AND pushes — the pre-push hook runs the installer too.
+You are starting session S27 (H.264 fallback) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S27) and docs/plans/M4-share.md. Work in the main tree <repo root> on a new branch: git checkout -b feat/h264-fallback. Do NOT create a worktree. Set RELAY_NO_INSTALL=1 for commits AND pushes — the pre-push hook runs the installer too.
 
-Relay sends HEVC only, and on Windows without OEM codec entitlement the HEVC decoder cannot be installed for free — verified on a real Windows 10 PC where the Install button is greyed out. Jake has since required Relay be completely free for every user, so HEVC cannot be the only codec.
+Relay sends HEVC only, and on Windows without OEM codec entitlement the HEVC decoder cannot be installed for free — verified on a real Windows 10 PC where the Install button is greyed out. The owner has since required Relay be completely free for every user, so HEVC cannot be the only codec.
 
 1. Offer H.264 alongside HEVC and negotiate: HEVC when both ends decode it, H.264 otherwise. Not a user setting.
 2. Do not regress the latency budget. Re-measure on loopback and record both codecs side by side: bitrate for equivalent quality, encode latency, CPU. Record what you measure, not what you expect.
 3. WASAPI loopback of a silent endpoint delivers no packets, so a quiet desktop makes an audio benchmark read zero and still look plausible. Use scripts/dual-audio-check.ps1, which plays a tone and asserts packet counts.
 4. CMake is needed by opusic-sys and is not on PATH: prepend "C:\Program Files\CMake\bin".
-5. The acceptance test needs a machine with no HEVC decoder. Jake's second PC is exactly that — tell me when you are ready and I will drive it from here.
+5. The acceptance test needs a machine with no HEVC decoder. The owner's second PC is exactly that — tell me when you are ready and I will drive it from here.
 6. Finish only when the Definition of Done is met, then update docs/plans/M4-share.md and docs/ROADMAP.md.
 ```
 
 ---
 
 ## S28 — Portability seam and a macOS build
-**Branch** `feat/portability-seam` · **Worktree** `C:\Users\stern\Documents\Code\relay-portable`
+**Branch** `feat/portability-seam` · **Worktree** `..\relay-portable`
 
 Everything needed to make macOS *possible*, none of which needs a Mac to write.
 
@@ -1033,7 +1033,7 @@ Everything needed to make macOS *possible*, none of which needs a Mac to write.
 - [ ] Every Windows API call sits behind a seam and a `#[cfg(windows)]` module. No `use windows::` outside a platform module.
 - [ ] A `stub` platform backend that compiles everywhere and returns a clear "not supported on this platform" per capability, so the portable half builds and tests on any target.
 - [ ] `cargo check --target x86_64-apple-darwin` and `--target aarch64-apple-darwin` succeed for the portable crates. Where a crate cannot yet build, name the exact API that blocks it.
-- [ ] CI builds the macOS targets. Private repos consume paid Actions minutes at a higher rate — tell Jake the cost before enabling it broadly.
+- [ ] CI builds the macOS targets. Private repos consume paid Actions minutes at a higher rate — tell the owner the cost before enabling it broadly.
 - [ ] `docs/dev/porting.md`: for each seam, the Windows API today, the macOS equivalent, and the honest difficulty. Include the ones with no clean answer — DDC/CI over IOKit, and the endpoint APO, which has no macOS analogue and needs a different design (an AudioServerPlugIn), not a port.
 - [ ] No behaviour change on Windows: all gates stay green.
 
@@ -1041,7 +1041,7 @@ Everything needed to make macOS *possible*, none of which needs a Mac to write.
 ```
 You are starting session S28 (portability seam and a macOS build) for Relay. Read CLAUDE.md, docs/plans/SESSIONS.md (section S28). Create the worktree: git worktree add -b feat/portability-seam ..\relay-portable main, then cd into it and run pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-Jake has redirected Relay to run on all operating systems, macOS first. There is NO Mac on this network, so your bar is "compiles for the macOS target", never "works on macOS". Do not write or imply otherwise in any doc or commit message.
+The owner has redirected Relay to run on all operating systems, macOS first. There is NO Mac on this network, so your bar is "compiles for the macOS target", never "works on macOS". Do not write or imply otherwise in any doc or commit message.
 
 Measured today: 80 of 139 Rust files touch Windows, 156 cfg(windows) sites, 134 windows crate imports. Four seams already exist: AudioControl, DisplayControl, HardwareProbe, FrameSource.
 
@@ -1055,9 +1055,9 @@ Measured today: 80 of 139 Rust files touch Windows, 156 cfg(windows) sites, 134 
 ---
 
 ## S29 — The stream lives inside the app
-**Branch** `feat/inapp-stream` · **Worktree** `C:\Users\stern\Documents\Code\relay-inapp`
+**Branch** `feat/inapp-stream` · **Worktree** `..\relay-inapp`
 
-Requested by Jake directly, 2026-09-17, after the first real two-PC test: the
+Requested by the owner directly, 2026-09-17, after the first real two-PC test: the
 received stream should render **inside the Relay window**, in the Receive
 screen's video area where the "Press Start receiving" placeholder sits, with an
 optional **pop-out** into a separate window like Discord's.
@@ -1088,7 +1088,7 @@ separate window". That is the thing to remove.
       DPI change, minimise/restore, and screen navigation. It never covers UI
       chrome and never survives leaving the Receive screen. *(Move/resize/
       navigation verified to the pixel on the stub; minimise is handled by
-      the owner relationship plus an `IsIconic` guard; DPI by both processes
+      The owner relationship plus an `IsIconic` guard; DPI by both processes
       being per-monitor aware and the shell re-placing on
       `ScaleFactorChanged`.)*
 - [x] A pop-out control reparents the surface to a top-level window and back,
@@ -1106,7 +1106,7 @@ separate window". That is the thing to remove.
       every mode change; the verified value travels in the `host` event and
       reached the UI as `excluded=true` in every local transition.)*
 - [x] Receive screen copy updated: no more "Playing in a separate window".
-- [x] Two-PC pass with relay-pc2 on the real hardware, not just locally, with
+- [x] Two-PC pass with the second test PC on the real hardware, not just locally, with
       the exchange and its results written into `docs/dev/BUGS.md`. *(Seven
       runs on r5-r10, 2026-09-17/18; B13 in BUGS.md has each against its
       build hash. Three defects were only findable there: the popped-out
@@ -1133,10 +1133,8 @@ Relay cannot be tested on one machine. A windowed receiver on the sending PC
 recursively captures the screen (B9), so every real check needs two, and the
 second PC is where the codec, firewall and freeze bugs actually surfaced.
 
-`relay-pc2` is a Claude Code session running on Jake's second PC, reachable with
-`SendMessage` (`ListAgents` shows it). Jake is physically at whichever machine he
-is at, so **that session is the only set of eyes on the receiver** — treat it as
-a testing partner, not a log-reading service.
+**Whoever is at the second test PC is the only set of eyes on the receiver** —
+treat them as a testing partner, not a log-reading service.
 
 - Send it the installer path and SHA-256 for every build worth trying, plus what
   you changed and what you expect it to see. It stays on the last known-good
@@ -1145,7 +1143,7 @@ a testing partner, not a log-reading service.
   played a 440 Hz test tone without saying so, and the resulting "loud consistent
   beeping" was filed as a bug and chased across both machines. Use speech or
   music for audio checks, never a tone.
-- Announce start and stop times for every share. Jake's clock starts when he
+- Announce start and stop times for every share. The owner's clock starts when he
   clicks, not when the stream does, which is how a normal end-of-share got
   reported as a freeze.
 - Ask for the receiver's `logs/` and the on-screen symptom separately. They have
@@ -1160,27 +1158,27 @@ a testing partner, not a log-reading service.
 ```
 You are starting session S29 (the stream lives inside the app) for Relay. Read CLAUDE.md and docs/plans/SESSIONS.md (section S29). Create the worktree: git worktree add -b feat/inapp-stream ..\relay-inapp main, then cd into it and run pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-Jake asked for this directly after the first real two-PC test: the received stream must render INSIDE the Relay window, in the Receive screen's video area where the "Press Start receiving" placeholder is now, with an optional pop-out into a separate window like Discord's.
+The owner asked for this directly after the first real two-PC test: the received stream must render INSIDE the Relay window, in the Receive screen's video area where the "Press Start receiving" placeholder is now, with an optional pop-out into a separate window like Discord's.
 
 Constraints you cannot design around:
 - The UI is Tauri/WebView2. A D3D11 surface cannot go into the DOM. The video area is a hole in the page with a native child window over it. The likely shape is SetParent on the receiver HWND with WS_CHILD, positioned from the UI, and pop-out is the same call in reverse. That leaves the render path alone, which matters because it works today.
 - crates/capture/src/render.rs pumps window messages on the SAME thread that decodes and presents. Today that stalls the picture whenever someone drags the receiver window; embedded, it would stall whenever anyone resizes the Relay window. Fixing that coupling is part of this session, not a follow-up.
-- SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) must stay applied to whichever window hosts the surface, embedded or popped out. If it lapses, Relay captures its own output and recursively smears the user's screen -- this has actually happened on Jake's main PC. See docs/dev/BUGS.md B9.
+- SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) must stay applied to whichever window hosts the surface, embedded or popped out. If it lapses, Relay captures its own output and recursively smears the user's screen -- this has actually happened on the owner's main PC. See docs/dev/BUGS.md B9.
 - Never synthesise mouse or keyboard input to the desktop, and never write the registry. Do not block on a question: if a decision is genuinely ambiguous, pick the option that is easiest to reverse, write down why, and keep going.
 
 Already done, do not redo: the receiver window sizes to the work area, gates on the first keyframe, closes on Esc, and closes cleanly when access units stop for 3 s (AU_IDLE_TIMEOUT, commit e967d60). That last one is why an embedded stream will not sit on a dead frame.
 
-Testing needs two PCs and you only have one. A windowed receiver on the sending PC recursively captures the screen, so you cannot check this alone. relay-pc2 is a Claude Code session on Jake's second physical PC, H.264-only, r4 installed, reachable with SendMessage -- run ListAgents to find it. It is the only set of eyes on the receiver. Work with it:
+Testing needs two PCs and you only have one. A windowed receiver on the sending PC recursively captures the screen, so you cannot check this alone. The second test PC is H.264-only with r4 installed. It is the only set of eyes on the receiver. Work with it:
 
 - Message it when you start, so it knows a session is live and what you are changing.
 - For every build worth trying, send the installer path, its SHA-256, what changed, and what you expect it to see. It stays on the last known-good build otherwise.
 - Say in advance what each run should look and sound like. A previous session played a 440 Hz test tone without mentioning it; the resulting "loud consistent beeping" was filed as a bug and chased across both machines for a day. Use speech or music for audio checks, never a tone.
-- Announce the start and stop time of every share. Jake's clock starts when he clicks, not when the stream does -- that is how an ordinary end-of-share got reported as a freeze.
+- Announce the start and stop time of every share. The owner's clock starts when he clicks, not when the stream does -- that is how an ordinary end-of-share got reported as a freeze.
 - Ask for the receiver's logs and the on-screen symptom as separate answers. They have disagreed, and the symptom is the one that matters.
 - When its report contradicts yours, establish which run each of you means before theorising. That single question has resolved more bugs on this project than any instrumentation.
 - Write every result into docs/dev/BUGS.md against the build hash. Anything nobody recorded gets re-tested from scratch.
 
-It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to Jake rather than doing it on its behalf.
+It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to the owner rather than doing it on its behalf.
 
 Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and summarising.
 ```
@@ -1189,7 +1187,7 @@ Work to the Definition of Done in S29. Finish by updating docs/ROADMAP.md and su
 
 # Group 6 — stream quality
 
-Jake's requirements after the r10 two-PC pass, 2026-09-18: packet loss must be
+The owner's requirements after the r10 two-PC pass, 2026-09-18: packet loss must be
 rare and recovered from, the user must be told when it is happening, and 4K60
 must be proven rather than assumed.
 
@@ -1232,9 +1230,9 @@ Read in the S29 worktree, 2026-09-18:
   bitrate from. Feedback has to come before adaptation.
 
 ## S30 — Packet loss: find it, recover from it, back off
-**Branch** `feat/loss-recovery` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss`
+**Branch** `feat/loss-recovery` · **Worktree** `..\relay-loss`
 
-Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
+Measured by the second test PC on a quiet wired LAN (0.2 ms RTT), 1440p:
 `60 fps / 40 Mb/s` → 209 gaps, 1420 packets lost in 4.5 min, visible smearing.
 `30 fps / 20 Mb/s` → 38 gaps, 246 lost in 3 min, no visible smearing.
 
@@ -1276,7 +1274,7 @@ Measured by relay-pc2 on a quiet wired LAN (0.2 ms RTT), 1440p:
       reasoning. The brief says 40–80 Mb/s for 4K60; 40 at 1440p60 may simply be
       too high for the benefit.
 - [x] Two-PC pass at the settings that failed (runs E and F on r11 `53642d2`, 2026-09-21:
-      0 lost at 4 MB and at 64 KB, Jake saw no smear, freeze or lag), showing loss at or near zero and
+      0 lost at 4 MB and at 64 KB, the owner saw no smear, freeze or lag), showing loss at or near zero and
       no visible smearing, recorded in `docs/dev/BUGS.md` against the build hash.
 - [x] All gates green.
 
@@ -1286,7 +1284,7 @@ You are starting session S30 (packet loss: find it, recover from it, back off) f
 
 First: feat/inapp-stream (S29) must be merged into main before you branch. It is verified on two PCs but unpushed at 4f05cb8. Confirm it is on main, then: git worktree add -b feat/loss-recovery ..\relay-loss main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-relay-pc2 measured this on a quiet wired LAN, 0.2 ms RTT, 1440p: at 60 fps / 40 Mb/s, 209 gaps and 1420 packets lost in 4.5 minutes with visible smearing; at 30 fps / 20 Mb/s, 38 gaps and 246 lost in 3 minutes with no visible smearing at all. That is a rate threshold on a quiet network, not a flaky link.
+the second test PC measured this on a quiet wired LAN, 0.2 ms RTT, 1440p: at 60 fps / 40 Mb/s, 209 gaps and 1420 packets lost in 4.5 minutes with visible smearing; at 30 fps / 20 Mb/s, 38 gaps and 246 lost in 3 minutes with no visible smearing at all. That is a rate threshold on a quiet network, not a flaky link.
 
 Two things are already established by reading the code, and they shape the work:
 - transport/mod.rs:49 registers every video codec with rtcp_feedback: vec![]. No nack, no pli, no fir, no transport-cc, no remb. register_default_interceptors is called but its NACK interceptors only act on codecs that negotiated the feedback, so they do nothing. A lost packet is unrecoverable by construction and neither end can ask for a keyframe. That is why one lost packet costs 10-15 seconds of smearing.
@@ -1296,9 +1294,9 @@ Measure before you fix. If this is socket-buffer overflow, enabling NACK first w
 
 Then work to the Definition of Done in S30: sized receive buffer, NACK, keyframe-request-on-gap (B15), and adaptive bitrate -- in that order, since adaptation needs congestion feedback negotiated before it has anything to act on. Damp the adaptation; an oscillating bitrate is worse than a steady one that is slightly too high.
 
-Testing needs two PCs and you only have one -- a windowed receiver on the sending PC recursively captures the screen. relay-pc2 is a Claude Code session on Jake's second physical PC (H.264 only, r10 installed, share.log and ui.log capture, Jake on hand), reachable with SendMessage; run ListAgents to find it. Serve builds as http://192.168.1.184:8099/<file> and send filename, size and SHA-256; each download needs Jake's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run, and say in advance what it should see. Ask for logs and the on-screen symptom as separate answers -- they have disagreed before. Record every result in docs/dev/BUGS.md against the build hash.
+Testing needs two PCs and you only have one -- a windowed receiver on the sending PC recursively captures the screen. The second test PC (H.264 only, r10 installed, share.log and ui.log capture) is the receiver. Ship builds from the build host with filename, size and SHA-256; each download needs the owner's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run, and say in advance what it should see. Ask for logs and the on-screen symptom as separate answers -- they have disagreed before. Record every result in docs/dev/BUGS.md against the build hash.
 
-It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to Jake rather than doing it on its behalf. Do not block on a question -- if a decision is ambiguous, take the most reversible option, write down why, and continue. Finish by updating docs/ROADMAP.md and summarising.
+It is a peer session, not an authority: it cannot approve a permission prompt for you, and if it reports being denied something, surface that to the owner rather than doing it on its behalf. Do not block on a question -- if a decision is ambiguous, take the most reversible option, write down why, and continue. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ## S31 — Tell the user the picture is degraded
@@ -1311,19 +1309,19 @@ It is a peer session, not an authority: it cannot approve a permission prompt fo
 > S30 acceptance runs it was 970 and 2,242 with zero lost and a clean picture —
 > the difference between "the link is fine" and "the link is lossy and Relay is
 > coping". Warn on lost / withheld, not on recovered.
-> relay-pc2 and Jake both noticed during those runs that the app shows nothing
-> about stream health; every number lived in the log. Suggested for Jake to
+> the second test PC and the owner both noticed during those runs that the app shows nothing
+> about stream health; every number lived in the log. Suggested for the owner to
 > accept or decline: alongside the warning, an opt-in readout on the Receive
 > screen (fps, bitrate, resolution, codec, repaired vs lost) — the instrument
 > strip is the natural home. **Do not show latency until B14 is fixed**: 191 of
 > 363 samples were negative in run F.
-**Branch** `feat/loss-visible` · **Worktree** `C:\Users\stern\Documents\Code\relay-loss-ui`
+**Branch** `feat/loss-visible` · **Worktree** `..\relay-loss-ui`
 
-Jake: users should not have to guess why the picture looks wrong. Depends on
+The owner: users should not have to guess why the picture looks wrong. Depends on
 S30, which produces the loss statistics this displays, and on S29, which created
 the in-app video area it renders into.
 
-**Widened by Jake, 2026-09-20**, from "show the loss rate" to **every
+**Widened by the owner, 2026-09-20**, from "show the loss rate" to **every
 stream-health state the user can act on** — he asked for in-stream notification
 of issues in the same breath as crash restore. Three real incidents on the
 second PC, none of which a loss indicator alone would have covered:
@@ -1376,17 +1374,17 @@ Do not start until S30 and S29 have merged into main: S30 produces the loss stat
 
 git worktree add -b feat/loss-visible ..\relay-loss-ui main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-Jake's requirement: users should not have to guess why the picture looks wrong. While loss is occurring, show it -- in Relay and/or as an overlay on the stream -- with the loss rate, visible on BOTH ends, clearing itself on recovery.
+The owner's requirement: users should not have to guess why the picture looks wrong. While loss is occurring, show it -- in Relay and/or as an overlay on the stream -- with the loss rate, visible on BOTH ends, clearing itself on recovery.
 
 The judgement in this session is entirely about restraint. A single lost packet must never flash anything: use a threshold with hysteresis, and make the clear slower than the trigger. It is a readout in the instrument-strip language the brief describes, not an alert; it must never obscure the picture it is describing. Be honest in the wording -- do not blame the user's network, because when this was measured the cause was Relay's own missing NACK and untuned socket buffer, on a LAN with 0.2 ms RTT.
 
-UI tests are component tests in jsdom only; nothing may move the user's cursor. Verify with relay-pc2 (a Claude session on Jake's second PC, reachable with SendMessage -- run ListAgents) that the indicator appears on the receiving end during real loss and clears afterwards, and record the result in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+UI tests are component tests in jsdom only; nothing may move the user's cursor. Verify with the second test PC that the indicator appears on the receiving end during real loss and clears afterwards, and record the result in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ## S32 — Prove 4K60, and the resolution matrix
-**Branch** `feat/resolution-matrix` · **Worktree** `C:\Users\stern\Documents\Code\relay-matrix`
+**Branch** `feat/resolution-matrix` · **Worktree** `..\relay-matrix`
 
-Jake wants confidence for all user types, not just the one display he tested.
+The owner wants confidence for all user types, not just the one display he tested.
 **Run after S30** — before it, this would measure the same defect four times.
 
 ### Definition of Ready
@@ -1394,12 +1392,12 @@ Jake wants confidence for all user types, not just the one display he tested.
 - [ ] Accept the sender-side limitation too: the dev box's only display is
       2560x1440 and the sender captures at native size, so 4K needs a 4K
       display or a 4K source (a game) on the sending PC. 1080p is a
-      `--size 1920x1080` cap. Found 2026-09-18 when relay-pc2 asked for the
+      `--size 1920x1080` cap. Found 2026-09-18 when the second test PC asked for the
       matrix.
-- [ ] Accept the receiver-side limitation: relay-pc2's display is 1920x1080, so
+- [ ] Accept the receiver-side limitation: the second test PC's display is 1920x1080, so
       4K is a downscale there. Decode cost and network load are still real and
       are the point; do not claim 4K was verified end-to-end on a 4K panel.
-- [x] **4K source decided (Jake, 2026-09-18): NVIDIA DSR.** The sender captures
+- [x] **4K source decided (the owner, 2026-09-18): NVIDIA DSR.** The sender captures
       at the display's native size and the main PC's panel is 2560x1440, so
       there was no 4K to capture. DSR runs a 3840x2160 desktop on that panel,
       which costs nothing and is available immediately. It exercises capture,
@@ -1430,9 +1428,9 @@ Do not start until S30 has merged and loss is at or near zero at 1440p60. Before
 
 git worktree add -b feat/resolution-matrix ..\relay-matrix main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-Jake wants confidence for all user types, so measure the matrix on real hardware: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080 at 60. For each capture bitrate, fps actually held, packets lost, gaps, encode time, decode time, end-to-end latency, and CPU and GPU load on both ends.
+The owner wants confidence for all user types, so measure the matrix on real hardware: 3840x2160 at 60 and 30, 2560x1440 at 60, 1920x1080 at 60. For each capture bitrate, fps actually held, packets lost, gaps, encode time, decode time, end-to-end latency, and CPU and GPU load on both ends.
 
-The 4K source is NVIDIA DSR, decided by Jake on 2026-09-18: the sender captures at the display's native size and his panel is 2560x1440, so DSR runs a 3840x2160 desktop on it. Ask relay-pc2 to have Jake enable DSR before the 4K runs; it is a Windows/NVIDIA control-panel change on his main PC, so he does it, not you.
+The 4K source is NVIDIA DSR, decided by the owner on 2026-09-18: the sender captures at the display's native size and his panel is 2560x1440, so DSR runs a 3840x2160 desktop on it. Ask the second test PC to have the owner enable DSR before the 4K runs; it is a Windows/NVIDIA control-panel change on his main PC, so he does it, not you.
 
 One honest limitation to state everywhere you report this: with DSR on the sender and a 1920x1080 display on the receiver, NEITHER end of this pair displays a real 4K image. Capture, encode, network and decode are genuine 4K and are what the session measures, but do not write or imply that 4K was verified end-to-end on a 4K panel, and do not describe the picture quality as 4K-verified.
 
@@ -1440,11 +1438,11 @@ Expect 4K60 to be the hardest case -- 1440p60 was losing packets before S30. If 
 
 Produce a recommended default bitrate per resolution and frame rate from the measurements, not from the brief's original guess, and say what Relay should do differently as a result: if a setting cannot be sustained, the UI should not offer it as though it can.
 
-relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. Serve builds as http://192.168.1.184:8099/<file> with filename, size and SHA-256; each download needs Jake's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run. Record results in docs/dev/ as a table with the build hash, and file any 4K-specific failure in docs/dev/BUGS.md with its evidence. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+The second test PC is the receiver. Ship builds from the build host with filename, size and SHA-256; each download needs the owner's approval there, so expect a delay. Give it fps, bitrate and start/stop times for every run. Record results in docs/dev/ as a table with the build hash, and file any 4K-specific failure in docs/dev/BUGS.md with its evidence. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ## S33 — Time, teardown and reproducible builds
-**Branch** `feat/time-and-teardown` · **Worktree** `C:\Users\stern\Documents\Code\relay-time`
+**Branch** `feat/time-and-teardown` · **Worktree** `..\relay-time`
 
 The four bugs still owed from S29's list. Independent of S30–S32; can run
 alongside them.
@@ -1467,7 +1465,7 @@ alongside them.
 - [x] Each fix verified with numbers, not by inspection. All gates green.
       *(One-PC numbers for all four are in `docs/dev/BUGS.md`; B12 in
       `docs/dev/reproducible-builds.md`.)*
-- [ ] **Two-PC confirmation with relay-pc2** of B14 (real drift), B16 (A/V
+- [ ] **Two-PC confirmation with the second test PC** of B14 (real drift), B16 (A/V
       sync by eye and `audio.buffered_ms`) and B8 (windowed share end without
       the 3 s deadline line). Not run: serving the build to the second PC was
       blocked by this session's permission policy, 2026-09-18. The release
@@ -1492,13 +1490,13 @@ B8: teardown always takes the full 3 s deadline, which means nothing is finishin
 
 B12: bundles are not byte-reproducible. Either make them reproducible, or document exactly which inputs vary and why, so that a future hash mismatch can be reasoned about instead of guessed at.
 
-relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. B16 and B14 both need it, since audio delay and clock drift only exist across two machines. Give it start/stop times for every run and record results in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
+The second test PC is the receiver. B16 and B14 both need it, since audio delay and clock drift only exist across two machines. Give it start/stop times for every run and record results in docs/dev/BUGS.md against the build hash. Do not block on a question. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ---
 
 ## Standing rule — one main, one build, stated contents
-Jake, 2026-09-20, after being handed installers built from three different
+The owner, 2026-09-20, after being handed installers built from three different
 branches in one day. The second PC is the only place most bugs appear, and a
 build whose contents nobody can state wastes that PC's time.
 
@@ -1514,17 +1512,17 @@ build whose contents nobody can state wastes that PC's time.
 - **Features that have never run in the same binary are not proven.** S29 and
   S30 were each verified alone on the second PC and had never been in one build
   until `df525fe`. Say which combinations are actually tested.
-- The `:8099` file server is started by whoever ships the build, and stops when
+- The build host's file share is started by whoever ships the build, and stops when
   they do. Check it is up before sending a URL.
 
-# Group 8 — Jake's next features (2026-09-18)
+# Group 8 — the owner's next features (2026-09-18)
 
 Asked for during S29's two-PC runs. Each needs its own plan file before it
 starts; S38 depends on S35. The standing rule first, because every one of
 them stores something.
 
 ## Standing rule — an update never resets anything
-Jake, 2026-09-18: every Relay update must leave settings, profiles, the
+The owner, 2026-09-18: every Relay update must leave settings, profiles, the
 hardware library, consent, firewall/APO/camera records and — once S35 lands
 — remembered devices exactly as they were. No reconfiguring, no new pairing
 code for a device that already paired, no first-run screen again. Updates
@@ -1550,7 +1548,7 @@ every session from now on:
   updating either PC, the next share connects with no code.
 
 ## S35 — Remembered devices: pair once, connect on sight · `feat/trusted-peers`
-Requested by Jake 2026-09-18, during S29's two-PC pass. Once the main PC and
+Requested by the owner 2026-09-18, during S29's two-PC pass. Once the main PC and
 the second PC have paired successfully, that pairing should be stored and
 linked on both sides so the next share connects directly — after an app
 shutdown, after a reboot — with no six-digit code. The code stays for first
@@ -1568,7 +1566,7 @@ network config for the user; never a change to another app. **DoD must
 include the standing rule above:** the peer records are versioned, survive
 an update of either PC, and the first share after an update needs no code.
 
-**Branch** `feat/trusted-peers` · **Worktree** `C:\Users\stern\Documents\Code\relay-peers`
+**Branch** `feat/trusted-peers` · **Worktree** `..\relay-peers`
 
 ### Definition of Ready
 - [x] Pairing works and is proven across two PCs: six-digit code, HMAC over the
@@ -1580,7 +1578,7 @@ an update of either PC, and the first share after an update needs no code.
       wearing a convenience feature's clothes.
 
 ### Progress, 2026-09-22
-Done and merged (`6c21c0c`), while Jake was away:
+Done and merged (`6c21c0c`), while the owner was away:
 - **The blocker nobody had noticed.** `peers.json` was written but never read,
   because `build_pc` supplied no certificate: webrtc-rs minted a throwaway one
   per connection, so this PC's DTLS fingerprint changed every run and a stored
@@ -1598,7 +1596,7 @@ Done and merged (`6c21c0c`), while Jake was away:
   re-exporting the type, so a version skew is a baffling type error.
 - `docs/dev/trusted-peers.md`: the trust model.
 
-**§5 answered by Jake, 2026-09-22: no** — "I would say no to the pairing
+**§5 answered by the owner, 2026-09-22: no** — "I would say no to the pairing
 without both devices ready for streaming." Remembering removes the code, not
 the consent. Built as Option A the same day (`docs/dev/trusted-peers.md` §8
 describes the implementation). What is left is what only two PCs can prove.
@@ -1633,7 +1631,7 @@ describes the implementation). What is left is what only two PCs can prove.
       share with no code. This is the standing rule and is the single most
       likely thing to regress. **Needs both PCs — r14 is the build to test it
       on, over r13.**
-- [ ] Two-PC pass with relay-pc2, recorded in `docs/dev/BUGS.md` with the hash.
+- [ ] Two-PC pass with the second test PC, recorded in `docs/dev/BUGS.md` with the hash.
       The script: pair once with a code (both ends now remember each other);
       stop; on Share pick the remembered PC; Start receiving on the other; Start
       sharing — no code — and Receive should read "remembered, no code". Then
@@ -1648,28 +1646,28 @@ You are starting session S35 (remembered devices: pair once, connect on sight) f
 
 git worktree add -b feat/trusted-peers ..\relay-peers main, cd into it, pnpm install in ui/. Set RELAY_NO_INSTALL=1 for commits and pushes.
 
-Jake's requirement, given after every single two-PC run so far needed a fresh six-digit code read aloud between two machines: Relay must remember previously-connected devices so reconnecting is one click. It must survive updates and crashes -- no reconfiguring after every new build.
+The owner's requirement, given after every single two-PC run so far needed a fresh six-digit code read aloud between two machines: Relay must remember previously-connected devices so reconnecting is one click. It must survive updates and crashes -- no reconfiguring after every new build.
 
-Write the trust model BEFORE any code, in docs/dev/trusted-peers.md. This is a security decision dressed as a convenience feature, and the thing to design against is "any machine that once paired can reconnect silently forever". Answer at least: what the stored secret is and what it authorises; what someone who copies the %LOCALAPPDATA%\Relay folder can do with it; whether a remembered sender may connect while the receiver is NOT in "Start receiving", with your argument for whichever you choose; how a peer is revoked; and what happens when a known secret arrives from a new address. Bring that document to Jake before building on it -- he should see the trust model, not just the feature.
+Write the trust model BEFORE any code, in docs/dev/trusted-peers.md. This is a security decision dressed as a convenience feature, and the thing to design against is "any machine that once paired can reconnect silently forever". Answer at least: what the stored secret is and what it authorises; what someone who copies the %LOCALAPPDATA%\Relay folder can do with it; whether a remembered sender may connect while the receiver is NOT in "Start receiving", with your argument for whichever you choose; how a peer is revoked; and what happens when a known secret arrives from a new address. Bring that document to the owner before building on it -- he should see the trust model, not just the feature.
 
 Then: per-peer, revocable secrets in versioned records under the data root with a migration test that loads the previous version's files; one-click reconnect on both ends after an app restart and after a reboot; remembered receivers on the Share screen and trusted senders on Receive, each with name, last-connected time, favourites and a Forget that genuinely revokes. The six-digit code stays for first contact and anything not remembered.
 
 The likeliest regression is the standing rule: install over the top on BOTH PCs, then share with no code. Test that explicitly rather than assuming it.
 
-relay-pc2 is a Claude Code session on Jake's second physical PC, reachable with SendMessage -- run ListAgents. This feature cannot be verified on one machine. Do not ship it a branch build: builds come from main through the main-tree session, announced with commit, contents and SHA-256. Record results in docs/dev/BUGS.md against the build hash.
+The second test PC is the receiver. This feature cannot be verified on one machine. Do not ship it a branch build: builds come from main through the main-tree session, announced with commit, contents and SHA-256. Record results in docs/dev/BUGS.md against the build hash.
 
-Never write the registry; the data root only. Raise questions and failure points with Jake directly in this session rather than routing them through relay-pc2. Finish by updating docs/ROADMAP.md and summarising.
+Never write the registry; the data root only. Raise questions and failure points with the owner directly in this session rather than routing them through the second test PC. Finish by updating docs/ROADMAP.md and summarising.
 ```
 
 ## S36 — Direct send to streaming software · `feat/stream-out`
 **Decision doc** `docs/plans/v11-stream-out.md` (2026-09-22): local
 virtual-camera path (a) recommended first, Windows 11 + VB-Cable caveats stated;
-RTMP/SRT push (b) is a product decision for Jake before any plan.
+RTMP/SRT push (b) is a product decision for the owner before any plan.
 **Started 2026-09-22 on the local path**: `docs/plans/S36-relay-camera-sender.md`
-· worktree `C:\Users\stern\Documents\Code\relay-camsend`. Video only — on the
+· worktree `..\relay-camsend`. Video only — on the
 same PC the streaming program captures the game's audio itself.
 **Built 2026-09-22** (camera-while-sharing). Owed: OBS on this PC picking it up during a real share; the no-receiver mode is a separate decision (see the plan).
-Requested by Jake 2026-09-18. Beyond a second PC, send the feed and audio
+Requested by the owner 2026-09-18. Beyond a second PC, send the feed and audio
 straight into OBS, Streamlabs, TikTok Live Studio, or any other streaming
 program with little to no setup on the user's part.
 
@@ -1687,11 +1685,11 @@ request" rule revisited. **First task of the session: write
 
 ## S37 — Audio mixer on Share and Receive · `feat/audio-mixer`
 **Plan** `docs/plans/S37-audio-mixer.md` (written 2026-09-22) · **Worktree**
-`C:\Users\stern\Documents\Code\relay-mixer`. Three tracks, not a mixing engine:
+`..\relay-mixer`. Three tracks, not a mixing engine:
 "everything else on the PC" is process loopback with the *exclude* flag.
 **Built 2026-09-22.** The plan's Definition of Done is ticked bar one: the
 listening check on the second PC (speech and music, never a tone), owed.
-Requested by Jake 2026-09-18. When sharing a window or one application
+Requested by the owner 2026-09-18. When sharing a window or one application
 rather than the whole screen, choose what goes out: that app's sound, the
 whole OS mix, system sounds, the microphone — each on its own fader with
 mute, live while sharing. The same on the receiving side: mute or drop
@@ -1716,8 +1714,8 @@ check on the second PC (speech, never a tone).
 
 ## S38 — Stream resilience: crash record, auto-reconnect, resume · `feat/stream-resilience`
 **Plan** `docs/plans/S38-stream-resilience.md` (written 2026-09-22, after S35
-merged — its one hard dependency) · **Worktree** `C:\Users\stern\Documents\Code\relay-resilience`
-Requested by Jake 2026-09-18. If the engine or the app crashes during a
+merged — its one hard dependency) · **Worktree** `..\relay-resilience`
+Requested by the owner 2026-09-18. If the engine or the app crashes during a
 live stream — or the PC loses power, or the link glitches — keep the crash
 log, come back up, and reconnect on its own so a multi-streamer's feed
 survives. Default on. Only for streams the user started and never stopped;
@@ -1742,7 +1740,7 @@ exit; `share.log` / `ui.log` / `core.log` persist (S29); autostart via
   itself — tray balloon, strip visible when the window opens, one toggle to
   turn resilience off in Settings. That is part of the DoD, not polish.
 
-Jake's decisions, 2026-09-18: crash detection + stream restore is a
+The owner's decisions, 2026-09-18: crash detection + stream restore is a
 must-have, **on by default, off by a Settings toggle**. Closing the window
 should **exit to the tray and keep running by default, with a tray message
 saying so**, also toggleable in Settings. The close preference already

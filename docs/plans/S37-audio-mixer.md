@@ -1,8 +1,8 @@
 # S37 — Audio mixer on Share and Receive
 
-**Branch** `feat/audio-mixer` · **Worktree** `C:\Users\stern\Documents\Code\relay-mixer`
+**Branch** `feat/audio-mixer` · **Worktree** `..\relay-mixer`
 
-Jake, 2026-09-18: when sharing a window or one application rather than the
+The owner, 2026-09-18: when sharing a window or one application rather than the
 whole screen, choose what goes out — that app's sound, the rest of the PC,
 the microphone — each on its own fader with mute, live while sharing. The
 same on the receiving side: mute or drop system sounds, app sound, the mic,
@@ -132,7 +132,7 @@ strip reads them like the others.
 - [x] Levels for all three tracks in the strip (`rest_peak` / `rest_packets`).
 - [x] Recording: the game and the microphone land on disk; everything else
       does not, and the Share mixer says so when that track is being sent.
-- [ ] Listening check on the second PC with relay-pc2: **speech and music,
+- [ ] Listening check on the second PC with the second test PC: **speech and music,
       never a tone.** Mute the game and hear only the rest; mute the rest and
       hear only the game; move a fader mid-share and hear no click. Recorded
       in `BUGS.md` against the build hash. **Owed.**
@@ -157,7 +157,7 @@ audio-track count before deciding what lands on disk.
 
 Non-negotiables: shared-mode WASAPI only, Relay's own mix only, no endpoint
 volume or default-device change, no DSP on the share path. UI tests in jsdom
-only. relay-pc2 is a Claude session on Jake's second PC (SendMessage; ListAgents);
+only. The second test PC is the receiver;
 the listening check there uses speech and music, never a tone. Builds ship from
 main through the main-tree session. Do not block on a question: take the most
 reversible option, write it down, continue. Finish by updating docs/ROADMAP.md.

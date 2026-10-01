@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Relay third-party licences</title>
+<style>
+body { background: #0E0D0C; color: #ECE6DC; font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+a { color: #C9A96A; }
+pre { white-space: pre-wrap; background: #151312; padding: 12px; font-size: 12px; }
+h2 { border-top: 1px solid #2a2622; padding-top: 16px; }
+</style>
+</head>
+<body>
+<h1>Relay third-party licences</h1>
+<p>Relay is MIT licensed. It is built with the open-source software below, each under its own licence.</p>
+<!-- NOTICES -->
+<h2>Rust crates</h2>
+<ul>
+{{#each overview}}<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}
+</ul>
+{{#each licenses}}
+<h3 id="{{id}}">{{name}}</h3>
+<p>Used by:</p>
+<ul>
+{{#each used_by}}<li><a href="{{#if crate.repository}}{{crate.repository}}{{else}}https://crates.io/crates/{{crate.name}}{{/if}}">{{crate.name}} {{crate.version}}</a></li>
+{{/each}}
+</ul>
+<pre>{{text}}</pre>
+{{/each}}
+<!-- NPM -->
+</body>
+</html>

@@ -41,7 +41,7 @@ pub struct UiPrefs {
     #[serde(default)]
     pub close_action: CloseAction,
     /// Bring a share back on its own after a crash, a dropped link or a
-    /// reboot (S38). On by default — Jake's decision — because the person it
+    /// reboot (S38). On by default — the owner's decision — because the person it
     /// is for is mid-stream with an audience and cannot rebuild it by hand.
     #[serde(default = "default_true")]
     pub resilience: bool,
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn the_s38_switches_default_on_and_an_older_file_turns_them_on_too() {
-        // Jake's decisions: resilience and the close notice are on unless
+        // The owner's decisions: resilience and the close notice are on unless
         // turned off. And the standing rule: a settings.json written before
         // these fields existed must not read as "off".
         assert!(UiPrefs::default().resilience);

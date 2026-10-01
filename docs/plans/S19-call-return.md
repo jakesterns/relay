@@ -1,9 +1,9 @@
 # S19 — Call-audio return route and mix-minus
 
-**Branch** `feat/mix-minus` · **Worktree** `C:\Users\stern\Documents\Code\relay-mixminus`
+**Branch** `feat/mix-minus` · **Worktree** `..\relay-mixminus`
 
 Started 2026-09-23 as the first v1.1 item, because every v1 session is
-built and only live testing remains. Jake's brief lists it under v1.1 and
+built and only live testing remains. The owner's brief lists it under v1.1 and
 S2 left the seam for it on purpose (`docs/dev/dual-audio-decision.md`).
 
 ## The problem

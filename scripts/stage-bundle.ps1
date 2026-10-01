@@ -126,6 +126,11 @@ $text = [System.IO.File]::ReadAllText($catalog).Replace("`r`n", "`n")
 Write-Host ("  resource autoeq-index.tsv ({0:N0} models, {1:N0} KB)" -f `
     (Get-Content $catalog).Count, ((Get-Item $catalog).Length / 1KB))
 
+# Third-party licences (Rust crates, npm packages, bundled assets). The
+# installer must carry them, so a missing tool is an error, not a skip.
+& (Join-Path $PSScriptRoot 'licenses.ps1') -Out (Join-Path $staging 'licenses.html')
+Write-Host '  resource licenses.html'
+
 Write-Host ''
 Write-Host "staged into $staging"
 Write-Host 'now run:  cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json'

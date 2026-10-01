@@ -845,7 +845,7 @@ mod tests {
             "--code",
             "1",
             "--record-dir",
-            r"C:\Users\jake\Videos\Relay",
+            r"%USERPROFILE%\Videos\Relay",
             "--record",
             "--replay-secs",
             "90",
@@ -853,7 +853,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             o.record_dir.as_deref(),
-            Some(std::path::Path::new(r"C:\Users\jake\Videos\Relay"))
+            Some(std::path::Path::new(r"%USERPROFILE%\Videos\Relay"))
         );
         assert!(o.record);
         assert_eq!(o.replay_secs, 90);

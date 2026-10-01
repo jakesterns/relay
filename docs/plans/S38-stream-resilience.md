@@ -1,15 +1,15 @@
 # S38 — Stream resilience: crash record, auto-reconnect, resume
 
-**Branch** `feat/stream-resilience` · **Worktree** `C:\Users\stern\Documents\Code\relay-resilience`
+**Branch** `feat/stream-resilience` · **Worktree** `..\relay-resilience`
 
-Jake, 2026-09-18 and again 2026-09-20: if Relay or a share dies, restore the
+The owner, 2026-09-18 and again 2026-09-20: if Relay or a share dies, restore the
 session by default rather than leaving the user to rebuild it; keep the crash
 log; tell the user what is happening during a stream rather than degrading
 silently. **On by default, off by a Settings toggle.** Closing the window exits
 to the tray and keeps running, **with a notification-area message saying so**,
 also toggleable.
 
-Evidence it is needed (relay-pc2, 2026-09-20): the receiver twice ended a
+Evidence it is needed (the second test PC, 2026-09-20): the receiver twice ended a
 share by itself with nothing on screen explaining why; the app kept a stale
 "Paired" status after the share was dead; every stream-health number lived in
 `share.log`. S31 fixed the last two symptoms; this is the cure for the first.
@@ -18,7 +18,7 @@ share by itself with nothing on screen explaining why; the app kept a stale
 
 - **S35 made reconnect possible without a code.** After one code pairing both
   PCs remember each other, and a remembered sender connects with no code —
-  provided the receiver is on Start receiving (Jake's Option A). So resuming a
+  provided the receiver is on Start receiving (the owner's Option A). So resuming a
   share after a crash or reboot needs nothing typed, *as long as the receiver
   is listening*. That is the design's one hard dependency and it is why S35
   had to land first.
@@ -162,7 +162,7 @@ default). Two `Toggle`s under the close-action one, in the same voice.
 - [x] Nothing here changes behaviour when `resilience` is off: an engine exit
       is reported as today and nothing respawns.
 - [ ] All gates green (**yes**: fmt, clippy `-D warnings`, 292 UI / 214 core /
-      176 capture, footprint); two-PC pass with relay-pc2 recorded in
+      176 capture, footprint); two-PC pass with the second test PC recorded in
       `BUGS.md` against the build hash — **owed**.
 
 ## Kickoff prompt
@@ -171,20 +171,19 @@ You are session S38 (stream resilience) for Relay. Read CLAUDE.md,
 docs/plans/S38-stream-resilience.md (the design; follow it), docs/plans/SESSIONS.md
 (section S38 and the standing rules), and docs/dev/stream-notices.md.
 
-Your worktree already exists: C:\Users\stern\Documents\Code\relay-resilience on
+Your worktree already exists: ..\relay-resilience on
 branch feat/stream-resilience, cut from main with S35 merged. pnpm install in ui/.
 RELAY_NO_INSTALL=1 for commits and pushes.
 
 Build it in the order the design lists: the intent record and backoff (pure,
 tested), the supervisor in the core, resume at start, the crash record, the tray
-balloon, the two Settings toggles, then the UI states. Jake's decisions are not
+balloon, the two Settings toggles, then the UI states. The owner's decisions are not
 open: on by default, off by a toggle; closing the window keeps running and says
 so in the tray.
 
 Never kill a Relay process by image name; kill only PIDs you started. Never
 write the registry. Do not block on a question: take the most reversible option,
-write down why, continue. relay-pc2 is a Claude session on Jake's second PC,
-reachable with SendMessage (ListAgents); builds ship from main through the
+write down why, continue. The second test PC is the receiver; builds ship from main through the
 main-tree session with commit, contents and SHA-256. Record every two-PC result
 in docs/dev/BUGS.md against the hash. Finish by updating docs/ROADMAP.md.
 ```

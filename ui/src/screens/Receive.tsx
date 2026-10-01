@@ -344,7 +344,7 @@ function StreamHealthCard(
 /** PCs that may send to this one without a code (S35).
  *
  *  They still need this screen to be on Start receiving. Remembering removed
- *  the code, not the consent -- Jake's call in the trust model (§5): nothing
+ *  the code, not the consent -- the owner's call in the trust model (§5): nothing
  *  can put a picture on this screen unasked. Forget is real, not a hidden
  *  row: the PC needs a code again, like a stranger. */
 function TrustedSendersCard({ tick }: { tick: number }) {

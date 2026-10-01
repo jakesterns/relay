@@ -246,7 +246,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 // DTLS decides whether the claim is true, and "paired" is not
                 // reported until it has. That this PC is in Start receiving at
                 // all is the consent: remembering removes the code, not the
-                // consent (trust model §5, Jake's decision).
+                // consent (trust model §5, the owner's decision).
                 let fp = signal::sdp_fingerprint(&sdp);
                 let known =
                     fp.as_deref().and_then(|f| relay_core::peers::recognise(f).ok().flatten());

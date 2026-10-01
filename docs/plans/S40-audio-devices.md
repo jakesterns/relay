@@ -88,7 +88,7 @@ as the source, or tones measured by FFT, per the automated-audio rule.
 - **Row 7 pass**: Output set to Realtek mid-share over IPC; reopened 56 ms after the command, tone moved from the Rodecaster to Realtek at -14.0 dB with no measurable gap, same relay-share pid, no reconnect.
 - **Row 10 pass**: the next share opened straight on Realtek (`recv ... --output-device {...}`); setting System default again removes the flag after a core restart.
 - Fixed after the run: the Output picker only showed while a sender was connected; it now shows whenever the Receive page is open.
-- Sender rows (2-6, 9, 11) are owed: they change this PC's default devices, which Jake uses for other work.
+- Sender rows (2-6, 9, 11) are owed: they change this PC's default devices, which the owner uses for other work.
 
 ## Not done / follow-ups
 - A pinned device that is unplugged and plugged back in is not picked up

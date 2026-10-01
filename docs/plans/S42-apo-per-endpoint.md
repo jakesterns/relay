@@ -106,7 +106,7 @@ in (22 others were there).
   byte-for-byte.
 - Also fixed: `tests/elevate_helper.rs` still sent pre-S42 string ops.
 
-**Live retest (with Jake).**
+**Live retest (with the owner).**
 1. `reg export HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects ae-before.reg`
    plus the Render export.
 2. Uninstall the S42 install on the S/PDIF output (restores FxProperties and
@@ -170,7 +170,7 @@ endpoint, discovery), GetRegistrationProperties, GetEffectsList, format
 negotiation (both formats + answer), LockForProcess, shm create (name +
 HRESULT). Never APOProcess.
 
-**Next live step (with Jake).** Rebuild + reinstall the DLL on the S/PDIF
+**Next live step (with the owner).** Rebuild + reinstall the DLL on the S/PDIF
 endpoint, create `C:\ProgramData\Relay\apo-diag.on`, restart
 AudioEndpointBuilder, play speech/music to S/PDIF, then read the log:
 - no file anywhere -> never loaded (compare the Equalizer APO registration);
@@ -179,7 +179,7 @@ AudioEndpointBuilder, play speech/music to S/PDIF, then read the log:
 - format refusals -> negotiation;
 - `shm create … S_OK` -> `relay-core apo status` should read `reachable`.
 
-## Live test plan (VM or Jake's machine, with Jake — NOT unattended)
+## Live test plan (VM or the owner's machine, with the owner — NOT unattended)
 
 Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per
 `docs/dev/elevation-live.md`. Export `HKLM\...\MMDevices\Audio\Render` first
@@ -192,7 +192,7 @@ Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per
 2. Install through Settings → that output's Install… → accept UAC. Check
    `apo-backup\<guid>.json` exists and only that endpoint's FxProperties
    changed (diff the export).
-3. **Load in audiodg.** Play speech/music to that output (Jake's rule: never a
+3. **Load in audiodg.** Play speech/music to that output (the owner's rule: never a
    tone for listening). `tasklist /m relay_apo.dll /fi "imagename eq audiodg.exe"`
    shows the DLL; `relay-core apo status` shows `params section: reachable`.
 4. Refusals: `elevate run install-apo --endpoint {00000000-0000-0000-0000-000000000000}`

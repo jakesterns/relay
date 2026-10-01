@@ -16,7 +16,7 @@
 //!   itself again into the app window it came from (it remembers the owner),
 //!   and tells the app so (`host_close`, then the `host` event). It used to
 //!   only hide and ask the app to re-embed it; on the second PC that
-//!   four-hop round trip took anywhere from 1.6 s to 47 s and Jake clicked
+//!   four-hop round trip took anywhere from 1.6 s to 47 s and the owner clicked
 //!   the close button several times waiting. If the app window is gone,
 //!   close ends the receive, as it does for a standalone window.
 //!

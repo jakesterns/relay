@@ -1,10 +1,10 @@
 # Trusted peers: the trust model
 
-**Status: approved. Jake answered §5 on 2026-09-22 — no: both PCs must be
+**Status: approved. The owner answered §5 on 2026-09-22 — no: both PCs must be
 ready. Implemented as Option A, and the implementation is described at the
 end (§8).**
 
-Jake's requirement: after two PCs have paired once, reconnecting should be one
+The owner's requirement: after two PCs have paired once, reconnecting should be one
 click, not a fresh six-digit code read aloud between two machines. It must
 survive updates and crashes.
 
@@ -105,7 +105,7 @@ inherent in remembering it, and is why revocation and visibility matter.
 **May a remembered sender connect while the receiving PC is _not_ in "Start
 receiving"?**
 
-**Jake, 2026-09-22: no.** "I would say no to the pairing without both devices
+**The owner, 2026-09-22: no.** "I would say no to the pairing without both devices
 ready for streaming." Option A is what shipped. Option B is kept below as the
 record of what was considered and why it was not the default.
 
@@ -117,7 +117,7 @@ consent. One click on the receiving PC, then the sender connects with no code.
   else.
 - The failure mode of a stolen identity key is bounded: an impersonator still
   cannot connect to a PC that is not listening.
-- Costs one click on the receiver — which is the click Jake already makes.
+- Costs one click on the receiver — which is the click the owner already makes.
 
 *Option B — yes, auto-accept.* A remembered sender can connect any time Relay
 is running.
@@ -126,7 +126,7 @@ is running.
 - But it is exactly the shape we set out to design against. Anyone holding a
   remembered peer's key, or that peer's machine, can start a stream to this PC
   unprompted.
-- If Jake wants this, it should be **per peer**, off by default, obvious in the
+- If the owner wants this, it should be **per peer**, off by default, obvious in the
   UI, and paired with an on-screen indication that a share has begun.
 
 I recommend A, and if B is wanted later it should be an explicit per-peer

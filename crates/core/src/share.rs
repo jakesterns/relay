@@ -1194,13 +1194,13 @@ mod tests {
         let ev = decode_line(r#"{"event":"connected","peer":"den-pc","rtt_ms":0.4}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Connected { peer, .. } if peer == "den-pc"));
 
-        let ev = decode_line(r#"{"event":"waiting","code":"123456","name":"jake"}"#).unwrap();
+        let ev = decode_line(r#"{"event":"waiting","code":"123456","name":"studio"}"#).unwrap();
         assert!(
-            matches!(ev, ShareEvent::Waiting { code, name } if code == "123456" && name == "jake")
+            matches!(ev, ShareEvent::Waiting { code, name } if code == "123456" && name == "studio")
         );
 
-        let ev = decode_line(r#"{"event":"paired","sender":"jake"}"#).unwrap();
-        assert!(matches!(ev, ShareEvent::Paired { sender, .. } if sender == "jake"));
+        let ev = decode_line(r#"{"event":"paired","sender":"studio"}"#).unwrap();
+        assert!(matches!(ev, ShareEvent::Paired { sender, .. } if sender == "studio"));
 
         let ev = decode_line(r#"{"event":"error","where":"video","message":"boom"}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Error { message } if message == "boom"));
@@ -1213,9 +1213,9 @@ mod tests {
     fn paired_and_connected_carry_whether_a_code_was_used() {
         // S35: `trusted` says the peer connected as a remembered PC. Absent
         // (an engine that predates it) means a code was used.
-        let ev = decode_line(r#"{"event":"paired","sender":"jake","trusted":true}"#).unwrap();
+        let ev = decode_line(r#"{"event":"paired","sender":"studio","trusted":true}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Paired { trusted: true, .. }));
-        let ev = decode_line(r#"{"event":"paired","sender":"jake"}"#).unwrap();
+        let ev = decode_line(r#"{"event":"paired","sender":"studio"}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Paired { trusted: false, .. }));
         let ev = decode_line(r#"{"event":"connected","peer":"den-pc","trusted":true}"#).unwrap();
         assert!(matches!(ev, ShareEvent::Connected { trusted: true, .. }));
@@ -1258,9 +1258,9 @@ mod tests {
         assert_eq!(s, r#"{"event":"exited","ok":false,"code":1}"#);
         let s = serde_json::to_string(&ShareEvent::Waiting {
             code: "123456".into(),
-            name: "jake".into(),
+            name: "studio".into(),
         })
         .unwrap();
-        assert_eq!(s, r#"{"event":"waiting","code":"123456","name":"jake"}"#);
+        assert_eq!(s, r#"{"event":"waiting","code":"123456","name":"studio"}"#);
     }
 }

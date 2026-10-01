@@ -13,8 +13,8 @@ M0. Uses headset curves from M1 when available; not required.
 
 ## Definition of Ready
 - [x] M0 complete (done 2026-09-09).
-- [x] A default HRTF impulse-response set chosen with a licence that allows bundling (candidates: SADIE II, MIT KEMAR, HUTUBS); decision recorded here: **SADIE II, subject D1 (Neumann KU100), Apache 2.0 — confirmed by Jake 2026-09-10.** Attribution ships in `crates/audio/assets/hrtf/LICENSE`.
-- [x] A game known to use WASAPI exclusive mode identified for the detection test: **our own test helper** (`relay-audio` opens an `AUDCLNT_SHAREMODE_EXCLUSIVE` stream in-process for the automated test) — confirmed by Jake 2026-09-10. A real game spot-check moves to the MVP validation pass.
+- [x] A default HRTF impulse-response set chosen with a licence that allows bundling (candidates: SADIE II, MIT KEMAR, HUTUBS); decision recorded here: **SADIE II, subject D1 (Neumann KU100), Apache 2.0 — confirmed by the owner 2026-09-10.** Attribution ships in `crates/audio/assets/hrtf/LICENSE`.
+- [x] A game known to use WASAPI exclusive mode identified for the detection test: **our own test helper** (`relay-audio` opens an `AUDCLNT_SHAREMODE_EXCLUSIVE` stream in-process for the automated test) — confirmed by the owner 2026-09-10. A real game spot-check moves to the MVP validation pass.
 
 ## Checklist
 ### DSP (`relay-audio::dsp`, `#![forbid(unsafe_code)]` where possible)
@@ -60,6 +60,6 @@ Live detection on this machine: `exclusive_detect` and `exclusive_watch` tests r
 The APO itself, installer, signing (M3b).
 
 ## Deferred
-- **The listening session itself** — needs Jake's ears. Material is staged: `%LOCALAPPDATA%\Relay\previews\original.wav` / `processed.wav` (demo clip through a 2-band EQ + explosion tamer + HRTF), and the Games › Audio → "A/B listening test" card renders/plays pairs on demand. No code work left.
+- **The listening session itself** — needs the owner's ears. Material is staged: `%LOCALAPPDATA%\Relay\previews\original.wav` / `processed.wav` (demo clip through a 2-band EQ + explosion tamer + HRTF), and the Games › Audio → "A/B listening test" card renders/plays pairs on demand. No code work left.
 - **Real-game exclusive-mode spot check** — the DoR decision replaced it with the in-process exclusive stream for automation; verifying against a shipping title (e.g. a player with WASAPI-exclusive output) moves to the MVP validation pass alongside the two-PC share run.
 - ~~**Headset-correction curves in the chain**~~ — **done 2026-09-13** (`Headset correction curves now reach the audio chain`), extended 2026-09-14 by the catalogue fetch. A measured curve is fitted to a shelf/peaking cascade by `crates/audio/src/fit.rs` (two fixed-corner shelves plus greedy peaking placement, half-octave minimum spacing, evaluated against the actual cascade response), and `relay_core::audio_bridge::chain_params_with` prepends that fit to the profile's own bands — correction first, taste on top — under a `CORRECTION_BUDGET`. The Games screen carries a "Headset correction" card bound to `audio.headset_correction`. Coverage: `crates/core/tests/headset_correction.rs` plus the unit tests in `audio_bridge.rs`; the real oratory1990 HD 560S curve fits to 2.2 dB worst case / 0.8 dB RMS in eight bands.

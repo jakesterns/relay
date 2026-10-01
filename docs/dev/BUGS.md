@@ -53,7 +53,7 @@ cannot fail the render path, so the first real test is the second PC.
 ### B4 — Firewall rule policy misses a disabled Private profile
 S22 scopes Relay's rule to private + domain, never public — right for a
 LAN-only app. But on a machine where the **Private profile is disabled** and
-Public is enabled (Jake's dev box), the only profile actually enforcing is the
+Public is enabled (the owner's dev box), the only profile actually enforcing is the
 one we deliberately never touch. Windows confirmed this by offering *only* a
 Public checkbox in its own prompt.
 
@@ -65,7 +65,7 @@ rely on the coincidence.
 ### B5 — ~~`relay-core status` prints the foreground window title~~ FIXED 2026-09-17
 The CLI status line echoes whatever window is in front — during testing that
 was a browser tab title. Anyone pasting `status` output into a bug report or a
-log leaks it. `relay-pc2` redacted it by hand, which is the only reason it did
+log leaks it. the second test PC redacted it by hand, which is the only reason it did
 not end up in this repo.
 
 ### B6 — The HEVC banner becomes wrong the moment S27 lands
@@ -155,7 +155,7 @@ never kill Relay processes by name; kill the PIDs you started.
 ### B9 — Relay will happily capture its own render window  |  FIXED 2026-09-17, VERIFIED on hardware 2026-09-18
 2026-09-17, on the dev box: loopback runs left a receiver window on the display
 the sender was capturing, so the capture contained the window showing the
-capture. Jake's description was "an infinite loop of whatever is on my screen,
+capture. The owner's description was "an infinite loop of whatever is on my screen,
 like smearing a painting repeatedly", and with B8 keeping the window alive it
 did not stop on its own. His machine was unusable until the processes were
 killed.
@@ -172,7 +172,7 @@ exposure.
 
 *Verified 2026-09-18 (S29 run 2):* while the dev box shared its desktop to
 the second PC, a pattern stub was drawing into the receiver window class on
-the dev box. Jake saw the Relay window in the stream but not the surface
+the dev box. The owner saw the Relay window in the stream but not the surface
 inside it; everything else on the desktop came through. The exclusion holds
 on a real capture, in the embedded (owned popup) state, at 60 fps.
 
@@ -257,7 +257,7 @@ NSIS installer itself (stored mtimes, solid LZMA). `docs/dev/reproducible-builds
 has each input, the evidence, and a checklist for reasoning about a mismatch.
 
 ### B13 — The received stream played in a window of its own  |  FIXED, verified on the second PC 2026-09-18 (r10 = `5cb414b`)
-Jake, after the first real two-PC test: the picture belongs *inside* the
+The owner, after the first real two-PC test: the picture belongs *inside* the
 Relay window, in the Receive screen's video area, with a pop-out like
 Discord's. The old Receive screen painted an empty frame captioned "Playing
 in a separate window", and the window itself was a top-level `relay-share`
@@ -283,14 +283,14 @@ every transition; present counter climbing throughout. What the stub cannot
 show: a real modal drag of the app window, real decode and audio, Windows 10.
 
 **Two-PC pass, run 1, 2026-09-18 00:04-00:08 UTC, r5 = `256661b`, sender
-this dev box (main `3036081`), receiver the Windows 10 PC via relay-pc2:**
+this dev box (main `3036081`), receiver the Windows 10 PC via the second test PC:**
 - Embedded: picture clear and inside Relay, no second window; "little to no
-  latency" (Jake). `receiver window up mode="embedded" excluded=true`.
+  latency" (the owner). `receiver window up mode="embedded" excluded=true`.
 - Drag/resize for ~10 s: no freeze; no "receiver stalled" line anywhere in
   the run; `presented` climbed 30 per 500 ms throughout (60 fps).
 - Pop out and "Bring back into Relay": work.
 - **Closing the popped-out window (X/Esc) did not reliably re-embed.** Four
-  popout->embedded transitions took 7.2 s, 1.6 s, 46.8 s and 9.3 s; Jake
+  popout->embedded transitions took 7.2 s, 1.6 s, 46.8 s and 9.3 s; the owner
   clicked several times. The failed attempts left no log line. The
   re-embed was a four-hop chain (engine `host_close` -> core -> shell ->
   core `HostReceive` -> engine), and the engine could not take the
@@ -302,7 +302,7 @@ this dev box (main `3036081`), receiver the Windows 10 PC via relay-pc2:**
 - `aus == presented` all run (12604/12603): the double count is gone.
 - Audio: none playing, none heard, no beeping (B11 not reproduced).
 - Not reached: Settings navigation, minimise/restore (run 2).
-- Ended by Jake's Stop receiving at 00:08:31 (his clock); clean exit.
+- Ended by the owner's Stop receiving at 00:08:31 (his clock); clean exit.
 
 **Run 2, 00:11-00:16 UTC, still r5:** X-close re-embedded fine (1.1 s,
 1.6 s); Esc came back as a *black* video area for ~11 s before the picture
@@ -321,7 +321,7 @@ every attempt, and tab-switching did not recover it. `presented` kept
 climbing throughout. When the sender stopped, the engine logged the 3 s
 idle end correctly but `relay-share.exe` stayed resident, so the core never
 reported the end: no "share ended" text, and the *old pairing code stayed
-on screen* until Jake stopped and started receiving again. Video verdict
+on screen* until the owner stopped and started receiving again. Video verdict
 otherwise: "super clear, little to no latency" 1440p->1080p. r8 (`bef8617`)
 answers both: the render thread rebuilds its swapchain after every mode
 change, the teardown gets a 3 s deadline after which the engine exits, and
@@ -366,11 +366,11 @@ outlived a periodic keyframe (B15); 34 gaps / 272 packets for the run.
 
 **Audio run, 00:29-00:31 UTC, r6:** Windows text-to-speech on the dev box,
 21 lines over 91 s. Clear on the second PC, no stutter, gap, dropped word or
-pitch change; 100 packets/s steady, `aus == presented`, zero stalls. Jake
+pitch change; 100 packets/s steady, `aus == presented`, zero stalls. The owner
 hears it about 1 s behind the dev box's own speakers: B16.
 
 ### B16 — Audio arrives about a second late, and nothing measures it
-relay-pc2, audio run: intelligible and steady, but ~1 s behind the sender's
+the second test PC, audio run: intelligible and steady, but ~1 s behind the sender's
 own speakers while the video reads as near-instant, so A/V sync is off by
 about that much. The receiver logs no audio latency at all. Candidates: a
 fixed jitter/depacketiser target, the WASAPI render buffer, Opus frame
@@ -417,7 +417,7 @@ with its parts, underruns and slew counts. Against video: the picture is
 (ITU-R BT.1359), where 1 s was not. Two-PC confirmation below.
 
 ### B15 — Mid-stream smear: a damaged access unit is decoded and nobody asks for a keyframe
-relay-pc2, run 2: "every now and then the stream shows a weird smeared-paint
+the second test PC, run 2: "every now and then the stream shows a weird smeared-paint
 colour screen, almost as if it broke for a few seconds", while `aus ==
 presented` and no stall was logged. The receiver estimates packet loss over
 1 s windows and sends it to the sender as bitrate feedback, but on an RTP
@@ -445,7 +445,7 @@ looks like something saturating at 40 Mb/s — the receiver's UDP socket
 buffer is the first suspect (log `SO_RCVBUF` and overruns; raising it may
 be the whole fix) — rather than random LAN loss. Next split: 60 fps at
 20 Mb/s, to separate frame rate from bitrate. The sender's periodic IDR is
-every ~10 s (18 in 3 min), which is how long a smear lasts today. Jake saw
+every ~10 s (18 in 3 min), which is how long a smear lasts today. The owner saw
 **no smear at all in run 6**, the first corruption-free run, even with 246
 packets lost: single-packet gaps are covered by the 10 s cadence, and the
 visible damage comes from the bursts.
@@ -529,7 +529,7 @@ frames shown, 58 withheld.
 *Run E, 2026-09-21 00:16–00:17 UTC, is the acceptance run.* Source was
 full-screen game footage on the dev PC (the motion page would not stay in
 front; a first attempt was aborted at 58 s and 2 Mb/s and is not a result).
-Jake, watching pc2: "No lag, stuttering, audio, or smearing noticed while in
+The owner, watching pc2: "No lag, stuttering, audio, or smearing noticed while in
 fullscreen streaming video game gameplay in 1440p 60fps from the main pc."
 He stopped it by hand at 107 s; the end was clean. The content changes at
 ~33 fps, so 6,062 frames is the source, not loss. The socket queue again ran
@@ -541,7 +541,7 @@ real link* and not only under `RELAY_TEST_LOSS`: the same 64 KB buffer that
 gave run C a dead picture, same Warzone footage as E, full 185 s. The socket
 queue was pinned at exactly 65,536 for 43 of 185 seconds (>= 60,000 for 68)
 and nothing was lost: NACK repaired ~12 holes a second, 3.7x run E's rate.
-Jake: "No freezing, lag, audio, or smearing noticed." (C used the motion page
+The owner: "No freezing, lag, audio, or smearing noticed." (C used the motion page
 and F game footage, at the same rate; the buffer and build are what differ.)
 So the two fixes are independent: 4 MB removes the need for recovery, and
 recovery survives without the 4 MB. Both ship.
@@ -556,7 +556,7 @@ does not pace; with a 4 MB receive buffer that is tolerable on a LAN and is
 the first thing to revisit for Wi-Fi.
 
 ### B14 — Receiver latency goes negative: the clock offset is measured once
-relay-pc2, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
+the second test PC, run 1: `capture_to_present_ms` started at +2.9 ms, crossed zero
 at 00:05:06 and reached -8.0 ms by 00:08:30; 312 of 538 samples negative.
 The two PCs' wall clocks also disagreed by 2.6 s at connect and 6.9 s four
 and a half minutes later, so one of them drifts about 1 s/min against the
@@ -703,7 +703,7 @@ the contents, state what is owed.
 | r14 | `0fa9776` | S35 remembered devices (Option A) | — | code pairing → reconnect with no code → consent check (receiver not listening) → Forget → reboot; install-over-the-top on both PCs |
 | r15 | `4cdda0f` | S38 stream resilience | — | kill the sender's engine by PID and watch it return; same for the receiver; Stop is a Stop; give-up time; reboot one PC mid-share; crash line shown once; close notice on/off |
 | r16 | `dff9b33` | S37 audio mixer (three tracks, faders both ends) | Loopback on the main PC, headless, 2026-09-22: exclude-mode capture activates (`audio pipeline up track=Rest`, 48 kHz stereo), three tracks travel (`rest_packets` in lockstep with `audio_packets` and `mic_packets`, 1,048 each in 10 s), receiver classifies `relay-audio-rest` as `Rest`. Nothing was playing, so `rest_peak` = 0: *that* the track flows is proven, *what* it carries is not. | **listening check, speech and music, never a tone**: mute the game and hear only the rest; the reverse; move a fader mid-share, no click; an older receiver hearing the rest track as the mic |
-| r17 | `b23a85c` | S36 Relay Camera on the sending PC (camera while sharing, video only) | — | OBS on the **main** PC picking up its own outgoing share (camera must be registered there first — Jake's UAC click); the reverse path, PC 2 → main PC → OBS, is M5 as built and is the OBS test Jake queued |
+| r17 | `b23a85c` | S36 Relay Camera on the sending PC (camera while sharing, video only) | — | OBS on the **main** PC picking up its own outgoing share (camera must be registered there first — the owner's UAC click); the reverse path, PC 2 → main PC → OBS, is M5 as built and is the OBS test the owner queued |
 
 | r18 | `2da791f` | B17, both causes: identity is the stored certificate (DPAPI-wrapped `identity.key`) and the fingerprint is read from the real wire form; first build where a remembered peer can actually match — proven headless on one PC by `scripts/trusted-check.sh` | — | **the S35 script, now possible for the first time**: code pairing, then a second share with no code, on both directions; consent check; Forget; reboot; install-over-the-top keeps the identity (log says "identity upgraded" / "wrapped", never "generated" on an updated PC) |
 
@@ -716,7 +716,7 @@ the contents, state what is owed.
 | r24 | `5f7099d` | Core replays the newest ReceiveStatus on Subscribe; `restarting` flag on the drop push | 2026-09-26: close/reopen shows the live receive (same code, Stop receiving); outage reads "dropped" 0.29 s after the kill, no Idle/ended flash; reboot of PC 2 then opening Relay resumes receiving with no press; remembered store and identity survive the reboot | reboot with the shortcut-launched UI sampled untouched |
 | r25 | `4d6b862` | Engine drops a dead host HWND; shell embeds an unhosted stream window; receive episode resets on first stats, not paired; installer keeps `active-stream.json` across its shutdown | 2026-09-26: install over a live receive resumes it; unhosted receiver embedded by the shell in 168 ms; receiver kill → back embedded in 10 s; Stop receiving stays stopped (no restart, record cleared); sender gives up 3 min 06 s after the receiver stops (18 attempts, 1/2/5/10 s) | — |
 | r26 | `50ae1c1` | Receiver hears `stop`/`host` while waiting for a sender (the installer's stop was killing it → spurious "did not shut down cleanly" on every update); "You stopped receiving from X." | Installing r26 still logged "did not exit gracefully; killing" -- **expected**: the preinstall stop runs the *old* (r25) core. Only an install over r26 tests it | install over r26 with no kill line and no crash banner |
-| r27 | `093d2c9` | (r26 + docs) | 2026-09-26: **update path clean**: install over a live receive -- "stop command received while waiting", no kill line, no crash banner, resume with no press; mid-share Stop reads "You stopped receiving from jake." | -- |
+| r27 | `093d2c9` | (r26 + docs) | 2026-09-26: **update path clean**: install over a live receive -- "stop command received while waiting", no kill line, no crash banner, resume with no press; mid-share Stop reads "You stopped receiving from STUDIO." | -- |
 | r28 | `a681abc` | Resumed receive keeps its pairing code; tao's session-end panic not recorded as a crash | 2026-09-28: second reboot -- UI launched from the shortcut shows the live receive untouched; a receiver kill keeps the code; settings toggles persist across a UI restart without resetting each other | -- |
 | r29 | `1c2f5b4` | Wrong code is non-fatal to the receiver (rotates, keeps waiting, notice); receive episode ends after 30 s healthy; sender treats a wrong code as a refusal; close notice logged | 2026-09-28: 000000 → receiver stays up on the same port, code rotates and is stored, sender stops after one attempt with "did not accept that code"; pairing with the new code works; close notice logged with close_notice=true. **S35 and S38 closed on two PCs** | audio items (S37, S19, B16) parked on the shared Rodecaster |
 | r30 | `053bcfe` | `RELAY_NO_CAPTURE_EXCLUDE` (test-only) so a meter can read the received picture | 2026-09-28, measured, no ears: **S37** mixer -- mute game −101 dB, mute rest −84 dB, **no game leak into Rest** (exclude loopback holds), fader −60 = mute, sweep tracks dB exactly, no clicks, faders reset on a new share. **S19** call return -- 2500 Hz returns at −13.9 dB, follows the call app's on/off edge for edge, silent (−112 dB) when it is; mix-minus holds with Game-only capture. **B16** lip-sync -- audio +43 ms late (stdev 6.3, 55/55 flashes), identical with the return on (+43.7); `audio_ms` is the audio queue, not A/V offset (relabelled "Audio buffer") | per-frame A/V offset inside the engine (the durable B16 meter); call-app picker should list audio sessions, not windows; the Call card shows the UI's choice, not the receiver's `return_pid` |

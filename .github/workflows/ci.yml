@@ -64,3 +64,42 @@ jobs:
       - name: Footprint gate (release relay-core, 30 s idle)
         shell: pwsh
         run: ./scripts/footprint.ps1
+
+  licenses:
+    name: Dependency licences (cargo-deny, cargo-about, pnpm)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Pinned: a newer tool can change how a licence expression resolves.
+      - name: Install cargo-deny + cargo-about
+        run: |
+          cargo install --locked cargo-deny@0.20.2
+          cargo install --locked cargo-about@0.9.2 --features cli
+
+      - name: UI install (for pnpm licenses)
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      # Fails on GPL/AGPL/unknown licences in any shipped crate (deny.toml),
+      # then writes the licences page the installer bundles.
+      - name: Licence check + licenses.html
+        shell: pwsh
+        run: ./scripts/licenses.ps1 -Check -Out target/licenses/licenses.html
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: licenses
+          path: target/licenses/licenses.html

@@ -93,7 +93,7 @@ mod tests {
     fn instance_name_strips_the_service_suffix() {
         assert_eq!(instance_name("den-pc._relay._udp.local."), "den-pc");
         // Names with dots keep everything before the service type.
-        assert_eq!(instance_name("jake.desktop._relay._udp.local."), "jake.desktop");
+        assert_eq!(instance_name("studio.desktop._relay._udp.local."), "studio.desktop");
         // A foreign fullname passes through untouched.
         assert_eq!(instance_name("den-pc._other._tcp.local."), "den-pc._other._tcp.local.");
     }

@@ -131,7 +131,7 @@ pub fn remove_user(paths: &[String]) -> Result<(), LiveRegError> {
     remove_under(HKEY_CURRENT_USER, paths)
 }
 
-/// The product path for the Windows 10 camera (approved by Jake 2026-09-29):
+/// The product path for the Windows 10 camera (approved by the owner 2026-09-29):
 /// HKCU only, no elevation, called by the core only after the user's recorded
 /// consent and after `reg::vet_dshow_keys` accepted exactly these keys. The
 /// environment gate guards against an accidental write in development; a
