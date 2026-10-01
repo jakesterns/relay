@@ -140,9 +140,11 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
         });
     };
 
+    let mut shelves: Vec<(f64, f64)> = Vec::new();
     if bands.len() < budget {
         let lift = plateau_mean(&grid, &target, &current, LOW_PLATEAU_HZ);
         if lift.abs() >= SHELF_WORTH_IT_DB {
+            shelves.push((LOW_SHELF_CORNER_HZ, lift));
             place(
                 FilterKind::LowShelf,
                 LOW_SHELF_CORNER_HZ,
@@ -156,6 +158,7 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
     if bands.len() < budget {
         let lift = plateau_mean(&grid, &target, &current, HIGH_PLATEAU_HZ);
         if lift.abs() >= SHELF_WORTH_IT_DB {
+            shelves.push((HIGH_SHELF_CORNER_HZ, lift));
             place(
                 FilterKind::HighShelf,
                 HIGH_SHELF_CORNER_HZ,
@@ -171,7 +174,8 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
     // kept apart so they cover the spectrum instead of piling up.
     let mut peak_centres: Vec<f64> = Vec::new();
     while bands.len() < budget {
-        let Some((idx, residual)) = best_peak_candidate(&grid, &target, &current, &peak_centres)
+        let Some((idx, residual)) =
+            best_peak_candidate(&grid, &target, &current, &peak_centres, &shelves)
         else {
             break;
         };
@@ -185,6 +189,9 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
     let (max_error_db, rms_error_db) = error_stats(&target, &current);
     Fit { bands, max_error_db, rms_error_db }
 }
+
+/// No peak of the opposite sign within this many octaves of a shelf corner.
+pub const SHELF_CONFLICT_OCT: f64 = 1.0;
 
 /// Minimum spacing between peaking centres, in octaves. Roughly the width of
 /// a `PEAK_Q` filter, so neighbours overlap without piling up.
@@ -216,6 +223,7 @@ fn best_peak_candidate(
     target: &[f64],
     current: &[f64],
     peak_centres: &[f64],
+    shelves: &[(f64, f64)],
 ) -> Option<(usize, f64)> {
     let mut best: Option<(usize, f64)> = None;
     for (i, (&t, &c)) in target.iter().zip(current).enumerate() {
@@ -224,6 +232,15 @@ fn best_peak_candidate(
             continue;
         }
         let e = t - c;
+        // A peak pushing against a shelf near its corner only fights it
+        // (a −2 dB shelf with a +0.7 dB bump on top nets −1.3 and wastes a
+        // band). Leave that region to the shelf.
+        if shelves
+            .iter()
+            .any(|&(corner, g)| (hz / corner).log2().abs() < SHELF_CONFLICT_OCT && e * g < 0.0)
+        {
+            continue;
+        }
         if best.is_none_or(|(_, b): (usize, f64)| e.abs() > b.abs()) {
             best = Some((i, e));
         }
@@ -451,5 +468,29 @@ mod tests {
         // residual the fit measured, or the graph lies about the sound.
         let at_1k = response_db(&f.bands, 1000.0);
         assert!((at_1k - (-5.0)).abs() < f.max_error_db as f64 + 0.2, "got {at_1k}");
+    }
+
+    #[test]
+    fn no_peak_fights_a_shelf_near_its_corner() {
+        // The live export: a low cut easing back to flat by ~250 Hz.
+        let curve = [
+            (20.0, -2.2),
+            (80.0, -2.2),
+            (125.0, -1.6),
+            (200.0, -0.6),
+            (315.0, 0.0),
+            (16000.0, 0.0),
+        ];
+        for budget in 1..=4 {
+            let f = fit_curve(&curve, budget);
+            let shelves: Vec<_> =
+                f.bands.iter().filter(|b| b.kind != FilterKind::Peaking).collect();
+            for p in f.bands.iter().filter(|b| b.kind == FilterKind::Peaking) {
+                for s in &shelves {
+                    let near = ((p.freq_hz / s.freq_hz) as f64).log2().abs() < SHELF_CONFLICT_OCT;
+                    assert!(!(near && p.gain_db * s.gain_db < 0.0), "{:?} fights {:?}", p, s);
+                }
+            }
+        }
     }
 }

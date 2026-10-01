@@ -294,13 +294,15 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           delete au.learn_game_eq;
           break;
         }
-        case "export":
-          if (!au.game_eq) throw new Error("there is no game EQ to export yet");
+        case "export": {
+          const c = au.game_eq?.curve ?? rec.candidate;
+          if (!c) throw new Error("there is no game EQ to export yet");
           exported = {
-            text: JSON.stringify({ format: "relay-game-eq", schema: 1, game: { exe: p.game.exe }, curve: au.game_eq.curve, note: action.note }),
+            text: JSON.stringify({ format: "relay-game-eq", schema: 1, game: { exe: p.game.exe }, curve: c, note: action.note }),
             path: `C:\\Users\\test\\AppData\\Local\\Relay\\data\\exports\\${p.game.exe.replace(/\.exe$/i, "")}-game-eq.json`,
           };
           break;
+        }
         default: break;
       }
       core.gameEq.set(id, rec);

@@ -297,8 +297,10 @@ function GameEqCard({ profileId, onChanged }: {
     void f.text().then(setImportText).catch((e) => setErr(errText(e)));
   };
 
+  const { state: core } = useCore();
   const off = !profileId || !status || busy;
   const imported = status?.source === "imported" || status?.source === "tuned";
+  const canExport = !!status && (!!status.applied || !!status.offer);
   const prompt = !!status && (asking || status.needs_goal);
   const goalLabel = GOALS.find((g) => g.key === status?.goal)?.label;
 
@@ -334,6 +336,16 @@ function GameEqCard({ profileId, onChanged }: {
               options={GOALS.map((g) => ({ key: g.key, label: g.label }))} />
           )}
           <Kv k="State" v={gameEqStateText(status)} />
+          {imported && !status.learning_on && (
+            <p className="note" data-testid="game-eq-paused">
+              Learning paused because you imported this EQ. Turn on to fine-tune.
+            </p>
+          )}
+          {status.applied && core.audio_chain === "notinstalled" && (
+            <p className="note" data-testid="game-eq-inaudible">
+              Learned, not audible: audio effects are not installed on this output.
+            </p>
+          )}
           {(status.state === "learning" || status.state === "needs_relearn") && !status.needs_goal && (
             <div className="meter" role="progressbar" aria-label="Learning progress"
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={status.progress}>
@@ -355,7 +367,7 @@ function GameEqCard({ profileId, onChanged }: {
             <ConfirmButton label="Reset" confirm="Remove game EQ" disabled={off}
               onConfirm={() => void act({ kind: "reset" })} />
             <button className="btn q" disabled={off} onClick={() => setImporting(!importing)}>Import…</button>
-            <button className="btn q" disabled={off || !status.applied}
+            <button className="btn q" disabled={off || !canExport}
               onClick={() => void act({ kind: "export", note: "" })}>Export…</button>
           </div>
           <Toggle on={status.auto_apply} label="Apply new curves automatically"
@@ -451,7 +463,8 @@ function ChainReadout({ chain, hrtf, tamer }: { chain: string; hrtf: boolean; ta
   return (
     <Card>
       <Kv k="Processing" v={chain === "active" ? `${ms.toFixed(1)} ms` : "0 ms"} mono />
-      <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Bypassed by game (exclusive)"} />
+      <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active"
+        : chain === "notinstalled" ? "Not audible · audio effects not installed" : "Bypassed by game (exclusive)"} />
       <Kv k="Route" v={route} />
     </Card>
   );

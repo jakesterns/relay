@@ -34,7 +34,7 @@ pub mod state;
 #[cfg(test)]
 pub(crate) mod synth;
 
-pub use analyzer::{Analyzer, SoundClass, Stats};
+pub use analyzer::{Analyzer, SoundClass, Stats, NCLASSES};
 pub use derive::{derive, derive_checked, Derived, Goal, Limits};
 pub use file::{GameEqFile, GameEqLayer, LayerSource};
 pub use state::{status, LearnRecord, LearnStatus, Outcome, Thresholds};

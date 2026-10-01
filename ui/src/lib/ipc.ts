@@ -48,7 +48,10 @@ export interface GameEqStatus {
   note: string; last_error: string | null;
   /** A one-off message about the action just taken (e.g. an import made safe). */
   notice?: string;
+  /** Evidence per sound class, by name (the record's arrays are in this order). */
+  classes?: ClassCount[];
 }
+export interface ClassCount { class: string; events: number; frames: number }
 export type GameEqAction =
   | { kind: "status" }
   | { kind: "set_learning"; enabled: boolean }
@@ -218,7 +221,7 @@ export type ShareState =
   | { kind: "sharing"; peer: string }
   /** The share dropped and Relay is bringing it back (S38). */
   | { kind: "reconnecting"; peer: string; attempt: number };
-export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
+export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
 export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }

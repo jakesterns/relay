@@ -60,6 +60,15 @@ pub const SPEECH_GUARD_LO_HZ: f32 = 300.0;
 pub const SPEECH_GUARD_HI_HZ: f32 = 4000.0;
 /// Deepest net cut allowed inside it, dB.
 pub const SPEECH_GUARD_DB: f32 = 2.0;
+/// Footstep / reload detail: Awareness lifts the cue classes here at least
+/// by [`CUE_DETAIL_FLOOR`] of their presence, masked or not — this is where
+/// a step is located and recognised — and never cuts it.
+pub const CUE_DETAIL_LO_HZ: f32 = 2000.0;
+pub const CUE_DETAIL_HI_HZ: f32 = 5000.0;
+pub const CUE_DETAIL_FLOOR: f32 = 0.35;
+/// Consonants and presence: Dialogue never cuts here.
+pub const PRESENCE_LO_HZ: f32 = 1000.0;
+pub const PRESENCE_HI_HZ: f32 = 4000.0;
 /// Immersion is gentle: the whole curve at this fraction.
 pub const IMMERSION_SCALE: f32 = 0.5;
 
@@ -86,6 +95,9 @@ pub struct ClassWeights {
     pub masker: [f32; NCLASSES],
     /// Whole-curve scale.
     pub scale: f32,
+    /// A band the goal never cuts (gain ≥ 0 there): Dialogue keeps the
+    /// consonant / presence region, Awareness the footstep detail.
+    pub keep: Option<(f32, f32)>,
 }
 
 impl Goal {
@@ -110,16 +122,19 @@ impl Goal {
                 target: [1.0, 0.8, 0.8, 0.6, 0.0, 0.0, 0.0, 0.0, 0.0],
                 masker: [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 0.8, 0.8, 0.5],
                 scale: 1.0,
+                keep: Some((CUE_DETAIL_LO_HZ, CUE_DETAIL_HI_HZ)),
             },
             Goal::Dialogue => ClassWeights {
                 target: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 masker: [0.2, 0.2, 0.2, 0.0, 0.6, 0.8, 0.6, 1.0, 0.6],
                 scale: 1.0,
+                keep: Some((PRESENCE_LO_HZ, PRESENCE_HI_HZ)),
             },
             Goal::Immersion => ClassWeights {
                 target: [0.4, 0.3, 0.3, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 masker: [0.0, 0.0, 0.0, 0.0, 0.2, 0.4, 0.2, 0.2, 0.2],
                 scale: IMMERSION_SCALE,
+                keep: None,
             },
         }
     }
@@ -291,7 +306,10 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
                     num += mw * s * Stats::fraction_at_or_above(stats.hist(m), b, lt - CLEAR_DB);
                 }
             }
-            let bur = if den > 0.0 { num / den } else { 0.0 };
+            let mut bur = if den > 0.0 { num / den } else { 0.0 };
+            if t.is_cue() && (CUE_DETAIL_LO_HZ..=CUE_DETAIL_HI_HZ).contains(&BANDS_HZ[b]) {
+                bur = bur.max(CUE_DETAIL_FLOOR);
+            }
             buried[b] = buried[b].max(bur);
             best = best.max(tw * p * bur);
         }
@@ -348,7 +366,7 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
     let wb: [f32; NBANDS] = std::array::from_fn(|b| {
         Stats::median(&stats.frame_hist, b).map(|d| 10f32.powf(d / 10.0)).unwrap_or(0.0)
     });
-    let overall_db = guard_gains(&mut gains, limits, &wb);
+    let overall_db = guard_gains(&mut gains, limits, &wb, w.keep);
     Derived { gains, buried, overall_db }
 }
 
@@ -357,7 +375,13 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
 /// no boost at or below 80 Hz, the speech guard, the step limit, and never
 /// louder overall (power weighted by `wb`; uniform when unknown). Returns the
 /// overall power gain in dB (≤ 0). Non-finite gains become 0 first.
-pub fn guard_gains(gains: &mut [f32; NBANDS], limits: &Limits, wb: &[f32; NBANDS]) -> f32 {
+pub fn guard_gains(
+    gains: &mut [f32; NBANDS],
+    limits: &Limits,
+    wb: &[f32; NBANDS],
+    keep: Option<(f32, f32)>,
+) -> f32 {
+    let kept = |hz: f32| keep.is_some_and(|(lo, hi)| (lo..=hi).contains(&hz));
     for g in gains.iter_mut() {
         if !g.is_finite() {
             *g = 0.0;
@@ -368,7 +392,9 @@ pub fn guard_gains(gains: &mut [f32; NBANDS], limits: &Limits, wb: &[f32; NBANDS
     let guard_and_cap = |gains: &mut [f32; NBANDS]| {
         for b in 0..NBANDS {
             let hi = if BANDS_HZ[b] > limits.no_boost_below_hz { limits.max_boost_db } else { 0.0 };
-            let lo = if in_speech_band(BANDS_HZ[b]) {
+            let lo = if kept(BANDS_HZ[b]) {
+                0.0
+            } else if in_speech_band(BANDS_HZ[b]) {
                 -limits.speech_guard_db
             } else {
                 -limits.max_cut_db
@@ -416,7 +442,9 @@ pub fn guard_gains(gains: &mut [f32; NBANDS], limits: &Limits, wb: &[f32; NBANDS
     if excess > 0.0 {
         let room = (0..NBANDS)
             .map(|b| {
-                let floor = if in_speech_band(BANDS_HZ[b]) {
+                let floor = if kept(BANDS_HZ[b]) {
+                    0.0
+                } else if in_speech_band(BANDS_HZ[b]) {
                     -limits.speech_guard_db
                 } else {
                     -limits.max_cut_db
@@ -457,7 +485,7 @@ pub fn guard_curve(curve: &[(f32, f32)]) -> Vec<(f32, f32)> {
         curve.iter().copied().filter(|(h, d)| h.is_finite() && d.is_finite() && *h > 0.0).collect();
     let mut gains: [f32; NBANDS] =
         std::array::from_fn(|b| crate::fit::interp_db(&clean, BANDS_HZ[b] as f64) as f32);
-    guard_gains(&mut gains, &Limits::default(), &[1.0; NBANDS]);
+    guard_gains(&mut gains, &Limits::default(), &[1.0; NBANDS], None);
     // Rounding to 0.1 dB happens in `curve_from_gains`; re-guard the rounded
     // values so rounding cannot step over a limit.
     let mut out = curve_from_gains(&gains);
@@ -648,6 +676,32 @@ mod tests {
         let size = |d: &Derived| d.gains.iter().map(|g| g.abs()).fold(0f32, f32::max);
         assert!(size(&immersion) < size(&aware), "{} vs {}", size(&immersion), size(&aware));
         assert!(size(&immersion) <= MAX_BOOST_DB * IMMERSION_SCALE + 1e-3);
+    }
+
+    #[test]
+    fn dialogue_never_cuts_the_consonant_region() {
+        // Includes the live PC2 shape: footsteps, explosions, voice, music.
+        for s in [scene(), learned(90.0, 0.05)] {
+            let d = derive(&s, &Limits::default(), Goal::Dialogue);
+            let band: Vec<f32> = (0..NBANDS)
+                .filter(|&b| (2000.0..=4000.0).contains(&BANDS_HZ[b]))
+                .map(|b| d.gains[b])
+                .collect();
+            let mean = band.iter().sum::<f32>() / band.len() as f32;
+            assert!(mean >= 0.0 && band.iter().all(|&g| g >= 0.0), "{:?}", d.gains);
+        }
+    }
+
+    #[test]
+    fn awareness_lifts_footstep_detail_at_3_to_4_khz() {
+        // Footsteps band-limited to 2-5 kHz (energy centred 3-4 kHz), audible
+        // over the bed: unmasked, but their detail band is still lifted.
+        let d = derive(&learned(90.0, 0.12), &Limits::default(), Goal::Awareness);
+        let g = d.gains;
+        let detail = (g[idx(3150.0)] + g[idx(4000.0)]) / 2.0;
+        assert!(detail >= 1.0, "3-4 kHz lift {detail}: {g:?}");
+        assert!(detail >= g[idx(1000.0)] && detail >= g[idx(500.0)], "{g:?}");
+        assert!((16..=20).all(|b| g[b] >= 0.0), "never cuts the detail band: {g:?}");
     }
 
     #[test]

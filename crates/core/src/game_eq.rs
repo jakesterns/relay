@@ -103,6 +103,17 @@ pub struct GameEqStatus {
     /// A one-off message about the action just taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notice: Option<String>,
+    /// Evidence per sound class, by name, in the record's array order.
+    #[serde(default)]
+    pub classes: Vec<ClassCount>,
+}
+
+/// One sound class's evidence in the rolling window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClassCount {
+    pub class: relay_audio::learn::SoundClass,
+    pub events: u64,
+    pub frames: u64,
 }
 
 /// An export: the file text and where a copy was written.
@@ -250,13 +261,21 @@ pub fn status_with(
         }
     };
     let goal = audio.game_eq_goal;
-    let (targets, maskers, minutes, voices) = match rec {
+    let (targets, maskers, minutes, voices, classes) = match rec {
         Some(r) => {
             let w = r.window();
             let (t, m) = goal.unwrap_or_default().evidence(&w);
-            (t, m, r.active_minutes(), w.distinct_voices() as u32)
+            let classes = relay_audio::learn::SoundClass::ALL
+                .iter()
+                .map(|&c| ClassCount {
+                    class: c,
+                    events: w.events[c.index()],
+                    frames: w.class_frames[c.index()],
+                })
+                .collect();
+            (t, m, r.active_minutes(), w.distinct_voices() as u32, classes)
         }
-        None => (0, 0, 0.0, 0),
+        None => (0, 0, 0.0, 0, Vec::new()),
     };
     GameEqStatus {
         exe: profile.game.exe.clone(),
@@ -280,6 +299,7 @@ pub fn status_with(
         note: layer.map(|l| l.note.clone()).unwrap_or_default(),
         last_error: rec.and_then(|r| r.last_error.clone()),
         notice: None,
+        classes,
     }
 }
 
@@ -386,8 +406,17 @@ pub fn apply_action(
             Ok(ActionResult { changed: true, export: None, notice })
         }
         GameEqAction::Export { note } => {
-            let layer =
-                profile.audio.game_eq.as_ref().context("there is no game EQ to export yet")?;
+            // Nothing applied yet but a curve on offer: export the offer.
+            let offered = match profile.audio.game_eq.as_ref() {
+                Some(_) => None,
+                None => load_record_at(&file, &exe).and_then(|r| r.candidate).map(|c| {
+                    GameEqLayer::learned(relay_audio::learn::derive::guard_curve(&c), None)
+                }),
+            };
+            let layer = offered
+                .as_ref()
+                .or(profile.audio.game_eq.as_ref())
+                .context("there is no game EQ to export yet")?;
             let f =
                 GameEqFile::export(&exe, &profile.name, layer, profile.audio.game_eq_goal, note);
             let text = f.to_json();
@@ -809,6 +838,37 @@ mod tests {
         apply_action(&paths, &mut p, &GameEqAction::Reset).unwrap();
         helper.join().unwrap();
         assert!(!file.exists(), "the late save landed before Reset, not after");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_before_apply_exports_the_offer() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        save_record_at(&record_file(&paths, "game.exe"), &ready_record("game.exe", curve(2.0)))
+            .unwrap();
+        let out = apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() })
+            .unwrap()
+            .export
+            .unwrap();
+        let back = GameEqFile::parse(&out.text).unwrap();
+        assert_eq!(back.curve.as_deref(), Some(&curve(2.0)[..]));
+        assert!(p.audio.game_eq.is_none(), "exporting does not apply");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn status_names_the_sound_classes() {
+        let (paths, dir) = paths();
+        let p = profile();
+        save_record_at(&record_file(&paths, "game.exe"), &ready_record("game.exe", curve(1.0)))
+            .unwrap();
+        let st = status(&paths, &p, false);
+        let names: Vec<String> =
+            st.classes.iter().map(|c| serde_json::to_string(&c.class).unwrap()).collect();
+        assert_eq!(names.len(), relay_audio::learn::NCLASSES);
+        assert_eq!(names[0], "\"footsteps\"");
+        assert_eq!(names[8], "\"ambience\"");
         std::fs::remove_dir_all(dir).ok();
     }
 

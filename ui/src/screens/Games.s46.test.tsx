@@ -116,6 +116,38 @@ describe("learning, applying and files", () => {
     expect(keep).toHaveAttribute("aria-checked", "false");
   });
 
+  it("says learning is paused after an import", async () => {
+    const { h, eq } = await mount();
+    await h.user.click(eq().getByRole("button", { name: "Import…" }));
+    await h.user.click(eq().getByRole("textbox", { name: "Game EQ file" }));
+    await h.user.paste(JSON.stringify({ format: "relay-game-eq", schema: 1, game: { exe: "cod.exe" }, curve }));
+    await h.user.click(eq().getByRole("button", { name: "Import" }));
+    await settle();
+    expect(eq().getByTestId("game-eq-paused"))
+      .toHaveTextContent("Learning paused because you imported this EQ. Turn on to fine-tune.");
+  });
+
+  it("exports the offered curve before it is applied", async () => {
+    const p = profile1();
+    p.audio.game_eq_goal = "awareness";
+    p.audio.learn_game_eq = true;
+    core.gameEq.set("1", { progress: 100, candidate: curve, needsRelearn: false, learningNow: false });
+    const { h, eq } = await mount();
+    const btn = eq().getByRole("button", { name: "Export…" });
+    expect(btn).toBeEnabled();
+    await h.user.click(btn);
+    await settle();
+    expect(eq().getByTestId("game-eq-exported")).toBeInTheDocument();
+    expect(profile1().audio.game_eq).toBeUndefined();
+  });
+
+  it("says a learned curve is not audible without the audio effect", async () => {
+    profile1().audio.game_eq = { curve, source: "learned" };
+    core.state.audio_chain = "notinstalled";
+    const { eq } = await mount();
+    expect(eq().getByTestId("game-eq-inaudible")).toHaveTextContent(/not audible/);
+  });
+
   it("a file for another game is refused in plain words", async () => {
     const { h, eq } = await mount();
     await h.user.click(eq().getByRole("button", { name: "Import…" }));

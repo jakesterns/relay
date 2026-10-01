@@ -345,6 +345,9 @@ pub enum AudioChainState {
     /// The game opened the endpoint in WASAPI-exclusive mode: APO is bypassed
     /// by Windows and the user must be told.
     ExclusiveBypassed,
+    /// The profile has audio processing but Relay's audio effect is not
+    /// registered on the output: nothing is audible. Never claim "active".
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
