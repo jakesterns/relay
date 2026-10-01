@@ -419,6 +419,37 @@ export interface UiPrefs {
   /** Ctrl+Alt+L cycles the default output's listening devices (S41). Off by
    *  default; takes effect the next time Relay starts. */
   cycle_listening_hotkey?: boolean;
+  /** Check GitHub for a newer release once a day (S45). Default on. */
+  auto_check_updates?: boolean;
+  /** Install a found update without asking (S45). Default off. */
+  auto_install_updates?: boolean;
+  /** Offer pre-releases too (S45). Default off. */
+  prerelease_updates?: boolean;
+}
+
+/** Mirror of `crates/core/src/update.rs` (S45). */
+export type UpdatePhase = "idle" | "checking" | "downloading" | "waiting" | "installing";
+export interface UpdateAvailable {
+  version: string;
+  /** Release notes, plain text. */
+  notes: string;
+  url: string;
+  prerelease: boolean;
+  installer_name: string;
+  installer_url: string;
+  installer_size: number;
+  sums_url: string;
+}
+export interface InstallOutcome { version: string; ok: boolean; message: string; at: number }
+export interface UpdateStatus {
+  current: string;
+  phase: UpdatePhase;
+  available: UpdateAvailable | null;
+  /** Unix seconds. */
+  last_check: number | null;
+  last_error: string | null;
+  last_result: InstallOutcome | null;
+  waiting_for: string | null;
 }
 
 export interface ShareStatus {
@@ -633,6 +664,7 @@ const mockCatalog: CatalogEntry[] = [
 /** Browser-mode stand-in for `settings.json`. */
 let mockUiPrefs: UiPrefs = {
   close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
+  auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
 };
 /** Browser-mode stand-in for the endpoint list (S40). */
 const mockAudioDevices: AudioDevices = {
@@ -1063,6 +1095,33 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
   },
+  // S45 updates. Browser mode has nothing to offer.
+  async updateStatus(): Promise<UpdateStatus> {
+    if (!isTauri()) return structuredClone(mockUpdate);
+    return invoke<UpdateStatus>("update_status");
+  },
+  async checkForUpdates(): Promise<UpdateStatus> {
+    if (!isTauri()) { mockUpdate.last_check = Math.floor(Date.now() / 1000); return structuredClone(mockUpdate); }
+    return invoke<UpdateStatus>("check_for_updates");
+  },
+  async installUpdate(): Promise<UpdateStatus> {
+    if (!isTauri()) return structuredClone(mockUpdate);
+    return invoke<UpdateStatus>("install_update");
+  },
+  async updateLater(): Promise<UpdateStatus> {
+    if (!isTauri()) return structuredClone(mockUpdate);
+    return invoke<UpdateStatus>("update_later");
+  },
+  async skipUpdate(version: string): Promise<UpdateStatus> {
+    if (!isTauri()) return structuredClone(mockUpdate);
+    return invoke<UpdateStatus>("skip_update", { version });
+  },
+};
+
+/** Browser-mode stand-in for the updater (S45). */
+const mockUpdate: UpdateStatus = {
+  current: "0.1.0", phase: "idle", available: null, last_check: null,
+  last_error: null, last_result: null, waiting_for: null,
 };
 
 /** Subscribe to pushed core events. Returns an unsubscribe fn. */

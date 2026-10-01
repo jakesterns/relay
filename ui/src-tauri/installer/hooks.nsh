@@ -11,6 +11,7 @@
 ;   installer   /FIREWALL     also add the inbound firewall rule for
 ;                             relay-share.exe (raises one UAC prompt unless
 ;                             the installer is already elevated)
+;   installer   /RELAUNCH     reopen the window afterwards (in-app update)
 ;   uninstaller /KEEPDATA     keep the profiles and hardware library (default)
 ;   uninstaller /DELETEDATA   delete them too
 ;
@@ -95,6 +96,16 @@
   DetailPrint "Starting the Relay core..."
   nsis_tauri_utils::RunAsUser "$INSTDIR\relay-svc.exe" "run"
   Pop $0
+
+  ; /RELAUNCH: an in-app update (S45) runs this installer silently with
+  ; /S /RELAUNCH after the user chose Install now. The old window was closed
+  ; for the upgrade, so open the new one once the core is starting.
+  ${GetOptions} $CMDLINE "/RELAUNCH" $0
+  ${IfNot} ${Errors}
+    Sleep 1000
+    nsis_tauri_utils::RunAsUser "$INSTDIR\relay-ui.exe" ""
+    Pop $0
+  ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_PREUNINSTALL

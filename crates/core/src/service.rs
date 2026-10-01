@@ -152,6 +152,92 @@ struct Inner {
     /// otherwise the episode's clock ran on and the next unrelated failure,
     /// minutes later, was taken as "three minutes of trying" and gave up.
     recv_started: Option<std::time::Instant>,
+    /// The update check and user-approved install (S45).
+    update: crate::update::Updater,
+}
+
+/// S45: why an update must wait right now, if anything is in the way.
+fn update_busy(g: &Inner) -> Option<&'static str> {
+    crate::update::busy_reason(
+        g.share.is_some() || g.send_intent.is_some(),
+        g.receive.is_some() || g.recv_intent.is_some(),
+        g.state.active_profile.is_some(),
+    )
+}
+
+/// S45: start a check on the blocking pool. `manual` skips the daily limit
+/// (the user pressed Check now); the automatic one goes through `check_due`
+/// and the busy gate in `update_tick`.
+fn start_update_check(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
+    let include_pre = {
+        let mut g = inner.lock();
+        if g.update.phase != crate::update::Phase::Idle {
+            return;
+        }
+        g.update.phase = crate::update::Phase::Checking;
+        g.prefs.get().prerelease_updates
+    };
+    let inner = inner.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        let found = tokio::task::spawn_blocking(move || crate::update::check(include_pre))
+            .await
+            .unwrap_or_else(|e| Err(format!("update check task: {e}")));
+        let (announce, auto_install) = {
+            let mut g = inner.lock();
+            if let Err(e) = &found {
+                warn!(error = %e, "update check failed");
+            }
+            let announce = g.update.finish_check(found);
+            (announce, g.prefs.get().auto_install_updates)
+        };
+        if let Some(v) = announce {
+            info!(version = %v, "an update is available");
+            let text = format!("Relay {v} is available. Open Settings to see what's new and install it.");
+            crate::winloop::balloon("Relay", &text);
+            let _ = events.send(Event::Notice { text });
+            if auto_install {
+                start_update_install(&inner, &events);
+            }
+        }
+    });
+}
+
+/// S45: download and verify the offered release, then hand it to the tick,
+/// which runs it once nothing is in the way. Only ever called because the
+/// user pressed Install now, or turned on automatic installs.
+fn start_update_install(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> bool {
+    let (dir, avail) = {
+        let mut g = inner.lock();
+        if !matches!(g.update.phase, crate::update::Phase::Idle) {
+            return false;
+        }
+        let Some(a) = g.update.cache.offer().cloned() else { return false };
+        g.update.phase = crate::update::Phase::Downloading;
+        (g.update.dir.clone(), a)
+    };
+    let inner = inner.clone();
+    let events = events.clone();
+    tokio::spawn(async move {
+        let a2 = avail.clone();
+        let res = tokio::task::spawn_blocking(move || crate::update::fetch_and_verify(&dir, &a2))
+            .await
+            .unwrap_or_else(|e| Err(format!("update download task: {e}")));
+        let mut g = inner.lock();
+        match res {
+            Ok(path) => {
+                info!(version = %avail.version, "update downloaded and verified");
+                g.update.ready = Some((path, avail.version.clone()));
+                g.update.phase = crate::update::Phase::Waiting;
+            }
+            Err(msg) => {
+                warn!(%msg, "update refused");
+                g.update.record_failure(&avail.version, msg.clone());
+                let _ = events.send(Event::Notice { text: msg });
+            }
+        }
+    });
+    true
 }
 
 /// Write the intent to disk, or remove the file when there is none.
@@ -272,6 +358,7 @@ impl Service {
             recv_host: None,
             recv_vcam: None,
             recv_started: None,
+            update: crate::update::Updater::load(&paths),
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -415,11 +502,64 @@ impl Service {
                     self.refresh_audio_chain();
                     self.recheck_monitor();
                     self.supervise();
+                    self.update_tick();
                 }
             }
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// S45, on the 1 s tick: start the daily check when it is due, and run a
+    /// verified installer once no share, receive or game profile is active.
+    fn update_tick(&self) {
+        use crate::update::Phase;
+        let mut check = false;
+        let mut launch = None;
+        {
+            let mut g = self.inner.lock();
+            let busy = update_busy(&g);
+            match g.update.phase {
+                Phase::Idle => {
+                    check = busy.is_none()
+                        && crate::update::check_due(
+                            g.prefs.get().auto_check_updates,
+                            g.update.started.elapsed(),
+                            crate::update::now_unix(),
+                            g.update.cache.last_check,
+                        );
+                }
+                Phase::Waiting => match busy {
+                    Some(reason) => {
+                        let why = format!("Waiting to install: {reason}. It installs as soon as that ends.");
+                        if g.update.waiting_for.as_deref() != Some(why.as_str()) {
+                            g.update.waiting_for = Some(why);
+                        }
+                    }
+                    None => {
+                        if let Some((path, version)) = g.update.ready.take() {
+                            g.update.phase = Phase::Installing;
+                            g.update.waiting_for = None;
+                            g.update.cache.pending_install = Some(version.clone());
+                            g.update.save();
+                            launch = Some((path, version));
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+        if check {
+            start_update_check(&self.inner, &self.events);
+        }
+        if let Some((path, version)) = launch {
+            info!(%version, "running the update installer");
+            if let Err(e) = crate::update::launch_installer(&path) {
+                let mut g = self.inner.lock();
+                g.update.cache.pending_install = None;
+                g.update.record_failure(&version, format!("Could not start the installer: {e:#}"));
+            }
+        }
     }
 
     /// Handle one notification-area menu pick. Returns `true` when the core
@@ -1875,7 +2015,43 @@ fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> R
 }
 
 impl IpcHandler {
+    /// S45: the update methods, handled before the main lock is taken
+    /// because starting a check or an install takes it itself.
+    fn handle_update(&self, method: &Method) -> Option<Reply> {
+        let status = |inner: &Arc<Mutex<Inner>>| Reply::Update { status: inner.lock().update.status() };
+        Some(match method {
+            Method::UpdateStatus => status(&self.inner),
+            Method::CheckForUpdates => {
+                start_update_check(&self.inner, &self.events);
+                status(&self.inner)
+            }
+            Method::InstallUpdate => {
+                let busy = { update_busy(&self.inner.lock()) };
+                start_update_install(&self.inner, &self.events);
+                if let Some(reason) = busy {
+                    self.inner.lock().update.waiting_for =
+                        Some(format!("Waiting to install: {reason}. It installs as soon as that ends."));
+                }
+                status(&self.inner)
+            }
+            Method::UpdateLater => {
+                let mut g = self.inner.lock();
+                g.update.later = g.update.cache.offer().map(|a| a.version.clone());
+                Reply::Update { status: g.update.status() }
+            }
+            Method::SkipUpdate { version } => {
+                let mut g = self.inner.lock();
+                g.update.skip(version);
+                Reply::Update { status: g.update.status() }
+            }
+            _ => return None,
+        })
+    }
+
     fn handle_sync(&self, method: Method) -> Reply {
+        if let Some(reply) = self.handle_update(&method) {
+            return reply;
+        }
         let mut g = self.inner.lock();
         match method {
             Method::Ping => Reply::Pong,
@@ -2493,6 +2669,11 @@ impl IpcHandler {
                 let _ = self.shutdown.send(CoreEvent::Shutdown);
                 Reply::Ok
             }
+            Method::UpdateStatus
+            | Method::CheckForUpdates
+            | Method::InstallUpdate
+            | Method::UpdateLater
+            | Method::SkipUpdate { .. } => unreachable!("handled by handle_update"),
         }
     }
 }

@@ -277,6 +277,19 @@ pub enum Method {
     /// The user has seen the last-crash line; clear it and mark the records
     /// seen (S38).
     AckCrash,
+    /// S45: what the updater knows and is doing.
+    UpdateStatus,
+    /// S45: "Check now" — check regardless of the daily limit.
+    CheckForUpdates,
+    /// S45: the user said Install now. Downloads, verifies, and installs
+    /// once no share or game profile is active.
+    InstallUpdate,
+    /// S45: "Later" — hide the offer until the next check finds it again.
+    UpdateLater,
+    /// S45: "Skip this version".
+    SkipUpdate {
+        version: String,
+    },
     Subscribe,
     Shutdown,
 }
@@ -321,6 +334,10 @@ pub enum Reply {
     },
     UiPrefs {
         prefs: crate::uiprefs::UiPrefs,
+    },
+    /// Reply to every S45 update method.
+    Update {
+        status: crate::update::UpdateStatus,
     },
     /// Reply to `ListAudioDevices` (S40).
     AudioDevices {
