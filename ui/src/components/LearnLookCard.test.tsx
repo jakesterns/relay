@@ -29,9 +29,10 @@ async function mount(exe: string | null = "game.exe") {
 function monitor(over: Partial<MonitorLearnView> = {}): MonitorLearnView {
   return {
     monitor: "GSM5C7C-x", monitor_name: "LG ULTRAGEAR+", panel: "oled", phase: "learning",
-    readiness: { frames: 300, frames_needed: 600, scenes: 2, scenes_needed: 3, stable_checkpoints: 0, checkpoints_needed: 3, progress: 0.45 },
+    readiness: { frames: 300, frames_needed: 600, scenes: 2, scenes_needed: 3, stable_checkpoints: 1, checkpoints_needed: 3, progress: 0.45, checkpoints: 2, scene_frames: [120, 180, 0, 0, 0] },
     converged: null, applied: null, use_learned: false, hdr_skipped: false, status: "learning",
-    adjustments: null, excluded: 12, ...over,
+    adjustments: null, excluded: 12,
+    excluded_by: { static_frames: 3, loading: 7, cutscene: 0, outlier: 0, idle: 1, warmup: 1 }, ...over,
   };
 }
 
@@ -72,7 +73,9 @@ describe("the learn-this-game's-look card", () => {
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("aria-valuenow", "45");
     expect(screen.getByText(/300 \/ 600 gameplay frames · 2 \/ 3 kinds of scene/)).toBeInTheDocument();
-    expect(screen.getByText(/12 skipped/)).toBeInTheDocument();
+    expect(screen.getByTestId("look-skipped")).toHaveTextContent("12 skipped: static/menu 3 · loading 7 · idle 1 · warm-up 1");
+    expect(screen.getByTestId("look-scenes")).toHaveTextContent("Scenes (dark → bright): 120 / 180 / 0 / 0 / 0");
+    expect(screen.getByText(/checkpoints 1 stable of 2/)).toBeInTheDocument();
   });
 
   it("Apply is offered once a look has settled, and applies it", async () => {

@@ -263,6 +263,9 @@ pub struct MonitorLearnView {
     #[serde(default)]
     pub adjustments: Option<Adjustments>,
     pub excluded: u64,
+    /// Why frames were skipped, by kind, so a tester can see the cause.
+    #[serde(default)]
+    pub excluded_by: relay_display::learn::converge::Excluded,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -310,7 +313,8 @@ pub fn view(
                 hdr_skipped: m.hdr_skipped,
                 status: rec.status(Some(&id)),
                 adjustments: rec.effective(&id).map(|look| realize(&look, &caps)),
-                excluded: ex.static_frames + ex.loading + ex.cutscene + ex.outlier + ex.idle,
+                excluded: ex.total(),
+                excluded_by: ex,
             }
         })
         .collect();

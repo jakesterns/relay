@@ -103,7 +103,9 @@ fn flat_black_is_not_hidden_detail() {
     let mut an = Analyser::new();
     let f = |t: usize| {
         frame(move |x, y| {
-            if y < H / 2 {
+            // Black band in the middle of moving content (a static border
+            // would be cropped away as not-the-game).
+            if (H / 4..H * 3 / 4).contains(&y) {
                 (0, 0, 0)
             } else {
                 let v = 80 + ((x + t * 9) % 100) as u8;
@@ -194,8 +196,22 @@ fn short_buffers_are_outliers_not_panics() {
 fn classification_thresholds_are_the_named_constants() {
     let base = FrameStats { luma_std: 0.2, motion: 0.1, ..Default::default() };
     assert_eq!(classify(&base, false), FrameClass::Gameplay);
-    let s = FrameStats { luma_std: LOADING_MAX_STDDEV - 1e-4, ..base.clone() };
+    let s = FrameStats {
+        luma_std: LOADING_MAX_STDDEV - 1e-4,
+        mean_luma: 0.5,
+        detail: LOADING_MIN_DETAIL - 1e-4,
+        ..base.clone()
+    };
     assert_eq!(classify(&s, false), FrameClass::Loading);
+    // Same spread, but textured: gameplay.
+    let s = FrameStats { detail: LOADING_MIN_DETAIL, ..s };
+    assert_eq!(classify(&s, false), FrameClass::Gameplay);
+    // Low absolute spread but high relative to a dark mean: not uniform.
+    let night = FrameStats { luma_std: 0.02, mean_luma: 0.05, ..base.clone() };
+    assert!(!is_loading(&night));
+    // Almost every pixel at the median, no texture: a spinner field.
+    let field = FrameStats { uniform_frac: LOADING_UNIFORM_FRAC, detail: 0.001, ..base.clone() };
+    assert!(is_loading(&field));
     let s = FrameStats { letterbox: LETTERBOX_BAR_FRAC, ..base.clone() };
     assert_eq!(classify(&s, false), FrameClass::Cutscene);
     let s = FrameStats { clip_frac: OUTLIER_CLIP_FRAC + 0.01, ..base.clone() };
@@ -575,4 +591,150 @@ fn no_input_for_the_idle_limit_is_not_gameplay() {
     let mut l = Learner::new("b1");
     l.observe(&with_input_idle(gameplay(0.3, 0.2), Some(30_000)));
     assert_eq!((l.agg.frames, l.excluded.idle), (0, 1));
+}
+
+// --- PC2 live findings (r49) ------------------------------------------------
+
+/// Tarkov-style night raid: near-black, low spread, faint texture, moving.
+fn night_raid(t: usize) -> Vec<u8> {
+    let mut rng = Lcg(t as u32 * 31 + 5);
+    frame(|x, y| {
+        let n = rng.next();
+        let wave = ((x + t * 7) / 6 + y / 9) % 5;
+        let v = 3 + wave as u8 * 2 + (n * 3.0) as u8;
+        (v, v + 1, v)
+    })
+}
+
+#[test]
+fn a_dark_moving_night_scene_is_gameplay_not_loading() {
+    let mut an = Analyser::new();
+    run(&mut an, &night_raid(0));
+    for t in 1..6 {
+        let r = run(&mut an, &night_raid(t));
+        assert!(r.stats.luma_std < LOADING_MAX_STDDEV, "the hard case: {:?}", r.stats);
+        assert_eq!(r.class, FrameClass::Gameplay, "{:?}", r.stats);
+    }
+}
+
+#[test]
+fn a_black_fade_is_loading() {
+    let mut an = Analyser::new();
+    for t in 0..6usize {
+        let v = (40 - t * 7) as u8;
+        let r = run(&mut an, &frame(|_, _| (v, v, v)));
+        assert_eq!(r.class, FrameClass::Loading, "step {t}: {:?}", r.stats);
+    }
+}
+
+#[test]
+fn a_loading_spinner_is_loading() {
+    let mut an = Analyser::new();
+    for t in 0..6usize {
+        // A small bright dot circling on a black field.
+        let (cx, cy) = (W / 2 + [0, 12, 0, 12][t % 4], H / 2 + [0, 0, 12, 12][t % 4]);
+        let r = run(
+            &mut an,
+            &frame(|x, y| {
+                if x.abs_diff(cx) < 4 && y.abs_diff(cy) < 4 {
+                    (200, 200, 200)
+                } else {
+                    (2, 2, 2)
+                }
+            }),
+        );
+        assert_eq!(r.class, FrameClass::Loading, "step {t}: {:?}", r.stats);
+    }
+}
+
+/// A game (or a video) in a window 40 % of the screen, inside a static page.
+fn windowed(t: usize, page: u8, content: impl Fn(usize, usize) -> (u8, u8, u8)) -> Vec<u8> {
+    let (x0, x1, y0, y1) = (W * 3 / 10, W * 7 / 10, H * 3 / 10, H * 7 / 10);
+    let _ = t;
+    frame(|x, y| {
+        if x >= x0 && x < x1 && y >= y0 && y < y1 {
+            content(x - x0, y - y0)
+        } else {
+            (page, page, page)
+        }
+    })
+}
+
+#[test]
+fn a_windowed_scene_in_a_static_frame_is_analysed_on_its_own_pixels() {
+    for page in [250u8, 15u8] {
+        let mut an = Analyser::new();
+        // Dark scene in the window.
+        let mut last = None;
+        for t in 0..4 {
+            last = Some(run(
+                &mut an,
+                &windowed(t, page, |x, y| {
+                    let v = 5 + ((x + y + t * 13) % 30) as u8;
+                    (v, v, v)
+                }),
+            ));
+        }
+        let dark = last.unwrap();
+        assert!(dark.stats.content_frac < 0.5, "{:?}", dark.stats);
+        assert_eq!(apl_bucket(dark.stats.mean_luma), 0, "page {page}: {:?}", dark.stats);
+        assert_eq!(dark.class, FrameClass::Gameplay);
+        // The content brightens: the bucket follows the content, not the page.
+        let mut last = None;
+        for t in 4..8 {
+            last = Some(run(
+                &mut an,
+                &windowed(t, page, |x, y| {
+                    let v = 200 + ((x + y + t * 13) % 50) as u8;
+                    (v, v, v)
+                }),
+            ));
+        }
+        let bright = last.unwrap();
+        assert_eq!(
+            apl_bucket(bright.stats.mean_luma),
+            APL_BUCKETS - 1,
+            "page {page}: {:?}",
+            bright.stats
+        );
+    }
+}
+
+#[test]
+fn scenes_accumulate_per_bucket_and_checkpoints_report_before_evidence() {
+    let mut l = Learner::new("b1");
+    for _ in 0..CHECKPOINT_FRAMES * 2 {
+        l.observe(&gameplay(0.3, 0.1));
+    }
+    let r = l.readiness();
+    assert_eq!(r.scenes, 1);
+    assert_eq!(r.checkpoints, 2, "checkpoints are taken with one scene");
+    assert_eq!(r.stable_checkpoints, 2);
+    assert_eq!(r.scene_frames[apl_bucket(0.3)], CHECKPOINT_FRAMES as u64 * 2);
+    for _ in 0..40 {
+        l.observe(&gameplay(0.05, 0.1));
+    }
+    let r = l.readiness();
+    assert_eq!(r.scenes, 2);
+    assert_eq!(r.scene_frames[0], 40);
+    assert_eq!(r.scene_frames[apl_bucket(0.3)], CHECKPOINT_FRAMES as u64 * 2, "not overwritten");
+    assert_eq!(l.phase(), Phase::Learning);
+}
+
+#[test]
+fn the_exclusion_breakdown_counts_warmup() {
+    let mut l = Learner::new("b1");
+    l.observe(&FrameReport { class: FrameClass::Warmup, ..gameplay(0.3, 0.1) });
+    l.observe(&FrameReport { class: FrameClass::Loading, ..gameplay(0.3, 0.1) });
+    assert_eq!((l.excluded.warmup, l.excluded.loading, l.excluded.total()), (1, 1, 2));
+}
+
+#[test]
+fn pc2_constants() {
+    assert_eq!(LOADING_MAX_CV, 0.25);
+    assert_eq!(LOADING_MIN_DETAIL, 0.005);
+    assert_eq!(ACTIVE_HISTORY, 8);
+    assert_eq!(ACTIVE_BLOCK_DELTA, 0.003);
+    assert_eq!((LOADING_UNIFORM_FRAC, LOADING_NEAR), (0.95, 0.02));
+    assert_eq!(MIN_ACTIVE_FRAC, 0.05);
 }

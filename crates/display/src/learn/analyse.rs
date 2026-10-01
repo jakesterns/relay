@@ -39,6 +39,30 @@ pub const OUTLIER_CLIP_FRAC: f32 = 0.6;
 /// means nobody is playing: a cutscene, a menu left open, AFK. Read from
 /// `GetLastInputInfo` — one system-wide timestamp, no hooks, no keylogging.
 pub const INPUT_IDLE_MAX_MS: u64 = 20_000;
+/// Near-uniform also needs the spread to be small *relative to the mean*: a
+/// night scene at mean 0.05 with std 0.02 is textured (ratio 0.4); a black
+/// or grey loading screen is not.
+pub const LOADING_MAX_CV: f32 = 0.25;
+/// A near-uniform frame only counts as Loading when it also has no texture:
+/// mean local gradient over the whole picture below this. A spinner or a
+/// fade has none; a night raid's ground and foliage do, however dark.
+/// (Motion is no test: a night scene can move less than a spinner.)
+pub const LOADING_MIN_DETAIL: f32 = 0.005;
+/// Recent block grids kept to find the active content region.
+pub const ACTIVE_HISTORY: usize = 8;
+/// A block whose mean changed by more than this across the history is
+/// active content. Borders, desktop and browser chrome do not change at all,
+/// so the bar is low: under one 8-bit code, which still catches a game's
+/// slowly shimmering dark sky.
+pub const ACTIVE_BLOCK_DELTA: f32 = 0.003;
+/// A frame where at least this fraction of pixels sits within
+/// [`LOADING_NEAR`] of the median is a uniform field with something small
+/// on it: a spinner, a logo, a progress dot.
+pub const LOADING_UNIFORM_FRAC: f32 = 0.95;
+pub const LOADING_NEAR: f32 = 0.02;
+/// Below this fraction of the frame, the "active region" is too small to
+/// trust (a cursor blink, a clock): analyse the whole frame instead.
+pub const MIN_ACTIVE_FRAC: f32 = 0.05;
 /// Motion grid (block means), small enough to be free to keep and compare.
 pub const MOTION_GRID: (usize, usize) = (64, 36);
 
@@ -116,6 +140,20 @@ pub struct FrameStats {
     pub motion: f32,
     /// Letterbox bar height as a fraction of the frame, top and bottom (min).
     pub letterbox: f32,
+    /// Fraction of the frame the statistics came from (the active content
+    /// region; 1 = whole frame).
+    #[serde(default = "one")]
+    pub content_frac: f32,
+    /// Fraction of pixels within [`LOADING_NEAR`] of the median.
+    #[serde(default)]
+    pub uniform_frac: f32,
+    /// Mean local luma gradient over the whole picture (texture).
+    #[serde(default)]
+    pub detail: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -124,11 +162,15 @@ pub struct FrameReport {
     pub stats: FrameStats,
 }
 
-/// Stateful only for motion. Create one per sampling session.
+/// Stateful only for motion and the active region: the last few 64×36
+/// block-mean grids (never pixels). Create one per sampling session.
 #[derive(Debug, Default)]
 pub struct Analyser {
-    prev_grid: Option<Vec<f32>>,
+    grids: std::collections::VecDeque<Vec<f32>>,
 }
+
+/// Block rectangle `[x0, x1) × [y0, y1)` in grid units.
+type BlockRect = (usize, usize, usize, usize);
 
 impl Analyser {
     pub fn new() -> Self {
@@ -142,29 +184,116 @@ impl Analyser {
         }
         let luma = luma_plane(f);
         let grid = block_grid(&luma, w, h);
-        let motion = match &self.prev_grid {
-            Some(prev) => mean_abs_diff(prev, &grid),
-            None => -1.0,
-        };
-        self.prev_grid = Some(grid);
+        if self.grids.back().is_some_and(|g| g.len() != grid.len()) {
+            self.grids.clear();
+        }
+        self.grids.push_back(grid);
+        if self.grids.len() > ACTIVE_HISTORY {
+            self.grids.pop_front();
+        }
+        let rect = self.active_rect();
+        let warmup = self.grids.len() < 2;
+        let motion = if warmup { -1.0 } else { self.motion_in(rect) };
 
-        let bar = letterbox_rows(&luma, w, h);
-        let mut stats = stats_for(f, &luma, bar);
+        // Crop to the active content: a windowed game or a video inside a
+        // static page is analysed on its own pixels, not the page's.
+        let (gw, gh) = MOTION_GRID;
+        let (px0, px1) = (rect.0 * w / gw, (rect.1 * w).div_ceil(gw).min(w));
+        let (py0, py1) = (rect.2 * h / gh, (rect.3 * h).div_ceil(gh).min(h));
+        let (cw, ch) = (px1 - px0, py1 - py0);
+        let mut data = Vec::with_capacity(cw * ch * 3);
+        let mut cl = Vec::with_capacity(cw * ch);
+        for y in py0..py1 {
+            data.extend_from_slice(&f.data[(y * w + px0) * 3..(y * w + px1) * 3]);
+            cl.extend_from_slice(&luma[y * w + px0..y * w + px1]);
+        }
+        let crop = Frame { width: cw, height: ch, data: &data, order: f.order };
+
+        let bar = letterbox_rows(&cl, cw, ch);
+        let mut stats = stats_for(&crop, &cl, bar);
         stats.motion = motion.max(0.0);
-        stats.letterbox = bar as f32 / h as f32;
-        let class = classify(&stats, motion < 0.0);
+        // Static black bars are cropped away with the rest of the border, so
+        // look for them on the whole frame too.
+        let full_bar = letterbox_rows(&luma, w, h) as f32 / h as f32;
+        stats.letterbox = (bar as f32 / ch as f32).max(full_bar);
+        stats.content_frac = (cw * ch) as f32 / (w * h) as f32;
+        let class = classify(&stats, warmup);
         FrameReport { class, stats }
+    }
+
+    /// Bounding box of blocks that changed across the history; the whole
+    /// grid until there is history or when too little changed to trust.
+    fn active_rect(&self) -> BlockRect {
+        let (gw, gh) = MOTION_GRID;
+        let full = (0, gw, 0, gh);
+        if self.grids.len() < 2 {
+            return full;
+        }
+        let (mut x0, mut x1, mut y0, mut y1) = (gw, 0, gh, 0);
+        let mut active = 0usize;
+        for i in 0..gw * gh {
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for g in &self.grids {
+                lo = lo.min(g[i]);
+                hi = hi.max(g[i]);
+            }
+            if hi - lo > ACTIVE_BLOCK_DELTA {
+                active += 1;
+                let (x, y) = (i % gw, i / gw);
+                x0 = x0.min(x);
+                x1 = x1.max(x + 1);
+                y0 = y0.min(y);
+                y1 = y1.max(y + 1);
+            }
+        }
+        if active == 0 || ((x1 - x0) * (y1 - y0)) as f32 / ((gw * gh) as f32) < MIN_ACTIVE_FRAC {
+            return full;
+        }
+        // An edge block of the box usually straddles the static border:
+        // drop one block on every side that is not the frame edge.
+        let (x0, x1) = if x1 - x0 > 2 {
+            (if x0 > 0 { x0 + 1 } else { 0 }, if x1 < gw { x1 - 1 } else { gw })
+        } else {
+            (x0, x1)
+        };
+        let (y0, y1) = if y1 - y0 > 2 {
+            (if y0 > 0 { y0 + 1 } else { 0 }, if y1 < gh { y1 - 1 } else { gh })
+        } else {
+            (y0, y1)
+        };
+        (x0, x1, y0, y1)
+    }
+
+    /// Mean block change between the last two grids, inside `rect` only, so
+    /// a small window of motion is not diluted by a static page around it.
+    fn motion_in(&self, r: BlockRect) -> f32 {
+        let n = self.grids.len();
+        let (a, b) = (&self.grids[n - 2], &self.grids[n - 1]);
+        let gw = MOTION_GRID.0;
+        let mut sum = 0.0;
+        let mut count = 0;
+        for y in r.2..r.3 {
+            for x in r.0..r.1 {
+                sum += (a[y * gw + x] - b[y * gw + x]).abs();
+                count += 1;
+            }
+        }
+        if count == 0 {
+            0.0
+        } else {
+            sum / count as f32
+        }
     }
 }
 
 /// The classification rules, in priority order. Pure; tested directly.
 pub fn classify(s: &FrameStats, warmup: bool) -> FrameClass {
-    if s.luma_std < LOADING_MAX_STDDEV {
+    if s.clip_frac > OUTLIER_CLIP_FRAC {
+        FrameClass::Outlier
+    } else if is_loading(s) {
         FrameClass::Loading
     } else if s.letterbox >= LETTERBOX_BAR_FRAC {
         FrameClass::Cutscene
-    } else if s.clip_frac > OUTLIER_CLIP_FRAC {
-        FrameClass::Outlier
     } else if warmup {
         FrameClass::Warmup
     } else if s.motion < MOTION_STATIC {
@@ -172,6 +301,16 @@ pub fn classify(s: &FrameStats, warmup: bool) -> FrameClass {
     } else {
         FrameClass::Gameplay
     }
+}
+
+/// Near-uniform (small spread absolutely and relative to the mean, or almost
+/// every pixel at the median) *and* textureless. Dark gameplay is
+/// low-spread but textured, so it is not Loading.
+pub fn is_loading(s: &FrameStats) -> bool {
+    let uniform = (s.luma_std < LOADING_MAX_STDDEV
+        && s.luma_std / s.mean_luma.max(0.01) < LOADING_MAX_CV)
+        || s.uniform_frac >= LOADING_UNIFORM_FRAC;
+    uniform && s.detail < LOADING_MIN_DETAIL
 }
 
 fn rgb_at(f: &Frame, i: usize) -> (f32, f32, f32) {
@@ -207,13 +346,6 @@ fn block_grid(luma: &[f32], w: usize, h: usize) -> Vec<f32> {
     sums.iter().zip(&counts).map(|(s, c)| if *c == 0 { 0.0 } else { s / *c as f32 }).collect()
 }
 
-fn mean_abs_diff(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 1.0; // a size change is not "static"
-    }
-    a.iter().zip(b).map(|(x, y)| (x - y).abs()).sum::<f32>() / a.len() as f32
-}
-
 /// Height of the shorter of the top and bottom black bars, in rows.
 fn letterbox_rows(luma: &[f32], w: usize, h: usize) -> usize {
     let row_black = |y: usize| {
@@ -240,7 +372,7 @@ fn stats_for(f: &Frame, luma: &[f32], bar: usize) -> FrameStats {
     let mut sum = 0f32;
     let mut sum_sq = 0f32;
     let (mut crush, mut clip, mut dark) = (0u32, 0u32, 0u32);
-    let (mut crush_grad, mut dark_grad) = (0f32, 0f32);
+    let (mut crush_grad, mut dark_grad, mut all_grad) = (0f32, 0f32, 0f32);
     let mut sats: Vec<f32> = Vec::with_capacity((y1 - y0) * w);
     let mut hue = [0f32; HUE_BINS];
 
@@ -255,6 +387,7 @@ fn stats_for(f: &Frame, luma: &[f32], bar: usize) -> FrameStats {
             let right = if x + 1 < w { luma[i + 1] } else { l };
             let down = if y + 1 < y1 { luma[i + w] } else { l };
             let grad = (l - right).abs() + (l - down).abs();
+            all_grad += grad;
             if l < LUMA_CRUSH {
                 crush += 1;
                 crush_grad += grad;
@@ -282,7 +415,17 @@ fn stats_for(f: &Frame, luma: &[f32], bar: usize) -> FrameStats {
     s.mean_luma = sum / n;
     s.luma_std = (sum_sq / n - s.mean_luma * s.mean_luma).max(0.0).sqrt();
     s.median_luma = median_from_hist(&hist, n as u32);
+    let near = (LOADING_NEAR * 255.0).round() as i32;
+    let mid = (s.median_luma * 255.0).round() as i32;
+    let close: u32 = hist
+        .iter()
+        .enumerate()
+        .filter(|(v, _)| (*v as i32 - mid).abs() <= near)
+        .map(|(_, c)| *c)
+        .sum();
+    s.uniform_frac = close as f32 / n;
     s.crush_frac = crush as f32 / n;
+    s.detail = all_grad / n;
     s.clip_frac = clip as f32 / n;
     s.dark_frac = dark as f32 / n;
     s.crushed_detail = if crush > 0 { crush_grad / crush as f32 } else { 0.0 };

@@ -118,6 +118,14 @@ function statusLine(s: LookStatus, sampling: boolean): string {
   }
 }
 
+function skippedText(e: NonNullable<MonitorLearnView["excluded_by"]>): string {
+  const parts: [string, number][] = [
+    ["static/menu", e.static_frames], ["loading", e.loading], ["cutscene", e.cutscene],
+    ["outlier", e.outlier], ["idle", e.idle], ["warm-up", e.warmup],
+  ];
+  return parts.filter(([, n]) => n > 0).map(([k, n]) => `${k} ${n}`).join(" · ");
+}
+
 function pct(v: number): string { return `${Math.round(v * 100)}%`; }
 
 function MonitorRow({ m }: { m: MonitorLearnView }) {
@@ -137,8 +145,18 @@ function MonitorRow({ m }: { m: MonitorLearnView }) {
           </div>
           <p className="p small mono">
             {r.frames} / {r.frames_needed} gameplay frames · {r.scenes} / {r.scenes_needed} kinds of scene
-            {m.excluded > 0 ? ` · ${m.excluded} skipped (menus, cutscenes, loading, idle)` : ""}
+            {` · checkpoints ${r.stable_checkpoints} stable of ${r.checkpoints ?? 0}`}
           </p>
+          {r.scene_frames && (
+            <p className="p small mono" data-testid="look-scenes">
+              Scenes (dark → bright): {r.scene_frames.join(" / ")}
+            </p>
+          )}
+          {m.excluded > 0 && (
+            <p className="p small mono" data-testid="look-skipped">
+              {m.excluded} skipped{m.excluded_by ? `: ${skippedText(m.excluded_by)}` : ""}
+            </p>
+          )}
         </>
       )}
       {m.converged && (

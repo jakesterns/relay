@@ -235,6 +235,13 @@ fn view_carries_the_exact_notices_and_progress() {
     assert_eq!(m.phase, Phase::Converged);
     assert!(m.hdr_skipped);
     assert!(m.adjustments.is_none(), "nothing applied yet");
+    // The breakdown and per-scene counts reach the view (PC2, r49).
+    assert_eq!(m.readiness.scene_frames.len(), 5);
+    assert_eq!(m.readiness.scene_frames.iter().sum::<u64>(), 1200);
+    let json = serde_json::to_value(m).unwrap();
+    for k in ["static_frames", "loading", "cutscene", "outlier", "idle", "warmup"] {
+        assert!(json["excluded_by"].get(k).is_some(), "{k}");
+    }
 }
 
 #[test]

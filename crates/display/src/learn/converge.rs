@@ -51,6 +51,15 @@ pub struct Excluded {
     pub outlier: u64,
     #[serde(default)]
     pub idle: u64,
+    /// First sample of a session (no motion reference yet).
+    #[serde(default)]
+    pub warmup: u64,
+}
+
+impl Excluded {
+    pub fn total(&self) -> u64 {
+        self.static_frames + self.loading + self.cutscene + self.outlier + self.idle + self.warmup
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -77,7 +86,7 @@ pub struct Learner {
 }
 
 /// How far along the evidence is.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Readiness {
     pub frames: u64,
     pub frames_needed: u64,
@@ -85,6 +94,13 @@ pub struct Readiness {
     pub scenes_needed: usize,
     pub stable_checkpoints: usize,
     pub checkpoints_needed: usize,
+    /// Checkpoints taken so far (kept: at most `CONVERGE_CHECKPOINTS`).
+    #[serde(default)]
+    pub checkpoints: usize,
+    /// Weighted gameplay frames per APL bucket (dark → bright), so a tester
+    /// can see which scenes are missing.
+    #[serde(default)]
+    pub scene_frames: Vec<u64>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
 }
@@ -118,13 +134,16 @@ impl Learner {
     pub fn readiness(&self) -> Readiness {
         let frames = self.agg.frames;
         let scenes = self.scenes();
-        let stable = if self.has_evidence() { self.stable_checkpoints() } else { 0 };
+        // Reported whether or not there is evidence yet: "0 stable" while
+        // checkpoints agree read as stuck on PC2. Convergence still needs both.
+        let stable = self.stable_checkpoints();
         let ev = 0.5 * (frames as f32 / MIN_GAMEPLAY_FRAMES as f32).min(1.0)
             + 0.3 * (scenes as f32 / MIN_SCENES as f32).min(1.0);
         let conv = if self.converged.is_some() {
             0.2
         } else {
-            0.2 * (stable as f32 / CONVERGE_CHECKPOINTS as f32).min(1.0)
+            let s = if self.has_evidence() { stable } else { 0 };
+            0.2 * (s as f32 / CONVERGE_CHECKPOINTS as f32).min(1.0)
         };
         Readiness {
             frames,
@@ -133,6 +152,8 @@ impl Learner {
             scenes_needed: MIN_SCENES,
             stable_checkpoints: stable,
             checkpoints_needed: CONVERGE_CHECKPOINTS,
+            checkpoints: self.checkpoints.len(),
+            scene_frames: self.agg.apl_buckets.iter().map(|w| w.round() as u64).collect(),
             progress: (ev + conv).min(1.0),
         }
     }
@@ -201,7 +222,10 @@ impl Learner {
                 self.excluded.idle += 1;
                 return false;
             }
-            FrameClass::Warmup => return false,
+            FrameClass::Warmup => {
+                self.excluded.warmup += 1;
+                return false;
+            }
         }
         // Clean frames only: a NaN from a broken frame must not poison sums.
         let s = &r.stats;
