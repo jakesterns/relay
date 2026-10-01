@@ -147,6 +147,9 @@ struct Inner {
     /// or by a toggle), so a toggle is sent only when it changes: install
     /// and uninstall each sent it twice (PC2, r47).
     recv_vcam: Option<bool>,
+    /// Consecutive 1 s ticks on which Windows' foreground window differed
+    /// from the one the hook last reported (see `reconcile_foreground`).
+    fg_mismatch: u8,
     /// When the current receive engine started. A restarted receiver that
     /// has stayed up for a while ends the episode even if no share arrived:
     /// otherwise the episode's clock ran on and the next unrelated failure,
@@ -365,6 +368,7 @@ impl Service {
             recv_episode: None,
             recv_host: None,
             recv_vcam: None,
+            fg_mismatch: 0,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
             learner: None,
@@ -520,6 +524,7 @@ impl Service {
                     }
                     self.refresh_audio_chain();
                     self.recheck_monitor();
+                    self.reconcile_foreground();
                     self.supervise();
                     self.update_tick();
                     self.learner_tick();
@@ -1023,6 +1028,42 @@ impl Service {
     /// no window at all, and then no foreground event ever fires: the live
     /// test closed Notepad and its profile stayed on the monitor until the
     /// guard undid it (2026-09-29). The brief says restore on exit too.
+    /// Safety net for the foreground hook. On the second PC a core started
+    /// from a test shell answered IPC for 8 minutes while its hook delivered
+    /// no foreground events at all (2026-10-01), so the game's profile never
+    /// applied. Once a second, ask Windows which window is in front (one
+    /// user32 call, nothing opened in the game) and, if it has differed from
+    /// the hook's view for two ticks in a row, act on it. Two ticks keeps the
+    /// hook in charge of fast switches and ignores Windows' own momentary
+    /// focus juggling. Same window: just refresh its title, which the hook
+    /// only reports on a switch.
+    fn reconcile_foreground(&self) {
+        let now = crate::winloop::foreground_hwnd();
+        let mut g = self.inner.lock();
+        let known = g.state.foreground.as_ref().map(|f| f.hwnd).unwrap_or(0);
+        if now == 0 || now == known {
+            g.fg_mismatch = 0;
+            if now != 0 {
+                if let Some(t) = crate::winloop::window_title(now) {
+                    if let Some(f) = g.state.foreground.as_mut() {
+                        f.title = t;
+                    }
+                }
+            }
+            return;
+        }
+        g.fg_mismatch = g.fg_mismatch.saturating_add(1);
+        if g.fg_mismatch < 2 {
+            return;
+        }
+        g.fg_mismatch = 0;
+        drop(g);
+        if let Some(fg) = crate::winloop::current_foreground() {
+            warn!(exe = %fg.exe, pid = fg.pid, "missed a foreground change; catching up");
+            self.on_foreground(fg);
+        }
+    }
+
     fn recheck_focus(&self) {
         #[cfg(windows)]
         {
