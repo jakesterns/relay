@@ -73,6 +73,28 @@ pub const PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID: &str =
 /// `PKEY_EFX_ProcessingModes_Supported_For_Streaming`.
 pub const PKEY_EFX_MODES: &str = "{d3993a3f-99c2-4402-b5ec-a92a0367664b},7";
 
+/// `PKEY_FX_ModeEffectClsid` — legacy single-MFX slot (mode effect: runs
+/// once per processing mode, after the mix). S42d: Relay's slot.
+pub const PKEY_FX_MODE_EFFECT_CLSID: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},6";
+/// `PKEY_CompositeFX_ModeEffectClsid` — multi-APO MFX chain.
+pub const PKEY_COMPOSITEFX_MODE_EFFECT_CLSID: &str = "{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},14";
+/// `PKEY_MFX_ProcessingModes_Supported_For_Streaming`.
+pub const PKEY_MFX_MODES: &str = "{d3993a3f-99c2-4402-b5ec-a92a0367664b},6";
+/// `PKEY_AudioEndpoint_Disable_SysFx` — the endpoint's "Disable all
+/// enhancements" switch. While it is non-zero no APO on the endpoint loads;
+/// the install deletes it (as Equalizer APO's Configurator does) and the
+/// backup puts it back.
+pub const PKEY_DISABLE_SYSFX: &str = "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5";
+
+/// Every FxProperties value name an install may create, change or delete.
+/// The live writer refuses a plan whose diff names anything else.
+pub const FX_WRITABLE_VALUES: &[&str] = &[
+    PKEY_FX_MODE_EFFECT_CLSID,
+    PKEY_COMPOSITEFX_MODE_EFFECT_CLSID,
+    PKEY_MFX_MODES,
+    PKEY_DISABLE_SYSFX,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;

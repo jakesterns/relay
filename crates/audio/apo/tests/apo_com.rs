@@ -100,6 +100,12 @@ fn apo_end_to_end_in_process() {
     let apo_obj: IAudioProcessingObject = RelayApo::default().into();
     let cfg: IAudioProcessingObjectConfiguration = apo_obj.cast().expect("configuration iface");
     let rt: IAudioProcessingObjectRT = apo_obj.cast().expect("RT iface");
+    // S42d: an MFX (mode effect) is a system effect — the engine QIs for
+    // IAudioSystemEffects (and IAudioSystemEffects2 for a mode-aware APO).
+    let _: windows::Win32::Media::Audio::Apo::IAudioSystemEffects =
+        apo_obj.cast().expect("IAudioSystemEffects (MFX slot)");
+    let _: windows::Win32::Media::Audio::Apo::IAudioSystemEffects2 =
+        apo_obj.cast().expect("IAudioSystemEffects2 (MFX slot)");
 
     // Registration properties carry our CLSID and one connection each way.
     // SAFETY: contract returns a CoTaskMem struct; we only read and leak it

@@ -45,6 +45,8 @@ pub enum LiveRegError {
         "live registry writes are disabled (set RELAY_APO_ALLOW_LIVE_WRITE=1; VM / installer only)"
     )]
     WritesDisabled,
+    #[error("plan refused: {0}")]
+    Refused(String),
 }
 
 fn check(err: WIN32_ERROR) -> Result<(), LiveRegError> {
@@ -295,6 +297,7 @@ impl LiveRegistry {
     /// backup-then-apply contract as relay-core's `Applier`).
     pub fn apply_install(plan: &InstallPlan) -> Result<(), LiveRegError> {
         assert_writes_allowed()?;
+        crate::fxstore::vet_fx_diff(plan).map_err(LiveRegError::Refused)?;
 
         // Only the values the planner actually changed are written; every
         // untouched value stays physically untouched.
