@@ -75,15 +75,121 @@ fn install_then_uninstall_restores_byte_for_byte() {
     );
 }
 
-/// The baseline RODECaster endpoint already carries an MFX
-/// ({13AB3EBD-...}, the inbox "WM audio GFX" wrapper) and no composite MFX
-/// list: the slot is taken, so the install is refused and nothing is planned.
+const MS_GFX: &str = "{13AB3EBD-137E-4903-9D89-60BE8277FD17}";
+
+/// S44b. The baseline RODECaster endpoint already carries an MFX (MS_GFX,
+/// Microsoft's inbox "WM audio GFX APO", WMALFXGFXDSP.dll) and no composite
+/// MFX list: Relay takes the slot, records the original as its child (in the
+/// store for the APO, in the backup for the record), and uninstall puts the
+/// original back byte-for-byte.
 #[test]
-fn taken_mfx_slot_refuses_install() {
+fn microsoft_gfx_mfx_is_chained_and_restored() {
     let original = fixture_store();
-    let err = plan_install(&original, ENDPOINT, DLL).unwrap_err();
-    assert_eq!(err, PlanError::SlotTaken("{13AB3EBD-137E-4903-9D89-60BE8277FD17}".to_owned()));
+    let plan = plan_install(&original, ENDPOINT, DLL).unwrap();
+    let root = plan.new_store.keys.get("").unwrap();
+    assert_eq!(
+        sz_from_bytes(&root.get(ids::PKEY_FX_MODE_EFFECT_CLSID).unwrap().data).as_deref(),
+        Some(ids::APO_CLSID)
+    );
+    assert_eq!(
+        sz_from_bytes(&root.get(ids::PKEY_RELAY_CHILD_MFX).unwrap().data).as_deref(),
+        Some(MS_GFX)
+    );
+    assert_eq!(plan.backup.chained_clsid.as_deref(), Some(MS_GFX));
+    let mut changed = diff(&original, &plan.new_store);
+    changed.sort();
+    let mut want = vec![
+        (String::new(), ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned()),
+        (String::new(), ids::PKEY_RELAY_CHILD_MFX.to_owned()),
+    ];
+    want.sort();
+    assert_eq!(changed, want, "only the slot and Relay's own record change");
+    assert!(vet_fx_diff(&plan).is_ok());
+    // The vendor SFX is untouched.
+    assert_eq!(
+        sz_from_bytes(&root.get(SFX).unwrap().data).as_deref(),
+        Some("{C9453E73-8C5C-4463-9984-AF8BAB2F5447}")
+    );
+
+    // Uninstall: the original CLSID is back, every byte of the export equal.
+    let json = serde_json::to_string(&plan.backup).unwrap();
+    let back: Backup = serde_json::from_str(&json).unwrap();
+    let restored = plan_uninstall(&back);
+    assert_eq!(restored, original);
+    assert_eq!(
+        serialize(&restored.to_reg_map(ENDPOINT)),
+        serialize(&original.to_reg_map(ENDPOINT))
+    );
+    assert_eq!(
+        sz_from_bytes(
+            &restored.keys.get("").unwrap().get(ids::PKEY_FX_MODE_EFFECT_CLSID).unwrap().data
+        )
+        .as_deref(),
+        Some(MS_GFX)
+    );
+    // And reinstalling over the chained store keeps the same child.
+    let again = plan_install(&plan.new_store, ENDPOINT, DLL).unwrap();
+    assert_eq!(again.new_store, plan.new_store);
+}
+
+/// Shape of a Realtek onboard endpoint: vendor SFX and MFX in the legacy
+/// slots, DEFAULT modes, no composite lists. The CLSIDs here are
+/// placeholders; the shape is what matters.
+fn realtek_like_store() -> FxStore {
+    let mut store = spdif_like_store(true, false);
+    let root = store.keys.get_mut("").unwrap();
+    root.insert(ids::PKEY_FX_MODE_EFFECT_CLSID.into(), sz(REALTEK_MFX));
+    root.insert(
+        ids::PKEY_FX_ENDPOINT_EFFECT_CLSID.into(),
+        sz("{33333333-4444-5555-6666-777777777777}"),
+    );
+    store
+}
+const REALTEK_MFX: &str = "{22222222-3333-4444-5555-666666666666}";
+
+#[test]
+fn realtek_mfx_is_chained_and_restored() {
+    let original = realtek_like_store();
+    let plan = plan_install(&original, ENDPOINT, DLL).unwrap();
+    assert_eq!(plan.backup.chained_clsid.as_deref(), Some(REALTEK_MFX));
+    let root = plan.new_store.keys.get("").unwrap();
+    assert_eq!(
+        sz_from_bytes(&root.get(ids::PKEY_RELAY_CHILD_MFX).unwrap().data).as_deref(),
+        Some(REALTEK_MFX)
+    );
+    // Vendor SFX and EFX untouched.
+    assert_eq!(sz_from_bytes(&root.get(SFX).unwrap().data).as_deref(), Some(VENDOR_SFX));
+    assert_eq!(
+        root.get(ids::PKEY_FX_ENDPOINT_EFFECT_CLSID),
+        original.keys.get("").unwrap().get(ids::PKEY_FX_ENDPOINT_EFFECT_CLSID)
+    );
+    let restored = plan_uninstall(&plan.backup);
+    assert_eq!(
+        serialize(&restored.to_reg_map(ENDPOINT)),
+        serialize(&original.to_reg_map(ENDPOINT))
+    );
+}
+
+/// Refusal stays for the cases chaining cannot handle, worded as such.
+#[test]
+fn unchainable_slots_still_refuse() {
+    // A child with no COM registration.
+    let err = relay_apo::fxstore::plan_install_with(&fixture_store(), ENDPOINT, DLL, &|_| false)
+        .unwrap_err();
+    assert_eq!(err, PlanError::SlotTaken(MS_GFX.to_owned()));
     assert!(err.to_string().starts_with("slot taken"));
+    assert!(err.to_string().contains("cannot chain"));
+    // Not a CLSID.
+    let mut s = spdif_like_store(false, false);
+    s.keys.get_mut("").unwrap().insert(ids::PKEY_FX_MODE_EFFECT_CLSID.into(), sz("RtkApo"));
+    assert!(matches!(plan_install(&s, ENDPOINT, DLL), Err(PlanError::SlotTaken(_))));
+    // A list in the single-effect slot.
+    let mut s = spdif_like_store(false, false);
+    s.keys
+        .get_mut("")
+        .unwrap()
+        .insert(ids::PKEY_FX_MODE_EFFECT_CLSID.into(), msz(&[REALTEK_MFX, MS_GFX]));
+    assert!(matches!(plan_install(&s, ENDPOINT, DLL), Err(PlanError::SlotTaken(_))));
 }
 
 fn sz(s: &str) -> RegValue {

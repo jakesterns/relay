@@ -13,8 +13,12 @@
 //!   exists, append our CLSID to it (vendor entries kept, never duplicated);
 //! - else if the legacy MFX slot ([`ids::PKEY_FX_MODE_EFFECT_CLSID`]) is
 //!   absent, empty or the nil GUID, write our CLSID there;
-//! - else a vendor owns the slot and there is no chain to join: refuse
-//!   ([`PlanError::SlotTaken`]) - never evict a vendor effect;
+//! - else another APO owns the slot (S44b): take the slot and record the
+//!   owner's CLSID at [`ids::PKEY_RELAY_CHILD_MFX`] and in the backup;
+//!   Relay's APO hosts it as a child, so the vendor/Windows effect keeps
+//!   running. Refuse ([`PlanError::SlotTaken`]) only when that is
+//!   impossible: the owner is not a CLSID, has no COM registration, or the
+//!   slot holds a list;
 //! - ensure [`ids::MODE_DEFAULT`] is listed at [`ids::PKEY_MFX_MODES`];
 //! - delete [`ids::PKEY_DISABLE_SYSFX`] when it is set ("Disable all
 //!   enhancements" would keep any APO from loading).
@@ -39,9 +43,13 @@ use crate::regfile::{
 /// Why an install was not planned.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PlanError {
-    /// The legacy MFX slot holds another vendor's effect and the endpoint
-    /// has no composite MFX list to chain into. Relay does not install.
-    #[error("slot taken: this output's mode effect (MFX) is {0}; Relay will not replace it")]
+    /// The legacy MFX slot holds another effect Relay cannot host as a
+    /// child (not a CLSID, not COM-registered, or a list) and the endpoint
+    /// has no composite MFX list to join. Relay does not install.
+    #[error(
+        "slot taken: this output's mode effect (MFX) is {0}, which Relay cannot chain; \
+         Relay will not replace it"
+    )]
     SlotTaken(String),
 }
 
@@ -223,6 +231,12 @@ pub struct Backup {
     /// still carries the APO). Backups from before S42b lack the
     /// audio-engine key; nothing wrote it then, so nothing is left behind.
     pub com_keys: Vec<String>,
+    /// S44b: the MFX that held the slot before the install, now hosted as
+    /// Relay's child. Uninstall puts it back by restoring `store` verbatim;
+    /// this field is the readable record. `None` for a free slot, a
+    /// composite-list join, and backups from before S44b.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chained_clsid: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,16 +255,32 @@ pub struct InstallPlan {
 }
 
 /// Plan an install against the current store image. Pure - touches nothing.
-/// Refuses with [`PlanError::SlotTaken`] rather than evict a vendor MFX.
+/// Any well-formed CLSID in the slot is treated as chainable; live callers
+/// use [`plan_install_with`] to also require its COM registration.
 pub fn plan_install(
     current: &FxStore,
     endpoint_guid: &str,
     apo_dll_path: &str,
 ) -> Result<InstallPlan, PlanError> {
+    plan_install_with(current, endpoint_guid, apo_dll_path, &|_| true)
+}
+
+/// [`plan_install`] with a check on the slot's current owner: `child_ok`
+/// says whether that CLSID is a registration Relay's APO can host (the live
+/// caller checks `HKLM\SOFTWARE\Classes\CLSID\{x}\InprocServer32`). Refuses
+/// with [`PlanError::SlotTaken`] only when chaining is impossible - the
+/// owner is not a CLSID, not registered, or the slot holds a list.
+pub fn plan_install_with(
+    current: &FxStore,
+    endpoint_guid: &str,
+    apo_dll_path: &str,
+    child_ok: &dyn Fn(&str) -> bool,
+) -> Result<InstallPlan, PlanError> {
     let clsid_key = ids::clsid_key(ids::APO_CLSID);
     let inproc_key = format!(r"{clsid_key}\InprocServer32");
 
-    let backup = Backup {
+    let mut backup = Backup {
+        chained_clsid: None,
         endpoint_guid: endpoint_guid.to_owned(),
         timestamp: iso_now(),
         store: current.clone(),
@@ -270,7 +300,12 @@ pub fn plan_install(
     if root.contains_key(ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID) {
         append_to_multi_sz(root, ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID, ids::APO_CLSID);
     } else {
-        match legacy_slot_owner(root.get(ids::PKEY_FX_MODE_EFFECT_CLSID)) {
+        let slot = root.get(ids::PKEY_FX_MODE_EFFECT_CLSID);
+        if slot.is_some_and(|v| v.kind == RegKind::MultiSz && parse_multi_sz(&v.data).len() > 1) {
+            // A list in the single-effect slot: not a shape Relay can host.
+            return Err(PlanError::SlotTaken(legacy_slot_owner(slot).unwrap_or_default()));
+        }
+        match legacy_slot_owner(slot) {
             None => {
                 root.insert(
                     ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned(),
@@ -278,7 +313,24 @@ pub fn plan_install(
                 );
             }
             Some(owner) if owner.eq_ignore_ascii_case(ids::APO_CLSID) => {}
-            Some(owner) => return Err(PlanError::SlotTaken(owner)),
+            Some(owner) => {
+                // S44b: chain. Relay takes the slot and hosts the owner as
+                // its child, so the vendor/Windows effect keeps running.
+                // Only a well-formed CLSID with a COM registration Relay's
+                // APO can CoCreate inside audiodg qualifies.
+                if !ids::is_braced_guid(&owner) || !child_ok(&owner) {
+                    return Err(PlanError::SlotTaken(owner));
+                }
+                root.insert(
+                    ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
+                );
+                root.insert(
+                    ids::PKEY_RELAY_CHILD_MFX.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(&owner) },
+                );
+                backup.chained_clsid = Some(owner);
+            }
         }
     }
 

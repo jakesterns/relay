@@ -236,11 +236,8 @@ plays, unprocessed).
 **Install plan (`fxstore::plan_install`, now `Result<_, PlanError>`):**
 - composite MFX `,14` present → append our CLSID (chain, vendor kept);
 - else legacy MFX `,6` absent / empty / nil GUID → write our CLSID;
-- else **refuse `PlanError::SlotTaken(clsid)`** — Relay never wraps or
-  evicts a vendor effect the way EAPO does. Dry-run and install show
-  "Slot taken: … Relay will not replace it … Nothing on your PC was changed"
-  (`audio_apo::slot_taken_line`). The RODECaster baseline is such a store
-  (MFX = `{13AB3EBD…}`).
+- else ~~refuse `PlanError::SlotTaken(clsid)`~~ — **superseded by S44b
+  below**: Relay now chains the owner instead of refusing.
 - `{d3993a3f…},6` gets MODE_DEFAULT (append if missing);
 - Disable_SysFx deleted when non-zero (as EAPO), restored by uninstall.
 - No EFX values are written any more; `fx_has_relay` still reads them, so a
@@ -253,6 +250,52 @@ plays, unprocessed).
   slot taken, RODECaster with MFX freed byte-for-byte, S/PDIF-shaped store
   with a vendor SFX, nil-GUID slot, composite chain, Disable_SysFx, vetting),
   `tests/apo_com.rs` (IAudioSystemEffects{,2} QI).
+
+### S44b — chain the displaced MFX (branch `feat/s44b-apo-chain`)
+
+Why: on the dev PC the default output's MFX slot holds Microsoft's "WM audio
+GFX APO" `{13AB3EBD-137E-4903-9D89-60BE8277FD17}` (WMALFXGFXDSP.dll);
+Realtek PCs hold RtkAPO. Refusing left per-game EQ unavailable on most real
+outputs. Equalizer APO's answer, adopted here: take the slot and host the
+original as a child.
+
+- **Install** (`fxstore::plan_install_with`): legacy `,6` owned by another
+  CLSID → write Relay's CLSID there and record the owner as REG_SZ at
+  `ids::PKEY_RELAY_CHILD_MFX` = `{7c3f2a91-5e4d-4b8a-a1f6-3d92c0e4b7a5},1`
+  (a Relay-owned fmtid, added to `FX_WRITABLE_VALUES`), and in
+  `Backup::chained_clsid`. FxProperties is where the APO can read it:
+  audiodg hands its property store to Initialize as
+  `APOInitSystemEffects::pAPOSystemEffectsProperties`. Composite `,14`
+  lists are still joined, not chained.
+- **Refuse `SlotTaken` only when chaining is impossible**: the owner is not
+  a braced CLSID, has no `HKLM\SOFTWARE\Classes\CLSID\{x}\InprocServer32`
+  (live check `LiveRegistry::clsid_is_chainable`, read-only), or the
+  single-effect slot holds a list. Wording: "…Relay cannot host it…".
+- **APO** (`com.rs`): Initialize reads the record, `CoCreateInstance`s the
+  child in-proc, forwards Initialize (same bytes, `APOInit.clsid` patched to
+  the child's). Format queries must pass both (child must accept the
+  requested format unchanged). LockForProcess locks the child with its input
+  on a Relay-owned mid buffer and the engine's output. Order: **Relay's EQ,
+  then the child** — the vendor/Windows effect is usually loudness/room/
+  limiter, and EQ belongs before the limiter. Bypass (or no chain built) =
+  the child alone on the engine buffers; zero allocations on the RT path.
+  GetEffectsList = the child's; GetLatency = sum; Reset/Unlock forwarded.
+  A child that fails to create/init/lock is dropped and Relay runs alone
+  (diag lines say which).
+- **Uninstall / uninstall-all**: unchanged — the backup store is restored
+  verbatim, so the original CLSID returns byte-for-byte and the record value
+  disappears (`microsoft_gfx_mfx_is_chained_and_restored`,
+  `realtek_mfx_is_chained_and_restored`).
+- Dry-run lists a `chain:` line naming the child.
+- Tests: `tests/fxstore_fixtures.rs` (MS GFX on the RODECaster baseline,
+  Realtek-shaped store, unchainable refusals), `tests/apo_chain.rs` (fake
+  child COM object: forwarding, both-must-agree negotiation, Relay→child
+  order, bypass = child only, effects list, latency, failed child → Relay
+  alone). `elevate_ipc` no longer depends on the dev PC's slot state.
+- Live pass owed (with the owner): install on the default output, confirm
+  the diag log shows `child … initialized`, Windows' own enhancement still
+  audible in bypass, EQ audible when a profile is active; uninstall and
+  `reg export` diff empty.
 
 **Live retest (with the owner; not run in this session).**
 1. Read-only first: `reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio" /v DisableProtectedAudioDG`

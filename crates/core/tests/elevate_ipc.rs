@@ -129,8 +129,18 @@ async fn the_apo_listing_names_the_real_endpoint_and_our_clsid() {
         .expect("plan");
     let Reply::DryRun { lines } = reply else { panic!("unexpected reply") };
     let text = lines.join("\n");
-    assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
-    assert!(text.contains("FxProperties"), "{text}");
+    // The listing depends on this machine's default output (free slot,
+    // chained vendor effect, or one Relay cannot host); assert on whichever
+    // plan it produced rather than on the dev PC's audio state.
+    if text.contains("Slot taken") {
+        assert!(text.contains("Nothing on your PC was changed"), "{text}");
+    } else {
+        assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
+        assert!(text.contains("FxProperties"), "{text}");
+        if text.contains(relay_apo::ids::PKEY_RELAY_CHILD_MFX) {
+            assert!(text.contains("chain:"), "{text}");
+        }
+    }
     assert!(text.contains("written before anything is changed"), "{text}");
 
     let _ = client.call(Method::Shutdown).await;

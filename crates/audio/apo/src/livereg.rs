@@ -289,6 +289,15 @@ impl LiveRegistry {
         Key::open(&ids::audio_engine_key(ids::APO_CLSID), KEY_READ).ok()?.read_values().ok()
     }
 
+    /// Read-only (S44b): can Relay's APO host `clsid` as a child? True when
+    /// it is a braced CLSID with an `InprocServer32` under HKLM classes -
+    /// what `CoCreateInstance(CLSCTX_INPROC_SERVER)` inside audiodg needs.
+    /// The `child_ok` argument of [`crate::fxstore::plan_install_with`].
+    pub fn clsid_is_chainable(clsid: &str) -> bool {
+        ids::is_braced_guid(clsid)
+            && Key::open(&format!(r"{}\InprocServer32", ids::clsid_key(clsid)), KEY_READ).is_ok()
+    }
+
     /// Write an [`InstallPlan`]: set the diffed FxProperties values and
     /// create the COM registration keys.
     ///
