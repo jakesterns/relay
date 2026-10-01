@@ -345,6 +345,24 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
         }
     }
 
+    let wb: [f32; NBANDS] = std::array::from_fn(|b| {
+        Stats::median(&stats.frame_hist, b).map(|d| 10f32.powf(d / 10.0)).unwrap_or(0.0)
+    });
+    let overall_db = guard_gains(&mut gains, limits, &wb);
+    Derived { gains, buried, overall_db }
+}
+
+/// The hearing-safety rules every game layer passes, wherever it came from
+/// (derived here, imported, blended, stored on disk, sent over IPC): caps,
+/// no boost at or below 80 Hz, the speech guard, the step limit, and never
+/// louder overall (power weighted by `wb`; uniform when unknown). Returns the
+/// overall power gain in dB (≤ 0). Non-finite gains become 0 first.
+pub fn guard_gains(gains: &mut [f32; NBANDS], limits: &Limits, wb: &[f32; NBANDS]) -> f32 {
+    for g in gains.iter_mut() {
+        if !g.is_finite() {
+            *g = 0.0;
+        }
+    }
     // Caps, the speech guard and the step limit, until they agree. Every move
     // shrinks a gain's magnitude, so this settles.
     let guard_and_cap = |gains: &mut [f32; NBANDS]| {
@@ -359,7 +377,7 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
         }
     };
     for _ in 0..4 * NBANDS {
-        guard_and_cap(&mut gains);
+        guard_and_cap(gains);
         let mut changed = false;
         for b in 1..NBANDS {
             let d = gains[b] - gains[b - 1];
@@ -377,12 +395,9 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
             break;
         }
     }
-    guard_and_cap(&mut gains);
+    guard_and_cap(gains);
 
-    // Hearing rule: not louder overall, weighted by the game's own spectrum.
-    let wb: [f32; NBANDS] = std::array::from_fn(|b| {
-        Stats::median(&stats.frame_hist, b).map(|d| 10f32.powf(d / 10.0)).unwrap_or(0.0)
-    });
+    // Hearing rule: not louder overall, weighted by `wb`.
     let power = |g: &[f32; NBANDS], k: f32| -> f32 {
         let (mut num, mut den) = (0f32, 0f32);
         for b in 0..NBANDS {
@@ -397,7 +412,7 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
         }
     };
     // Gain compensation: lower everything by the excess, within the guard.
-    let excess = power(&gains, 1.0);
+    let excess = power(gains, 1.0);
     if excess > 0.0 {
         let room = (0..NBANDS)
             .map(|b| {
@@ -415,11 +430,11 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
             *g -= shift;
         }
     }
-    if power(&gains, 1.0) > 0.0 {
+    if power(gains, 1.0) > 0.0 {
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
         for _ in 0..30 {
             let mid = 0.5 * (lo + hi);
-            if power(&gains, mid) > 0.0 {
+            if power(gains, mid) > 0.0 {
                 hi = mid;
             } else {
                 lo = mid;
@@ -431,8 +446,32 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
             }
         }
     }
-    let overall_db = power(&gains, 1.0);
-    Derived { gains, buried, overall_db }
+    power(gains, 1.0)
+}
+
+/// [`guard_gains`] for any curve: sampled on the analysis bands (log
+/// interpolation), guarded with uniform weights, returned on the same grid as
+/// [`curve_from_gains`]. Idempotent. An empty or non-finite curve is flat.
+pub fn guard_curve(curve: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    let clean: Vec<(f32, f32)> =
+        curve.iter().copied().filter(|(h, d)| h.is_finite() && d.is_finite() && *h > 0.0).collect();
+    let mut gains: [f32; NBANDS] =
+        std::array::from_fn(|b| crate::fit::interp_db(&clean, BANDS_HZ[b] as f64) as f32);
+    guard_gains(&mut gains, &Limits::default(), &[1.0; NBANDS]);
+    // Rounding to 0.1 dB happens in `curve_from_gains`; re-guard the rounded
+    // values so rounding cannot step over a limit.
+    let mut out = curve_from_gains(&gains);
+    for p in out.iter_mut() {
+        p.1 = p.1.clamp(-MAX_CUT_DB, MAX_BOOST_DB);
+    }
+    out
+}
+
+/// True when `curve` already satisfies every guard (within rounding).
+pub fn is_guarded(curve: &[(f32, f32)]) -> bool {
+    let g = guard_curve(curve);
+    curve.len() == g.len()
+        && curve.iter().zip(&g).all(|(a, b)| (a.0 - b.0).abs() < 0.5 && (a.1 - b.1).abs() < 0.051)
 }
 
 /// Largest per-band difference between two gain sets, dB.
@@ -649,5 +688,48 @@ mod tests {
         let at = |hz: f64| crate::fit::response_db(&bands, hz) as f32;
         assert!(at(63.0) < 0.0);
         assert!(at(63.0) >= -10.0 && at(3150.0) <= 7.0);
+    }
+
+    #[test]
+    fn a_hostile_curve_is_made_safe() {
+        let hostile = [(20.0, 6.0), (80.0, 6.0), (1000.0, -9.0), (16000.0, 6.0)];
+        let g = guard_curve(&hostile);
+        let d = Derived {
+            gains: std::array::from_fn(|b| g[b + 1].1),
+            buried: [0.0; NBANDS],
+            overall_db: 0.0,
+        };
+        let lim = Limits::default();
+        check_limits_rounded(&d, &lim);
+        assert!(g[0].1 <= 0.0, "no boost at 20 Hz");
+        assert_eq!(guard_curve(&g), g, "idempotent");
+        assert!(is_guarded(&g) && !is_guarded(&hostile));
+        // Absurd and broken values too.
+        let wild = [(20.0, 40.0), (1000.0, -40.0), (5000.0, f32::NAN), (16000.0, 40.0)];
+        let w = guard_curve(&wild);
+        assert!(w.iter().all(|p| p.1.is_finite() && (-9.0..=6.0).contains(&p.1)));
+        assert_eq!(guard_curve(&[]).iter().map(|p| p.1).fold(0f32, f32::max), 0.0);
+    }
+
+    fn check_limits_rounded(d: &Derived, lim: &Limits) {
+        let g = d.gains;
+        for (b, &x) in g.iter().enumerate() {
+            assert!(x <= lim.max_boost_db + 0.05 && x >= -lim.max_cut_db - 0.05, "{g:?}");
+            if BANDS_HZ[b] <= lim.no_boost_below_hz {
+                assert!(x <= 0.0, "boost at {} Hz: {g:?}", BANDS_HZ[b]);
+            }
+            if in_speech_band(BANDS_HZ[b]) {
+                assert!(
+                    x >= -lim.speech_guard_db - 0.05,
+                    "speech cut at {} Hz: {g:?}",
+                    BANDS_HZ[b]
+                );
+            }
+        }
+        for w in g.windows(2) {
+            assert!((w[1] - w[0]).abs() <= lim.max_step_db + 0.11, "{g:?}");
+        }
+        let p: f32 = g.iter().map(|x| 10f32.powf(x / 10.0)).sum::<f32>() / NBANDS as f32;
+        assert!(10.0 * p.log10() <= 0.05, "louder overall: {g:?}");
     }
 }

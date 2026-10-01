@@ -176,8 +176,20 @@ impl LearnRecord {
     /// Parse a stored record; anything unreadable, of another schema, or for
     /// another exe is `None` (the caller starts fresh).
     pub fn from_json(text: &str, exe: &str) -> Option<Self> {
-        let r: Self = serde_json::from_str(text).ok()?;
-        (r.schema == RECORD_SCHEMA && r.exe.eq_ignore_ascii_case(exe)).then_some(r)
+        let mut r: Self = serde_json::from_str(text).ok()?;
+        if !(r.schema == RECORD_SCHEMA && r.exe.eq_ignore_ascii_case(exe)) {
+            return None;
+        }
+        // A record on disk can be edited by hand: its curve passes the same
+        // guard as everything else before anyone can apply it.
+        if let Some(c) = r.candidate.as_mut() {
+            let g = super::derive::guard_curve(c);
+            if g != *c {
+                r.candidate_gains = Some(g[1..=super::NBANDS].iter().map(|p| p.1).collect());
+                *c = g;
+            }
+        }
+        Some(r)
     }
 
     /// Start a learning session for `version`. A changed version resets the
@@ -644,6 +656,16 @@ mod tests {
             r.active_minutes() <= (th.segment_secs * th.window_segments as u64) as f32 / 60.0 + 0.1
         );
         assert!(r.total_active_frames >= 390 * 100);
+    }
+
+    #[test]
+    fn a_wild_candidate_on_disk_is_guarded_on_load() {
+        let mut r = LearnRecord::new("game.exe", None);
+        r.candidate = Some(vec![(20.0, 40.0), (1000.0, -40.0), (16000.0, 40.0)]);
+        let back = LearnRecord::from_json(&serde_json::to_string(&r).unwrap(), "game.exe").unwrap();
+        let c = back.candidate.unwrap();
+        assert!(crate::learn::derive::is_guarded(&c));
+        assert!(c.iter().all(|p| (-9.0..=6.0).contains(&p.1)), "{c:?}");
     }
 
     #[test]

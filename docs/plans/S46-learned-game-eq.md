@@ -132,6 +132,26 @@ on the path, no process handle). A new version resets the evidence and shows
 States: off · learning · ready · applied (applied (imported), applied
 (imported, fine-tuned here)) · needs relearn.
 
+### Safety guard at every entry point (review fix)
+
+`relay_audio::learn::derive::guard_curve` applies the same rules as the
+derivation — +6 / −9 dB caps, no boost at or below 80 Hz, at most 2 dB net
+cut in 300 Hz – 4 kHz, at most 3 dB between neighbouring bands, never louder
+overall (uniform weighting) — to any curve. It runs on import (clamp, and the
+UI is told; non-finite numbers are still refused), on every offer and the
+fine-tune blend, on a record's candidate when loaded from disk, and as the
+last gate in `chain_params_with` before biquad fitting, so a curve from IPC or
+a hand-edited `profiles.json` cannot bypass it. Record reads are capped at
+1 MiB. A per-record lock file (`<exe>.lock`, held by the helper for its whole
+run) makes Reset / Relearn / goal changes and the next helper wait for a
+stopping helper's final save.
+
+### What the learner hears
+
+Process loopback taps the game's streams in the audio engine before the
+endpoint effect chain, so the learner hears the game's pre-EQ mix and cannot
+chase its own curve. Live test step 9 confirms it on hardware.
+
 ### Hardware independence and imports
 
 The game layer is stored on the profile, independent of the headset: changing

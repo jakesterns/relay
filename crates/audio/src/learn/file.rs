@@ -72,12 +72,13 @@ impl GameEqLayer {
     /// What taking a learned `candidate` would make of this layer: the
     /// candidate itself for a learned layer; for an imported one, the
     /// original import moved [`IMPORT_BLEND`] of the way towards it.
+    /// Always guarded ([`super::derive::guard_curve`]).
     pub fn offer(&self, candidate: &[(f32, f32)]) -> Vec<(f32, f32)> {
         if !self.is_imported() {
-            return candidate.to_vec();
+            return super::derive::guard_curve(candidate);
         }
         let base = self.base.as_deref().unwrap_or(&self.curve);
-        blend(base, candidate, IMPORT_BLEND)
+        super::derive::guard_curve(&blend(base, candidate, IMPORT_BLEND))
     }
 }
 
@@ -259,12 +260,26 @@ impl GameEqFile {
 
     /// The layer to store in a profile: the curve if present, else the
     /// bands' combined response sampled on 1/3 octaves.
-    pub fn to_layer(&self) -> GameEqLayer {
-        let curve = match (&self.curve, &self.bands) {
+    /// The file's curve as written (before the safety guard).
+    fn raw_curve(&self) -> Vec<(f32, f32)> {
+        match (&self.curve, &self.bands) {
             (Some(c), _) => c.clone(),
             (None, Some(b)) => sample_bands(b),
             (None, None) => Vec::new(),
-        };
+        }
+    }
+
+    /// True when the import had to be changed to meet the safety guard
+    /// (clamp-and-warn: the caller tells the user).
+    pub fn adjusted(&self) -> bool {
+        !super::derive::is_guarded(&self.raw_curve())
+    }
+
+    /// The layer to store: the file's curve passed through
+    /// [`super::derive::guard_curve`], so no file can boost the sub-bass, cut
+    /// the speech band, step sharply or make the game louder.
+    pub fn to_layer(&self) -> GameEqLayer {
+        let curve = super::derive::guard_curve(&self.raw_curve());
         GameEqLayer {
             base: Some(curve.clone()),
             curve,
@@ -347,7 +362,13 @@ mod tests {
 
     fn layer() -> GameEqLayer {
         GameEqLayer {
-            curve: vec![(20.0, -4.0), (100.0, -3.0), (1000.0, 0.0), (3150.0, 3.0), (16000.0, 0.0)],
+            curve: crate::learn::derive::guard_curve(&[
+                (20.0, -4.0),
+                (100.0, -3.0),
+                (1000.0, 0.0),
+                (3150.0, 3.0),
+                (16000.0, 0.0),
+            ]),
             source: LayerSource::Learned,
             exe_version: Some("1.2.3.4".into()),
             note: String::new(),
@@ -473,16 +494,39 @@ mod tests {
             .map(|&(hz, _)| (hz, crate::fit::interp_db(&layer().curve, hz as f64) as f32 + 4.0))
             .collect();
         let offer = imported.offer(&learned);
-        for (&(hz, o), &(_, l)) in offer.iter().zip(learned.iter()) {
-            assert!((o - (l - 4.0 * (1.0 - IMPORT_BLEND))).abs() < 0.11, "{hz} Hz: {o} vs {l}");
-        }
+        // Halfway from the import, then through the same safety guard.
+        let want =
+            crate::learn::derive::guard_curve(&blend(&layer().curve, &learned, IMPORT_BLEND));
+        assert_eq!(offer, want);
+        assert!(crate::learn::derive::is_guarded(&offer));
+        let at = |c: &[(f32, f32)], hz: f32| c.iter().find(|p| p.0 == hz).unwrap().1;
+        assert!(
+            at(&offer, 3150.0) > at(&layer().curve, 3150.0) - 0.05,
+            "moved towards the learned curve"
+        );
         // Taking it makes a tuned layer that still blends from the import.
         let tuned =
             GameEqLayer { curve: offer.clone(), source: LayerSource::Tuned, ..imported.clone() };
         assert_eq!(tuned.offer(&learned), offer, "no drift on repeated offers");
-        // A learned layer just takes the candidate.
+        // A learned layer takes the candidate (guarded).
         let own = GameEqLayer::learned(layer().curve, None);
-        assert_eq!(own.offer(&learned), learned);
+        assert_eq!(own.offer(&learned), crate::learn::derive::guard_curve(&learned));
+    }
+
+    #[test]
+    fn a_hostile_import_is_clamped_and_flagged() {
+        let text = r#"{"format":"relay-game-eq","schema":1,"game":{"exe":"h.exe"},
+            "curve":[[20,6],[80,6],[1000,-9],[16000,6]]}"#;
+        let f = GameEqFile::parse(text).unwrap();
+        assert!(f.adjusted());
+        let l = f.to_layer();
+        assert!(crate::learn::derive::is_guarded(&l.curve));
+        assert!(l.curve.iter().filter(|p| p.0 <= 80.0).all(|p| p.1 <= 0.0));
+        assert!(l.curve.iter().filter(|p| (300.0..=4000.0).contains(&p.0)).all(|p| p.1 >= -2.05));
+        let again = GameEqFile::export("h.exe", "", &l, None, "").to_json();
+        assert!(!GameEqFile::parse(&again).unwrap().adjusted());
+        // Non-finite numbers are still refused outright.
+        assert!(GameEqFile::parse(&text.replace("[1000,-9]", "[1000,1e999]")).is_err());
     }
 
     #[test]

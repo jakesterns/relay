@@ -375,6 +375,7 @@ function GameEqCard({ profileId, onChanged }: {
                 })}>Import</button>
             </div>
           )}
+          {status.notice && <p className="note" role="status">{status.notice}</p>}
           {exported && (
             <p className="note" data-testid="game-eq-exported">
               Saved to <span className="m">{exported.path}</span>{" "}

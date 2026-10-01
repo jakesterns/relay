@@ -2154,20 +2154,27 @@ impl IpcHandler {
                 let Some(mut profile) = g.store.get(id).cloned() else {
                     return Reply::Error { message: "no such profile".into() };
                 };
-                if action.touches_record() {
-                    // The helper's final save must not overwrite this change.
-                    if g.learner.as_ref().is_some_and(|l| l.profile == id) {
-                        if let Some(l) = g.learner.take() {
-                            l.stop_blocking();
-                        }
-                    }
-                }
+                // Take a helper on this record out under the lock, then work
+                // without it: the record lock (held by the helper until it has
+                // made its final save and exited) orders the rest.
+                let stopping = if action.touches_record()
+                    && g.learner.as_ref().is_some_and(|l| l.profile == id)
+                {
+                    g.learner.take()
+                } else {
+                    None
+                };
                 let paths = g.paths.clone();
-                let (changed, export) =
-                    match crate::game_eq::apply_action(&paths, &mut profile, &action) {
-                        Ok(r) => r,
-                        Err(e) => return Reply::Error { message: e.to_string() },
-                    };
+                drop(g);
+                if let Some(l) = stopping {
+                    l.stop();
+                }
+                let result = crate::game_eq::apply_action(&paths, &mut profile, &action);
+                g = self.inner.lock();
+                let crate::game_eq::ActionResult { changed, export, notice } = match result {
+                    Ok(r) => r,
+                    Err(e) => return Reply::Error { message: e.to_string() },
+                };
                 if changed {
                     g.store.upsert(profile.clone());
                     if let Err(e) = g.store.save() {
@@ -2181,7 +2188,8 @@ impl IpcHandler {
                     g = self.inner.lock();
                 }
                 let learning_now = g.learner.as_ref().is_some_and(|l| l.profile == id);
-                let status = crate::game_eq::status(&paths, &profile, learning_now);
+                let mut status = crate::game_eq::status(&paths, &profile, learning_now);
+                status.notice = notice;
                 Reply::GameEq { status: Box::new(status), export }
             }
             Method::DeleteProfile { id } => {

@@ -61,10 +61,13 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
     let mut layer_boosts = false;
     if let Some(layer) = audio.game_eq.as_ref().filter(|l| l.curve.len() >= 2) {
         let left = MAX_BANDS.saturating_sub(audio.bands.len() + bands.len());
-        let game = relay_audio::fit::fit_curve(&layer.curve, GAME_LAYER_BUDGET.min(left)).bands;
+        // The final gate: whatever stored this curve (the learner, an import,
+        // IPC, a hand-edited profiles.json), it is guarded before fitting.
+        let curve = relay_audio::learn::derive::guard_curve(&layer.curve);
+        let game = relay_audio::fit::fit_curve(&curve, GAME_LAYER_BUDGET.min(left)).bands;
         // Judged on the curve, not the fitted filters: a shelf that shapes a
         // pure cut can carry a small positive band without boosting anything.
-        layer_boosts = layer.curve.iter().any(|&(_, db)| db > 0.05);
+        layer_boosts = curve.iter().any(|&(_, db)| db > 0.05);
         bands.extend(game);
     }
 
@@ -344,6 +347,28 @@ mod tests {
             120.0,
             "the user's limiter wins"
         );
+    }
+
+    /// A profile written by hand or over IPC cannot reach the DSP unguarded.
+    #[test]
+    fn a_hostile_profile_curve_is_guarded_before_fitting() {
+        let hostile = [(20.0, 6.0), (80.0, 6.0), (1000.0, -9.0), (16000.0, 6.0)];
+        let audio = AudioSettings { game_eq: Some(layer(&hostile)), ..AudioSettings::default() };
+        let p = chain_params(&audio);
+        let r = |hz: f64| relay_audio::fit::response_db(&p.bands, hz);
+        assert!(r(40.0) <= 0.75, "sub-bass boost {}", r(40.0));
+        for hz in [400.0, 1000.0, 3150.0] {
+            assert!(r(hz) >= -2.75, "speech band cut {} at {hz}", r(hz));
+        }
+        for hz in [20.0, 100.0, 1000.0, 10000.0] {
+            assert!(r(hz) <= 6.75 && r(hz) >= -9.75);
+        }
+        let wild = [(20.0, 40.0), (1000.0, -40.0), (16000.0, 40.0)];
+        let p = chain_params(&AudioSettings {
+            game_eq: Some(layer(&wild)),
+            ..AudioSettings::default()
+        });
+        assert!(p.bands.iter().all(|b| b.gain_db.is_finite() && b.gain_db.abs() <= 12.0));
     }
 
     #[test]

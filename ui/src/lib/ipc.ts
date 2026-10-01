@@ -46,6 +46,8 @@ export interface GameEqStatus {
   distinct_voices: number; exe_version: string | null;
   applied: [number, number][] | null; offer: [number, number][] | null;
   note: string; last_error: string | null;
+  /** A one-off message about the action just taken (e.g. an import made safe). */
+  notice?: string;
 }
 export type GameEqAction =
   | { kind: "status" }

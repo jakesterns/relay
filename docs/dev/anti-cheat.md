@@ -69,7 +69,10 @@ loopback of the game's PID (#25, the same OS path as #12, Discord and OBS);
 "is anyone playing" is the system-wide idle timestamp (#26); a game update is
 noticed from the exe file's version resource (#27). Nothing is injected,
 hooked or read from the game, and the analysis runs in `relay-share`, never
-in the always-on core. Voice chat apps (Discord and the rest) are never
+in the always-on core. Process loopback taps the game's streams in the audio
+engine before the endpoint effect chain, so the learner hears the game's
+pre-EQ mix (not Relay's own processing); `learn_source` in
+`crates/capture/src/learn.rs` pins it to the game's PID. Voice chat apps (Discord and the rest) are never
 captured; only chat the game itself plays can be, and that is recognised
 (codec band limit) and left out of the statistics.
 

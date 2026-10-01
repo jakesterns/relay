@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use relay_audio::learn::{Analyzer, Goal, LearnRecord, Limits, Thresholds};
-use relay_core::game_eq::{load_record_at, save_record_at};
+use relay_core::game_eq::{load_record_at, lock_record, save_record_at, LOCK_TIMEOUT};
 
 use crate::audio::{AudioCapture, AudioSource};
 
@@ -89,10 +89,22 @@ fn emit(v: serde_json::Value) {
     println!("{v}");
 }
 
+/// What the learner captures: the game's own process tree by process
+/// loopback. Process loopback taps the application's streams in the audio
+/// engine *before* the endpoint's effect chain (where Relay's APO and EQ
+/// run), so the learner hears the game's pre-EQ mix and cannot chase its
+/// own curve. Never the desktop mix, never another process.
+pub fn learn_source(pid: u32) -> AudioSource {
+    AudioSource::Process { pid }
+}
+
 /// Run until stopped.
 pub fn run(args: LearnArgs) -> Result<()> {
     let th = Thresholds::default();
     let limits = Limits::default();
+    // Held for the whole run: the core's Reset / Relearn / goal change, and
+    // any next helper, wait until this one's final save is on disk.
+    let _lock = lock_record(&args.record, LOCK_TIMEOUT)?;
     let mut rec = load_record_at(&args.record, &args.exe)
         .unwrap_or_else(|| LearnRecord::new(&args.exe, args.version.as_deref()));
     rec.set_goal(args.goal, &limits);
@@ -117,8 +129,9 @@ pub fn run(args: LearnArgs) -> Result<()> {
         })?;
     }
 
-    let cap = AudioCapture::start(AudioSource::Process { pid: args.pid })
-        .context("process loopback of the game")?;
+    let source = learn_source(args.pid);
+    debug_assert!(matches!(source, AudioSource::Process { .. }), "the learner only taps the game");
+    let cap = AudioCapture::start(source).context("process loopback of the game")?;
     let mut rate = cap.sample_rate;
     let mut an = Analyzer::new(rate);
     emit(serde_json::json!({ "event": "learning", "rate": rate, "progress": rec.progress(&th) }));
@@ -194,6 +207,11 @@ mod tests {
             "--pid", "1", "--exe", "g.exe", "--record", "r", "--x", "1"
         ]))
         .is_err());
+    }
+
+    #[test]
+    fn the_learner_only_ever_taps_the_game_process() {
+        assert!(matches!(learn_source(4242), AudioSource::Process { pid: 4242 }));
     }
 
     #[test]

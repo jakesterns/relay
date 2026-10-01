@@ -100,6 +100,9 @@ pub struct GameEqStatus {
     pub offer: Option<Vec<(f32, f32)>>,
     pub note: String,
     pub last_error: Option<String>,
+    /// A one-off message about the action just taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// An export: the file text and where a copy was written.
@@ -130,8 +133,68 @@ pub fn export_dir(paths: &Paths) -> PathBuf {
 /// The stored record for `exe`, or `None` (missing, unreadable, another
 /// schema: all mean "start fresh").
 pub fn load_record_at(path: &Path, exe: &str) -> Option<LearnRecord> {
+    // Size first: a record is tens of KB; a huge file is not ours to parse.
+    if std::fs::metadata(path).ok()?.len() > MAX_RECORD_BYTES {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
+    if text.len() as u64 > MAX_RECORD_BYTES {
+        return None;
+    }
     LearnRecord::from_json(&text, exe)
+}
+
+/// Largest record file read, bytes.
+pub const MAX_RECORD_BYTES: u64 = 1 << 20;
+
+/// How long anyone waits for another holder of a record's lock.
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Exclusive hold on one game's record (`<record>.lock`, opened with no
+/// sharing). The learner helper holds it for its whole run, so a helper that
+/// is still stopping — and about to make its final save — blocks the core's
+/// Reset / Relearn / goal change and any new helper until it has exited.
+pub struct RecordLock {
+    _file: std::fs::File,
+}
+
+pub fn lock_record(record: &Path, timeout: Duration) -> Result<RecordLock> {
+    let path = record.with_extension("lock");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let until = Instant::now() + timeout;
+    loop {
+        let mut o = std::fs::OpenOptions::new();
+        o.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            o.share_mode(0);
+        }
+        match o.open(&path) {
+            Ok(f) => return Ok(RecordLock { _file: f }),
+            Err(e) if Instant::now() < until => {
+                tracing::debug!(error = %e, "record busy; waiting");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => bail!("the learning record is busy ({e})"),
+        }
+    }
+}
+
+/// Outcome of one [`apply_action`].
+#[derive(Debug, Default)]
+pub struct ActionResult {
+    /// The profile changed and must be saved.
+    pub changed: bool,
+    pub export: Option<GameEqExport>,
+    /// Something to tell the user (e.g. an import was made safe).
+    pub notice: Option<String>,
+}
+
+fn done(changed: bool) -> Result<ActionResult> {
+    Ok(ActionResult { changed, ..Default::default() })
 }
 
 pub fn load_record(paths: &Paths, exe: &str) -> Option<LearnRecord> {
@@ -164,9 +227,9 @@ pub fn status_with(
     let layer = audio.game_eq.as_ref();
     let applied = layer.map(|l| l.curve.clone());
     let on = audio.learning_on();
-    let offer = rec
-        .and_then(|r| r.candidate.as_deref())
-        .map(|c| layer.map(|l| l.offer(c)).unwrap_or_else(|| c.to_vec()));
+    let offer = rec.and_then(|r| r.candidate.as_deref()).map(|c| {
+        layer.map(|l| l.offer(c)).unwrap_or_else(|| relay_audio::learn::derive::guard_curve(c))
+    });
 
     let needs_relearn = rec.is_some_and(|r| r.needs_relearn) && offer.is_none();
     let state = if needs_relearn {
@@ -216,6 +279,7 @@ pub fn status_with(
         offer,
         note: layer.map(|l| l.note.clone()).unwrap_or_default(),
         last_error: rec.and_then(|r| r.last_error.clone()),
+        notice: None,
     }
 }
 
@@ -230,7 +294,10 @@ pub fn take_offer(profile: &mut Profile, rec: &LearnRecord) -> bool {
             note: l.note,
             base: l.base.or(Some(l.curve)),
         },
-        _ => GameEqLayer::learned(candidate.to_vec(), rec.exe_version.clone()),
+        _ => GameEqLayer::learned(
+            relay_audio::learn::derive::guard_curve(candidate),
+            rec.exe_version.clone(),
+        ),
     };
     profile.audio.game_eq = Some(layer);
     true
@@ -243,18 +310,21 @@ pub fn apply_action(
     paths: &Paths,
     profile: &mut Profile,
     action: &GameEqAction,
-) -> Result<(bool, Option<GameEqExport>)> {
+) -> Result<ActionResult> {
     let exe = profile.game.exe.clone();
     let file = record_file(paths, &exe);
+    // Wait out a stopping helper's final save before touching the record.
+    let _lock =
+        if action.touches_record() { Some(lock_record(&file, LOCK_TIMEOUT)?) } else { None };
     match action {
-        GameEqAction::Status => Ok((false, None)),
+        GameEqAction::Status => done(false),
         GameEqAction::SetLearning { enabled } => {
             profile.audio.learn_game_eq = Some(*enabled);
-            Ok((true, None))
+            done(true)
         }
         GameEqAction::SetAutoApply { enabled } => {
             profile.audio.game_eq_auto_apply = *enabled;
-            Ok((true, None))
+            done(true)
         }
         GameEqAction::SetGoal { goal } => {
             profile.audio.game_eq_goal = Some(*goal);
@@ -274,14 +344,14 @@ pub fn apply_action(
                 }
                 save_record_at(&file, &rec)?;
             }
-            Ok((true, None))
+            done(true)
         }
         GameEqAction::Apply => {
             let rec = load_record_at(&file, &exe).context("nothing has been learned yet")?;
             if !take_offer(profile, &rec) {
                 bail!("there is no learned curve to apply yet");
             }
-            Ok((true, None))
+            done(true)
         }
         GameEqAction::Relearn => {
             let mut rec =
@@ -289,13 +359,13 @@ pub fn apply_action(
             rec.relearn();
             rec.goal = goal_of(profile);
             save_record_at(&file, &rec)?;
-            Ok((false, None))
+            done(false)
         }
         GameEqAction::Reset => {
             profile.audio.game_eq = None;
             profile.audio.learn_game_eq = None;
             let _ = std::fs::remove_file(&file);
-            Ok((true, None))
+            done(true)
         }
         GameEqAction::Import { text } => {
             let f = GameEqFile::parse(text)?;
@@ -308,7 +378,12 @@ pub fn apply_action(
             if profile.audio.game_eq_goal.is_none() {
                 profile.audio.game_eq_goal = f.goal;
             }
-            Ok((true, None))
+            let notice = f.adjusted().then(|| {
+                "The imported curve went past Relay's hearing-safety limits and was \
+                 adjusted to fit them."
+                    .to_string()
+            });
+            Ok(ActionResult { changed: true, export: None, notice })
         }
         GameEqAction::Export { note } => {
             let layer =
@@ -322,7 +397,10 @@ pub fn apply_action(
             let stem = safe_name(exe.trim_end_matches(".exe").trim_end_matches(".EXE"));
             let path = export_dir(paths).join(format!("{stem}-game-eq.json"));
             crate::profiles::write_atomic(&path, text.as_bytes())?;
-            Ok((false, Some(GameEqExport { text, path: path.display().to_string() })))
+            Ok(ActionResult {
+                export: Some(GameEqExport { text, path: path.display().to_string() }),
+                ..Default::default()
+            })
         }
     }
 }
@@ -504,8 +582,20 @@ mod tests {
         r
     }
 
+    /// A test curve, already through the safety guard (as every stored
+    /// curve is).
     fn curve(db: f32) -> Vec<(f32, f32)> {
-        vec![(20.0, -db), (100.0, -db), (1000.0, 0.0), (3150.0, db), (16000.0, 0.0)]
+        relay_audio::learn::derive::guard_curve(&[
+            (20.0, -db),
+            (100.0, -db),
+            (1000.0, 0.0),
+            (3150.0, db),
+            (16000.0, 0.0),
+        ])
+    }
+
+    fn at(c: &[(f32, f32)], hz: f32) -> f32 {
+        c.iter().find(|p| p.0 == hz).unwrap().1
     }
 
     #[test]
@@ -550,7 +640,9 @@ mod tests {
         let st = status(&paths, &p, true);
         assert_eq!(st.state, LearnStatus::Ready);
         let offer = st.offer.unwrap();
-        assert!((offer[3].1 - 2.0).abs() < 0.11, "halfway from +4 towards 0: {offer:?}");
+        let (from, to) = (at(&curve(4.0), 3150.0), at(&curve(0.0), 3150.0));
+        let mid = at(&offer, 3150.0);
+        assert!(mid < from && mid > to, "between the import and the local result: {offer:?}");
         apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
         let l = p.audio.game_eq.as_ref().unwrap();
         assert_eq!(l.source, LayerSource::Tuned);
@@ -578,9 +670,10 @@ mod tests {
             apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() }).is_err()
         );
         p.audio.game_eq = Some(GameEqLayer::learned(curve(2.0), None));
-        let (_, out) =
-            apply_action(&paths, &mut p, &GameEqAction::Export { note: "mine".into() }).unwrap();
-        let out = out.unwrap();
+        let out = apply_action(&paths, &mut p, &GameEqAction::Export { note: "mine".into() })
+            .unwrap()
+            .export
+            .unwrap();
         let back = GameEqFile::parse(&out.text).unwrap();
         assert_eq!(back.curve.as_deref(), Some(&curve(2.0)[..]));
         assert_eq!(std::fs::read_to_string(&out.path).unwrap(), out.text);
@@ -659,6 +752,63 @@ mod tests {
         let st = status(&paths, &p, true);
         assert_eq!(st.state, LearnStatus::NeedsRelearn);
         assert_eq!(st.applied.as_deref(), Some(&curve(2.0)[..]), "the old layer keeps applying");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_hostile_import_is_made_safe_and_says_so() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let text = r#"{"format":"relay-game-eq","schema":1,"game":{"exe":"Game.exe"},
+            "curve":[[20,6],[80,6],[1000,-9],[16000,6]]}"#;
+        let r = apply_action(&paths, &mut p, &GameEqAction::Import { text: text.into() }).unwrap();
+        assert!(r.notice.is_some());
+        let c = &p.audio.game_eq.as_ref().unwrap().curve;
+        assert!(relay_audio::learn::derive::is_guarded(c), "{c:?}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_wild_record_on_disk_is_guarded_and_an_oversized_one_ignored() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let mut rec =
+            ready_record("game.exe", vec![(20.0, 40.0), (1000.0, -40.0), (16000.0, 40.0)]);
+        let file = record_file(&paths, "game.exe");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        // Written raw, as a hand edit would be.
+        std::fs::write(&file, serde_json::to_vec(&rec).unwrap()).unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let c = &p.audio.game_eq.as_ref().unwrap().curve;
+        assert!(relay_audio::learn::derive::is_guarded(c) && c.iter().all(|x| x.1.abs() <= 9.0));
+        rec.exe = "game.exe".into();
+        let mut big = serde_json::to_vec(&rec).unwrap();
+        big.resize(MAX_RECORD_BYTES as usize + 10, b' ');
+        std::fs::write(&file, big).unwrap();
+        assert!(load_record(&paths, "game.exe").is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// A helper that is still stopping makes its last save after the user
+    /// pressed Reset: Reset must wait for it, so the record stays gone.
+    #[test]
+    fn reset_waits_for_a_late_save_from_a_stopping_helper() {
+        let (paths, dir) = paths();
+        let file = record_file(&paths, "game.exe");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let f2 = file.clone();
+        let helper = std::thread::spawn(move || {
+            let _l = lock_record(&f2, LOCK_TIMEOUT).unwrap();
+            tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            save_record_at(&f2, &ready_record("game.exe", vec![(20.0, 0.0), (16000.0, 0.0)]))
+                .unwrap();
+        });
+        rx.recv().unwrap();
+        let mut p = profile();
+        apply_action(&paths, &mut p, &GameEqAction::Reset).unwrap();
+        helper.join().unwrap();
+        assert!(!file.exists(), "the late save landed before Reset, not after");
         std::fs::remove_dir_all(dir).ok();
     }
 
