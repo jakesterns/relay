@@ -198,7 +198,11 @@ pub fn forward_log_crate(debug: bool) {
                 // (~2 KB of binary per line on PC2): keep the words only.
                 let head = msg.split(": Full").next().unwrap_or(&msg);
                 let head: String = head.chars().take(120).collect();
-                tracing::error!(from = r.target(), suppressed_since_last = more, "{head} (queue full)");
+                tracing::error!(
+                    from = r.target(),
+                    suppressed_since_last = more,
+                    "{head} (queue full)"
+                );
                 return;
             }
             if r.level() == log::Level::Error {

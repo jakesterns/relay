@@ -92,7 +92,8 @@ impl Version {
             }
             p.parse().ok()
         };
-        let v = Version { major: num(it.next())?, minor: num(it.next())?, patch: num(it.next())?, pre };
+        let v =
+            Version { major: num(it.next())?, minor: num(it.next())?, patch: num(it.next())?, pre };
         if it.next().is_some() || v.pre.iter().any(|p| p.is_empty()) {
             return None;
         }
@@ -247,7 +248,8 @@ pub fn plain_notes(md: &str) -> String {
     for line in md.replace("\r\n", "\n").lines() {
         let t = line.trim_end();
         let t = t.trim_start_matches('#').trim_start();
-        let t = if let Some(rest) = t.strip_prefix("* ") { format!("- {rest}") } else { t.to_string() };
+        let t =
+            if let Some(rest) = t.strip_prefix("* ") { format!("- {rest}") } else { t.to_string() };
         let mut s = String::with_capacity(t.len());
         let mut chars = t.chars().peekable();
         while let Some(c) = chars.next() {
@@ -623,8 +625,12 @@ impl Updater {
         self.phase = Phase::Idle;
         self.ready = None;
         self.waiting_for = None;
-        self.cache.last_result =
-            Some(InstallOutcome { version: version.to_string(), ok: false, message, at: now_unix() });
+        self.cache.last_result = Some(InstallOutcome {
+            version: version.to_string(),
+            ok: false,
+            message,
+            at: now_unix(),
+        });
         self.save();
     }
 }
@@ -667,7 +673,8 @@ pub fn download(url: &str, dest: &Path, max: usize) -> Result<[u8; 32]> {
     {
         use std::io::Write;
         let part = dest.with_extension("part");
-        let mut f = std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
+        let mut f =
+            std::fs::File::create(&part).with_context(|| format!("creating {}", part.display()))?;
         let mut h = Sha256::new();
         crate::hardware::catalog::https_get(url, &[], max, &mut |c| {
             h.update(c);
@@ -697,9 +704,13 @@ pub fn fetch_and_verify(dir: &Path, a: &Available) -> Result<PathBuf, String> {
     let sums_path = dir.join(SUMS_ASSET);
     download(&a.sums_url, &sums_path, MAX_SUMS_BYTES)
         .map_err(|e| format!("Could not download the checksums: {e:#}"))?;
-    let sums = std::fs::read_to_string(&sums_path).map_err(|e| format!("Could not read the checksums: {e}"))?;
+    let sums = std::fs::read_to_string(&sums_path)
+        .map_err(|e| format!("Could not read the checksums: {e}"))?;
     let expected = parse_sums(&sums, &a.installer_name).ok_or_else(|| {
-        format!("The release's {SUMS_ASSET} does not list {}, so it was not installed.", a.installer_name)
+        format!(
+            "The release's {SUMS_ASSET} does not list {}, so it was not installed.",
+            a.installer_name
+        )
     })?;
 
     let installer = dir.join(&a.installer_name);
@@ -755,11 +766,14 @@ mod sig_win {
     use std::path::Path;
     use windows::core::{GUID, HSTRING, PCWSTR};
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Security::Cryptography::{CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE};
+    use windows::Win32::Security::Cryptography::{
+        CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+    };
     use windows::Win32::Security::WinTrust::{
         WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData, WinVerifyTrust,
         WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
-        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+        WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
+        WTD_UI_NONE,
     };
 
     const TRUST_E_NOSIGNATURE: i32 = 0x800B_0100_u32 as i32;
@@ -786,7 +800,8 @@ mod sig_win {
         // SAFETY: `data` and `info` outlive both calls; the state handle is
         // released with WTD_STATEACTION_CLOSE on every path.
         unsafe {
-            let rc = WinVerifyTrust(HWND(-1isize as *mut _), &mut action, &mut data as *mut _ as *mut _);
+            let rc =
+                WinVerifyTrust(HWND(-1isize as *mut _), &mut action, &mut data as *mut _ as *mut _);
             let result = match rc {
                 0 => {
                     let subject = signer_subject(data.hWVTStateData);
@@ -798,10 +813,13 @@ mod sig_win {
                 TRUST_E_NOSIGNATURE | TRUST_E_SUBJECT_FORM_UNKNOWN | TRUST_E_PROVIDER_UNKNOWN => {
                     Signature::Unsigned
                 }
-                other => Signature::Invalid { reason: format!("WinVerifyTrust 0x{:08X}", other as u32) },
+                other => {
+                    Signature::Invalid { reason: format!("WinVerifyTrust 0x{:08X}", other as u32) }
+                }
             };
             data.dwStateAction = WTD_STATEACTION_CLOSE;
-            let _ = WinVerifyTrust(HWND(-1isize as *mut _), &mut action, &mut data as *mut _ as *mut _);
+            let _ =
+                WinVerifyTrust(HWND(-1isize as *mut _), &mut action, &mut data as *mut _ as *mut _);
             result
         }
     }
@@ -887,14 +905,19 @@ mod tests {
         assert!(pick(&rels, &v("0.2.1"), false).is_none());
         assert!(pick(&rels, &v("9.0.0"), true).is_none());
         // 0.2.5 in the fixture has no sums file; 0.2.2 points off-repo.
-        let only_broken: Vec<_> =
-            rels.iter().filter(|r| r.tag_name == "v0.2.5" || r.tag_name == "v0.2.2").cloned().collect();
+        let only_broken: Vec<_> = rels
+            .iter()
+            .filter(|r| r.tag_name == "v0.2.5" || r.tag_name == "v0.2.2")
+            .cloned()
+            .collect();
         assert!(pick(&only_broken, &v("0.1.0"), true).is_none());
     }
 
     #[test]
     fn notes_lose_markdown_but_keep_the_words() {
-        let n = plain_notes("## What's Changed\r\n* **Fix** the [share](https://x/y) drop by `@a`\n\n\n\nok");
+        let n = plain_notes(
+            "## What's Changed\r\n* **Fix** the [share](https://x/y) drop by `@a`\n\n\n\nok",
+        );
         assert_eq!(n, "What's Changed\n- Fix the share drop by @a\n\nok");
     }
 
@@ -937,7 +960,8 @@ mod tests {
         let f = dir.join("setup.exe");
         std::fs::write(&f, b"abc").unwrap();
         // SHA-256("abc")
-        let good = decode_hex32("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad").unwrap();
+        let good = decode_hex32("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            .unwrap();
         assert!(verify_sum(&f, &good).is_ok());
         let mut bad = good;
         bad[0] ^= 1;
@@ -950,15 +974,18 @@ mod tests {
     fn signature_decisions() {
         let p = EXPECTED_PUBLISHER;
         assert!(signature_decision(&Signature::Unsigned, p).is_ok());
-        assert!(signature_decision(&Signature::Valid { subject: "SignPath Foundation".into() }, p).is_ok());
-        let e = signature_decision(&Signature::Valid { subject: "Someone Else Ltd".into() }, p).unwrap_err();
+        assert!(signature_decision(&Signature::Valid { subject: "SignPath Foundation".into() }, p)
+            .is_ok());
+        let e = signature_decision(&Signature::Valid { subject: "Someone Else Ltd".into() }, p)
+            .unwrap_err();
         assert!(e.contains("Someone Else Ltd"));
         assert!(signature_decision(&Signature::Invalid { reason: "x".into() }, p).is_err());
     }
 
     #[test]
     fn downloads_are_refused_from_outside_the_repository() {
-        let e = download("https://evil.example/Relay_9.9.9_x64-setup.exe", Path::new("x"), 10).unwrap_err();
+        let e = download("https://evil.example/Relay_9.9.9_x64-setup.exe", Path::new("x"), 10)
+            .unwrap_err();
         assert!(e.to_string().contains("refusing"));
     }
 
@@ -985,7 +1012,11 @@ mod tests {
 
     #[test]
     fn a_pending_install_becomes_a_result_on_the_next_start() {
-        let mut c = UpdateCache { pending_install: Some("0.2.0".into()), available: Some(avail("0.2.0")), ..Default::default() };
+        let mut c = UpdateCache {
+            pending_install: Some("0.2.0".into()),
+            available: Some(avail("0.2.0")),
+            ..Default::default()
+        };
         c.reconcile(&v("0.2.0"), 5);
         let r = c.last_result.clone().unwrap();
         assert!(r.ok && r.version == "0.2.0");
