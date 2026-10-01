@@ -154,6 +154,8 @@ struct Inner {
     recv_started: Option<std::time::Instant>,
     /// The update check and user-approved install (S45).
     update: crate::update::Updater,
+    /// S46: the learner helper for the focused game, while one runs.
+    learner: Option<crate::game_eq::Learner>,
 }
 
 /// S45: why an update must wait right now, if anything is in the way.
@@ -360,6 +362,7 @@ impl Service {
             recv_vcam: None,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
+            learner: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -395,10 +398,13 @@ impl Service {
         }
 
         // Stop any share/receive child so it never outlives the core.
-        let (share, receive) = {
+        let (share, receive, learner) = {
             let mut g = service.inner.lock();
-            (g.share.take(), g.receive.take())
+            (g.share.take(), g.receive.take(), g.learner.take())
         };
+        if let Some(l) = learner {
+            l.stop_blocking();
+        }
         if let Some(engine) = share {
             engine.stop();
         }
@@ -504,11 +510,42 @@ impl Service {
                     self.recheck_monitor();
                     self.supervise();
                     self.update_tick();
+                    self.learner_tick();
                 }
             }
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// S46, on the 1 s tick: notice a learner that exited, and take a newly
+    /// offered curve when the profile allows auto-apply.
+    fn learner_tick(&self) {
+        let mut g = self.inner.lock();
+        let Some(l) = g.learner.as_mut() else { return };
+        if !l.running() {
+            info!("the learner helper exited");
+            g.learner = None;
+            return;
+        }
+        if !l.take_fresh() {
+            return;
+        }
+        let id = l.profile;
+        let Some(mut profile) = g.store.get(id).cloned() else { return };
+        if !profile.audio.game_eq_auto_apply {
+            return;
+        }
+        let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) else { return };
+        if crate::game_eq::take_offer(&mut profile, &rec) {
+            info!(exe = %profile.game.exe, "auto-applied the newly learned game EQ");
+            g.store.upsert(profile);
+            if let Err(e) = g.store.save() {
+                warn!(error = %e, "saving the auto-applied game EQ failed");
+            }
+            drop(g);
+            reselect(&self.inner, &self.events);
+        }
     }
 
     /// S45, on the 1 s tick: start the daily check when it is due, and run a
@@ -868,6 +905,7 @@ impl Service {
             g.state.audio_chain = AudioChainState::Bypass;
             g.state.display_state = DisplayState::Default;
             g.state.display_via = DisplayVia::default();
+            stop_learner(&mut g);
             let state = Box::new(g.state.clone());
             drop(g);
             let _ = self.events.send(Event::StateChanged { state });
@@ -950,6 +988,7 @@ impl Service {
                     title: String::new(),
                     hmonitor: 0,
                     hwnd: 0,
+                    path: String::new(),
                 });
                 info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
                 self.on_foreground(fg);
@@ -1010,6 +1049,7 @@ impl Service {
                         warn!(error = %e, "restore via hotkey failed");
                     }
                     g.pinned = true; // stay off until focus changes again
+                    stop_learner(&mut g);
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
@@ -1092,6 +1132,7 @@ impl Service {
 /// app performs, not a second, thinner one.
 fn restore_all(g: &mut Inner) -> anyhow::Result<()> {
     g.pinned = false;
+    stop_learner(g);
     g.applier.restore()?;
     g.state.active_profile = None;
     g.state.audio_chain = AudioChainState::Bypass;
@@ -1203,10 +1244,37 @@ fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
         .map(<[(f32, f32)]>::to_vec)
 }
 
+/// S46: stop the learner helper, if one runs. Non-blocking: it saves and
+/// exits on its own, and is killed by handle if it does not.
+fn stop_learner(g: &mut Inner) {
+    if let Some(l) = g.learner.take() {
+        l.stop();
+    }
+}
+
+/// S46: run the learner for `profile` on the focused game when its learning
+/// is on and a goal is chosen; otherwise make sure none runs.
+fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
+    let want = profile.filter(|p| p.audio.learning_active() && fg.pid != 0);
+    if let (Some(p), Some(l)) = (want, g.learner.as_mut()) {
+        if l.profile == p.id && l.pid == fg.pid && l.running() {
+            return;
+        }
+    }
+    stop_learner(g);
+    if let Some(p) = want {
+        match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
+            Ok(l) => g.learner = Some(l),
+            Err(e) => warn!(error = %e, "could not start learning this game's sound"),
+        }
+    }
+}
+
 /// connected-hardware view. Mutates state only; the caller broadcasts.
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     let hw = g.connected.clone();
     let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
+    sync_learner(g, pick.as_ref(), fg);
     match pick {
         Some(profile) => {
             g.pinned = false;
@@ -2081,6 +2149,40 @@ impl IpcHandler {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
+            }
+            Method::GameEq { id, action } => {
+                let Some(mut profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                if action.touches_record() {
+                    // The helper's final save must not overwrite this change.
+                    if g.learner.as_ref().is_some_and(|l| l.profile == id) {
+                        if let Some(l) = g.learner.take() {
+                            l.stop_blocking();
+                        }
+                    }
+                }
+                let paths = g.paths.clone();
+                let (changed, export) =
+                    match crate::game_eq::apply_action(&paths, &mut profile, &action) {
+                        Ok(r) => r,
+                        Err(e) => return Reply::Error { message: e.to_string() },
+                    };
+                if changed {
+                    g.store.upsert(profile.clone());
+                    if let Err(e) = g.store.save() {
+                        return Reply::Error { message: e.to_string() };
+                    }
+                }
+                let restart = changed || action.touches_record();
+                if restart {
+                    drop(g);
+                    reselect(&self.inner, &self.events);
+                    g = self.inner.lock();
+                }
+                let learning_now = g.learner.as_ref().is_some_and(|l| l.profile == id);
+                let status = crate::game_eq::status(&paths, &profile, learning_now);
+                Reply::GameEq { status: Box::new(status), export }
             }
             Method::DeleteProfile { id } => {
                 if !g.store.remove(id) {

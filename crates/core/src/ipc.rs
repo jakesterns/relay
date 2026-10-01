@@ -280,6 +280,13 @@ pub enum Method {
     /// The user has seen the last-crash line; clear it and mark the records
     /// seen (S38).
     AckCrash,
+    /// S46: a profile's learned game EQ — read its status, or act on it
+    /// (learning switch, goal, auto-apply, Apply / Relearn / Reset, Import /
+    /// Export). Every action replies with the status after it.
+    GameEq {
+        id: Uuid,
+        action: crate::game_eq::GameEqAction,
+    },
     /// S45: what the updater knows and is doing.
     UpdateStatus,
     /// S45: "Check now" — check regardless of the daily limit.
@@ -423,6 +430,12 @@ pub enum Reply {
     Presets {
         presets: Vec<SharePresetDef>,
         recording: RecordingSettings,
+    },
+    /// Reply to `GameEq` (S46). `export` is set for an Export.
+    GameEq {
+        status: Box<crate::game_eq::GameEqStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        export: Option<crate::game_eq::GameEqExport>,
     },
     Ok,
     Error {

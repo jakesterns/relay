@@ -74,6 +74,43 @@ pub struct AudioSettings {
     /// behaviour.
     #[serde(default = "default_true")]
     pub headset_correction: bool,
+    /// S46: learn this game's EQ from its own audio. `None` = the default:
+    /// on when the profile has audio processing and its game layer was not
+    /// imported, off otherwise. `Some` is the user's explicit choice. Either
+    /// way nothing is learned until a goal is chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learn_game_eq: Option<bool>,
+    /// S46: what the player wants from this game. Asked before learning
+    /// starts; changing it re-derives the curve from the saved aggregates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_eq_goal: Option<relay_audio::learn::Goal>,
+    /// S46: take a newly converged curve without asking.
+    #[serde(default)]
+    pub game_eq_auto_apply: bool,
+    /// S46: the game layer this profile applies, learned or imported. Stacks
+    /// after the headset correction and before the bands above. Independent
+    /// of the headset: changing the listening device only changes the
+    /// correction underneath it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_eq: Option<relay_audio::learn::GameEqLayer>,
+}
+
+impl AudioSettings {
+    /// Whether learning is switched on (before the goal question).
+    pub fn learning_on(&self) -> bool {
+        match self.learn_game_eq {
+            Some(on) => on,
+            None => {
+                crate::audio_bridge::wants_processing(self)
+                    && !self.game_eq.as_ref().is_some_and(|l| l.is_imported())
+            }
+        }
+    }
+
+    /// Whether the learner should actually run: switched on and a goal chosen.
+    pub fn learning_active(&self) -> bool {
+        self.learning_on() && self.game_eq_goal.is_some()
+    }
 }
 
 /// GPU-side colour controls (NvAPI / ADLX). Units follow the vendor APIs.
@@ -263,6 +300,10 @@ pub struct Foreground {
     /// game's process, which anti-cheat protects (2026-09-29).
     #[serde(default)]
     pub hwnd: u64,
+    /// Full image path, from the same query that gave `exe` (empty if it was
+    /// refused). Used only to read the exe's file version (S46).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub path: String,
 }
 
 /// A running process that owns a visible window (for the exe picker).

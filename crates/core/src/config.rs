@@ -170,6 +170,12 @@ impl Paths {
         self.data_dir().join("updates")
     }
 
+    /// S46: one learning record per game exe (aggregate statistics only,
+    /// never audio).
+    pub fn game_eq_dir(&self) -> PathBuf {
+        self.data_dir().join("game-eq")
+    }
+
     /// Downloaded headphone measurements, one CSV per model. Cached so a
     /// model is fetched once ever; deleting this only costs a re-download.
     pub fn curves_dir(&self) -> PathBuf {

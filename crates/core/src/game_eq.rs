@@ -1,0 +1,664 @@
+//! S46: learned game EQ — the core's side.
+//!
+//! The analysis itself never runs in the core. While a profiled game with
+//! learning on (and a goal chosen) has focus, the core spawns
+//! `relay-share learn` for the game's PID; that helper captures the game's
+//! audio by process loopback, keeps only aggregate statistics, and writes
+//! them to `game-eq\<exe>.json` (see [`record_file`]). The core reads that
+//! record when the UI asks, applies the user's actions, and stops the helper
+//! on blur, exit or restore. Nothing here touches the game process: the
+//! exe's file version comes from its file on disk ([`exe_version`]).
+//!
+//! What the profile stores: the goal, the learning switch, auto-apply, and
+//! the applied game layer (learned, imported, or imported-then-tuned). The
+//! layer is independent of the headset; the S41 correction underneath it is
+//! what follows the listening device.
+
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use anyhow::{bail, Context, Result};
+use relay_audio::learn::state::same_curve;
+use relay_audio::learn::{
+    GameEqFile, GameEqLayer, Goal, LayerSource, LearnRecord, LearnStatus, Limits, Thresholds,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::config::Paths;
+use crate::types::{Foreground, Profile};
+
+/// How long a stop waits for the helper's final save before killing it.
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// One request from the UI about a profile's game EQ.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GameEqAction {
+    /// Read-only.
+    Status,
+    /// "Learn this game's sound" on or off.
+    SetLearning { enabled: bool },
+    /// Choose (or change) the goal. Re-derives from the saved aggregates.
+    SetGoal { goal: Goal },
+    /// Take a newly converged curve without asking.
+    SetAutoApply { enabled: bool },
+    /// Apply the curve on offer.
+    Apply,
+    /// Forget the evidence and learn again (the applied layer stays).
+    Relearn,
+    /// Remove the game layer and the learned evidence.
+    Reset,
+    /// Import a game EQ file (its text).
+    Import { text: String },
+    /// Export the applied layer, with an optional note.
+    Export {
+        #[serde(default)]
+        note: String,
+    },
+}
+
+impl GameEqAction {
+    /// Actions that rewrite the record: the helper must be stopped first so
+    /// its final save cannot overwrite them.
+    pub fn touches_record(&self) -> bool {
+        matches!(self, GameEqAction::SetGoal { .. } | GameEqAction::Relearn | GameEqAction::Reset)
+    }
+}
+
+/// What the UI shows for one profile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GameEqStatus {
+    pub exe: String,
+    pub state: LearnStatus,
+    /// Learning switched on (the user's choice, or the default).
+    pub learning_on: bool,
+    /// On, but waiting for the goal question.
+    pub needs_goal: bool,
+    /// The helper is listening right now.
+    pub learning_now: bool,
+    pub goal: Option<Goal>,
+    pub auto_apply: bool,
+    /// Where the applied layer came from, if one is applied.
+    pub source: Option<LayerSource>,
+    pub progress: u8,
+    pub active_minutes: f32,
+    /// Evidence so far, and what readiness needs.
+    pub targets: u64,
+    pub maskers: u64,
+    pub min_targets: u64,
+    pub min_maskers: u64,
+    pub distinct_voices: u32,
+    pub exe_version: Option<String>,
+    /// The applied layer's curve.
+    pub applied: Option<Vec<(f32, f32)>>,
+    /// What Apply would apply now (blended, for an imported layer).
+    pub offer: Option<Vec<(f32, f32)>>,
+    pub note: String,
+    pub last_error: Option<String>,
+}
+
+/// An export: the file text and where a copy was written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GameEqExport {
+    pub text: String,
+    pub path: String,
+}
+
+/// A file-name-safe form of an exe name.
+fn safe_name(exe: &str) -> String {
+    exe.to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '_' })
+        .collect()
+}
+
+/// `game-eq\<exe>.json`: one learning record per game exe.
+pub fn record_file(paths: &Paths, exe: &str) -> PathBuf {
+    paths.game_eq_dir().join(format!("{}.json", safe_name(exe)))
+}
+
+/// Where exports are written.
+pub fn export_dir(paths: &Paths) -> PathBuf {
+    paths.data_dir().join("exports")
+}
+
+/// The stored record for `exe`, or `None` (missing, unreadable, another
+/// schema: all mean "start fresh").
+pub fn load_record_at(path: &Path, exe: &str) -> Option<LearnRecord> {
+    let text = std::fs::read_to_string(path).ok()?;
+    LearnRecord::from_json(&text, exe)
+}
+
+pub fn load_record(paths: &Paths, exe: &str) -> Option<LearnRecord> {
+    load_record_at(&record_file(paths, exe), exe)
+}
+
+pub fn save_record_at(path: &Path, rec: &LearnRecord) -> Result<()> {
+    let json = serde_json::to_vec(rec)?;
+    crate::profiles::write_atomic(path, &json)
+}
+
+/// The goal the record should be derived for.
+fn goal_of(profile: &Profile) -> Goal {
+    profile.audio.game_eq_goal.unwrap_or_default()
+}
+
+/// The status of `profile`'s game EQ.
+pub fn status(paths: &Paths, profile: &Profile, learning_now: bool) -> GameEqStatus {
+    status_with(load_record(paths, &profile.game.exe).as_ref(), profile, learning_now)
+}
+
+/// [`status`] with the record already loaded.
+pub fn status_with(
+    rec: Option<&LearnRecord>,
+    profile: &Profile,
+    learning_now: bool,
+) -> GameEqStatus {
+    let audio = &profile.audio;
+    let th = Thresholds::default();
+    let layer = audio.game_eq.as_ref();
+    let applied = layer.map(|l| l.curve.clone());
+    let on = audio.learning_on();
+    let offer = rec
+        .and_then(|r| r.candidate.as_deref())
+        .map(|c| layer.map(|l| l.offer(c)).unwrap_or_else(|| c.to_vec()));
+
+    let needs_relearn = rec.is_some_and(|r| r.needs_relearn) && offer.is_none();
+    let state = if needs_relearn {
+        if applied.is_some() || on {
+            LearnStatus::NeedsRelearn
+        } else {
+            LearnStatus::Off
+        }
+    } else {
+        match (&offer, &applied) {
+            (Some(o), Some(a)) if same_curve(o, a) => LearnStatus::Applied,
+            // Imported with learning off: applied as imported, no offer.
+            (Some(_), Some(_)) if !on => LearnStatus::Applied,
+            (Some(_), _) if on => LearnStatus::Ready,
+            (_, Some(_)) => LearnStatus::Applied,
+            _ if on => LearnStatus::Learning,
+            _ => LearnStatus::Off,
+        }
+    };
+    let goal = audio.game_eq_goal;
+    let (targets, maskers, minutes, voices) = match rec {
+        Some(r) => {
+            let w = r.window();
+            let (t, m) = goal.unwrap_or_default().evidence(&w);
+            (t, m, r.active_minutes(), w.distinct_voices() as u32)
+        }
+        None => (0, 0, 0.0, 0),
+    };
+    GameEqStatus {
+        exe: profile.game.exe.clone(),
+        state,
+        learning_on: on,
+        needs_goal: on && goal.is_none(),
+        learning_now,
+        goal,
+        auto_apply: audio.game_eq_auto_apply,
+        source: layer.map(|l| l.source),
+        progress: rec.map(|r| r.progress(&th)).unwrap_or(0),
+        active_minutes: (minutes * 10.0).round() / 10.0,
+        targets,
+        maskers,
+        min_targets: th.min_cues,
+        min_maskers: th.min_maskers,
+        distinct_voices: voices,
+        exe_version: rec.and_then(|r| r.exe_version.clone()),
+        applied,
+        offer,
+        note: layer.map(|l| l.note.clone()).unwrap_or_default(),
+        last_error: rec.and_then(|r| r.last_error.clone()),
+    }
+}
+
+/// Take the offer into the profile. Returns false when there is none.
+pub fn take_offer(profile: &mut Profile, rec: &LearnRecord) -> bool {
+    let Some(candidate) = rec.candidate.as_deref() else { return false };
+    let layer = match profile.audio.game_eq.take() {
+        Some(l) if l.is_imported() => GameEqLayer {
+            curve: l.offer(candidate),
+            source: LayerSource::Tuned,
+            exe_version: rec.exe_version.clone().or(l.exe_version),
+            note: l.note,
+            base: l.base.or(Some(l.curve)),
+        },
+        _ => GameEqLayer::learned(candidate.to_vec(), rec.exe_version.clone()),
+    };
+    profile.audio.game_eq = Some(layer);
+    true
+}
+
+/// Apply one action to `profile` (and its record on disk). The caller saves
+/// the profile when this returns `Ok(true, _)` and has already stopped the
+/// helper when [`GameEqAction::touches_record`].
+pub fn apply_action(
+    paths: &Paths,
+    profile: &mut Profile,
+    action: &GameEqAction,
+) -> Result<(bool, Option<GameEqExport>)> {
+    let exe = profile.game.exe.clone();
+    let file = record_file(paths, &exe);
+    match action {
+        GameEqAction::Status => Ok((false, None)),
+        GameEqAction::SetLearning { enabled } => {
+            profile.audio.learn_game_eq = Some(*enabled);
+            Ok((true, None))
+        }
+        GameEqAction::SetAutoApply { enabled } => {
+            profile.audio.game_eq_auto_apply = *enabled;
+            Ok((true, None))
+        }
+        GameEqAction::SetGoal { goal } => {
+            profile.audio.game_eq_goal = Some(*goal);
+            if let Some(mut rec) = load_record_at(&file, &exe) {
+                // Same aggregates, new goal: the curve is re-derived now.
+                if rec.set_goal(*goal, &Limits::default()) {
+                    // A learned layer follows the goal at once; an imported
+                    // one keeps waiting for the user's Apply.
+                    let learned = profile
+                        .audio
+                        .game_eq
+                        .as_ref()
+                        .is_some_and(|l| l.source == LayerSource::Learned);
+                    if learned {
+                        take_offer(profile, &rec);
+                    }
+                }
+                save_record_at(&file, &rec)?;
+            }
+            Ok((true, None))
+        }
+        GameEqAction::Apply => {
+            let rec = load_record_at(&file, &exe).context("nothing has been learned yet")?;
+            if !take_offer(profile, &rec) {
+                bail!("there is no learned curve to apply yet");
+            }
+            Ok((true, None))
+        }
+        GameEqAction::Relearn => {
+            let mut rec = load_record_at(&file, &exe).unwrap_or_else(|| LearnRecord::new(&exe, None));
+            rec.relearn();
+            rec.goal = goal_of(profile);
+            save_record_at(&file, &rec)?;
+            Ok((false, None))
+        }
+        GameEqAction::Reset => {
+            profile.audio.game_eq = None;
+            profile.audio.learn_game_eq = None;
+            let _ = std::fs::remove_file(&file);
+            Ok((true, None))
+        }
+        GameEqAction::Import { text } => {
+            let f = GameEqFile::parse(text)?;
+            if !f.game.exe.eq_ignore_ascii_case(&exe) {
+                bail!("this file is for {}, not {}", f.game.exe, exe);
+            }
+            profile.audio.game_eq = Some(f.to_layer());
+            // Imported: applied as it is, learning off unless asked for.
+            profile.audio.learn_game_eq = None;
+            if profile.audio.game_eq_goal.is_none() {
+                profile.audio.game_eq_goal = f.goal;
+            }
+            Ok((true, None))
+        }
+        GameEqAction::Export { note } => {
+            let layer = profile.audio.game_eq.as_ref().context("there is no game EQ to export yet")?;
+            let f = GameEqFile::export(&exe, &profile.name, layer, profile.audio.game_eq_goal, note);
+            let text = f.to_json();
+            // Round-trip through our own validator: never write a file we
+            // would refuse to read.
+            GameEqFile::parse(&text)?;
+            let stem = safe_name(exe.trim_end_matches(".exe").trim_end_matches(".EXE"));
+            let path = export_dir(paths).join(format!("{stem}-game-eq.json"));
+            crate::profiles::write_atomic(&path, text.as_bytes())?;
+            Ok((false, Some(GameEqExport { text, path: path.display().to_string() })))
+        }
+    }
+}
+
+/// The exe's file version from its version resource, read from the file on
+/// disk (`GetFileVersionInfoW` on the path; no handle to the process).
+#[cfg(windows)]
+pub fn exe_version(path: &str) -> Option<String> {
+    use windows::core::{HSTRING, PCWSTR};
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let wide = HSTRING::from(path);
+    // SAFETY: plain Win32 calls on a NUL-terminated path we own and a buffer
+    // sized by the first call; the returned pointer is into that buffer and
+    // only read while it is alive.
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(wide.as_ptr()), None);
+        if size == 0 || size > 1 << 20 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        GetFileVersionInfoW(PCWSTR(wide.as_ptr()), None, size, buf.as_mut_ptr().cast()).ok()?;
+        let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let root = HSTRING::from("\\");
+        if !VerQueryValueW(buf.as_ptr().cast(), PCWSTR(root.as_ptr()), &mut ptr, &mut len).as_bool()
+            || ptr.is_null()
+            || (len as usize) < std::mem::size_of::<VS_FIXEDFILEINFO>()
+        {
+            return None;
+        }
+        let info = &*(ptr as *const VS_FIXEDFILEINFO);
+        if info.dwSignature != 0xFEEF_04BD {
+            return None;
+        }
+        Some(format!(
+            "{}.{}.{}.{}",
+            info.dwFileVersionMS >> 16,
+            info.dwFileVersionMS & 0xffff,
+            info.dwFileVersionLS >> 16,
+            info.dwFileVersionLS & 0xffff
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn exe_version(_path: &str) -> Option<String> {
+    None
+}
+
+/// The running learner helper for one focused game.
+pub struct Learner {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    pub profile: Uuid,
+    pub pid: u32,
+    fresh: Arc<AtomicBool>,
+}
+
+impl Learner {
+    /// Spawn `relay-share learn` for the focused game.
+    pub fn spawn(paths: &Paths, profile: &Profile, fg: &Foreground) -> Result<Self> {
+        let bin = crate::share::share_binary()?;
+        let version = exe_version(&fg.path);
+        let record = record_file(paths, &profile.game.exe);
+        let goal = goal_of(profile);
+        let mut cmd = Command::new(&bin);
+        cmd.arg("learn")
+            .arg("--pid")
+            .arg(fg.pid.to_string())
+            .arg("--exe")
+            .arg(&profile.game.exe)
+            .arg("--record")
+            .arg(&record)
+            .arg("--goal")
+            .arg(serde_json::to_string(&goal)?.trim_matches('"'));
+        if let Some(v) = &version {
+            cmd.arg("--version").arg(v);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("starting {}", bin.display()))?;
+        let stdin = child.stdin.take();
+        let fresh = Arc::new(AtomicBool::new(false));
+        if let Some(out) = child.stdout.take() {
+            let flag = fresh.clone();
+            std::thread::Builder::new()
+                .name("relay-learn-reader".into())
+                .stack_size(64 * 1024)
+                .spawn(move || {
+                    for line in BufReader::new(out).lines().map_while(Result::ok) {
+                        if line.contains("\"candidate\"") {
+                            flag.store(true, Ordering::Relaxed);
+                        }
+                    }
+                })?;
+        }
+        tracing::info!(exe = %profile.game.exe, pid = fg.pid, ?version, "learning the game's sound");
+        Ok(Self { child, stdin, profile: profile.id, pid: fg.pid, fresh })
+    }
+
+    /// A new curve was offered since the last call.
+    pub fn take_fresh(&self) -> bool {
+        self.fresh.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Ask the helper to save and exit; wait up to [`STOP_TIMEOUT`], then kill
+    /// it (our own child, by handle — never by image name).
+    pub fn stop_blocking(mut self) {
+        self.ask_stop();
+        let until = Instant::now() + STOP_TIMEOUT;
+        while Instant::now() < until {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// The same, without holding the caller up.
+    pub fn stop(self) {
+        let _ = std::thread::Builder::new()
+            .name("relay-learn-stop".into())
+            .stack_size(64 * 1024)
+            .spawn(move || self.stop_blocking());
+    }
+
+    fn ask_stop(&mut self) {
+        if let Some(mut s) = self.stdin.take() {
+            let _ = s.write_all(b"stop\n");
+            let _ = s.flush();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::GameMatch;
+    use relay_audio::learn::Stats;
+
+    fn paths() -> (Paths, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("relay-game-eq-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        (Paths::at(dir.clone()), dir)
+    }
+
+    fn profile() -> Profile {
+        let mut p = Profile::new("Some Game", GameMatch::exe("Game.exe"));
+        p.audio.bands.push(crate::types::EqBand { freq_hz: 1000.0, gain_db: 1.0, q: 1.0 });
+        p
+    }
+
+    /// A record with a candidate, as the helper would leave it.
+    fn ready_record(exe: &str, curve: Vec<(f32, f32)>) -> LearnRecord {
+        let mut r = LearnRecord::new(exe, Some("1.0.0.0"));
+        r.absorb(&Stats::default(), &Thresholds::default());
+        r.candidate = Some(curve);
+        r.candidate_gains = Some(vec![0.0; relay_audio::learn::NBANDS]);
+        r
+    }
+
+    fn curve(db: f32) -> Vec<(f32, f32)> {
+        vec![(20.0, -db), (100.0, -db), (1000.0, 0.0), (3150.0, db), (16000.0, 0.0)]
+    }
+
+    #[test]
+    fn goal_first_then_learning_then_apply() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let st = status(&paths, &p, false);
+        assert!(st.learning_on && st.needs_goal, "{st:?}");
+        assert_eq!(st.state, LearnStatus::Learning);
+        apply_action(&paths, &mut p, &GameEqAction::SetGoal { goal: Goal::Awareness }).unwrap();
+        assert!(p.audio.learning_active());
+        save_record_at(&record_file(&paths, "game.exe"), &ready_record("game.exe", curve(3.0)))
+            .unwrap();
+        let st = status(&paths, &p, true);
+        assert_eq!(st.state, LearnStatus::Ready);
+        assert_eq!(st.offer.as_deref(), Some(&curve(3.0)[..]));
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        assert_eq!(p.audio.game_eq.as_ref().unwrap().source, LayerSource::Learned);
+        assert_eq!(status(&paths, &p, true).state, LearnStatus::Applied);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_import_applies_at_once_with_learning_off_and_can_be_fine_tuned() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let layer = GameEqLayer::learned(curve(4.0), Some("2.0".into()));
+        let text = GameEqFile::export("game.exe", "Some Game", &layer, None, "from a friend").to_json();
+        apply_action(&paths, &mut p, &GameEqAction::Import { text }).unwrap();
+        let st = status(&paths, &p, false);
+        assert_eq!(st.state, LearnStatus::Applied);
+        assert_eq!(st.source, Some(LayerSource::Imported));
+        assert!(!st.learning_on, "learning is off for an imported game by default");
+        assert_eq!(st.applied.as_deref(), Some(&curve(4.0)[..]));
+
+        // "Keep learning to fine-tune": the offer blends towards the local result.
+        apply_action(&paths, &mut p, &GameEqAction::SetLearning { enabled: true }).unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::SetGoal { goal: Goal::Awareness }).unwrap();
+        save_record_at(&record_file(&paths, "game.exe"), &ready_record("game.exe", curve(0.0)))
+            .unwrap();
+        let st = status(&paths, &p, true);
+        assert_eq!(st.state, LearnStatus::Ready);
+        let offer = st.offer.unwrap();
+        assert!((offer[3].1 - 2.0).abs() < 0.11, "halfway from +4 towards 0: {offer:?}");
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let l = p.audio.game_eq.as_ref().unwrap();
+        assert_eq!(l.source, LayerSource::Tuned);
+        assert_eq!(l.base.as_deref(), Some(&curve(4.0)[..]), "still anchored to the import");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_file_for_another_game_is_refused() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let layer = GameEqLayer::learned(curve(1.0), None);
+        let text = GameEqFile::export("other.exe", "", &layer, None, "").to_json();
+        let err = apply_action(&paths, &mut p, &GameEqAction::Import { text }).unwrap_err();
+        assert!(err.to_string().contains("other.exe"), "{err}");
+        assert!(p.audio.game_eq.is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn export_writes_the_applied_layer_learned_or_imported() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        assert!(apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() }).is_err());
+        p.audio.game_eq = Some(GameEqLayer::learned(curve(2.0), None));
+        let (_, out) =
+            apply_action(&paths, &mut p, &GameEqAction::Export { note: "mine".into() }).unwrap();
+        let out = out.unwrap();
+        let back = GameEqFile::parse(&out.text).unwrap();
+        assert_eq!(back.curve.as_deref(), Some(&curve(2.0)[..]));
+        assert_eq!(std::fs::read_to_string(&out.path).unwrap(), out.text);
+        // No hardware or personal fields in it.
+        for word in ["headset", "correction", "endpoint", "user", "path"] {
+            assert!(!out.text.to_lowercase().contains(word), "{word} in {}", out.text);
+        }
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn changing_goal_follows_at_once_for_a_learned_layer() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        p.audio.game_eq_goal = Some(Goal::Awareness);
+        // A real learned record, from synthetic statistics.
+        let mut rec = LearnRecord::new("game.exe", None);
+        let th = Thresholds { min_cues: 1, min_maskers: 0, checkpoint_secs: 1, ..Default::default() };
+        let mut st = Stats::default();
+        st.active_frames = 10_000;
+        st.events[0] = 50;
+        st.class_frames[0] = 500;
+        st.class_frames[8] = 9_000;
+        let n = relay_audio::learn::NBANDS * relay_audio::learn::HIST_BINS;
+        for b in 0..relay_audio::learn::NBANDS {
+            // Footsteps at -60 rel. in the highs; ambience at -55 everywhere.
+            if b >= 16 {
+                st.class_hist[b * relay_audio::learn::HIST_BINS + 20] = 50;
+            }
+            st.class_hist[8 * n + b * relay_audio::learn::HIST_BINS + 22] = 9_000;
+            st.frame_hist[b * relay_audio::learn::HIST_BINS + 22] = 9_500;
+        }
+        for _ in 0..4 {
+            rec.absorb(&st, &th);
+            rec.checkpoint(&th, &Limits::default());
+        }
+        assert!(rec.candidate.is_some(), "{rec:?}");
+        save_record_at(&record_file(&paths, "game.exe"), &rec).unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let before = p.audio.game_eq.clone().unwrap().curve;
+        apply_action(&paths, &mut p, &GameEqAction::SetGoal { goal: Goal::Immersion }).unwrap();
+        let after = p.audio.game_eq.clone().unwrap().curve;
+        assert_ne!(before, after, "re-derived and applied without relearning");
+        assert_eq!(status(&paths, &p, false).state, LearnStatus::Applied);
+        let saved = load_record(&paths, "game.exe").unwrap();
+        assert_eq!(saved.goal, Goal::Immersion);
+        assert_eq!(saved.total_active_frames, rec.total_active_frames);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn relearn_keeps_the_applied_layer_and_reset_removes_everything() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        p.audio.game_eq = Some(GameEqLayer::learned(curve(2.0), None));
+        let file = record_file(&paths, "game.exe");
+        save_record_at(&file, &ready_record("game.exe", curve(2.0))).unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Relearn).unwrap();
+        assert!(p.audio.game_eq.is_some());
+        assert!(load_record(&paths, "game.exe").unwrap().candidate.is_none());
+        apply_action(&paths, &mut p, &GameEqAction::Reset).unwrap();
+        assert!(p.audio.game_eq.is_none());
+        assert!(!file.exists());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_new_game_version_shows_needs_relearn_while_the_old_layer_applies() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        p.audio.game_eq_goal = Some(Goal::Awareness);
+        p.audio.game_eq = Some(GameEqLayer::learned(curve(2.0), Some("1.0.0.0".into())));
+        let mut rec = ready_record("game.exe", curve(2.0));
+        assert!(rec.begin_session(Some("1.1.0.0")));
+        save_record_at(&record_file(&paths, "game.exe"), &rec).unwrap();
+        let st = status(&paths, &p, true);
+        assert_eq!(st.state, LearnStatus::NeedsRelearn);
+        assert_eq!(st.applied.as_deref(), Some(&curve(2.0)[..]), "the old layer keeps applying");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn record_names_are_file_safe() {
+        assert_eq!(safe_name("Some Game.exe"), "some_game.exe");
+        assert_eq!(safe_name("..\\x.exe"), ".._x.exe");
+    }
+}

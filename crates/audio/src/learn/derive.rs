@@ -22,8 +22,10 @@
 //!   [`SPEECH_GUARD_HI_HZ`] is cut by more than [`SPEECH_GUARD_DB`], so
 //!   callouts and chat stay intelligible.
 //! - **Hearing rule**: the curve may not make the game louder overall. The
-//!   power gain weighted by the game's own spectrum must be ≤ 0 dB; if not,
-//!   the boosts are scaled down until it is. Peaks are the limiter's job.
+//!   power gain weighted by the game's own spectrum must be ≤ 0 dB. If it is
+//!   not, the whole curve is first lowered (gain compensation, as far as the
+//!   speech guard and the cut cap allow), then any excess left is taken off
+//!   the boosts. Peaks are the limiter's job.
 
 use serde::{Deserialize, Serialize};
 
@@ -394,6 +396,25 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
             0.0
         }
     };
+    // Gain compensation: lower everything by the excess, within the guard.
+    let excess = power(&gains, 1.0);
+    if excess > 0.0 {
+        let room = (0..NBANDS)
+            .map(|b| {
+                let floor = if in_speech_band(BANDS_HZ[b]) {
+                    -limits.speech_guard_db
+                } else {
+                    -limits.max_cut_db
+                };
+                gains[b] - floor
+            })
+            .fold(f32::MAX, f32::min)
+            .max(0.0);
+        let shift = excess.min(room);
+        for g in gains.iter_mut() {
+            *g -= shift;
+        }
+    }
     if power(&gains, 1.0) > 0.0 {
         let (mut lo, mut hi) = (0.0f32, 1.0f32);
         for _ in 0..30 {

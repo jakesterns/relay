@@ -23,6 +23,7 @@ pub mod display_sim;
 pub mod elevate;
 pub mod firewall;
 pub mod footprint;
+pub mod game_eq;
 pub mod hardware;
 pub mod hotkeys;
 pub mod instance;

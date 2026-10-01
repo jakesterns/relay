@@ -511,7 +511,8 @@ mod imp {
             return None;
         }
 
-        let exe = process_image(pid).map(|p| exe_name(&p)).unwrap_or_default();
+        let path = process_image(pid).unwrap_or_default();
+        let exe = exe_name(&path);
 
         let mut title_buf = [0u16; 512];
         let n = GetWindowTextW(hwnd, &mut title_buf) as usize;
@@ -519,7 +520,7 @@ mod imp {
 
         let hmonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as i64;
 
-        Some(Foreground { pid, exe, title, hmonitor, hwnd: hwnd.0 as u64 })
+        Some(Foreground { pid, exe, title, hmonitor, hwnd: hwnd.0 as u64, path })
     }
 
     pub(super) unsafe fn process_image(pid: u32) -> Option<String> {

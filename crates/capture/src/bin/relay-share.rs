@@ -9,6 +9,7 @@
 //!                                  encode a raw clip, for codec quality comparisons
 //! relay-share send                 share the primary monitor to a paired peer
 //! relay-share recv                 receive and render to a window
+//! relay-share learn --pid N ...    S46: learn a game's sound (aggregates only)
 //! ```
 //!
 //! Stats and lifecycle messages go to stdout as NDJSON; the core relays them
@@ -175,6 +176,11 @@ fn run() -> Result<()> {
         "host-stub" => {
             let opts = parse_recv_args(&args[1..])?;
             run_async(relay_capture::render::run_stub(opts.host))
+        }
+        #[cfg(windows)]
+        "learn" => {
+            let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
+            relay_capture::learn::run(opts)
         }
         #[cfg(windows)]
         "recv" => {
@@ -774,6 +780,9 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
                  (--audio-pid <pid> narrows the program mix to one process;
                   --audio-mic *adds* a second microphone track;
                   --no-audio --audio-mic sends the microphone alone)
+  learn          S46: learn one game's sound by process loopback of its PID
+                 (--pid N --exe NAME --record FILE [--goal G] [--version V]);
+                 keeps aggregate statistics only, never audio
   recv           receive a share and render it to a window
                  (--vcam mirrors into the Relay virtual camera;
                   --mic-route <endpoint-id> renders audio to that endpoint)
