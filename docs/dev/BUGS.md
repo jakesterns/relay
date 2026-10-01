@@ -336,7 +336,7 @@ with `E_ACCESSDENIED` on all seven mode changes because the *old* swapchain
 still held the window when the new one was created. Pop-in stayed black
 (X, Esc, Settings-and-back); minimise/restore fine (no rebuild involved);
 the Relay icon on the popped-out title bar confirmed. **End of share by
-sender stop now works**: "The share from jake ended.", Idle, code cleared,
+sender stop now works**: "The share from studio ended.", Idle, code cleared,
 `relay-share.exe` gone — but only because the 3 s teardown deadline fired
 ("teardown did not finish within 3 s; exiting now"), so B8's hang is still
 there underneath and costs every share end 3 s. Loss for the run at 60 fps
@@ -709,7 +709,7 @@ the contents, state what is owed.
 
 | r19 | `2091050` | S19 call-audio return route: the receiver sends the call app's audio back (`relay-audio-return`), the sender hears it behind a Call fader; "Send the call back" card on Receive | One-PC headless `scripts/return-check.sh`: 647 packets sent, 599+ received and played, peak 0.33 with a `SoundPlayer` as the call app | a real call on PC 2 (Discord, second participant): the main PC hears them, they never hear themselves; then Game + "everything else" once to hear the echo the Share screen warns about |
 | r20 | `0aafc2d` (branch `fix/core-version`) | Two-PC fixes: still screen no longer ends a share (sender re-encodes the last frame every empty 250 ms); receiver restarted by S38 keeps its host window; clean stop reported as `sender_stopped`; `relay-core --version`; `share-start` takes `RELAY_PEER_ID` | 2026-09-25: no-code share streams 24 s, trusted, embedded, aus=presented=1445, 2.9 ms; update r19→r20 keeps `peers.json` and `identity.key` byte-identical | — |
-| r21 | `19eadba` | Shell forwards `ended_by_sender`; reused identity logs "loaded" | 2026-09-25: "The share from jake ended." after a clean stop; "loaded this PC's DTLS identity" on both PCs | — |
+| r21 | `19eadba` | Shell forwards `ended_by_sender`; reused identity logs "loaded" | 2026-09-25: "The share from studio ended." after a clean stop; "loaded this PC's DTLS identity" on both PCs | — |
 | r22 | `eb19637` | A no-code refusal is final (sender: one attempt, message, no crash record); receiver refuses an unremembered no-code peer and keeps its port and code | 2026-09-25: **S35 done on two PCs**: pair with code, reconnect with no code, Forget, two refusals (code unchanged, WARN with fingerprint), re-pair gives one fresh entry | reboot of either PC |
 | r22 | `eb19637` | (same build) | 2026-09-25: **S38 kill tests pass**: sender engine killed by PID, back in 4.5 s with no code, embedded; receiver engine killed by PID, core restarts it in 1.5 s, share back in 9.6 s, embedded | reboot of one / both mid-share; give-up time; crash line shown once |
 | r23 | `8ea5fcd` | Receiver's codec status keeps the sender and trusted flag ("remembered, no code" was wiped 0.4 s into every trusted share) | — | the live screen during an outage ("dropped — waiting"), "remembered, no code" throughout |

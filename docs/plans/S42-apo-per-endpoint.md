@@ -221,7 +221,7 @@ modes), no SFX/MFX CLSIDs, and `{d04e05a6…},0` = nil GUID.
   (`DeviceSelector.cpp:101`, `DeviceAPOInfo.cpp:141-153`). This is what lets
   an unsigned/test-signed APO load in audiodg, and it is the most likely
   reason ours never loaded. Relay does **not** write it: it is global config
-  (non-negotiable), and it is Jake's call. Live check below.
+  (non-negotiable), and it is the owner's call. Live check below.
 
 **Relay's decision: MFX.** Per-game EQ applies to everything on the
 endpoint, so post-mix. MFX vs EFX: both post-mix; MFX runs once per
@@ -254,7 +254,7 @@ plays, unprocessed).
   with a vendor SFX, nil-GUID slot, composite chain, Disable_SysFx, vetting),
   `tests/apo_com.rs` (IAudioSystemEffects{,2} QI).
 
-**Live retest (with Jake; not run in this session).**
+**Live retest (with the owner; not run in this session).**
 1. Read-only first: `reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio" /v DisableProtectedAudioDG`
    and `reg query HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects /s`
    (an EAPO install, if any, shows what loads on this PC).
@@ -263,10 +263,10 @@ plays, unprocessed).
    (and `,6` modes if missing) on the S/PDIF endpoint.
 3. `apo-diag.on`, restart AudioEndpointBuilder, play speech/music to S/PDIF,
    read the log. Still no DllMain line → the remaining difference from EAPO
-   is `DisableProtectedAudioDG`; decide with Jake whether to test it by hand
+   is `DisableProtectedAudioDG`; decide with the owner whether to test it by hand
    (a global switch Relay would then have to own, back up and restore).
 
-## Live test plan (VM or Jake's machine, with Jake — NOT unattended)
+## Live test plan (VM or the owner's machine, with the owner — NOT unattended)
 
 Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per
 `docs/dev/elevation-live.md`. Export `HKLM\...\MMDevices\Audio\Render` first
