@@ -13,8 +13,8 @@ import type {
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import type { EndpointApo } from "../lib/ipc";
-import { devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import type { EndpointApo, LearnView, LookTargets } from "../lib/ipc";
+import { LOOK_PRIVACY, TOURNAMENT_NOTICE, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -70,6 +70,8 @@ export interface FakeCore {
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
+  /** S47: learn views by lower-case exe. Missing = never touched. */
+  learn: Map<string, LearnView>;
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -203,9 +205,21 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       ],
     },
     elevation: { decline: false },
+    learn: new Map(),
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
+  };
+
+  const learnView = (exe: string): LearnView => {
+    const key = exe.toLowerCase();
+    let v = core.learn.get(key);
+    if (!v) {
+      v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
+        privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+      core.learn.set(key, v);
+    }
+    return v;
   };
 
   const summaries = (): ProfileSummary[] => [...core.profiles.values()].map(summarize);
@@ -241,6 +255,46 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
     ack_crash: () => void (core.state.last_crash = null),
     update_status: () => structuredClone(core.update),
+    learn_display_status: (a) => structuredClone(learnView(String(a.exe))),
+    learn_display_set: (a) => {
+      const v = learnView(String(a.exe));
+      v.enabled = Boolean(a.enabled);
+      if (v.status === "off" && v.enabled) v.status = "learning";
+      else if (v.status === "learning" && !v.enabled) v.status = "off";
+      return structuredClone(v);
+    },
+    learn_display_apply: (a) => {
+      const v = learnView(String(a.exe));
+      const ready = v.monitors.filter((m) => m.converged);
+      if (ready.length === 0) throw new Error("this game's look has not settled yet; keep playing");
+      for (const m of ready) { m.applied = m.converged; m.use_learned = true; m.status = "applied"; }
+      v.status = "applied";
+      return structuredClone(v);
+    },
+    learn_display_relearn: (a) => {
+      const v = learnView(String(a.exe));
+      for (const m of v.monitors) { m.converged = null; m.phase = "learning"; m.readiness.frames = 0; m.readiness.progress = 0; }
+      return structuredClone(v);
+    },
+    learn_display_reset: (a) => {
+      core.learn.delete(String(a.exe).toLowerCase());
+      return structuredClone(learnView(String(a.exe)));
+    },
+    learn_display_export: (a) => JSON.stringify({
+      format: "relay-game-display", version: 1, game: { exe: String(a.exe).toLowerCase() },
+      look: { shadow: 0.3, saturation: 0.1, highlight: 0 }, evidence: { frames: 900, scenes: 3 },
+      note: String(a.note ?? ""),
+    }),
+    learn_display_import: (a) => {
+      const f = JSON.parse(String(a.json)) as { format?: string; game?: { exe?: string }; look?: LookTargets; note?: string };
+      if (f.format !== "relay-game-display" || !f.look) throw new Error("this is not a Relay game display file");
+      if (f.game?.exe?.toLowerCase() !== String(a.exe).toLowerCase()) throw new Error(`this file is for ${f.game?.exe}, not ${a.exe}`);
+      const v = learnView(String(a.exe));
+      v.imported = { look: f.look, note: f.note ?? "" };
+      v.enabled = false;
+      v.status = "applied_imported";
+      return structuredClone(v);
+    },
     check_for_updates: () => {
       core.update.last_check = 1_790_000_000;
       return structuredClone(core.update);
@@ -518,6 +572,8 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
+  "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn",
+  "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",

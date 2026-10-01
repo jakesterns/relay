@@ -3519,6 +3519,7 @@ dependencies = [
  "rand 0.9.5",
  "rcgen",
  "relay-core",
+ "relay-display",
  "relay-vdevice",
  "rtc",
  "serde",
