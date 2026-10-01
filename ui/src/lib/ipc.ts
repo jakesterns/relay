@@ -133,6 +133,35 @@ export type HardwareItem =
   | { kind: "monitor"; value: HardwareMonitor };
 
 export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
+
+// S47: learned game display. Mirrors crates/core/src/learned_display.rs.
+/** Panel-neutral look, each axis 0..1 (0 = leave the game alone). */
+export interface LookTargets { shadow: number; saturation: number; highlight: number }
+export type PanelKind = "oled" | "ips" | "va" | "tn" | "unknown";
+export type LookPhase = "learning" | "converged";
+export type LookStatus = "off" | "learning" | "ready" | "applied" | "applied_imported" | "hdr_skipped";
+export interface LookReadiness {
+  frames: number; frames_needed: number; scenes: number; scenes_needed: number;
+  stable_checkpoints: number; checkpoints_needed: number; progress: number;
+}
+export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
+export interface MonitorLearnView {
+  monitor: MonitorId; monitor_name: string; panel: PanelKind; phase: LookPhase;
+  readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
+  use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
+  adjustments: LookAdjustments | null; excluded: number;
+}
+export interface ImportedLook { look: LookTargets; note: string }
+export interface LearnView {
+  exe: string; enabled: boolean; status: LookStatus; sampling: boolean;
+  monitors: MonitorLearnView[]; imported: ImportedLook | null;
+  privacy: string; tournament: string;
+}
+/** The owner's exact wording (S47). A notice only. */
+export const TOURNAMENT_NOTICE =
+  "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.";
+export const LOOK_PRIVACY =
+  "Frames are analysed in memory at low resolution while the game has focus. Nothing is recorded, nothing is saved, nothing leaves this PC.";
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
 export type ShareState =
   | { kind: "off" }
@@ -1150,6 +1179,37 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
   },
+  // S47 learned game display. Browser mode keeps an in-memory record.
+  async learnDisplayStatus(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_status", { exe });
+  },
+  async learnDisplaySet(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_set", { exe, enabled });
+  },
+  async learnDisplayApply(exe: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("this game's look has not settled yet; keep playing");
+    return invoke<LearnView>("learn_display_apply", { exe });
+  },
+  async learnDisplayRelearn(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_relearn", { exe });
+  },
+  async learnDisplayReset(exe: string): Promise<LearnView> {
+    if (!isTauri()) { mockLearnStore.delete(exe.toLowerCase()); return structuredClone(mockLearn(exe)); }
+    return invoke<LearnView>("learn_display_reset", { exe });
+  },
+  /** The current game layer as the versioned JSON file's text. */
+  async learnDisplayExport(exe: string, note: string, name?: string): Promise<string> {
+    if (!isTauri()) throw new Error("nothing has been learned for this game yet");
+    return invoke<string>("learn_display_export", { exe, name: name ?? null, note });
+  },
+  async learnDisplayImport(exe: string, json: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("importing needs the Relay service");
+    return invoke<LearnView>("learn_display_import", { exe, json });
+  },
+
   // S45 updates. Browser mode has nothing to offer.
   async updateStatus(): Promise<UpdateStatus> {
     if (!isTauri()) return structuredClone(mockUpdate);
@@ -1172,6 +1232,19 @@ export const api = {
     return invoke<UpdateStatus>("skip_update", { version });
   },
 };
+
+const mockLearnStore = new Map<string, LearnView>();
+/** Browser-mode stand-in for the learn view (S47). */
+function mockLearn(exe: string): LearnView {
+  const key = exe.toLowerCase();
+  let v = mockLearnStore.get(key);
+  if (!v) {
+    v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
+      privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+    mockLearnStore.set(key, v);
+  }
+  return v;
+}
 
 /** Browser-mode stand-in for the updater (S45). */
 const mockUpdate: UpdateStatus = {

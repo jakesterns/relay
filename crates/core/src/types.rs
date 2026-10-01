@@ -263,6 +263,12 @@ pub struct Foreground {
     /// game's process, which anti-cheat protects (2026-09-29).
     #[serde(default)]
     pub hwnd: u64,
+    /// Full image path, read with the one query-limited open the exe name
+    /// already needs. Used only to fingerprint the game build (S47: file
+    /// size and modified time, from the file on disk). Never sent over IPC:
+    /// it can carry the user's name.
+    #[serde(default, skip_serializing)]
+    pub image: String,
 }
 
 /// A running process that owns a visible window (for the exe picker).
