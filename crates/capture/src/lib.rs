@@ -27,6 +27,8 @@ pub mod devices;
 pub mod encode;
 #[cfg(windows)]
 pub mod learn;
+#[cfg(windows)]
+pub mod look;
 pub mod mixer;
 pub mod pace;
 #[cfg(windows)]

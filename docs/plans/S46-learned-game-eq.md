@@ -227,4 +227,4 @@ Never run against a real game in this session. On the owner's PC:
    learned curve must not chase its own EQ): with the layer applied, keep
    learning for 10 min and confirm the curve does not drift towards flat.
 10. Anti-cheat titles: repeat 2 with an EAC / BattlEye / Vanguard game; nothing
-    new is accessed (see `docs/dev/anti-cheat.md` #25–#27).
+    new is accessed (see `docs/dev/anti-cheat.md` #28–#30).

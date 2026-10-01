@@ -12,6 +12,7 @@ import {
 } from "../lib/ipc";
 import { buildRamp, cascadeDb } from "../lib/honest";
 import { colorSummary } from "./Profiles";
+import { LearnLookCard } from "../components/LearnLookCard";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -767,6 +768,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
           )}
         </Card>
       </div>
+      <LearnLookCard exe={draft?.game.exe ?? null} />
     </>
   );
 }

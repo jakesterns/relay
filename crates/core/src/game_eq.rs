@@ -468,7 +468,7 @@ impl Learner {
     /// Spawn `relay-share learn` for the focused game.
     pub fn spawn(paths: &Paths, profile: &Profile, fg: &Foreground) -> Result<Self> {
         let bin = crate::share::share_binary()?;
-        let version = exe_version(&fg.path);
+        let version = exe_version(&fg.image);
         let record = record_file(paths, &profile.game.exe);
         let goal = goal_of(profile);
         let mut cmd = Command::new(&bin);

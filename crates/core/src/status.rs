@@ -74,7 +74,7 @@ mod tests {
                 title: "CoD".into(),
                 hmonitor: 0,
                 hwnd: 0,
-                path: String::new(),
+                image: String::new(),
             }),
             ..Default::default()
         };
