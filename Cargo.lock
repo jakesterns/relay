@@ -3480,6 +3480,7 @@ name = "relay-apo"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "embed-resource",
  "relay-audio",
  "serde",
  "serde_json",
@@ -3492,6 +3493,7 @@ dependencies = [
 name = "relay-audio"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "hound",
  "realfft",
  "rustfft",
@@ -3509,6 +3511,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
+ "embed-resource",
  "hmac",
  "log",
  "mdns-sd",
@@ -3587,6 +3590,7 @@ dependencies = [
 name = "relay-vdevice"
 version = "0.1.0"
 dependencies = [
+ "embed-resource",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

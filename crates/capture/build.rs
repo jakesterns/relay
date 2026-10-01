@@ -21,8 +21,16 @@
 //! that below `MIN_VCAM_BUILD`. Keep that guard: with delay-load a missing
 //! export raises a structured exception rather than returning an error, so the
 //! version check is what keeps it from ever being reached.
+include!("../../build-support/versioninfo.rs");
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../build-support/versioninfo.rs");
+    versioninfo::embed(
+        versioninfo::Target::Bin("relay-share"),
+        "relay-share.exe",
+        "Relay share engine",
+    );
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }

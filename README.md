@@ -94,4 +94,5 @@ runbooks.
 Relay is released under the [MIT licence](LICENSE). Bundled third-party
 assets (SADIE II HRIRs, the Geist fonts, the AutoEQ index) are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). See
-[CONTRIBUTING.md](CONTRIBUTING.md) to contribute.
+[CONTRIBUTING.md](CONTRIBUTING.md) to contribute. Release signing is described
+in the [code signing policy](docs/CODE_SIGNING_POLICY.md).
