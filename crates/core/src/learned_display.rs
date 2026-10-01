@@ -35,7 +35,7 @@ tournaments or professional environments. Check with your tournament host or rul
 
 /// The privacy line shown beside the control.
 pub const PRIVACY_NOTICE: &str = "Frames are analysed in memory at low resolution while the \
-game has focus. Nothing is recorded, nothing is saved, nothing leaves this PC.";
+game has focus. No frames are recorded or saved, and nothing leaves this PC.";
 
 // ---------------------------------------------------------------------------
 // Store
@@ -535,6 +535,29 @@ pub fn decode_line(line: &str) -> Option<SamplerLine> {
         )),
         _ => None,
     }
+}
+
+/// Everything the sampler has sent, read *after* checking whether it exited,
+/// so a fast exit (HDR: one line, then gone) never loses its last line.
+/// Returns the lines and whether the sampler is finished.
+pub fn drain(rx: &Receiver<SamplerLine>, exited: bool) -> (Vec<SamplerLine>, bool) {
+    let mut lines: Vec<SamplerLine> = rx.try_iter().collect();
+    let mut done = exited;
+    if exited {
+        // The reader thread may still be forwarding the final lines: wait
+        // for it to hang up (stdout closed), bounded.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(l) => lines.push(l),
+                Err(_) => break,
+            }
+        }
+    } else if matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
+        done = true;
+    }
+    (lines, done)
 }
 
 /// `relay-share look --hmonitor N --fps F`.

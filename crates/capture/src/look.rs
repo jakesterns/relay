@@ -74,7 +74,9 @@ fn lower_priority() {
 pub fn run(hmonitor: HMONITOR, fps: u32) -> Result<()> {
     let fps = fps.clamp(1, MAX_FPS);
     lower_priority();
-    if output_is_hdr(hmonitor).unwrap_or(false) {
+    // An output whose colour space cannot be read is skipped like HDR:
+    // learning from the wrong space is worse than not learning.
+    if output_is_hdr(hmonitor).unwrap_or(true) {
         println!("{}", serde_json::json!({ "event": "look_hdr" }));
         return Ok(());
     }

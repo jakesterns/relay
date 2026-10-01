@@ -415,7 +415,11 @@ impl Service {
 
         // Belt and braces: whatever happened, put the machine back.
         let mut g = service.inner.lock();
-        g.look = None;
+        if g.look.take().is_some() {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json on exit");
+            }
+        }
         if let Err(e) = g.applier.restore() {
             warn!(error = %e, "restore on exit failed; will retry on next start");
         }
@@ -528,8 +532,8 @@ impl Service {
         use crate::learned_display::SamplerLine;
         let mut g = self.inner.lock();
         let Some(s) = g.look.as_mut() else { return };
-        let lines: Vec<SamplerLine> = s.rx.try_iter().collect();
-        let mut stop = s.exited();
+        let exited = s.exited();
+        let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
         let (exe, mon) = (s.exe.clone(), s.monitor.clone());
         let before = g.learn.game(&exe).and_then(|r| r.effective(&mon));
         let mut save = false;
@@ -1279,7 +1283,12 @@ fn sync_look(g: &mut Inner) {
             return;
         }
     }
-    g.look = None;
+    if g.look.take().is_some() {
+        // Keep the evidence gathered since the last checkpoint.
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
     let Some((fg, t)) = want else { return };
     let build = build_fingerprint(std::path::Path::new(&fg.image));
     let rec = g.learn.game_mut(&fg.exe).monitor_mut(&t.id);
@@ -1298,7 +1307,32 @@ fn sync_look(g: &mut Inner) {
 /// S47: the look in use changed while a profile is applied: put the
 /// original back and apply again with the new look.
 fn reapply_learned(g: &mut Inner) {
-    if g.state.active_profile.is_none() || g.pinned {
+    let Some(active) = g.state.active_profile.clone() else { return };
+    if g.pinned {
+        // A profile applied by hand stays applied regardless of focus:
+        // re-apply that same profile so the screen updates now.
+        let Some(profile) = g.store.get(active.id).cloned() else { return };
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-apply failed");
+            return;
+        }
+        let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
+        let target = resolve_target(g, hmon);
+        let correction = correction_for(g, &profile);
+        let to_apply = learned_profile(g, &profile, target.as_ref());
+        match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
+            Ok(applied) => {
+                g.state.display_state = applied.display;
+                g.state.display_via = applied.via;
+            }
+            Err(e) => {
+                warn!(error = %e, "re-applying the pinned profile failed");
+                g.pinned = false;
+                g.state.active_profile = None;
+                g.state.display_state = DisplayState::Default;
+                g.state.display_via = DisplayVia::default();
+            }
+        }
         return;
     }
     let Some(fg) = g.state.foreground.clone() else { return };

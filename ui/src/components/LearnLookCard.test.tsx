@@ -38,7 +38,7 @@ function monitor(over: Partial<MonitorLearnView> = {}): MonitorLearnView {
 function seed(v: Partial<LearnView>) {
   core.learn.set("game.exe", {
     exe: "game.exe", enabled: true, status: "learning", sampling: true, monitors: [], imported: null,
-    privacy: "Frames are analysed in memory at low resolution while the game has focus. Nothing is recorded, nothing is saved, nothing leaves this PC.",
+    privacy: "Frames are analysed in memory at low resolution while the game has focus. No frames are recorded or saved, and nothing leaves this PC.",
     tournament: TOURNAMENT_NOTICE, ...v,
   });
 }
@@ -50,7 +50,7 @@ describe("the learn-this-game's-look card", () => {
     await mount();
     expect(screen.getByTestId("look-status")).toHaveTextContent(/^Off/);
     expect(screen.getByRole("switch", { name: /Learn this game's look/ })).toHaveAttribute("aria-checked", "false");
-    expect(screen.getByText(/Nothing is recorded, nothing is saved, nothing leaves this PC/)).toBeInTheDocument();
+    expect(screen.getByText(/No frames are recorded or saved, and nothing leaves this PC/)).toBeInTheDocument();
     expect(screen.getByTestId("tournament-notice")).toHaveTextContent(
       "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.",
     );

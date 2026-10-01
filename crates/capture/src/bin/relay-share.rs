@@ -241,10 +241,8 @@ fn parse_codec(s: &str) -> Result<relay_capture::codec::VideoCodec> {
     }
 }
 
-/// Parse `relay-share send` flags into [`SendOpts`].
-#[cfg(windows)]
 /// `look --hmonitor N [--fps 1|2]`.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(windows)]
 fn parse_look_args(args: &[String]) -> Result<(isize, u32)> {
     let (mut hmonitor, mut fps) = (None, 1u32);
     let mut it = args.iter();
@@ -258,6 +256,8 @@ fn parse_look_args(args: &[String]) -> Result<(isize, u32)> {
     Ok((hmonitor.context("look needs --hmonitor")?, fps))
 }
 
+/// Parse `relay-share send` flags into [`SendOpts`].
+#[cfg(windows)]
 fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::SendOpts> {
     let mut opts = relay_capture::transport::sender::SendOpts {
         peer: None,

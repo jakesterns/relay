@@ -161,7 +161,7 @@ export interface LearnView {
 export const TOURNAMENT_NOTICE =
   "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.";
 export const LOOK_PRIVACY =
-  "Frames are analysed in memory at low resolution while the game has focus. Nothing is recorded, nothing is saved, nothing leaves this PC.";
+  "Frames are analysed in memory at low resolution while the game has focus. No frames are recorded or saved, and nothing leaves this PC.";
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
 export type ShareState =
   | { kind: "off" }

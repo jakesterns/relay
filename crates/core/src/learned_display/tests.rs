@@ -228,7 +228,7 @@ fn view_carries_the_exact_notices_and_progress() {
         "Relay's visual enhancements may not be allowed in some tournaments or professional \
          environments. Check with your tournament host or rules."
     );
-    assert!(v.privacy.contains("Nothing is recorded"));
+    assert!(v.privacy.contains("No frames are recorded or saved"));
     assert!(v.enabled && v.sampling);
     let m = &v.monitors[0];
     assert_eq!(m.panel, PanelKind::Oled);
@@ -251,6 +251,27 @@ fn sampler_wire_lines_decode() {
     assert_eq!(decode_line(r#"{"event":"stats"}"#), None);
     assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "1"]);
     assert_eq!(SAMPLE_FPS, 1);
+}
+
+#[test]
+fn a_fast_exit_never_loses_the_hdr_line() {
+    // The sampler wrote look_hdr and exited before the tick looked.
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(SamplerLine::Hdr).unwrap();
+    drop(tx);
+    let (lines, done) = drain(&rx, true);
+    assert_eq!(lines, vec![SamplerLine::Hdr]);
+    assert!(done);
+    // Exit not yet noticed, but the reader hung up: still finished.
+    let (tx, rx) = std::sync::mpsc::channel();
+    tx.send(SamplerLine::Hdr).unwrap();
+    drop(tx);
+    let (lines, done) = drain(&rx, false);
+    assert_eq!(lines.len(), 1);
+    assert!(done);
+    // Running and quiet: not finished.
+    let (_tx, rx) = std::sync::mpsc::channel::<SamplerLine>();
+    assert_eq!(drain(&rx, false), (vec![], false));
 }
 
 #[test]
