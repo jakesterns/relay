@@ -193,7 +193,8 @@ fn start_update_check(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Even
         };
         if let Some(v) = announce {
             info!(version = %v, "an update is available");
-            let text = format!("Relay {v} is available. Open Settings to see what's new and install it.");
+            let text =
+                format!("Relay {v} is available. Open Settings to see what's new and install it.");
             crate::winloop::balloon("Relay", &text);
             let _ = events.send(Event::Notice { text });
             if auto_install {
@@ -531,7 +532,9 @@ impl Service {
                 }
                 Phase::Waiting => match busy {
                     Some(reason) => {
-                        let why = format!("Waiting to install: {reason}. It installs as soon as that ends.");
+                        let why = format!(
+                            "Waiting to install: {reason}. It installs as soon as that ends."
+                        );
                         if g.update.waiting_for.as_deref() != Some(why.as_str()) {
                             g.update.waiting_for = Some(why);
                         }
@@ -2022,7 +2025,8 @@ impl IpcHandler {
     /// S45: the update methods, handled before the main lock is taken
     /// because starting a check or an install takes it itself.
     fn handle_update(&self, method: &Method) -> Option<Reply> {
-        let status = |inner: &Arc<Mutex<Inner>>| Reply::Update { status: inner.lock().update.status() };
+        let status =
+            |inner: &Arc<Mutex<Inner>>| Reply::Update { status: inner.lock().update.status() };
         Some(match method {
             Method::UpdateStatus => status(&self.inner),
             Method::CheckForUpdates => {
@@ -2033,8 +2037,9 @@ impl IpcHandler {
                 let busy = { update_busy(&self.inner.lock()) };
                 start_update_install(&self.inner, &self.events);
                 if let Some(reason) = busy {
-                    self.inner.lock().update.waiting_for =
-                        Some(format!("Waiting to install: {reason}. It installs as soon as that ends."));
+                    self.inner.lock().update.waiting_for = Some(format!(
+                        "Waiting to install: {reason}. It installs as soon as that ends."
+                    ));
                 }
                 status(&self.inner)
             }

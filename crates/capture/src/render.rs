@@ -545,12 +545,11 @@ fn follow_vcam(
                 );
             }
         },
-        Some(false) => {
-            if sink.take().is_some() {
-                info!("Relay Camera off");
-                println!("{}", serde_json::json!({ "event": "vcam_down" }));
-            }
+        Some(false) if sink.take().is_some() => {
+            info!("Relay Camera off");
+            println!("{}", serde_json::json!({ "event": "vcam_down" }));
         }
+        Some(false) => {}
         None => {}
     }
 }
@@ -643,7 +642,9 @@ fn video_thread(
     let result: Result<()> = 'outer: loop {
         if let (Some(d), Some(t)) = (fail_after, decoding_since) {
             if t.elapsed() >= d {
-                break Err(anyhow::anyhow!("TEST: render failure injected (RELAY_TEST_FAIL_RENDER)"));
+                break Err(anyhow::anyhow!(
+                    "TEST: render failure injected (RELAY_TEST_FAIL_RENDER)"
+                ));
             }
         }
         // The window thread asks us to stop (Esc, close, the owner window
