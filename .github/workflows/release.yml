@@ -1,0 +1,186 @@
+# Signed release: tag v* -> build -> SignPath (binaries) -> NSIS -> SignPath
+# (installer) -> SHA-256 sums -> GitHub Release.
+#
+# Runs only on tag pushes in the upstream repository. Pull requests (forks
+# included) never trigger it, so fork code never sees the SignPath token.
+# The token lives in the "release" environment; give that environment a
+# required reviewer so every run also waits for the owner in GitHub, on top of
+# the manual approval SignPath itself requires per signing request.
+#
+# Configuration (Settings -> Environments -> release):
+#   secret   SIGNPATH_API_TOKEN            API token of a SignPath submitter user
+#   variable SIGNPATH_ORGANIZATION_ID      e.g. 00000000-0000-0000-0000-000000000000
+#   variable SIGNPATH_PROJECT_SLUG         e.g. relay
+#   variable SIGNPATH_SIGNING_POLICY_SLUG  e.g. release-signing
+# Artifact configuration slugs are fixed below ("binaries", "installer");
+# their XML is in .signpath/artifact-configuration.xml.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, sign, publish
+    if: github.repository == 'jakesterns/relay' && github.event_name == 'push'
+    runs-on: windows-latest
+    environment: release
+    permissions:
+      contents: write   # create the GitHub Release
+      actions: read     # SignPath reads the uploaded artifacts
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Same pins as ci.yml; stage-bundle.ps1 generates licenses.html with it.
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about@0.9.2 --features cli
+
+      # The Tauri crate embeds ui/dist at compile time: UI first.
+      - name: UI install + build
+        working-directory: ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build and stage helper binaries
+        shell: pwsh
+        run: ./scripts/stage-bundle.ps1
+
+      # relay-ui.exe only; the installer is built after signing.
+      - name: Build relay-ui (no bundle)
+        working-directory: ui
+        run: pnpm tauri build --no-bundle --config src-tauri/tauri.bundle.conf.json
+
+      - name: Collect binaries for signing
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $triple = (rustc -vV | Select-String '^host: ').Line -replace '^host: ', ''
+          $out = 'dist/unsigned-bin'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item target/release/relay-ui.exe $out
+          foreach ($n in 'relay-core','relay-svc','relay-elevate','relay-share','relay-preview') {
+            Copy-Item "ui/src-tauri/binaries/$n-$triple.exe" "$out/$n.exe"
+          }
+          Copy-Item ui/src-tauri/binaries/relay_apo.dll $out
+          Copy-Item ui/src-tauri/binaries/relay_vdevice.dll $out
+          Get-ChildItem $out
+
+      - name: Upload unsigned binaries
+        id: upload-unsigned-bin
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-binaries
+          path: dist/unsigned-bin/*
+          if-no-files-found: error
+
+      - name: Sign binaries (SignPath)
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: binaries
+          github-artifact-id: ${{ steps.upload-unsigned-bin.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 86400
+          output-artifact-directory: dist/signed-bin
+
+      - name: Put signed binaries back
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $triple = (rustc -vV | Select-String '^host: ').Line -replace '^host: ', ''
+          $in = 'dist/signed-bin'
+          foreach ($f in Get-ChildItem $in -Filter *.*) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') { throw "$($f.Name): signature $($sig.Status)" }
+          }
+          Copy-Item "$in/relay-ui.exe" target/release/relay-ui.exe -Force
+          foreach ($n in 'relay-core','relay-svc','relay-elevate','relay-share','relay-preview') {
+            Copy-Item "$in/$n.exe" "ui/src-tauri/binaries/$n-$triple.exe" -Force
+          }
+          Copy-Item "$in/relay_apo.dll" ui/src-tauri/binaries/ -Force
+          Copy-Item "$in/relay_vdevice.dll" ui/src-tauri/binaries/ -Force
+
+      # Packages the already-built (now signed) binaries without recompiling.
+      - name: Build NSIS installer
+        working-directory: ui
+        run: pnpm tauri bundle --bundles nsis --config src-tauri/tauri.bundle.conf.json
+
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist/unsigned-installer | Out-Null
+          $setup = @(Get-ChildItem target/release/bundle/nsis -Filter *-setup.exe)
+          if ($setup.Count -ne 1) { throw "expected one setup exe, found $($setup.Count)" }
+          Copy-Item $setup[0].FullName dist/unsigned-installer/
+
+      - name: Upload unsigned installer
+        id: upload-unsigned-installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-installer
+          path: dist/unsigned-installer/*
+          if-no-files-found: error
+
+      - name: Sign installer (SignPath)
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: installer
+          github-artifact-id: ${{ steps.upload-unsigned-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 86400
+          output-artifact-directory: dist/release
+
+      - name: Licences page + SHA-256 sums
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item ui/src-tauri/binaries/licenses.html dist/release/
+          foreach ($f in Get-ChildItem dist/release -Filter *-setup.exe) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne 'Valid') { throw "$($f.Name): signature $($sig.Status)" }
+          }
+          $lines = Get-ChildItem dist/release -File | Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object Name |
+            ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+          [IO.File]::WriteAllText("$PWD/dist/release/SHA256SUMS.txt", (($lines -join "`n") + "`n"))
+          Get-Content dist/release/SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release create "$env:GITHUB_REF_NAME" (Get-ChildItem dist/release -File).FullName `
+            --title "Relay $env:GITHUB_REF_NAME" --generate-notes --draft

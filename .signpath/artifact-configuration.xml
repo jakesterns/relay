@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configurations for Relay. SignPath stores artifact
+  configurations per project in its web UI; this file is the source of truth
+  that the owner pastes there. There are two, because the NSIS installer
+  embeds the binaries and SignPath cannot reach inside an NSIS archive:
+
+    1. slug "binaries"  - a zip of the eight shipped PE files, signed in place
+                          (this file, first block). The release workflow puts
+                          the signed files back into the staging folder and only
+                          then builds the installer.
+    2. slug "installer" - a zip holding the one NSIS setup exe (second block,
+                          kept here as a comment; paste it as its own
+                          configuration).
+
+  Every file listed must be present: a missing or extra PE file fails the
+  request, which is the point - nothing unexpected gets signed.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="relay-ui.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay-core.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay-svc.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay-elevate.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay-share.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay-preview.exe"><authenticode-sign /></pe-file>
+    <pe-file path="relay_apo.dll"><authenticode-sign /></pe-file>
+    <pe-file path="relay_vdevice.dll"><authenticode-sign /></pe-file>
+  </zip-file>
+</artifact-configuration>
+<!--
+Second configuration, slug "installer":
+
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="Relay_*_x64-setup.exe">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
+-->
