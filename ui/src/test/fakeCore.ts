@@ -11,7 +11,7 @@ import type {
   ApoStatus, AudioEffectsStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
   ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
-  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
+  SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
 import type { EndpointApo } from "../lib/ipc";
 import { devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
@@ -61,6 +61,10 @@ export interface FakeCore {
   autostart: boolean;
   /** `settings.json`: what closing the window means. */
   prefs: UiPrefs;
+  /** The updater (S45). Nothing on offer by default. */
+  update: UpdateStatus;
+  /** The version "Skip this version" last recorded. */
+  skippedUpdate: string | null;
   /** Active audio endpoints (S40), both directions. */
   audioDevices: AudioDevices;
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
@@ -179,7 +183,15 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
     peers: [],
     autostart: false,
-    prefs: { close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {} },
+    prefs: {
+      close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
+      auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+    },
+    update: {
+      current: "0.1.0", phase: "idle", available: null, last_check: null,
+      last_error: null, last_result: null, waiting_for: null,
+    },
+    skippedUpdate: null,
     audioDevices: {
       render: [
         { id: "{spk}", name: "Speakers (USB Audio 2.0)", is_default: true },
@@ -228,6 +240,24 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     get_ui_prefs: () => structuredClone(core.prefs),
     set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
     ack_crash: () => void (core.state.last_crash = null),
+    update_status: () => structuredClone(core.update),
+    check_for_updates: () => {
+      core.update.last_check = 1_790_000_000;
+      return structuredClone(core.update);
+    },
+    install_update: () => {
+      if (core.update.available) core.update.phase = "downloading";
+      return structuredClone(core.update);
+    },
+    update_later: () => {
+      core.update.available = null;
+      return structuredClone(core.update);
+    },
+    skip_update: (a) => {
+      core.skippedUpdate = a.version as string;
+      core.update.available = null;
+      return structuredClone(core.update);
+    },
     // A core is already answering, so there is nothing to launch.
     start_core: () => false,
     start_share: (a) => {
@@ -487,6 +517,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "core_status", "list_profiles", "get_profile", "save_profile", "delete_profile",
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
+  "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",

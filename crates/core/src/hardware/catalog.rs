@@ -13,9 +13,10 @@
 //!   it would otherwise sit in the always-on core's working set forever to
 //!   serve a search the user runs a handful of times. It is read, scanned and
 //!   dropped.
-//! - This is the only outbound network call Relay makes. It is user-initiated
-//!   (picking a model), goes to one host, and is skipped entirely once the
-//!   curve is cached.
+//! - This is one of the two outbound requests Relay makes (the other is the
+//!   update check in `update.rs`, which reuses this WinHTTP GET). It is
+//!   user-initiated (picking a model), goes to one host, and is skipped
+//!   entirely once the curve is cached.
 //!
 //! Regenerate the index with `scripts/build-catalog.ps1`.
 
@@ -227,7 +228,30 @@ pub fn curve(entry: &CatalogEntry, cache_dir: &Path) -> Result<(Vec<(f32, f32)>,
 
 #[cfg(windows)]
 fn http_get(url: &str) -> Result<String> {
-    imp::http_get(url)
+    let mut out: Vec<u8> = Vec::new();
+    imp::https_get(url, &[], MAX_CURVE_BYTES, &mut |chunk| {
+        out.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    String::from_utf8(out).context("the measurement was not valid UTF-8")
+}
+
+/// Cap on a downloaded measurement. The largest AutoEQ CSV is ~60 KB; a
+/// megabyte means something is wrong and we should not buffer it.
+#[cfg(windows)]
+const MAX_CURVE_BYTES: usize = 1024 * 1024;
+
+/// The same WinHTTP GET for the update check (S45): extra request headers, a
+/// byte cap, and a sink, so a large download streams to disk instead of
+/// sitting in the core's memory.
+#[cfg(windows)]
+pub(crate) fn https_get(
+    url: &str,
+    headers: &[&str],
+    max_bytes: usize,
+    sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    imp::https_get(url, headers, max_bytes, sink)
 }
 
 #[cfg(not(windows))]
@@ -252,10 +276,6 @@ mod imp {
         WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
     };
 
-    /// Cap on a downloaded measurement. The largest AutoEQ CSV is ~60 KB; a
-    /// megabyte means something is wrong and we should not buffer it.
-    const MAX_BYTES: usize = 1024 * 1024;
-
     struct Handle(*mut std::ffi::c_void);
     impl Drop for Handle {
         fn drop(&mut self) {
@@ -269,8 +289,14 @@ mod imp {
         }
     }
 
-    pub fn http_get(url: &str) -> Result<String> {
+    pub fn https_get(
+        url: &str,
+        headers: &[&str],
+        max_bytes: usize,
+        sink: &mut dyn FnMut(&[u8]) -> Result<()>,
+    ) -> Result<()> {
         let (host, path) = split_url(url)?;
+        let header_w: Vec<u16> = headers.join("\r\n").encode_utf16().collect();
         let agent = HSTRING::from("Relay");
         let host_w = HSTRING::from(host.as_str());
         let path_w = HSTRING::from(path.as_str());
@@ -305,7 +331,8 @@ mod imp {
             if request.0.is_null() {
                 bail!("WinHttpOpenRequest failed: {}", std::io::Error::last_os_error());
             }
-            WinHttpSendRequest(request.0, None, None, 0, 0, 0)
+            let header_arg = if header_w.is_empty() { None } else { Some(header_w.as_slice()) };
+            WinHttpSendRequest(request.0, header_arg, None, 0, 0, 0)
                 .map_err(|e| anyhow::anyhow!("sending the request: {e}"))?;
             WinHttpReceiveResponse(request.0, std::ptr::null_mut())
                 .map_err(|e| anyhow::anyhow!("reading the response: {e}"))?;
@@ -322,14 +349,14 @@ mod imp {
             )
             .map_err(|e| anyhow::anyhow!("reading the status line: {e}"))?;
             if status == 404 {
-                bail!("the measurement is no longer at that path (HTTP 404); rebuild the index");
+                bail!("nothing at that path (HTTP 404)");
             }
             if !(200..300).contains(&status) {
                 bail!("HTTP {status}");
             }
 
-            let mut out: Vec<u8> = Vec::new();
-            let mut buf = [0u8; 16 * 1024];
+            let mut total: usize = 0;
+            let mut buf = vec![0u8; 16 * 1024];
             loop {
                 let mut read: u32 = 0;
                 WinHttpReadData(request.0, buf.as_mut_ptr() as *mut _, buf.len() as u32, &mut read)
@@ -337,12 +364,13 @@ mod imp {
                 if read == 0 {
                     break;
                 }
-                out.extend_from_slice(&buf[..read as usize]);
-                if out.len() > MAX_BYTES {
-                    bail!("the measurement is larger than {MAX_BYTES} bytes; refusing it");
+                total += read as usize;
+                if total > max_bytes {
+                    bail!("the response is larger than {max_bytes} bytes; refusing it");
                 }
+                sink(&buf[..read as usize])?;
             }
-            String::from_utf8(out).context("the measurement was not valid UTF-8")
+            Ok(())
         }
     }
 

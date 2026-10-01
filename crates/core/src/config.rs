@@ -158,6 +158,18 @@ impl Paths {
         self.data_dir().join("window.json")
     }
 
+    /// The update check's cache: last check time, what was found, a skipped
+    /// version and the last install's result (S45).
+    pub fn update_file(&self) -> PathBuf {
+        self.data_dir().join("update.json")
+    }
+
+    /// Where a downloaded installer and its sums file wait for verification
+    /// and install (S45). Emptied before each download.
+    pub fn updates_dir(&self) -> PathBuf {
+        self.data_dir().join("updates")
+    }
+
     /// Downloaded headphone measurements, one CSV per model. Cached so a
     /// model is fetched once ever; deleting this only costs a re-download.
     pub fn curves_dir(&self) -> PathBuf {

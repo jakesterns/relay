@@ -159,6 +159,39 @@ async fn ack_crash() -> CmdResult<()> {
     }
 }
 
+/// S45: every update method answers with the updater's status.
+async fn update_call(method: Method) -> CmdResult<relay_core::update::UpdateStatus> {
+    match call(method).await? {
+        Reply::Update { status } => Ok(status),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn update_status() -> CmdResult<relay_core::update::UpdateStatus> {
+    update_call(Method::UpdateStatus).await
+}
+
+#[tauri::command]
+async fn check_for_updates() -> CmdResult<relay_core::update::UpdateStatus> {
+    update_call(Method::CheckForUpdates).await
+}
+
+#[tauri::command]
+async fn install_update() -> CmdResult<relay_core::update::UpdateStatus> {
+    update_call(Method::InstallUpdate).await
+}
+
+#[tauri::command]
+async fn update_later() -> CmdResult<relay_core::update::UpdateStatus> {
+    update_call(Method::UpdateLater).await
+}
+
+#[tauri::command]
+async fn skip_update(version: String) -> CmdResult<relay_core::update::UpdateStatus> {
+    update_call(Method::SkipUpdate { version }).await
+}
+
 #[tauri::command]
 async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::GetUiPrefs).await? {
@@ -1095,6 +1128,11 @@ pub fn run() {
             forget_peer,
             set_peer_favourite,
             ack_crash,
+            update_status,
+            check_for_updates,
+            install_update,
+            update_later,
+            skip_update,
             list_hardware,
             save_hardware,
             delete_hardware,

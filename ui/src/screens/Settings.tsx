@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
+import { UpdatesCard } from "../components/UpdatesCard";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { api, installApoOp, setAudioEffectsOp, uninstallApoOp, type ApoStatus, type AudioEffectsStatus, type ElevatedOp, type ElevationResult, type EndpointApo, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
@@ -103,6 +104,7 @@ export function Settings() {
               : "Adds one value under HKCU\\...\\CurrentVersion\\Run. Nothing else on your PC is changed; turning this off removes it."} />
           <ErrorNote text={autostartErr} onDismiss={() => setAutostartErr(null)} />
         </Card>
+        <UpdatesCard prefs={prefs} setPref={setPref} />
         <Card title="When you close the window">
           {/* The honest line the background story needs. Relay is useful
               precisely while its window is shut, so what stays running has to

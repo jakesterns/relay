@@ -58,6 +58,17 @@ pub struct UiPrefs {
     /// the next time the core starts.
     #[serde(default)]
     pub cycle_listening_hotkey: bool,
+    /// Check GitHub for a newer release once a day (S45). On by default —
+    /// the owner's decision — and the check only ever *finds* an update.
+    #[serde(default = "default_true")]
+    pub auto_check_updates: bool,
+    /// Install a found update without asking (S45). Off by default: an
+    /// update is installed when the user says so.
+    #[serde(default)]
+    pub auto_install_updates: bool,
+    /// Offer pre-releases too (S45). Off by default.
+    #[serde(default)]
+    pub prerelease_updates: bool,
 }
 
 /// Per-track device choices from the mixer (S40). `None` = System default,
@@ -123,6 +134,9 @@ impl Default for UiPrefs {
             close_notice: true,
             audio_devices: AudioDevicePrefs::default(),
             cycle_listening_hotkey: false,
+            auto_check_updates: true,
+            auto_install_updates: false,
+            prerelease_updates: false,
         }
     }
 }
@@ -245,6 +259,22 @@ mod tests {
 
         let reloaded = PrefsStore::load(&p);
         assert_eq!(reloaded.get().close_action, CloseAction::QuitRelay);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn updates_are_checked_by_default_and_installed_only_when_asked() {
+        // The owner's decision (S45), pinned, for a fresh install and for a
+        // settings.json written before the fields existed.
+        let d = UiPrefs::default();
+        assert!(d.auto_check_updates);
+        assert!(!d.auto_install_updates);
+        assert!(!d.prerelease_updates);
+        let p = temp("pre-s45");
+        std::fs::write(&p, r#"{"version":1,"close_action":"keep_running"}"#).unwrap();
+        let prefs = PrefsStore::load(&p).get();
+        assert!(prefs.auto_check_updates);
+        assert!(!prefs.auto_install_updates);
         let _ = std::fs::remove_file(&p);
     }
 

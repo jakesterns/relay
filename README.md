@@ -49,9 +49,15 @@ what it installs and how to remove it. Uninstall from Windows Settings > Apps.
 - **LAN only.** Sharing uses WebRTC between PCs on the same network, with
   mDNS discovery, a six-digit pairing code and DTLS-SRTP encryption. Nothing
   goes through a server. There are no accounts, no telemetry and no analytics.
-- Relay makes one other network request, and only when you ask: fetching a
-  headphone's measured frequency response from the AutoEQ project on GitHub
-  (or you can paste a curve instead).
+- Relay makes two other network requests, both to GitHub:
+  - when you ask, fetching a headphone's measured frequency response from the
+    AutoEQ project (or you can paste a curve instead);
+  - an update check: at most once a day, never during a share or a game, Relay
+    asks GitHub's Releases API whether a newer Relay exists. Nothing about you
+    or your PC is sent. Turn it off in Settings > Updates ("Check for updates
+    automatically"). An update is downloaded and installed only when you choose
+    Install now (or turn on "Install updates automatically", off by default),
+    and only after its SHA-256 and signature check out.
 - **Nothing global is changed.** Relay does not change your default audio
   devices, apply system-wide EQ or edit other apps' settings. Before applying
   any profile it writes the original state to disk, and it restores that state
