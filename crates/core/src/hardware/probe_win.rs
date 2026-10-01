@@ -24,7 +24,8 @@ use windows::Win32::Graphics::Gdi::{
 /// `MONITORINFO::dwFlags` primary bit (winuser.h; not surfaced by the crate).
 const MONITORINFOF_PRIMARY: u32 = 1;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
+    eCapture, eConsole, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
+    DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
 use windows::Win32::System::Com::{
@@ -115,10 +116,51 @@ fn probe_endpoints() -> windows::core::Result<Vec<EndpointInfo>> {
                 key: endpoint_key(container.as_deref(), &id),
                 name: name.unwrap_or_else(|| "Unknown endpoint".into()),
                 default: !default_id.is_empty() && id == default_id,
+                fx_guid: super::fx_guid_of(&id),
             });
         }
+        super::listening::unique_endpoint_keys(&mut out);
         Ok(out)
     }
+}
+
+/// Active render and capture endpoints with friendly names and which is the
+/// console default, for the mixer's device pickers (S40). Read-only; an
+/// enumeration failure is an empty list, never an error the UI must handle.
+pub fn list_audio_devices() -> crate::share::AudioDevices {
+    let _com = ComGuard::init();
+    let list = |flow| -> Vec<crate::share::AudioDevice> {
+        // SAFETY: standard MMDevice enumeration, as in `probe_endpoints`.
+        unsafe {
+            let Ok(en) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            else {
+                return Vec::new();
+            };
+            let default_id = en
+                .GetDefaultAudioEndpoint(flow, eConsole)
+                .ok()
+                .and_then(|d| device_id(&d))
+                .unwrap_or_default();
+            let Ok(coll) = en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) else {
+                return Vec::new();
+            };
+            let n = coll.GetCount().unwrap_or(0);
+            let mut out = Vec::with_capacity(n as usize);
+            for i in 0..n {
+                let Ok(dev) = coll.Item(i) else { continue };
+                let Some(id) = device_id(&dev) else { continue };
+                let (name, _) = device_props(&dev);
+                out.push(crate::share::AudioDevice {
+                    is_default: !default_id.is_empty() && id == default_id,
+                    name: name.unwrap_or_else(|| "Unknown device".into()),
+                    id,
+                });
+            }
+            out
+        }
+    };
+    crate::share::AudioDevices { render: list(eRender), capture: list(eCapture) }
 }
 
 unsafe fn device_id(dev: &IMMDevice) -> Option<String> {

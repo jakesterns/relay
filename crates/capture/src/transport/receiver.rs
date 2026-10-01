@@ -41,6 +41,9 @@ pub struct RecvOpts {
     /// other participants — back to the sender as one more Opus track
     /// (S19). The service sets it from the user's pick; never inferred.
     pub return_pid: Option<u32>,
+    /// Play received audio on this endpoint (S40); `None` = the System
+    /// default, followed if it changes. `mic_route` wins when both are set.
+    pub output_device: Option<String>,
 }
 
 /// One depacketized video access unit.
@@ -194,6 +197,14 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let mut stdin_lines = crate::render::stdin_lines();
     let mut stdin_open = true;
     let mut host = opts.host;
+    // Relay Camera can be switched on or off while waiting (S43b): the
+    // choice is carried into the render thread when a sender connects.
+    let mut vcam = opts.vcam;
+    // Where received audio plays (S40). Made here so a pick while waiting
+    // for a sender is kept; the virtual-mic route, when set, is the output.
+    let output = crate::devices::DeviceSlot::shared(
+        opts.mic_route.clone().or_else(|| opts.output_device.clone()),
+    );
     let (mut sig, local_ip, offer_json, sender_name, trusted) = loop {
         let (tcp, from) = loop {
             tokio::select! {
@@ -209,6 +220,13 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                                 crate::command::HostMode::Embedded if owner != 0 => Some(owner),
                                 _ => None,
                             };
+                        }
+                        Some(crate::command::EngineCmd::Device { track, device }) => {
+                            crate::render::apply_device(&output, opts.mic_route.is_some(), track, device);
+                        }
+                        Some(crate::command::EngineCmd::Vcam { on }) => {
+                            info!(on, "vcam command received while waiting for a sender");
+                            vcam = on;
                         }
                         _ => {}
                     },
@@ -228,7 +246,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 // DTLS decides whether the claim is true, and "paired" is not
                 // reported until it has. That this PC is in Start receiving at
                 // all is the consent: remembering removes the code, not the
-                // consent (trust model §5, Jake's decision).
+                // consent (trust model §5, the owner's decision).
                 let fp = signal::sdp_fingerprint(&sdp);
                 let known =
                     fp.as_deref().and_then(|f| relay_core::peers::recognise(f).ok().flatten());
@@ -623,8 +641,12 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     }
 
     // Full receive mode is attached by the caller (decode + present + audio).
-    let render_opts =
-        crate::render::RenderOpts { vcam: opts.vcam, mic_route: opts.mic_route.clone(), host };
+    let render_opts = crate::render::RenderOpts {
+        vcam,
+        mic_route: opts.mic_route.clone(),
+        host,
+        output: output.clone(),
+    };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.
     let (end_tx, end_rx) = mpsc::channel::<()>(1);
@@ -803,6 +825,8 @@ async fn video_track_loop(
     let mut unknown_pt_logged = false;
     let mut media_ssrc = 0u32;
     let mut last_keyframe_request: Option<Instant> = None;
+    // When the current wait for a keyframe began, to log how long it took.
+    let mut key_wait_since: Option<Instant> = None;
     let mut withholding_since: Option<Instant> = None;
     // Unrepaired loss over ~1 s windows, for the sender's bitrate control.
     let mut window_start = Instant::now();
@@ -837,6 +861,16 @@ async fn video_track_loop(
                     stats.video_lost_packets.fetch_add(u64::from(lost), Ordering::Relaxed);
                     warn!(lost, "video packets not recovered in time; waiting for a keyframe");
                     asm.lost();
+                    // A fresh loss after the last request -- usually inside the
+                    // keyframe that answered it -- means that keyframe is broken
+                    // too: ask again now, not at the 500 ms retry (r35: every
+                    // double loss took 534 ms against a 17 ms norm). 20 ms keeps
+                    // one burst's losses to one request.
+                    if last_keyframe_request
+                        .is_some_and(|t| now.duration_since(t) >= Duration::from_millis(20))
+                    {
+                        last_keyframe_request = None;
+                    }
                     continue;
                 }
             };
@@ -900,8 +934,17 @@ async fn video_track_loop(
             withholding_since = None;
         }
 
+        if asm.need_keyframe {
+            key_wait_since.get_or_insert(now);
+        }
         if !asm.need_keyframe {
             last_keyframe_request = None;
+            if let Some(t) = key_wait_since.take() {
+                info!(
+                    ms = now.duration_since(t).as_millis() as u64,
+                    "keyframe arrived; the picture is clean again"
+                );
+            }
         } else if last_keyframe_request.is_none_or(|t| now.duration_since(t) >= KEYFRAME_RETRY) {
             last_keyframe_request = Some(now);
             stats.keyframe_requests.fetch_add(1, Ordering::Relaxed);

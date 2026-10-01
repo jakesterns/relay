@@ -66,13 +66,56 @@ export interface CatalogEntry { name: string; source: string; rig: string; path:
 /** A base64 JPEG thumbnail of the live capture (Event::SharePreview). */
 export interface SharePreview { width: number; height: number; jpeg: string }
 export interface AudioInterface { id: string; name: string }
-export interface EndpointInfo { key: string; name: string; default: boolean }
+export interface EndpointInfo {
+  key: string; name: string; default: boolean;
+  /** MMDevices endpoint GUID; where its FX store lives (read-only, S41). */
+  fx_guid?: string;
+}
+/** Something a person listens on through an output (S41). Mirrors
+ *  `hardware::listening::ListeningDevice`. */
+export type ListeningDevice = { kind: "headset"; id: HeadsetId } | { kind: "speakers" };
+/** What one output feeds. Mirrors `hardware::listening::EndpointListening`. */
+export interface EndpointListening { endpoint: string; devices: ListeningDevice[]; active?: ListeningDevice | null }
+/** Other processing seen on an output. Mirrors `hardware::other_processing`. */
+export interface OtherProcessor { name: string; kind: "apo" | "spatial" | "software"; advice: string; clsids?: string[] }
+export interface EndpointProcessing { endpoint: string; processors: OtherProcessor[] }
+
+/** The key listening devices are stored under; mirrors
+ *  `hardware::listening::listening_key`. Since S41b the core makes every
+ *  endpoint key unique (outputs of one device get `#<endpoint guid>`), so
+ *  this is the endpoint's own key. */
+export function listeningKey(_all: EndpointInfo[], ep: EndpointInfo): string {
+  return ep.key;
+}
+
+export function sameListening(a: ListeningDevice | null | undefined, b: ListeningDevice | null | undefined): boolean {
+  if (!a || !b) return false;
+  if (a.kind === "speakers" || b.kind === "speakers") return a.kind === b.kind;
+  return a.id === b.id;
+}
+
+/** The device correction uses on one output; mirrors `EndpointListening::active`:
+ *  one entry is active by itself, several need a pick that is still listed. */
+export function activeListening(l: EndpointListening | undefined): ListeningDevice | null {
+  if (!l || l.devices.length === 0) return null;
+  if (l.devices.length === 1) return l.devices[0];
+  return l.devices.find((d) => sameListening(d, l.active)) ?? null;
+}
 export interface MonitorProbe {
   id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
   primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[]; color?: ColorInfo;
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
-export interface HardwareView { endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null }
+export interface HardwareView {
+  endpoints: EndpointInfo[]; monitors: MonitorProbe[]; headset: HeadsetId | null;
+  /** What each output feeds (S41), keyed by `listeningKey`. */
+  listening?: EndpointListening[];
+  /** The default output's listening key. */
+  default_listening?: string | null;
+  active_listening?: ListeningDevice | null;
+  /** Third-party APOs and vendor audio software seen per output (read-only). */
+  other_processing?: EndpointProcessing[];
+}
 /** Vendor-private DDC/CI controls the core has a *verified* opcode for on one
  *  monitor. Mirrors `hardware::MonitorVendorControls`. The core decides: the
  *  quirks table and the evidence behind each opcode live in Rust, so the UI
@@ -162,6 +205,16 @@ export type MixerTrack = "app" | "rest" | "mic" | "call";
 /** `gain` is linear, 0–2 (unity 1). */
 export interface FaderLevel { gain: number; mute: boolean }
 export type FaderSet = Partial<Record<MixerTrack, FaderLevel>>;
+/** Device-backed tracks (S40): the sender's mic input, or where an engine
+ *  plays (the receiver's received mix, the sender's call return). */
+export type DeviceTrack = "mic" | "output";
+/** One active endpoint. Mirrors `share::AudioDevice`. */
+export interface AudioDevice { id: string; name: string; is_default: boolean }
+export interface AudioDevices { render: AudioDevice[]; capture: AudioDevice[] }
+/** Saved picks; absent = System default. Mirrors `uiprefs::AudioDevicePrefs`. */
+export interface AudioDevicePrefs {
+  send_mic?: string | null; send_output?: string | null; receive_output?: string | null;
+}
 /**
  * Recording container. Same video + Opus bitstream either way — the choice
  * never re-encodes. `mkv` survives a crash mid-file where `mp4` does not.
@@ -289,23 +342,64 @@ export interface FirewallStatus {
  *  the elevated helper will do. There is no free-form variant: this is the
  *  allow-list, and the core refuses anything else. */
 export type ElevatedOp =
-  | "install_apo" | "uninstall_apo" | "install_camera" | "uninstall_camera"
+  | { install_apo: { endpoint: string | null } }
+  | { uninstall_apo: { endpoint: string | null } }
+  | "install_camera" | "uninstall_camera"
   | "allow_firewall" | "remove_firewall";
+
+/** The APO ops name one render endpoint by GUID (S42). `null` = the default
+ *  output (install) / every recorded output (uninstall). */
+export const installApoOp = (endpoint: string | null): ElevatedOp => ({ install_apo: { endpoint } });
+export const uninstallApoOp = (endpoint: string | null): ElevatedOp => ({ uninstall_apo: { endpoint } });
+
+/** Stable spelling of an op, for switch statements and effect deps. */
+export function opKind(op: ElevatedOp): string {
+  return typeof op === "string" ? op : Object.keys(op)[0];
+}
+/** The endpoint an APO op names, if any. */
+export function opEndpoint(op: ElevatedOp): string | null {
+  if (typeof op === "string") return null;
+  return "install_apo" in op ? op.install_apo.endpoint : op.uninstall_apo.endpoint;
+}
 
 /** Result of one `runElevated`. `declined` means the user dismissed the UAC
  *  prompt, which is a normal answer: nothing was attempted. */
 export interface ElevationResult { declined: boolean; ok: boolean; lines: string[] }
 
-/** Mirror of relay-core's `audio_apo::ApoStatus`. */
-export interface ApoStatus { installed: boolean; endpoint: string | null; running: boolean }
+/** Mirror of relay-core's `audio_apo::EndpointApo`: one render endpoint on
+ *  the Settings APO card. */
+export interface EndpointApo {
+  endpoint: string;
+  name: string;
+  is_default: boolean;
+  installed: boolean;
+  backed_up: boolean;
+  running: boolean;
+}
+/** Mirror of relay-core's `audio_apo::ApoStatus`. The first three fields
+ *  describe the default output; `endpoints` lists every output (S42). */
+export interface ApoStatus {
+  installed: boolean;
+  endpoint: string | null;
+  running: boolean;
+  endpoints?: EndpointApo[];
+  /** Machine-wide audio-engine registration audiodg needs (S42b). */
+  audio_engine?: "registered" | "mismatch" | "missing";
+}
 /** Mirror of relay-vdevice's `installed::Consent`. */
 export interface VdeviceConsent { decided_at: string; apo: boolean; camera: boolean; microphone: boolean }
 export type MicTargetKind = "vb_cable" | "voice_meeter";
 export interface MicTarget { endpoint_id: string; name: string; kind: MicTargetKind }
 /** Mirror of relay-core's `vdevice::VdeviceStatus`. */
+/** How Relay Camera exists on this PC (S43): the Windows 11 22H2+ frame-server
+ *  camera (HKLM, one admin prompt) or, on Windows 10, a DirectShow filter
+ *  registered for this user only (no prompt). */
+export type CameraPath = "frame_server" | "direct_show";
 export interface VdeviceStatus {
   windows_build: number | null;
   camera_supported: boolean;
+  /** Absent from cores older than S43, which only knew the frame server. */
+  camera_path?: CameraPath | null;
   camera_registered: boolean;
   obs_virtualcam: string | null;
   mic_targets: MicTarget[];
@@ -320,6 +414,11 @@ export interface UiPrefs {
   resilience: boolean;
   /** Say in the notification area that Relay kept running on close (S38). */
   close_notice: boolean;
+  /** The mixer's device picks (S40). Absent in a pre-S40 core. */
+  audio_devices?: AudioDevicePrefs;
+  /** Ctrl+Alt+L cycles the default output's listening devices (S41). Off by
+   *  default; takes effect the next time Relay starts. */
+  cycle_listening_hotkey?: boolean;
 }
 
 export interface ShareStatus {
@@ -423,6 +522,10 @@ export const mockHardware: HardwareReply = {
       { id: "mon:GSM5C7C:402NTCZ9E219", name: "LG ULTRAGEAR+", native: [3840, 2160], refresh_hz: 144, primary: true, hmonitor: 65537, gdi_name: "\\\\.\\DISPLAY1" },
     ],
     headset: "hd560s",
+    listening: [],
+    default_listening: "ep:c:31f634a2-usb-dac",
+    active_listening: null,
+    other_processing: [],
   },
 };
 
@@ -476,6 +579,7 @@ let mockAutostart = false;
 const mockVdevice: VdeviceStatus = {
   windows_build: 26200,
   camera_supported: true,
+  camera_path: "frame_server",
   camera_registered: false,
   obs_virtualcam: null,
   mic_targets: [
@@ -489,20 +593,21 @@ const mockVdevice: VdeviceStatus = {
  *  be read without a core. The real lines come from the uninstall planner and
  *  the live FX store. */
 function mockElevationPlan(op: ElevatedOp): string[] {
+  const ep = opEndpoint(op) ?? "{endpoint}";
   const cam = "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}";
   const tail = ["", "Windows will ask for permission before any of this happens. Decline and nothing on this PC changes."];
-  switch (op) {
+  switch (opKind(op)) {
     case "install_apo":
       return [
-        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\{endpoint}\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
+        "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render\\" + ep + "\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
         "HKLM\\SOFTWARE\\Classes\\CLSID\\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
-        "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\{endpoint}.json (written before anything is changed)",
+        "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\" + ep + ".json (written before anything is changed)",
         ...tail,
       ];
     case "install_camera":
       return [cam, cam + "\\InprocServer32", ...tail];
     case "uninstall_apo":
-      return ["[x] Restore the endpoint audio chain — {endpoint} (needs admin)", ...tail];
+      return ["[x] Restore the endpoint audio chain — " + ep + " (needs admin)", ...tail];
     default:
       return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
   }
@@ -526,7 +631,26 @@ const mockCatalog: CatalogEntry[] = [
 ];
 
 /** Browser-mode stand-in for `settings.json`. */
-let mockUiPrefs: UiPrefs = { close_action: "keep_running", resilience: true, close_notice: true };
+let mockUiPrefs: UiPrefs = {
+  close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
+};
+/** Browser-mode stand-in for the endpoint list (S40). */
+const mockAudioDevices: AudioDevices = {
+  render: [
+    { id: "{0.0.0.00000000}.{spk}", name: "Speakers (USB Audio 2.0)", is_default: true },
+    { id: "{0.0.0.00000000}.{hdmi}", name: "LG ULTRAGEAR+ (NVIDIA HDA)", is_default: false },
+  ],
+  capture: [
+    { id: "{0.0.1.00000000}.{mic}", name: "Microphone (Rodecaster)", is_default: true },
+    { id: "{0.0.1.00000000}.{cam}", name: "Webcam microphone", is_default: false },
+  ],
+};
+
+/** The saved-prefs key for one track. A receiver has no mic. */
+export function devicePrefKey(side: MixerSide, track: DeviceTrack): keyof AudioDevicePrefs | null {
+  if (side === "receive" && track === "mic") return null;
+  return `${side}_${track}` as keyof AudioDevicePrefs;
+}
 
 export const api = {
   async status(): Promise<CoreState> {
@@ -633,6 +757,20 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("set_mixer", { side, faders });
   },
+  /** Active render and capture endpoints (S40). */
+  async listAudioDevices(): Promise<AudioDevices> {
+    if (!isTauri()) return structuredClone(mockAudioDevices);
+    return invoke<AudioDevices>("list_audio_devices");
+  },
+  /** One track's device, live and saved (S40). `null` = System default. */
+  async setAudioDevice(side: MixerSide, track: DeviceTrack, device: string | null): Promise<void> {
+    if (!isTauri()) {
+      const key = devicePrefKey(side, track);
+      if (key) mockUiPrefs = { ...mockUiPrefs, audio_devices: { ...mockUiPrefs.audio_devices, [key]: device } };
+      return;
+    }
+    return invoke<void>("set_audio_device", { side, track, device });
+  },
   async listPresets(): Promise<PresetsReply> {
     if (!isTauri()) return structuredClone({ presets: mockPresets, recording: mockRecording });
     return invoke<PresetsReply>("list_presets");
@@ -712,6 +850,27 @@ export const api = {
     }
     return invoke<void>("delete_hardware", { id });
   },
+  /** Replace what an output feeds (S41). */
+  async setListeningDevices(endpoint: string, devices: ListeningDevice[]): Promise<void> {
+    if (!isTauri()) {
+      const c = mockHardware.connected;
+      const rest = (c.listening ?? []).filter((l) => l.endpoint !== endpoint);
+      const prev = (c.listening ?? []).find((l) => l.endpoint === endpoint);
+      const active = prev?.active && devices.some((d) => sameListening(d, prev.active)) ? prev.active : null;
+      c.listening = devices.length ? [...rest, { endpoint, devices: structuredClone(devices), active }] : rest;
+      return;
+    }
+    return invoke<void>("set_listening_devices", { endpoint, devices });
+  },
+  /** Mark which listening device on an output is in use: the quick switch. */
+  async setActiveListening(endpoint: string, device: ListeningDevice): Promise<void> {
+    if (!isTauri()) {
+      const l = (mockHardware.connected.listening ?? []).find((x) => x.endpoint === endpoint);
+      if (l) l.active = structuredClone(device);
+      return;
+    }
+    return invoke<void>("set_active_listening", { endpoint, device });
+  },
   async probeHardware(): Promise<ProbeReport> {
     if (!isTauri()) return structuredClone(mockHardware.connected);
     return invoke<ProbeReport>("probe_hardware");
@@ -757,22 +916,30 @@ export const api = {
     }
     return invoke<FirewallStatus>("firewall_status");
   },
-  /** Read-only probe: is the Relay APO on the default render endpoint? */
+  /** Read-only probe: is the Relay APO installed, per render endpoint? */
   async apoStatus(): Promise<ApoStatus> {
-    if (!isTauri()) return { installed: false, endpoint: null, running: false };
+    if (!isTauri()) {
+      return {
+        installed: false, endpoint: "{mock-headphones}", running: false,
+        endpoints: [
+          { endpoint: "{mock-headphones}", name: "Headphones (USB DAC)", is_default: true, installed: false, backed_up: false, running: false },
+          { endpoint: "{mock-spdif}", name: "Digital Output (S/PDIF)", is_default: false, installed: false, backed_up: false, running: false },
+        ],
+      };
+    }
     return invoke<ApoStatus>("apo_status");
   },
   /** Register the APO (backup-then-apply). Direct, unelevated path — the
    *  Settings card goes through `runElevated` instead. Kept for the CLI and
    *  the VM runbook, where the gates are already armed. */
-  async installApo(): Promise<void> {
+  async installApo(endpoint: string | null = null): Promise<void> {
     if (!isTauri()) throw new Error("Installing the APO needs the Relay core");
-    return invoke<void>("install_apo");
+    return invoke<void>("install_apo", { endpoint });
   },
-  /** Restore the endpoint's FX chain from the install backup and unregister. */
-  async uninstallApo(): Promise<void> {
+  /** Restore one endpoint's FX chain from its install backup. */
+  async uninstallApo(endpoint: string | null = null): Promise<void> {
     if (!isTauri()) throw new Error("Removing the APO needs the Relay core");
-    return invoke<void>("uninstall_apo");
+    return invoke<void>("uninstall_apo", { endpoint });
   },
   /** Exactly what an elevated op would change on this PC. Read-only, and the
    *  listing the user reads *before* the Windows permission prompt. */

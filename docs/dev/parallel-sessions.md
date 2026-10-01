@@ -33,7 +33,7 @@ in the main tree on a `chore/` branch.
 ## Adding one
 
 ```
-cd "C:\Users\stern\Documents\Code\Stream Share"
+cd "<repo root>"
 git worktree add -b feat/<name> ..\relay-<name> main
 cd ..\relay-<name>\ui && pnpm install
 ```
@@ -43,7 +43,7 @@ cd ..\relay-<name>\ui && pnpm install
 ## Finishing one
 
 ```
-cd "C:\Users\stern\Documents\Code\Stream Share"
+cd "<repo root>"
 git merge --no-ff feat/<name>          # or open a PR
 git push
 git worktree remove ..\relay-<name>
@@ -106,7 +106,7 @@ live in the common git dir, so only one install runs at a time and the log
 names the tree that produced each line:
 
 ```
-[18:13:38] (Stream Share) installed b6ae8b66 -> C:\Users\stern\AppData\Local\Relay
+[18:13:38] (Stream Share) installed b6ae8b66 -> %LOCALAPPDATA%\Relay
 [18:20:02] (relay-mkv) an install is already running; skipping
 ```
 

@@ -290,6 +290,23 @@ describe("whether a call will see the stream", () => {
     expect(kv("Camera", card("In calls"))).toBe("Needs Windows 11 22H2+ (this PC: build 19045)");
   });
 
+  it("offers the camera on Windows 10 through the per-user filter (S43)", async () => {
+    core.vdevice = { ...core.vdevice, camera_supported: true, camera_path: "direct_show", windows_build: 19045 };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Camera", card("In calls"))).toBe("Not enabled — turn it on in Settings");
+    expect(card("In calls")).not.toHaveTextContent(/Windows 11/);
+  });
+
+  it("says which apps list the Windows 10 camera once it is installed", async () => {
+    core.vdevice = { ...core.vdevice, camera_path: "direct_show", windows_build: 19045, camera_registered: true };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Camera", card("In calls"))).toBe('"Relay Camera" — pick it in Discord, Zoom or Meet');
+    expect(card("In calls")).toHaveTextContent(/Zoom, Discord, Teams, Chrome and Edge/);
+    expect(card("In calls")).toHaveTextContent(/Windows Camera app does not list it/);
+  });
+
   it("says Relay does not feed an OBS camera that happens to be installed", async () => {
     core.vdevice = { ...core.vdevice, obs_virtualcam: "OBS Virtual Camera" };
     tauri.useFakeCore(core.handler);
@@ -619,6 +636,17 @@ describe("a receiver brought back on its own", () => {
     expect(screen.queryByText(/ended/)).not.toBeInTheDocument();
   });
 
+  /** r41: after this PC's own failure the status line said the sender
+   *  dropped, beside a notice saying this PC stopped. */
+  it("blames this PC, not the sender, when the receiver reported a failure", async () => {
+    await mount();
+    await paired();
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: false, restarting: true, message: "the decoder failed" }));
+    expect(screen.getByText(/This PC stopped showing the share from studio-pc/)).toBeInTheDocument();
+    expect(screen.queryByText(/dropped/)).not.toBeInTheDocument();
+  });
+
   it("says ended, not dropped, when the sender stopped it", async () => {
     await mount();
     await paired();
@@ -650,7 +678,9 @@ describe("the mixer", () => {
   it("waits for a sender, then grows a row as each track arrives", async () => {
     await mount();
     await push(() => tauri.emit("core://receive-status", { receiving: true, code: "418254" }));
-    expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
+    // Before a sender: the Output pick is there (choose where it plays
+    // first), but no faders yet.
+    expect(screen.queryByRole("slider", { name: "Their audio" })).not.toBeInTheDocument();
 
     await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
     expect(screen.getByRole("slider", { name: "Their audio" })).toBeInTheDocument();

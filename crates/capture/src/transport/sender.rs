@@ -80,6 +80,11 @@ pub struct SendOpts {
     /// program captures the game's audio itself. The core decides this from
     /// the preset, consent and registration; the engine never chooses it.
     pub vcam: bool,
+    /// The microphone endpoint id (S40); `None` = the System default, which
+    /// the track then follows if it changes mid-share.
+    pub mic_device: Option<String>,
+    /// Where the call coming back plays (S40); `None` = the System default.
+    pub output_device: Option<String>,
 }
 
 /// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
@@ -530,6 +535,12 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let stop = Arc::new(AtomicBool::new(false));
     // Per-track gain and mute, set from stdin, read by each audio thread (S37).
     let faders = crate::mixer::Faders::shared();
+    // Which endpoint the mic and the call-return output use, set live from
+    // stdin (S40). Empty = the System default, followed if it changes.
+    let device_slots = Arc::new(crate::devices::DeviceSlots::new(
+        opts.mic_device.clone(),
+        opts.output_device.clone(),
+    ));
     // The call coming back (S19). The receiver sends at most one track our
     // way; when it arrives, play it on the default endpoint behind the Call
     // fader. The playback thread starts only then, so a share with nothing
@@ -539,6 +550,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let mut tracks = events.tracks;
         let stats = stats.clone();
         let faders = faders.clone();
+        let output_slot = device_slots.output.clone();
         let runtime2 = runtime.clone();
         runtime.spawn(Box::pin(async move {
             while let Some(track) = tracks.recv().await {
@@ -553,13 +565,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 let play_stats = Arc::new(crate::playback::PlaybackStats::default());
                 let play_stats2 = play_stats.clone();
                 let faders2 = faders.clone();
+                let output_slot2 = output_slot.clone();
                 let spawned = std::thread::Builder::new()
                     .name("relay-return-playback".into())
                     .spawn(move || {
                         if let Err(e) = crate::playback::run(
                             vec![(rx, crate::mixer::Track::Call)],
                             stop_rx,
-                            None,
+                            output_slot2,
                             play_stats2,
                             faders2,
                         ) {
@@ -772,8 +785,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let rec = recorder.clone();
         let faders = faders.clone();
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
+            // The program mix follows the default output (S40); no pick.
             if let Err(e) =
-                audio_pipeline(source, AudioTrack::Program, atx, stats, stop, rec, faders)
+                audio_pipeline(source, AudioTrack::Program, None, atx, stats, stop, rec, faders)
             {
                 warn!(error = %e, "audio pipeline stopped");
             }
@@ -788,12 +802,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let stop = stop.clone();
         let rec = recorder.clone();
         let faders = faders.clone();
+        let mic_slot = device_slots.mic.clone();
         Some(std::thread::Builder::new().name("relay-mic-pipeline".into()).spawn(move || {
             // A missing or exclusively-held microphone must not take the
             // share down with it: video and the program mix carry on.
             if let Err(e) = audio_pipeline(
                 AudioSource::Microphone,
                 AudioTrack::Mic,
+                Some(mic_slot),
                 mtx,
                 stats,
                 stop,
@@ -824,6 +840,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             if let Err(e) = audio_pipeline(
                 AudioSource::Rest { pid },
                 AudioTrack::Rest,
+                None,
                 rtx,
                 stats,
                 stop,
@@ -1026,8 +1043,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             faders.apply(&set);
                             debug!(?set, "mixer set");
                         }
+                        Some(EngineCmd::Device { track, device }) => {
+                            let changed = device_slots.apply(track, device.clone());
+                            info!(?track, device = device.as_deref().unwrap_or("System default"), changed, "audio device set");
+                        }
                         Some(EngineCmd::Host { .. }) => {
                             debug!("host is a receiver command; ignored by the sender");
+                        }
+                        // S36's "Relay Camera here" stays decided at spawn:
+                        // the core arbitrates the one ring writer between a
+                        // share and a receive, so a live toggle is receiver
+                        // only (S43b; docs/plans/S43-vcam-win10.md).
+                        Some(EngineCmd::Vcam { on }) => {
+                            info!(on, "vcam is a receiver command; ignored by the sender");
                         }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");
@@ -1093,23 +1121,9 @@ const RTP_OUTBOUND_MTU: usize = 1200;
 /// the camera is registered. Every failure is reported as a `vcam_error` line
 /// and answered with `None`: a webcam is never a reason to lose the share.
 fn start_vcam_sink(size: (u32, u32), fps: u32) -> Option<crate::vcam_sink::VcamSink> {
-    // `MFCreateVirtualCamera` is delay-loaded; on a Windows without it the
-    // call is a structured exception, not an error. Same guard as the receiver.
-    if !relay_vdevice::detect::frameserver_supported() {
-        let build = relay_vdevice::detect::windows_build();
-        warn!(?build, "MFCreateVirtualCamera not present; sharing without Relay Camera");
-        println!(
-            "{}",
-            serde_json::json!({
-                "event": "vcam_error",
-                "message": format!(
-                    "this PC has no virtual camera API (Windows build {}); the share still goes out",
-                    build.map(|b| b.to_string()).unwrap_or_else(|| "unknown".into()),
-                ),
-            })
-        );
-        return None;
-    }
+    // `VcamSink::start` picks the path: the frame-server camera where the API
+    // exists, the DirectShow ring (S43) on Windows 10. It never calls the
+    // delay-loaded MFCreateVirtualCamera where the export is missing.
     match crate::vcam_sink::VcamSink::start(size.0, size.1, fps) {
         Ok(sink) => {
             println!(
@@ -1298,6 +1312,12 @@ fn video_pipeline(
                 let Some(frame) = frame else {
                     tracing::debug!("no capture frame in 250ms");
                     if let Some(nv12) = last_nv12.as_ref() {
+                        // A keyframe asked for on a still screen is owed now,
+                        // not at the next screen change: the receiver sat
+                        // paused through five requests for 2.3 s (r34, 2b).
+                        if keyframe_wanted.swap(false, Ordering::Relaxed) {
+                            let _ = enc.request_keyframe();
+                        }
                         let pts = time::qpc_now_100ns();
                         enc.submit(nv12, pts)?;
                         inflight.insert(pts, pts);
@@ -1437,9 +1457,11 @@ pub enum AudioTrack {
     Rest = 2,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn audio_pipeline(
     source: AudioSource,
     which: AudioTrack,
+    device: Option<Arc<crate::devices::DeviceSlot>>,
     tx: mpsc::Sender<(Vec<u8>, Duration)>,
     stats: Arc<Stats>,
     stop: Arc<AtomicBool>,
@@ -1450,7 +1472,7 @@ fn audio_pipeline(
         AudioTrack::Program | AudioTrack::Rest => OpusProfile::program(),
         AudioTrack::Mic => OpusProfile::voice(),
     };
-    let mut stream = OpusStream::new(source, profile)?;
+    let mut stream = OpusStream::new_on(source, profile, device)?;
     stream.set_faders(
         faders,
         match which {

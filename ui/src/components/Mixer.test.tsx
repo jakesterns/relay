@@ -125,3 +125,76 @@ describe("MixerCard", () => {
     expect(screen.queryByText("Mixer")).not.toBeInTheDocument();
   });
 });
+
+describe("device pickers (S40)", () => {
+  const sendDevices = [
+    { track: "mic" as const, row: "mic" as const, label: "Microphone input" },
+    { track: "output" as const, row: "call" as const, label: "Call output" },
+  ];
+  const picker = (label: string) => screen.getByRole("combobox", { name: label }) as HTMLSelectElement;
+  const optionTexts = (sel: HTMLSelectElement) => Array.from(sel.options).map((o) => o.textContent);
+
+  it("defaults to the System default, named after the current default device", async () => {
+    renderScreen(<MixerCard side="send" rows={rows} sessionKey="a" devices={sendDevices} />);
+    await settle();
+    const mic = picker("Microphone input");
+    expect(mic.value).toBe("");
+    expect(optionTexts(mic)).toEqual([
+      "System default (Microphone (Rodecaster))", "Microphone (Rodecaster)", "Webcam microphone",
+    ]);
+    // No call row, so no call-output picker: a picker only rides with its row.
+    expect(screen.queryByRole("combobox", { name: "Call output" })).not.toBeInTheDocument();
+    expect(tauri.lastCall("set_audio_device")).toBeUndefined();
+  });
+
+  it("sends a pick live and saves it; picking the default sends null", async () => {
+    renderScreen(<MixerCard side="send" rows={rows} sessionKey="a" devices={sendDevices} />);
+    await settle();
+    fireEvent.change(picker("Microphone input"), { target: { value: "{cam}" } });
+    await settle();
+    expect(tauri.lastCall("set_audio_device")?.args).toEqual({ side: "send", track: "mic", device: "{cam}" });
+    expect(core.prefs.audio_devices?.send_mic).toBe("{cam}");
+    expect(picker("Microphone input").value).toBe("{cam}");
+    fireEvent.change(picker("Microphone input"), { target: { value: "" } });
+    await settle();
+    expect(tauri.lastCall("set_audio_device")?.args).toEqual({ side: "send", track: "mic", device: null });
+  });
+
+  it("shows a saved pick, and one that is unplugged as such rather than as the default", async () => {
+    core.prefs = { ...core.prefs, audio_devices: { send_mic: "{gone}" } };
+    renderScreen(<MixerCard side="send" rows={rows} sessionKey="a" devices={sendDevices} />);
+    await settle();
+    const mic = picker("Microphone input");
+    expect(mic.value).toBe("{gone}");
+    expect(mic.selectedOptions[0].textContent).toMatch(/not connected/);
+  });
+
+  it("lists render endpoints for an output, as its own row on the receiver", async () => {
+    core.prefs = { ...core.prefs, audio_devices: { receive_output: "{hdmi}" } };
+    renderScreen(<MixerCard side="receive" rows={rows} sessionKey="r"
+      devices={[{ track: "output", label: "Output" }]} />);
+    await settle();
+    const out = picker("Output");
+    expect(out.value).toBe("{hdmi}");
+    expect(optionTexts(out)[0]).toBe("System default (Speakers (USB Audio 2.0))");
+    fireEvent.change(out, { target: { value: "" } });
+    await settle();
+    expect(tauri.lastCall("set_audio_device")?.args).toEqual({ side: "receive", track: "output", device: null });
+  });
+
+  it("re-reads the endpoint list when a picker takes focus, so a new device appears", async () => {
+    renderScreen(<MixerCard side="send" rows={rows} sessionKey="a" devices={sendDevices} />);
+    await settle();
+    core.audioDevices.capture.push({ id: "{usb}", name: "USB headset", is_default: false });
+    fireEvent.focus(picker("Microphone input"));
+    await settle();
+    expect(optionTexts(picker("Microphone input"))).toContain("USB headset");
+  });
+
+  it("asks for nothing when there are no pickers", async () => {
+    renderScreen(<MixerCard side="send" rows={rows} sessionKey="a" />);
+    await settle();
+    expect(tauri.lastCall("list_audio_devices")).toBeUndefined();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+});

@@ -97,6 +97,18 @@ pub enum Method {
         side: crate::share::MixerSide,
         faders: crate::share::FaderSet,
     },
+    /// Active render and capture endpoints for the mixer's device pickers
+    /// (S40). Read-only.
+    ListAudioDevices,
+    /// Point one device-backed track at an endpoint, or back at the System
+    /// default (`device` null), live on a running share or receive, and
+    /// saved for the next one (S40).
+    SetAudioDevice {
+        side: crate::share::MixerSide,
+        track: crate::share::DeviceTrack,
+        #[serde(default)]
+        device: Option<String>,
+    },
     /// Presets and recording settings.
     ListPresets,
     SavePreset {
@@ -144,6 +156,20 @@ pub enum Method {
     DeleteHardware {
         id: String,
     },
+    /// Replace what an output feeds (S41): the ordered listening devices
+    /// the user said are connected to it. `endpoint` is the listening key
+    /// from `HardwareView::endpoints`/`listening`. Headsets must already be
+    /// in the library.
+    SetListeningDevices {
+        endpoint: String,
+        devices: Vec<crate::hardware::ListeningDevice>,
+    },
+    /// Pick which of an output's listening devices is on the user's head
+    /// (or that it is the speakers) -- the quick switch (S41).
+    SetActiveListening {
+        endpoint: String,
+        device: crate::hardware::ListeningDevice,
+    },
     /// Full re-probe including the slow DDC/CI capability query; refreshes the
     /// cached connected state and stores VCP lists on known library monitors.
     ProbeHardware,
@@ -183,15 +209,23 @@ pub enum Method {
     /// policy reads, no elevation and no prompt. Cheap enough to call when a
     /// screen opens, but not on a timer.
     FirewallStatus,
-    /// Is the endpoint APO registered on the default render endpoint?
-    /// Read-only registry probe.
+    /// Is the endpoint APO registered, per render endpoint (S42)? Read-only
+    /// registry probe plus the backups on disk.
     ApoStatus,
-    /// Register the APO (backup-then-apply). Refused unless the live-write
-    /// gate is set — VM / installer only.
-    InstallApo,
-    /// Restore the endpoint's FX property store from the install backup and
-    /// unregister. Same gate.
-    UninstallApo,
+    /// Register the APO on one render endpoint (default output when
+    /// `endpoint` is absent), backup-then-apply. Refused unless the
+    /// live-write gate is set — VM / installer only; the UI goes through
+    /// `RunElevated`.
+    InstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
+    /// Restore one endpoint's FX property store from its install backup.
+    /// Same gate.
+    UninstallApo {
+        #[serde(default)]
+        endpoint: Option<String>,
+    },
     /// Virtual-device state: Windows support, registration, consent, OBS /
     /// VB-Cable detection. Read-only.
     VdeviceStatus,
@@ -287,6 +321,10 @@ pub enum Reply {
     },
     UiPrefs {
         prefs: crate::uiprefs::UiPrefs,
+    },
+    /// Reply to `ListAudioDevices` (S40).
+    AudioDevices {
+        devices: crate::share::AudioDevices,
     },
     Receivers {
         receivers: serde_json::Value,
@@ -828,6 +866,61 @@ mod tests {
 
     /// Locks the wire shape that `ui/src/lib/ipc.ts` mirrors.
     #[test]
+    fn apo_methods_wire_shape() {
+        let ep = "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}";
+        let r: Request = serde_json::from_str(&format!(
+            r#"{{"id":1,"method":"install_apo","params":{{"endpoint":"{ep}"}}}}"#
+        ))
+        .unwrap();
+        assert!(matches!(r.method, Method::InstallApo { endpoint: Some(ref e) } if e == ep));
+        let r: Request =
+            serde_json::from_str(r#"{"id":2,"method":"uninstall_apo","params":{}}"#).unwrap();
+        assert!(matches!(r.method, Method::UninstallApo { endpoint: None }));
+        let r: Request = serde_json::from_str(&format!(
+            r#"{{"id":3,"method":"run_elevated","params":{{"op":{{"install_apo":{{"endpoint":"{ep}"}}}}}}}}"#
+        ))
+        .unwrap();
+        match r.method {
+            Method::RunElevated { op } => assert_eq!(op.endpoint(), Some(ep)),
+            other => panic!("{other:?}"),
+        }
+        let r: Request = serde_json::from_str(
+            r#"{"id":4,"method":"elevation_plan","params":{"op":"install_camera"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r.method,
+            Method::ElevationPlan { op: crate::elevate::ElevatedOp::InstallCamera }
+        ));
+        let v = serde_json::to_value(Method::InstallApo { endpoint: None }).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "method": "install_apo", "params": { "endpoint": null } })
+        );
+        let reply = serde_json::to_value(Reply::Apo {
+            status: crate::audio_apo::ApoStatus {
+                installed: false,
+                endpoint: None,
+                running: false,
+                endpoints: vec![crate::audio_apo::EndpointApo {
+                    endpoint: ep.into(),
+                    name: "Headphones".into(),
+                    is_default: true,
+                    installed: true,
+                    backed_up: true,
+                    running: false,
+                }],
+                audio_engine: crate::audio_apo::AudioEngineRegistration::Registered,
+            },
+        })
+        .unwrap();
+        let e = &reply["status"]["endpoints"][0];
+        for k in ["endpoint", "name", "is_default", "installed", "backed_up", "running"] {
+            assert!(e.get(k).is_some(), "missing {k}");
+        }
+    }
+
+    #[test]
     fn hardware_methods_wire_shape() {
         use crate::hardware::{Headset, HeadsetKind};
         let m = Method::SaveHardware {
@@ -862,6 +955,81 @@ mod tests {
         .unwrap();
         assert_eq!(v["method"], "import_curve");
         assert_eq!(v["params"]["headset"], "hd560s");
+    }
+
+    /// Locks the S41 listening-device wire shape `ui/src/lib/ipc.ts` mirrors.
+    #[test]
+    fn listening_methods_wire_shape() {
+        use crate::hardware::ListeningDevice;
+        let hd = ListeningDevice::Headset { id: crate::types::HeadsetId("hd560s".into()) };
+        let v = serde_json::to_value(Request {
+            id: 3,
+            method: Method::SetListeningDevices {
+                endpoint: "ep:c:rode".into(),
+                devices: vec![hd.clone(), ListeningDevice::Speakers],
+            },
+        })
+        .unwrap();
+        assert_eq!(v["method"], "set_listening_devices");
+        assert_eq!(v["params"]["endpoint"], "ep:c:rode");
+        assert_eq!(v["params"]["devices"][0]["kind"], "headset");
+        assert_eq!(v["params"]["devices"][0]["id"], "hd560s");
+        assert_eq!(v["params"]["devices"][1]["kind"], "speakers");
+
+        let v = serde_json::to_value(Request {
+            id: 4,
+            method: Method::SetActiveListening { endpoint: "ep:c:rode".into(), device: hd },
+        })
+        .unwrap();
+        assert_eq!(v["method"], "set_active_listening");
+        assert_eq!(v["params"]["device"]["id"], "hd560s");
+        let back: Request = serde_json::from_value(v).unwrap();
+        assert!(matches!(back.method, Method::SetActiveListening { .. }));
+    }
+
+    /// The exact payload `api.setListeningDevices` sends (ui/src/lib/ipc.ts,
+    /// locked there by Listening.test.tsx) parses; bare id strings do not.
+    #[test]
+    fn listening_devices_parse_from_the_ui_payload_only() {
+        use crate::hardware::ListeningDevice;
+        let ui = r#"{"id":1,"method":"set_listening_devices","params":{"endpoint":"ep:c:rode#aaaa","devices":[{"kind":"headset","id":"hd560s"},{"kind":"speakers"}]}}"#;
+        let r: Request = serde_json::from_str(ui).unwrap();
+        match r.method {
+            Method::SetListeningDevices { endpoint, devices } => {
+                assert_eq!(endpoint, "ep:c:rode#aaaa");
+                assert_eq!(devices[1], ListeningDevice::Speakers);
+            }
+            other => panic!("{other:?}"),
+        }
+        let bare = r#"{"id":1,"method":"set_listening_devices","params":{"endpoint":"x","devices":["hd560s"]}}"#;
+        assert!(serde_json::from_str::<Request>(bare).is_err());
+    }
+
+    #[test]
+    fn audio_device_methods_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (listAudioDevices / setAudioDevice).
+        let m = Method::SetAudioDevice {
+            side: crate::share::MixerSide::Send,
+            track: crate::share::DeviceTrack::Mic,
+            device: Some("{mic}".into()),
+        };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "set_audio_device");
+        assert_eq!(v["params"]["side"], "send");
+        assert_eq!(v["params"]["track"], "mic");
+        assert_eq!(v["params"]["device"], "{mic}");
+        // A missing device is the System default.
+        let r: Request = serde_json::from_str(
+            r#"{"id":2,"method":"set_audio_device","params":{"side":"receive","track":"output"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.method, Method::SetAudioDevice { device: None, .. }));
+        let r: Request = serde_json::from_str(r#"{"id":3,"method":"list_audio_devices"}"#).unwrap();
+        assert!(matches!(r.method, Method::ListAudioDevices));
+        let reply = Reply::AudioDevices { devices: crate::share::AudioDevices::default() };
+        let v = serde_json::to_value(&reply).unwrap();
+        assert_eq!(v["type"], "audio_devices");
+        assert!(v["devices"]["render"].is_array() && v["devices"]["capture"].is_array());
     }
 
     #[test]

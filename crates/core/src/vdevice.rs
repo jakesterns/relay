@@ -13,15 +13,27 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Paths;
-use relay_vdevice::installed::{self, Consent, InstalledFile, CAMERA_MEDIA_SOURCE};
+use relay_vdevice::installed::{
+    self, Consent, InstalledFile, CAMERA_DSHOW_FILTER, CAMERA_MEDIA_SOURCE,
+};
+
+/// How Relay Camera is provided (re-exported for the IPC mirror).
+pub use relay_vdevice::reg::CameraPath;
 
 /// What the consent screen, Settings card and `relay-core vdevice` show.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VdeviceStatus {
-    /// Windows build number, and whether it carries the frame-server API.
+    /// Windows build number.
     pub windows_build: Option<u32>,
+    /// Relay Camera can exist on this PC — through either path (S43: the
+    /// DirectShow filter makes that true on Windows 10 too).
     pub camera_supported: bool,
-    /// Camera media source recorded (and expected) as registered.
+    /// Which path this PC uses: "frame_server" (Windows 11 22H2+, HKLM,
+    /// elevated) or "direct_show" (older, per-user, no elevation). None`n    /// off Windows.
+    #[serde(default)]
+    pub camera_path: Option<CameraPath>,
+    /// The component for this PC's path is recorded (and expected) as
+    /// registered.
     pub camera_registered: bool,
     /// OBS VirtualCam filter DLL, when its CLSID is registered (fallback).
     pub obs_virtualcam: Option<String>,
@@ -48,10 +60,12 @@ fn save(paths: &Paths, file: &InstalledFile) -> Result<()> {
 pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
     use relay_vdevice::detect;
     let file = load(paths)?;
+    let path = detect::camera_path();
     Ok(VdeviceStatus {
         windows_build: detect::windows_build(),
-        camera_supported: detect::frameserver_supported(),
-        camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
+        camera_supported: true,
+        camera_path: Some(path),
+        camera_registered: file.component(component_for(path)).is_some(),
         obs_virtualcam: detect::obs_virtualcam(),
         mic_targets: detect::mic_targets().unwrap_or_default(),
         consent: file.consent,
@@ -65,6 +79,7 @@ pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
     Ok(VdeviceStatus {
         windows_build: None,
         camera_supported: false,
+        camera_path: None,
         camera_registered: file.component(CAMERA_MEDIA_SOURCE).is_some(),
         obs_virtualcam: None,
         mic_targets: Vec::new(),
@@ -85,13 +100,43 @@ pub fn set_consent(paths: &Paths, apo: bool, camera: bool, microphone: bool) -> 
 /// The dry-run listing the consent screen shows: exactly what an install
 /// would create, before anything is created.
 pub fn camera_dry_run() -> Vec<String> {
+    #[cfg(windows)]
+    let path = relay_vdevice::detect::camera_path();
+    #[cfg(not(windows))]
+    let path = CameraPath::FrameServer;
+    camera_dry_run_for(path)
+}
+
+/// The dry-run listing for one path (pure apart from locating the DLL).
+pub fn camera_dry_run_for(path: CameraPath) -> Vec<String> {
     let dll = camera_dll_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| format!("<install dir>\\{CAMERA_DLL} (not built yet)"));
-    let plan = relay_vdevice::reg::plan_camera_install(&dll);
-    let mut lines: Vec<String> = plan.keys.iter().map(|k| format!(r"HKLM\{}", k.path)).collect();
+    let (hive, plan) = match path {
+        CameraPath::FrameServer => ("HKLM", relay_vdevice::reg::plan_camera_install(&dll)),
+        CameraPath::DirectShow => ("HKCU", relay_vdevice::reg::plan_dshow_install(&dll)),
+    };
+    let mut lines: Vec<String> = plan.keys.iter().map(|k| format!(r"{hive}\{}", k.path)).collect();
     lines.push(format!("file: {dll} (stays in place; only registered)"));
     lines
+}
+
+/// The `installed.json` component id for a camera path.
+pub fn component_for(path: CameraPath) -> &'static str {
+    match path {
+        CameraPath::FrameServer => CAMERA_MEDIA_SOURCE,
+        CameraPath::DirectShow => CAMERA_DSHOW_FILTER,
+    }
+}
+
+/// The HKCU keys `installed.json` says the DirectShow filter created,
+/// deepest first and vetted; empty when nothing (valid) is recorded.
+pub fn recorded_dshow_keys(paths: &Paths) -> Vec<String> {
+    load(paths)
+        .ok()
+        .and_then(|f| f.component(CAMERA_DSHOW_FILTER).cloned())
+        .and_then(|c| relay_vdevice::reg::plan_dshow_uninstall(&c).ok())
+        .unwrap_or_default()
 }
 
 /// The registry keys a camera install would create, derived here rather
@@ -123,6 +168,34 @@ fn camera_dll_path() -> Result<std::path::PathBuf> {
         .with_context(|| format!("{CAMERA_DLL} not found next to the running binary"))
 }
 
+/// Let the Frame Server read the camera DLL. It runs as LOCAL SERVICE
+/// (S-1-5-19) and loads the media source from where Relay is installed --
+/// `%LOCALAPPDATA%\Relay`, whose ACL admits only the user, SYSTEM and
+/// Administrators. Without this `IMFVirtualCamera::Start` fails with
+/// E_ACCESSDENIED and Relay Camera never appears (found in the 2026-09-29
+/// live pass). Read + execute on this one file only; nothing else in the
+/// folder is exposed. The installer does the same after every update, since
+/// a replaced file inherits the folder ACL again.
+#[cfg(windows)]
+pub fn grant_frameserver_read(dll: &std::path::Path) {
+    let sys = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| r"C:\Windows".into());
+    let out = std::process::Command::new(sys.join("System32").join("icacls.exe"))
+        .arg(dll)
+        .args(["/grant", "*S-1-5-19:(RX)"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            tracing::info!(dll = %dll.display(), "Frame Server may read the camera DLL")
+        }
+        Ok(o) => {
+            tracing::warn!(status = ?o.status, "could not grant the Frame Server read access; Relay Camera will not start")
+        }
+        Err(e) => tracing::warn!(error = %e, "could not run icacls; Relay Camera will not start"),
+    }
+}
+
 /// Register the camera media source. Consent-checked, record-then-apply,
 /// idempotent refusal when already recorded.
 #[cfg(windows)]
@@ -145,6 +218,7 @@ pub fn install_camera_live(paths: &Paths) -> Result<()> {
     match relay_vdevice::livereg::apply(&plan.keys) {
         Ok(()) => {
             tracing::info!(dll = %dll.display(), "camera media source registered");
+            grant_frameserver_read(&dll);
             Ok(())
         }
         Err(e) => {
@@ -177,15 +251,144 @@ pub fn uninstall_camera_live(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+/// Register the DirectShow camera filter for this user (the Windows 10
+/// path, S43). Consent-checked, vetted, record-then-apply like the media
+/// source — but HKCU only, so no elevation and no helper. Consent plus key
+/// vetting are the gates, so Install works in the shipped app.
+#[cfg(windows)]
+pub fn install_dshow_live(paths: &Paths) -> Result<()> {
+    install_dshow_with(
+        paths,
+        camera_dll_path,
+        relay_vdevice::livereg::user_key_exists,
+        relay_vdevice::livereg::apply_user_consented,
+    )
+}
+
+/// [`install_dshow_live`] with the DLL lookup and the registry writer
+/// passed in, so tests exercise every gate without touching the real
+/// registry (a test that reached the live writer once registered a camera
+/// on the dev PC, 2026-09-30).
+#[cfg(windows)]
+fn install_dshow_with(
+    paths: &Paths,
+    dll_path: impl FnOnce() -> Result<std::path::PathBuf>,
+    exists: impl Fn(&str) -> bool,
+    write: impl FnOnce(
+        &[relay_vdevice::reg::RegKeySpec],
+    ) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+) -> Result<()> {
+    let mut file = load(paths)?;
+    if !file.consent.as_ref().is_some_and(|c| c.camera) {
+        bail!("no recorded consent for the virtual camera — opt in first");
+    }
+    if file.component(CAMERA_DSHOW_FILTER).is_some() {
+        bail!("the camera filter is already recorded as registered; uninstall first");
+    }
+    let dll = dll_path()?;
+    let mut plan = relay_vdevice::reg::plan_dshow_install(&dll.to_string_lossy());
+    relay_vdevice::reg::vet_dshow_keys(&plan.record.hkcu_keys).map_err(anyhow::Error::msg)?;
+    // Record which category parents this write will create, so uninstall
+    // can take them away again (only if still empty) -- S43b.
+    plan.record.hkcu_created_parents = relay_vdevice::reg::dshow_parents_to_create(exists);
+
+    file.record(plan.record.clone());
+    save(paths, &file)?;
+    match write(&plan.keys) {
+        Ok(()) => {
+            tracing::info!(dll = %dll.display(), "camera filter registered for this user");
+            Ok(())
+        }
+        Err(e) => {
+            if matches!(e, relay_vdevice::livereg::LiveRegError::WritesDisabled) {
+                file.remove(CAMERA_DSHOW_FILTER);
+                save(paths, &file)?;
+            }
+            Err(e).context("registering the camera filter")
+        }
+    }
+}
+
+/// Remove the recorded per-user filter registration — exactly the recorded
+/// keys, after vetting them against the three the filter may own.
+#[cfg(windows)]
+pub fn uninstall_dshow_live(paths: &Paths) -> Result<()> {
+    uninstall_dshow_with(
+        paths,
+        relay_vdevice::livereg::remove_user_consented,
+        relay_vdevice::livereg::remove_user_empty_consented,
+    )
+}
+
+#[cfg(windows)]
+fn uninstall_dshow_with(
+    paths: &Paths,
+    remove: impl FnOnce(&[String]) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+    remove_if_empty: impl FnOnce(&[String]) -> Result<(), relay_vdevice::livereg::LiveRegError>,
+) -> Result<()> {
+    let mut file = load(paths)?;
+    let Some(record) = file.component(CAMERA_DSHOW_FILTER).cloned() else {
+        bail!("no camera filter registration recorded; nothing to uninstall");
+    };
+    let keys = relay_vdevice::reg::plan_dshow_uninstall(&record).map_err(anyhow::Error::msg)?;
+    let parents =
+        relay_vdevice::reg::plan_dshow_parent_cleanup(&record).map_err(anyhow::Error::msg)?;
+    remove(&keys).context("removing the camera filter keys")?;
+    // Parents the install created, deepest first, and only while empty. A
+    // failure here leaves an empty key, not a camera: log it and go on.
+    if !parents.is_empty() {
+        if let Err(e) = remove_if_empty(&parents) {
+            tracing::warn!(error = %e, "could not remove the empty category keys Relay created");
+        }
+    }
+    file.remove(CAMERA_DSHOW_FILTER);
+    save(paths, &file)?;
+    tracing::info!("camera filter unregistered");
+    Ok(())
+}
+
+/// Install Relay Camera by this PC's path: the per-user filter directly on
+/// Windows 10; the media source (HKLM — in practice via the elevated
+/// helper) on Windows 11 22H2+.
+#[cfg(windows)]
+pub fn install_vcam(paths: &Paths) -> Result<()> {
+    match relay_vdevice::detect::camera_path() {
+        CameraPath::DirectShow => install_dshow_live(paths),
+        CameraPath::FrameServer => install_camera_live(paths),
+    }
+}
+
+/// Remove whatever camera registration is recorded, whichever path made it
+/// (a PC upgraded from 10 to 11 may carry the filter record).
+#[cfg(windows)]
+pub fn uninstall_vcam(paths: &Paths) -> Result<()> {
+    let file = load(paths)?;
+    let (fs, ds) = (
+        file.component(CAMERA_MEDIA_SOURCE).is_some(),
+        file.component(CAMERA_DSHOW_FILTER).is_some(),
+    );
+    if !fs && !ds {
+        bail!("no camera registration recorded; nothing to uninstall");
+    }
+    if ds {
+        uninstall_dshow_live(paths)?;
+    }
+    if fs {
+        uninstall_camera_live(paths)?;
+    }
+    Ok(())
+}
+
 /// What the service passes to `relay-share recv`: camera on when consented
 /// and registered; mic route to the first VB-Cable (preferred) or
 /// VoiceMeeter input when the microphone opt-in is on.
 #[cfg(windows)]
 pub fn receive_routing(paths: &Paths) -> (bool, Option<String>) {
     let Ok(file) = load(paths) else { return (false, None) };
+    // relay-share picks the same path itself (frame server where the API
+    // exists, the DirectShow ring otherwise); here it is only "registered".
     let camera = file.consent.as_ref().is_some_and(|c| c.camera)
-        && file.component(CAMERA_MEDIA_SOURCE).is_some()
-        && relay_vdevice::detect::frameserver_supported();
+        && file.component(component_for(relay_vdevice::detect::camera_path())).is_some();
     let mic = if file.consent.as_ref().is_some_and(|c| c.microphone) {
         let mut targets = relay_vdevice::detect::mic_targets().unwrap_or_default();
         targets.sort_by_key(|t| t.kind != relay_vdevice::detect::MicTargetKind::VbCable);
@@ -243,8 +446,161 @@ mod tests {
     }
 
     #[test]
+    fn dshow_dry_run_is_hkcu_only() {
+        let lines = camera_dry_run_for(CameraPath::DirectShow);
+        let keys: Vec<_> = lines.iter().filter(|l| !l.starts_with("file:")).collect();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().all(|l| l.starts_with(r"HKCU\Software\Classes\CLSID\")), "{keys:?}");
+        assert!(keys.iter().any(|l| l.contains(relay_vdevice::reg::VIDEO_INPUT_CATEGORY)));
+        assert!(camera_dry_run_for(CameraPath::FrameServer)
+            .iter()
+            .filter(|l| !l.starts_with("file:"))
+            .all(|l| l.starts_with(r"HKLM\")));
+    }
+
+    #[test]
+    fn component_follows_the_path() {
+        assert_eq!(component_for(CameraPath::FrameServer), CAMERA_MEDIA_SOURCE);
+        assert_eq!(component_for(CameraPath::DirectShow), CAMERA_DSHOW_FILTER);
+        assert_eq!(CameraPath::for_support(false), CameraPath::DirectShow);
+        assert_eq!(CameraPath::for_support(true), CameraPath::FrameServer);
+        assert_eq!(serde_json::to_string(&CameraPath::DirectShow).unwrap(), "\"direct_show\"");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dshow_install_refuses_without_consent_and_records_nothing() {
+        // Never the real registry: a fake writer counts what would be written.
+        let paths = temp_paths("dsgate");
+        let fake_dll = || Ok(std::path::PathBuf::from("C:/Relay/relay_vdevice.dll"));
+        let err =
+            install_dshow_with(&paths, fake_dll, |_| false, |_| panic!("wrote without consent"))
+                .unwrap_err();
+        assert!(err.to_string().contains("consent"), "{err}");
+        assert!(installed::load(&paths.installed_file()).unwrap().components.is_empty());
+
+        // Consented: exactly the three vetted keys, and the record is kept.
+        set_consent(&paths, false, true, false).unwrap();
+        let mut wrote = 0;
+        install_dshow_with(&paths, fake_dll, |_| true, |keys| {
+            wrote = keys.len();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(wrote, 3);
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dshow_uninstall_refuses_a_tampered_record_before_the_registry() {
+        let paths = temp_paths("dstamper");
+        let mut file = InstalledFile::default();
+        let mut rec = relay_vdevice::reg::plan_dshow_install("x.dll").record;
+        rec.hkcu_keys.push(r"Software\Microsoft\Windows\CurrentVersion\Run".into());
+        file.record(rec);
+        installed::save(&paths.installed_file(), &file).unwrap();
+        let err = uninstall_dshow_live(&paths).unwrap_err();
+        assert!(err.to_string().contains("refusing"), "{err}");
+        assert!(recorded_dshow_keys(&paths).is_empty(), "a tampered record lists nothing");
+        // The record stays, so nothing is silently forgotten.
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dshow_uninstall_removes_exactly_the_record_and_keeps_it_on_failure() {
+        // A fake remover: never the real registry.
+        let paths = temp_paths("dsgood");
+        let mut file = InstalledFile::default();
+        file.record(relay_vdevice::reg::plan_dshow_install("x.dll").record);
+        installed::save(&paths.installed_file(), &file).unwrap();
+        assert_eq!(recorded_dshow_keys(&paths).len(), 3);
+        // A failed delete keeps the record for a later retry.
+        let err = uninstall_dshow_with(
+            &paths,
+            |_| Err(relay_vdevice::livereg::LiveRegError::WritesDisabled),
+            |_| panic!("parents before the keys"),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("removing"), "{err:#}");
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_some());
+        // A good one removes the three keys and forgets the record.
+        let mut removed = 0;
+        uninstall_dshow_with(
+            &paths,
+            |keys| {
+                removed = keys.len();
+                Ok(())
+            },
+            |_| panic!("no parents recorded, none removed"),
+        )
+        .unwrap();
+        assert_eq!(removed, 3);
+        assert!(load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).is_none());
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    /// S43b: the category keys the install created are recorded, and on
+    /// uninstall only those go, after the filter keys, through the empty-only
+    /// remover. Pre-existing parents are never recorded, so never removed.
+    #[cfg(windows)]
+    #[test]
+    fn dshow_created_parents_are_recorded_and_removed_empty_only() {
+        let paths = temp_paths("dsparents");
+        set_consent(&paths, false, true, false).unwrap();
+        let fake_dll = || Ok(std::path::PathBuf::from("C:/Relay/relay_vdevice.dll"));
+        let [instance, category] = relay_vdevice::reg::dshow_parent_keys();
+        // Fresh PC: neither category key exists before the write.
+        install_dshow_with(&paths, fake_dll, |_| false, |_| Ok(())).unwrap();
+        let rec = load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).cloned().unwrap();
+        assert_eq!(rec.hkcu_created_parents, vec![instance.clone(), category.clone()]);
+
+        let order = std::cell::RefCell::new(Vec::<String>::new());
+        uninstall_dshow_with(
+            &paths,
+            |keys| {
+                order.borrow_mut().push(format!("tree:{}", keys.len()));
+                Ok(())
+            },
+            |parents| {
+                for p in parents {
+                    order.borrow_mut().push(format!("empty:{p}"));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            order.into_inner(),
+            vec!["tree:3".to_string(), format!("empty:{instance}"), format!("empty:{category}")]
+        );
+
+        // Another camera already owns the category: nothing recorded, and
+        // uninstall never calls the parent remover.
+        install_dshow_with(&paths, fake_dll, |_| true, |_| Ok(())).unwrap();
+        let rec = load(&paths).unwrap().component(CAMERA_DSHOW_FILTER).cloned().unwrap();
+        assert!(rec.hkcu_created_parents.is_empty());
+        uninstall_dshow_with(&paths, |_| Ok(()), |_| panic!("pre-existing parents touched"))
+            .unwrap();
+
+        // A tampered parent list is refused before any registry call.
+        let mut file = load(&paths).unwrap();
+        let mut rec = relay_vdevice::reg::plan_dshow_install("x.dll").record;
+        rec.hkcu_created_parents = vec![r"Software\Classes\CLSID".into()];
+        file.record(rec);
+        save(&paths, &file).unwrap();
+        let err = uninstall_dshow_with(&paths, |_| panic!("tree"), |_| panic!("empty"))
+            .unwrap_err();
+        assert!(err.to_string().contains("refusing"), "{err}");
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[test]
     fn dry_run_names_both_keys_and_the_dll() {
-        let lines = camera_dry_run();
+        let lines = camera_dry_run_for(CameraPath::FrameServer);
         assert!(lines.iter().any(|l| l.contains("InprocServer32")));
         assert!(lines.iter().any(|l| l.contains(relay_vdevice::reg::VCAM_CLSID)));
         assert!(lines.iter().any(|l| l.contains("relay_vdevice.dll")));

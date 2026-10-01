@@ -19,6 +19,10 @@ pub const VERSION: u32 = 1;
 /// Component id of the camera media source COM DLL.
 pub const CAMERA_MEDIA_SOURCE: &str = "camera-media-source";
 
+/// Component id of the DirectShow camera filter (Windows 10 path, S43):
+/// registered per user, so its keys live under HKCU.
+pub const CAMERA_DSHOW_FILTER: &str = "camera-dshow-filter";
+
 /// The user's first-run decision. `None` = not asked yet (the UI shows the
 /// consent screen). A recorded `false` is as final as a `true`: the screen
 /// does not come back, Settings does.
@@ -51,6 +55,17 @@ pub struct Component {
     /// HKLM-relative registry keys created — uninstall deletes exactly
     /// these, deepest first.
     pub hklm_keys: Vec<String>,
+    /// HKCU-relative keys created (per-user components; empty for the
+    /// HKLM ones). Same rule: uninstall deletes exactly these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hkcu_keys: Vec<String>,
+    /// HKCU parent keys that did not exist before install and were created
+    /// only as the path to a recorded key (S43b: the video-input category's
+    /// `CLSID\{860BB310-...}` and its `Instance` on a PC with no other
+    /// DirectShow camera). Uninstall deletes these deepest first, and only
+    /// while they are empty; a key that gained anything is left alone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hkcu_created_parents: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +182,8 @@ mod tests {
             installed_at: iso_now(),
             dll_path: r"C:\somewhere\relay_vdevice.dll".into(),
             hklm_keys: vec![r"SOFTWARE\Classes\CLSID\{X}".into()],
+            hkcu_keys: vec![],
+            hkcu_created_parents: vec![],
         });
         save(&path, &f).expect("save");
         assert_eq!(load(&path).expect("load"), f);
@@ -177,6 +194,8 @@ mod tests {
             installed_at: iso_now(),
             dll_path: "elsewhere.dll".into(),
             hklm_keys: vec![],
+            hkcu_keys: vec![],
+            hkcu_created_parents: vec![],
         });
         assert_eq!(f.components.len(), 1);
         f.remove(CAMERA_MEDIA_SOURCE);

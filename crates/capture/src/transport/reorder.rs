@@ -43,7 +43,11 @@ pub enum Step<P> {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReorderStats {
-    /// Packets that filled a hole in time: a loss the viewer never saw.
+    /// Holes filled in time: a loss the viewer never saw. Counted when the
+    /// packet that closes the hole releases the ones parked behind it --
+    /// once per hole, not per packet: a single packet arriving early parks
+    /// only itself while hundreds go straight through in order, and counting
+    /// each of those read "Repaired 570" on a clean wired LAN (r33 soak).
     pub recovered: u64,
     /// Packets given up on.
     pub lost: u64,
@@ -102,11 +106,11 @@ impl<P> Reorder<P> {
             return;
         }
         if ahead == 0 {
-            if self.hole_since.is_some() {
-                self.stats.recovered += 1;
-            }
             out.push(Step::Packet(packet));
             self.advance(1);
+            if self.held.contains_key(&self.next_ext) {
+                self.stats.recovered += 1;
+            }
             self.drain(now, out);
             return;
         }
@@ -238,6 +242,21 @@ mod tests {
         r.push(2, 2, t1, &mut out);
         assert_eq!(packets(&out), vec![2, 3]);
         assert_eq!(r.deadline(), Some(t1 + HOLD), "the hole at 4 starts its clock now");
+    }
+
+    /// r33 soak: one packet ~565 ahead of the rest counted every in-order
+    /// packet after it as a repair. Nothing was lost; nothing was repaired.
+    #[test]
+    fn one_early_packet_is_not_hundreds_of_repairs() {
+        let t = Instant::now();
+        let mut r = Reorder::new();
+        let mut seqs: Vec<u16> = vec![1, 600];
+        seqs.extend(2..600);
+        seqs.push(601);
+        let out = feed(&mut r, &seqs, t);
+        assert_eq!(packets(&out), (1..=601).collect::<Vec<u16>>());
+        assert_eq!(r.stats.lost, 0);
+        assert!(r.stats.recovered <= 1, "recovered = {}", r.stats.recovered);
     }
 
     #[test]

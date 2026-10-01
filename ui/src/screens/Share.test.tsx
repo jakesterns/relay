@@ -538,13 +538,21 @@ describe("Relay Camera on this PC", () => {
     expect(kv("Relay Camera here", presetCard())).toBe("Off");
   });
 
+  it("is available on a Windows 10 PC through the per-user camera (S43)", async () => {
+    core.vdevice = { ...core.vdevice, camera_path: "direct_show", windows_build: 19045 };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(kv("Relay Camera here", presetCard())).toBe("Off");
+  });
+
   it("is a preset toggle that saves to the core and reads back", async () => {
     const h = await mount();
     await h.user.click(inCard(/preset/i).getByRole("button", { name: "Edit" }));
     const toggle = screen.getByRole("switch", { name: /Also show this share as Relay Camera/ });
     expect(toggle).toHaveAttribute("aria-checked", "false");
     // Honest about what it needs and what it does not do.
-    expect(toggle).toHaveTextContent(/Windows 11/);
+    expect(toggle).toHaveTextContent(/installed in Settings/);
+    expect(toggle).not.toHaveTextContent(/Windows 11/);
     expect(toggle).toHaveTextContent(/audio itself/);
     await h.user.click(toggle);
     await h.user.click(screen.getByRole("button", { name: "Save preset" }));

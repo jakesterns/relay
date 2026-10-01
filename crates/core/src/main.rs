@@ -48,6 +48,11 @@ struct Args {
     /// share or receive. The installer stops the core this way: an update
     /// must not end what the user left running.
     keep_stream: bool,
+    /// `apo` / `elevate`: target render endpoint GUID (S42). Default output
+    /// when absent.
+    endpoint: Option<String>,
+    /// `apo uninstall`: restore every recorded endpoint.
+    all: bool,
 }
 
 fn parse_args() -> Result<Args> {
@@ -64,6 +69,8 @@ fn parse_args() -> Result<Args> {
         keep_data: true,
         components_only: false,
         keep_stream: false,
+        endpoint: None,
+        all: false,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -79,6 +86,12 @@ fn parse_args() -> Result<Args> {
             "--delete-data" => out.keep_data = false,
             "--components-only" => out.components_only = true,
             "--keep-stream" => out.keep_stream = true,
+            "--endpoint" => {
+                let ep = args.next().ok_or_else(|| anyhow::anyhow!("--endpoint needs a GUID"))?;
+                relay_core::elevate::vet_endpoint_guid(&ep).map_err(anyhow::Error::msg)?;
+                out.endpoint = Some(ep);
+            }
+            "--all" => out.all = true,
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -142,22 +155,52 @@ fn main() -> Result<()> {
         #[cfg(windows)]
         "apo" => {
             logging::init_console(args.verbose);
+            let dir = args.paths.apo_backup_dir();
+            let ep = args.endpoint.as_deref();
             match args.arg.as_deref() {
                 None | Some("status") => {
-                    let s = relay_core::audio_apo::apo_status();
+                    let s = relay_core::audio_apo::apo_status(&dir);
+                    if args.json {
+                        println!("{}", serde_json::to_string_pretty(&s)?);
+                        return Ok(());
+                    }
+                    for e in s
+                        .endpoints
+                        .iter()
+                        .filter(|e| ep.is_none_or(|w| w.eq_ignore_ascii_case(&e.endpoint)))
+                    {
+                        println!(
+                            "{}{} {}\n  installed: {}  backup: {}  params section: {}",
+                            e.endpoint,
+                            if e.is_default { " (default)" } else { "" },
+                            e.name,
+                            e.installed,
+                            if e.backed_up { "yes" } else { "no" },
+                            if e.running { "reachable" } else { "not reachable" },
+                        );
+                    }
                     println!(
-                        "endpoint: {}\ninstalled: {}\nparams section: {}",
-                        s.endpoint.as_deref().unwrap_or("none"),
-                        s.installed,
-                        if s.running { "reachable" } else { "not reachable" },
+                        "audio-engine registration (HKLM\\{}): {}",
+                        relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID),
+                        match s.audio_engine {
+                            relay_core::audio_apo::AudioEngineRegistration::Registered => "present",
+                            relay_core::audio_apo::AudioEngineRegistration::Mismatch =>
+                                "present, values differ from this build",
+                            relay_core::audio_apo::AudioEngineRegistration::Missing =>
+                                "missing (audiodg will not load the APO)",
+                        }
                     );
                 }
                 Some("install") => {
-                    let ep = relay_core::audio_apo::install_live(&args.paths.apo_backup_dir())?;
+                    let ep = relay_core::audio_apo::install_live(&dir, ep)?;
                     println!("registered on {ep}; restart audiosrv to pick it up");
                 }
+                Some("uninstall") if args.all => {
+                    let eps = relay_core::audio_apo::uninstall_all_live(&dir)?;
+                    println!("restored {} endpoint(s) to their pre-install state", eps.len());
+                }
                 Some("uninstall") => {
-                    let ep = relay_core::audio_apo::uninstall_live(&args.paths.apo_backup_dir())?;
+                    let ep = relay_core::audio_apo::uninstall_live(&dir, ep)?;
                     println!("restored {ep} to its pre-install state");
                 }
                 Some(other) => {
@@ -229,9 +272,17 @@ fn main() -> Result<()> {
                         println!("{}", serde_json::to_string_pretty(&s)?);
                     } else {
                         println!(
-                            "windows build: {} (frame-server camera {})",
+                            "windows build: {} (camera path: {})",
                             s.windows_build.map_or("unknown".into(), |b| b.to_string()),
-                            if s.camera_supported { "supported" } else { "needs 22H2+" },
+                            match s.camera_path {
+                                Some(relay_core::vdevice::CameraPath::FrameServer) => {
+                                    "frame server, HKLM"
+                                }
+                                Some(relay_core::vdevice::CameraPath::DirectShow) => {
+                                    "DirectShow filter, per user"
+                                }
+                                None => "none",
+                            },
                         );
                         println!("camera registered: {}", s.camera_registered);
                         println!(
@@ -267,11 +318,11 @@ fn main() -> Result<()> {
                     println!("recorded: camera {} / microphone {}", c.camera, c.microphone);
                 }
                 Some("install") => {
-                    relay_core::vdevice::install_camera_live(&args.paths)?;
+                    relay_core::vdevice::install_vcam(&args.paths)?;
                     println!("Relay Camera media source registered");
                 }
                 Some("uninstall") => {
-                    relay_core::vdevice::uninstall_camera_live(&args.paths)?;
+                    relay_core::vdevice::uninstall_vcam(&args.paths)?;
                     println!("Relay Camera media source removed; installed.json cleared");
                 }
                 Some(other) => anyhow::bail!(
@@ -295,13 +346,14 @@ fn main() -> Result<()> {
                     "elevate takes `plan <op>` or `run <op>`, where <op> is one of                      install-apo, uninstall-apo, install-camera, uninstall-camera"
                 ),
             };
-            let Some(op) = ElevatedOp::parse(op) else {
+            let Some(op) = ElevatedOp::parse(op).map(|o| o.with_endpoint(args.endpoint.clone()))
+            else {
                 anyhow::bail!(
                     "`{op}` is not one of install-apo, uninstall-apo, install-camera,                      uninstall-camera"
                 )
             };
             if sub == "plan" {
-                for line in elevate::plan_lines(&args.paths, op) {
+                for line in elevate::plan_lines(&args.paths, &op) {
                     println!("{line}");
                 }
                 return Ok(());
@@ -487,12 +539,15 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
   autostart  show, enable or disable start-at-login (HKCU Run key only)
   share-start <code>  spawn the share engine (RELAY_PEER, RELAY_BITRATE_MBPS optional)
   share-stop          stop the running share engine
-  apo [status|install|uninstall]  endpoint-APO registration (install/uninstall
-             are VM / installer only: they refuse without
+  apo [status|install|uninstall] [--endpoint <guid>] [--all]
+             endpoint-APO registration per output (default output when no
+             --endpoint; `uninstall --all` restores every recorded output).
+             install/uninstall are VM / installer only: they refuse without
              RELAY_APO_ALLOW_LIVE_WRITE=1 and an elevated prompt)
   vdevice [status|dry-run|consent-camera|install|uninstall]  virtual-camera
              registration (install/uninstall refuse without
-             RELAY_VDEVICE_ALLOW_LIVE_WRITE=1 and an elevated prompt)
+             RELAY_VDEVICE_ALLOW_LIVE_WRITE=1; the Windows 11 media source also
+             needs an elevated prompt, the Windows 10 filter is per user)
   firewall [status|dry-run|allow|remove]  the inbound rule for relay-share.exe
              (the only Relay binary that listens). `status` and `dry-run` are
              read-only; `allow`/`remove` refuse without
@@ -559,6 +614,8 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         mic: std::env::var("RELAY_MIC").is_ok(),
                         rest: std::env::var("RELAY_REST").is_ok(),
                         vcam: false,
+                        mic_device: None,
+                        output_device: None,
                         cursor: true,
                         preset: None,
                         record: std::env::var("RELAY_RECORD").is_ok(),

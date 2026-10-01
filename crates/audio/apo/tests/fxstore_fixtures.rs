@@ -158,11 +158,121 @@ fn backup_json_round_trips_losslessly() {
 #[test]
 fn com_keys_are_scoped_to_our_clsid() {
     let plan = plan_install(&FxStore::empty(), ENDPOINT, DLL);
+    let ae = ids::audio_engine_key(ids::APO_CLSID);
     for path in plan.com_keys.keys() {
         assert!(
-            path.starts_with(&ids::clsid_key(ids::APO_CLSID)),
-            "COM key outside our CLSID: {path}"
+            path.starts_with(&ids::clsid_key(ids::APO_CLSID)) || path == ae,
+            "machine-wide key outside our two CLSID keys: {path}"
         );
     }
+    assert!(plan.com_keys.contains_key(&ae), "the audio-engine registration is planned");
     assert_eq!(plan.backup.com_keys, plan.com_keys.keys().map(str::to_owned).collect::<Vec<_>>());
+}
+
+// ---------------------------------------------------------------------------
+// S42b: the audio-engine registration, against the dev PC's real export of
+// HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects (read-only
+// `reg export`, 2026-09-30; 22 APOs, Relay's absent — the live finding).
+
+fn ae_fixture_text() -> String {
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../tests/fixtures/audioengine-apos-baseline.reg"
+    ))
+    .expect("audio-engine fixture present");
+    decode_bytes(&bytes).expect("fixture decodes")
+}
+
+/// Apply a plan's machine-wide keys to an HKLM image (what livereg's
+/// `apply_install` does to those keys).
+fn apply_machine_keys(
+    map: &relay_apo::regfile::KeyMap,
+    plan: &relay_apo::fxstore::InstallPlan,
+) -> relay_apo::regfile::KeyMap {
+    let mut out = map.clone();
+    for (path, values) in plan.com_keys.iter() {
+        out.insert(format!(r"HKEY_LOCAL_MACHINE\{path}"), values.clone());
+    }
+    out
+}
+
+/// Remove a backup's recorded machine-wide keys (livereg's `restore`:
+/// delete_tree each, deepest first).
+fn remove_machine_keys(
+    map: &relay_apo::regfile::KeyMap,
+    keys: &[String],
+) -> relay_apo::regfile::KeyMap {
+    map.iter()
+        .filter(|(path, _)| {
+            !keys.iter().any(|k| {
+                let full = format!(r"HKEY_LOCAL_MACHINE\{k}").to_ascii_lowercase();
+                let p = path.to_ascii_lowercase();
+                p == full || p.starts_with(&format!(r"{full}\"))
+            })
+        })
+        .map(|(k, v)| (k.to_owned(), v.clone()))
+        .collect()
+}
+
+#[test]
+fn audio_engine_fixture_round_trips_and_lacks_relay() {
+    let text = ae_fixture_text();
+    let map = parse(&text).expect("parses");
+    assert_eq!(serialize(&map), text);
+    assert!(!text.to_ascii_lowercase().contains(&ids::APO_CLSID.to_ascii_lowercase()));
+}
+
+/// The key Relay adds reads exactly like a `RegisterAPO` registration:
+/// same value names, same order, REG_SZ strings, REG_DWORD numbers.
+#[test]
+fn audio_engine_registration_matches_register_apo_shape() {
+    let plan = plan_install(&FxStore::empty(), ENDPOINT, DLL);
+    let base = parse(&ae_fixture_text()).unwrap();
+    let after = serialize(&apply_machine_keys(&base, &plan));
+    let want = format!(
+        "[HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\AudioEngine\\AudioProcessingObjects\\{clsid}]\r\n\
+         \"FriendlyName\"=\"Relay Audio (per-game EQ)\"\r\n\
+         \"Copyright\"=\"\u{a9} Relay\"\r\n\
+         \"MajorVersion\"=dword:00000001\r\n\
+         \"MinorVersion\"=dword:00000000\r\n\
+         \"Flags\"=dword:0000000e\r\n\
+         \"MinInputConnections\"=dword:00000001\r\n\
+         \"MaxInputConnections\"=dword:00000001\r\n\
+         \"MinOutputConnections\"=dword:00000001\r\n\
+         \"MaxOutputConnections\"=dword:00000001\r\n\
+         \"MaxInstances\"=dword:ffffffff\r\n\
+         \"NumAPOInterfaces\"=dword:00000001\r\n\
+         \"APOInterface0\"=\"{{FD7F2B29-24D0-4B5C-B177-592C39F9CA10}}\"\r\n",
+        clsid = ids::APO_CLSID
+    );
+    assert!(after.contains(&want), "{after}");
+
+    // Every value name Relay writes is one a Windows-registered APO on this
+    // PC also carries (names are what audiodg reads).
+    let reference = base
+        .get(r"HKEY_LOCAL_MACHINE\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{13AB3EBD-137E-4903-9D89-60BE8277FD17}")
+        .expect("WM audio GFX APO in fixture");
+    let ours = relay_apo::fxstore::audio_engine_values();
+    let names = |m: &relay_apo::regfile::ValueMap| m.keys().map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(names(&ours), names(reference));
+    for (name, v) in ours.iter() {
+        assert_eq!(v.kind, reference.get(name).unwrap().kind, "{name} type");
+    }
+}
+
+/// Install then uninstall (last endpoint): the AudioProcessingObjects export
+/// is byte-identical to the baseline; only Relay's key came and went.
+#[test]
+fn audio_engine_uninstall_restores_hklm_byte_for_byte() {
+    let before_text = ae_fixture_text();
+    let base = parse(&before_text).unwrap();
+    let plan = plan_install(&FxStore::empty(), ENDPOINT, DLL);
+    let installed = apply_machine_keys(&base, &plan);
+    assert_eq!(installed.len(), base.len() + 3, "class, InprocServer32, audio-engine key");
+    let restored = remove_machine_keys(&installed, &plan.backup.com_keys);
+    assert_eq!(serialize(&restored), before_text);
+    // Other APOs are untouched throughout.
+    for (path, values) in base.iter() {
+        assert_eq!(installed.get(path), Some(values), "{path}");
+    }
 }

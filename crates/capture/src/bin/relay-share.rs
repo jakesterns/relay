@@ -251,6 +251,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         preview_fps: 0,
         container: relay_core::share::RecordingContainer::Mp4,
         vcam: false,
+        mic_device: None,
+        output_device: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -275,6 +277,9 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             "--audio-mic" => opts.mic = true,
             // S37: everything except the --audio-pid app, as a third track.
             "--audio-rest" => opts.rest = true,
+            // S40: the mic and call-return endpoints; absent = System default.
+            "--mic-device" => opts.mic_device = it.next().cloned(),
+            "--output-device" => opts.output_device = it.next().cloned(),
             "--no-cursor" => opts.cursor = false,
             // S36: also feed "Relay Camera" on this PC with the captured frames.
             "--vcam" => opts.vcam = true,
@@ -316,6 +321,7 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         mic_route: None,
         host: None,
         return_pid: None,
+        output_device: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -325,6 +331,8 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--code" => opts.code = it.next().cloned(),
             "--vcam" => opts.vcam = true,
             "--mic-route" => opts.mic_route = it.next().cloned(),
+            // S40: play received audio on this endpoint instead of the default.
+            "--output-device" => opts.output_device = it.next().cloned(),
             // S19: send the call app's output back to the sender.
             "--return-pid" => {
                 opts.return_pid =
@@ -837,7 +845,7 @@ mod tests {
             "--code",
             "1",
             "--record-dir",
-            r"C:\Users\jake\Videos\Relay",
+            r"%USERPROFILE%\Videos\Relay",
             "--record",
             "--replay-secs",
             "90",
@@ -845,7 +853,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             o.record_dir.as_deref(),
-            Some(std::path::Path::new(r"C:\Users\jake\Videos\Relay"))
+            Some(std::path::Path::new(r"%USERPROFILE%\Videos\Relay"))
         );
         assert!(o.record);
         assert_eq!(o.replay_secs, 90);
@@ -913,7 +921,29 @@ mod tests {
         let o = parse_recv_args(&s(&["--return-pid", "4242"])).unwrap();
         assert_eq!(o.return_pid, Some(4242));
         assert!(parse_recv_args(&s(&["--return-pid", "discord"])).is_err());
+        // S40: the output pick; absent = System default.
+        assert_eq!(o.output_device, None);
+        let o = parse_recv_args(&s(&["--output-device", "{spk}"])).unwrap();
+        assert_eq!(o.output_device.as_deref(), Some("{spk}"));
 
         assert!(parse_recv_args(&s(&["--wat"])).is_err());
+    }
+
+    #[test]
+    fn send_device_flags_s40() {
+        let o = parse_send_args(&s(&["--code", "123456"])).unwrap();
+        assert_eq!((o.mic_device.as_deref(), o.output_device.as_deref()), (None, None));
+        let o = parse_send_args(&s(&[
+            "--code",
+            "123456",
+            "--audio-mic",
+            "--mic-device",
+            "{mic}",
+            "--output-device",
+            "{spk}",
+        ]))
+        .unwrap();
+        assert_eq!(o.mic_device.as_deref(), Some("{mic}"));
+        assert_eq!(o.output_device.as_deref(), Some("{spk}"));
     }
 }

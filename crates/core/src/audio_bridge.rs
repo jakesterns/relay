@@ -61,6 +61,23 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
     }
 }
 
+/// The measured curve headset correction should use (S41).
+///
+/// The headset the profile names, else the ACTIVE listening device of the
+/// default output (`connected.headset`, which [`crate::hardware::HardwareStore::connected`]
+/// resolves from the per-output listening list). Speakers, or an output
+/// whose listening device has not been picked, resolve to no headset and so
+/// to no correction: correcting for headphones that are not on the user's
+/// head would be wrong.
+pub fn correction_curve<'a>(
+    library: &'a crate::hardware::HardwareStore,
+    profile_headset: Option<&crate::types::HeadsetId>,
+    connected: &crate::hardware::ConnectedHardware,
+) -> Option<&'a [(f32, f32)]> {
+    let id = profile_headset.or(connected.headset.as_ref())?;
+    library.headset(id)?.curve.as_deref()
+}
+
 /// True when the profile configures any audio processing at all — the gate
 /// for the exclusive-mode watcher (no processing ⇒ nothing is bypassed).
 pub fn wants_processing(audio: &AudioSettings) -> bool {
@@ -234,5 +251,61 @@ mod tests {
         assert_eq!(p.sample_rate, 48_000);
         assert!(p.hrtf_applied);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// S41: one RODECaster output feeds IEMs, a headset and speakers. The
+    /// correction follows whichever the user marked active; speakers get
+    /// none.
+    #[test]
+    fn correction_follows_the_active_listening_device() {
+        use crate::hardware::{
+            EndpointInfo, HardwareStore, Headset, HeadsetKind, ListeningDevice, ProbeReport,
+        };
+        use crate::types::HeadsetId;
+
+        let mut lib = HardwareStore::in_memory();
+        for (id, gain) in [("blessing3", 3.0), ("hd560s", -2.0)] {
+            lib.upsert_headset(Headset {
+                id: HeadsetId(id.into()),
+                name: id.into(),
+                kind: HeadsetKind::Headphone,
+                curve: Some(vec![(20.0, gain), (20000.0, gain)]),
+                source: String::new(),
+                endpoints: vec![],
+            });
+        }
+        let report = ProbeReport {
+            endpoints: vec![EndpointInfo {
+                key: "ep:c:rode".into(),
+                name: "RODECaster".into(),
+                default: true,
+                fx_guid: String::new(),
+            }],
+            monitors: vec![],
+        };
+        let iem = ListeningDevice::Headset { id: HeadsetId("blessing3".into()) };
+        let hd = ListeningDevice::Headset { id: HeadsetId("hd560s".into()) };
+        let l = lib.listening_entry("ep:c:rode");
+        l.set_devices(vec![iem.clone(), hd.clone(), ListeningDevice::Speakers]);
+
+        // Several entries and no pick: no correction rather than a guess.
+        let hw = lib.connected(&report);
+        assert_eq!(correction_curve(&lib, None, &hw), None);
+
+        lib.listening_entry("ep:c:rode").set_active(&hd);
+        let hw = lib.connected(&report);
+        assert_eq!(correction_curve(&lib, None, &hw).unwrap()[0].1, -2.0);
+
+        lib.listening_entry("ep:c:rode").set_active(&iem);
+        let hw = lib.connected(&report);
+        assert_eq!(correction_curve(&lib, None, &hw).unwrap()[0].1, 3.0);
+
+        lib.listening_entry("ep:c:rode").set_active(&ListeningDevice::Speakers);
+        let hw = lib.connected(&report);
+        assert_eq!(correction_curve(&lib, None, &hw), None);
+
+        // A profile that names its headset keeps that curve.
+        let named = HeadsetId("hd560s".into());
+        assert_eq!(correction_curve(&lib, Some(&named), &hw).unwrap()[0].1, -2.0);
     }
 }

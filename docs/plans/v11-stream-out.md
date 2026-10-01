@@ -1,9 +1,9 @@
 # S36 — Direct send to streaming software: the decision
 
-**Status: a decision for Jake, not yet a plan.** Written 2026-09-22 so the
+**Status: a decision for the owner, not yet a plan.** Written 2026-09-22 so the
 choice is in front of him with its costs; nothing is built.
 
-Jake, 2026-09-18: beyond a second PC, send the feed and audio straight into
+The owner, 2026-09-18: beyond a second PC, send the feed and audio straight into
 OBS, Streamlabs, TikTok Live Studio, or any other streaming program, with
 little to no setup on the user's part.
 
@@ -61,10 +61,10 @@ camera; audio through the VB-Cable route until the driver is signed; Windows
 for OBS-style software on the same PC, and it is mostly wiring.
 
 **(b) is a product decision**, not a session: it makes Relay a streaming
-client. If Jake wants it, it gets its own plan with the outbound-request
+client. If the owner wants it, it gets its own plan with the outbound-request
 rule rewritten first.
 
-## What Jake needs to answer
+## What the owner needs to answer
 1. Is (a) with the Windows 11 + VB-Cable caveats worth shipping now?
 2. Is (b) wanted at all in v1.1, given what it changes about the brief?
 3. If both: (a) first is the recommendation; say if the order should differ.

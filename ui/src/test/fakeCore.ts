@@ -8,13 +8,34 @@
  * assert that Save actually reached the core and that a re-read sees it.
  */
 import type {
-  ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, PresetsReply, Preview,
+  ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
   ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
-  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus,
+  SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import { newProfile, summarize } from "../lib/ipc";
+import type { EndpointApo } from "../lib/ipc";
+import { devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
+
+/** The two render endpoints the fake APO card lists (S42). */
+export const DAC = "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}";
+export const SPDIF = "{0b5c7e21-1d2e-4f3a-9b8c-5d6e7f8a9b0c}";
+
+/** Build an `ApoStatus` from its per-output list, the way the core does:
+ *  the top-level fields describe the default output. */
+export function apoStatus(endpoints: EndpointApo[]): ApoStatus {
+  const d = endpoints.find((e) => e.is_default);
+  return { installed: d?.installed ?? false, endpoint: d?.endpoint ?? null, running: d?.running ?? false, endpoints };
+}
+
+/** Install on / remove from one output; `null` removes from every output. */
+function setApo(core: FakeCore, endpoint: string | null, installed: boolean) {
+  const list = (core.apo.endpoints ?? []).map((e) =>
+    endpoint === null || e.endpoint === endpoint
+      ? { ...e, installed, backed_up: installed, running: installed }
+      : e);
+  core.apo = apoStatus(list);
+}
 
 export interface FakeCore {
   state: CoreState;
@@ -38,6 +59,8 @@ export interface FakeCore {
   autostart: boolean;
   /** `settings.json`: what closing the window means. */
   prefs: UiPrefs;
+  /** Active audio endpoints (S40), both directions. */
+  audioDevices: AudioDevices;
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
@@ -119,10 +142,14 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       { name: "Sennheiser HD 600", source: "oratory1990", rig: "", path: "oratory1990/over-ear/Sennheiser%20HD%20600" },
       { name: "Moondrop Blessing 3", source: "crinacle", rig: "711", path: "crinacle/711%20in-ear/Moondrop%20Blessing%203" },
     ],
-    apo: { installed: false, endpoint: null, running: false },
+    apo: apoStatus([
+      { endpoint: DAC, name: "Headphones (USB DAC)", is_default: true, installed: false, backed_up: false, running: false },
+      { endpoint: SPDIF, name: "Digital Output (S/PDIF)", is_default: false, installed: false, backed_up: false, running: false },
+    ]),
     vdevice: {
       windows_build: 26200,
       camera_supported: true,
+      camera_path: "frame_server",
       camera_registered: false,
       obs_virtualcam: null,
       mic_targets: [{ endpoint_id: "{0.0.0}.{cable}", name: "CABLE Input (VB-Audio Virtual Cable)", kind: "vb_cable" }],
@@ -147,7 +174,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
     peers: [],
     autostart: false,
-    prefs: { close_action: "keep_running", resilience: true, close_notice: true },
+    prefs: { close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {} },
+    audioDevices: {
+      render: [
+        { id: "{spk}", name: "Speakers (USB Audio 2.0)", is_default: true },
+        { id: "{hdmi}", name: "LG ULTRAGEAR+ (NVIDIA HDA)", is_default: false },
+      ],
+      capture: [
+        { id: "{rode}", name: "Microphone (Rodecaster)", is_default: true },
+        { id: "{cam}", name: "Webcam microphone", is_default: false },
+      ],
+    },
     elevation: { decline: false },
     fail: new Map(),
     handler: () => undefined,
@@ -212,6 +249,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     save_replay: () => undefined,
     switch_source: () => undefined,
     set_mixer: () => undefined,
+    list_audio_devices: () => structuredClone(core.audioDevices),
+    set_audio_device: (a) => {
+      // As the service does: saved in settings, whether or not anything runs.
+      const key = devicePrefKey(a.side as MixerSide, a.track as DeviceTrack);
+      if (!key) throw new Error("a receiver has no microphone to choose");
+      core.prefs = { ...core.prefs, audio_devices: { ...core.prefs.audio_devices, [key]: (a.device as string | null) ?? undefined } };
+    },
     list_presets: (): PresetsReply => structuredClone({ presets: core.presets, recording: core.recording }),
     save_preset: (a) => {
       const p = a.preset as SharePresetDef;
@@ -242,6 +286,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         else core.hardware.monitors.push(structuredClone(item.value));
       }
     },
+    set_listening_devices: (a) => {
+      const c = core.hardware.connected;
+      const devices = a.devices as ListeningDevice[];
+      const rest = (c.listening ?? []).filter((l) => l.endpoint !== a.endpoint);
+      c.listening = devices.length ? [...rest, { endpoint: a.endpoint as string, devices: structuredClone(devices), active: null }] : rest;
+    },
+    set_active_listening: (a) => {
+      const l = (core.hardware.connected.listening ?? []).find((x) => x.endpoint === a.endpoint);
+      if (!l) throw new Error("nothing is listed for that output yet");
+      l.active = structuredClone(a.device as ListeningDevice);
+    },
     delete_hardware: (a) => {
       core.hardware.headsets = core.hardware.headsets.filter((h) => h.id !== a.id);
       core.hardware.monitors = core.hardware.monitors.filter((m) => m.id !== a.id);
@@ -268,18 +323,20 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     elevation_plan: (a) => {
       const cam = "HKLM\SOFTWARE\Classes\CLSID\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}";
       const tail = ["", "Windows will ask for permission before any of this happens. Decline and nothing on this PC changes."];
-      switch (a.op as ElevatedOp) {
+      const op = a.op as ElevatedOp;
+      const ep = opEndpoint(op) ?? DAC;
+      switch (opKind(op)) {
         case "install_apo":
           return [
-            "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render\ep:dac\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
+            "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\\Render\\" + ep + "\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
             "HKLM\SOFTWARE\Classes\CLSID\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
-            "backup: %LOCALAPPDATA%\Relay\apo-backup\ep:dac.json (written before anything is changed)",
+            "backup: %LOCALAPPDATA%\Relay\apo-backup\\" + ep + ".json (written before anything is changed)",
             ...tail,
           ];
         case "install_camera":
           return [cam, cam + "\InprocServer32", ...tail];
         case "uninstall_apo":
-          return ["[x] Restore the endpoint audio chain — ep:dac (needs admin)", ...tail];
+          return ["[x] Restore the endpoint audio chain — " + ep + " (needs admin)", ...tail];
         default:
           return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
       }
@@ -292,8 +349,8 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           lines: ["Windows permission was declined. Nothing on this PC was changed."],
         };
       }
-      if (op === "install_apo") core.apo = { installed: true, endpoint: "ep:dac", running: true };
-      if (op === "uninstall_apo") core.apo = { installed: false, endpoint: null, running: false };
+      if (opKind(op) === "install_apo") setApo(core, opEndpoint(op) ?? DAC, true);
+      if (opKind(op) === "uninstall_apo") setApo(core, opEndpoint(op), false);
       if (op === "install_camera") core.vdevice.camera_registered = true;
       if (op === "uninstall_camera") core.vdevice.camera_registered = false;
       if (op === "allow_firewall") {
@@ -308,11 +365,11 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       }
       return { declined: false, ok: true, lines: [`${op}: done.`] };
     },
-    install_apo: () => {
-      core.apo = { installed: true, endpoint: "ep:dac", running: true };
+    install_apo: (a) => {
+      setApo(core, (a.endpoint as string | null) ?? DAC, true);
     },
-    uninstall_apo: () => {
-      core.apo = { installed: false, endpoint: null, running: false };
+    uninstall_apo: (a) => {
+      setApo(core, (a.endpoint as string | null) ?? null, false);
     },
     vdevice_status: () => structuredClone(core.vdevice),
     set_vdevice_consent: (a) => {
@@ -321,7 +378,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         apo: a.apo as boolean, camera: a.camera as boolean, microphone: a.microphone as boolean,
       };
     },
-    vdevice_dry_run: () => [
+    vdevice_dry_run: () => core.vdevice.camera_path === "direct_show" ? [
+      "HKCU\\Software\\Classes\\CLSID\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}",
+      "HKCU\\Software\\Classes\\CLSID\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}\\InprocServer32",
+      "HKCU\\Software\\Classes\\CLSID\\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\\Instance\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}",
+      "file: <install dir>\\relay_vdevice.dll (stays in place; only registered)",
+    ] : [
       "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}",
       "HKLM\\SOFTWARE\\Classes\\CLSID\\{9B7E62D4-2A31-4C8E-8F5A-D0C4B6E91A27}\\InprocServer32",
       "file: <install dir>\\relay_vdevice.dll (stays in place; only registered)",
@@ -403,10 +465,10 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
-  "switch_source", "set_mixer", "list_presets", "save_preset", "delete_preset",
+  "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
-  "save_hardware", "delete_hardware", "probe_hardware", "import_curve",
+  "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",

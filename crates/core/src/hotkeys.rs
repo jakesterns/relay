@@ -10,6 +10,9 @@ pub enum HotkeyAction {
     ToggleProfile,
     TogglePreview,
     SaveReplay,
+    /// Step the default output to its next listening device (S41). Off by
+    /// default; `UiPrefs::cycle_listening_hotkey` turns it on.
+    CycleListening,
 }
 
 impl HotkeyAction {
@@ -20,6 +23,7 @@ impl HotkeyAction {
             HotkeyAction::ToggleProfile => 2,
             HotkeyAction::TogglePreview => 3,
             HotkeyAction::SaveReplay => 4,
+            HotkeyAction::CycleListening => 5,
         }
     }
 
@@ -29,6 +33,7 @@ impl HotkeyAction {
             2 => Some(HotkeyAction::ToggleProfile),
             3 => Some(HotkeyAction::TogglePreview),
             4 => Some(HotkeyAction::SaveReplay),
+            5 => Some(HotkeyAction::CycleListening),
             _ => None,
         }
     }
@@ -61,4 +66,32 @@ pub fn defaults() -> Vec<Hotkey> {
         Hotkey { action: HotkeyAction::TogglePreview, modifiers: ca, vk: b'P' as u32 },
         Hotkey { action: HotkeyAction::SaveReplay, modifiers: ca, vk: b'R' as u32 },
     ]
+}
+
+/// The defaults, plus Ctrl+Alt+L to cycle listening devices when the user
+/// turned it on (S41). Registered when the core starts.
+pub fn with_prefs(cycle_listening: bool) -> Vec<Hotkey> {
+    let mut out = defaults();
+    if cycle_listening {
+        let ca = Modifiers { ctrl: true, alt: true, ..Default::default() };
+        out.push(Hotkey { action: HotkeyAction::CycleListening, modifiers: ca, vk: b'L' as u32 });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cycle_listening_is_off_by_default_and_round_trips_its_id() {
+        assert!(!defaults().iter().any(|h| h.action == HotkeyAction::CycleListening));
+        assert!(!with_prefs(false).iter().any(|h| h.action == HotkeyAction::CycleListening));
+        assert!(with_prefs(true).iter().any(|h| h.action == HotkeyAction::CycleListening));
+        let id = HotkeyAction::CycleListening.id();
+        assert_eq!(HotkeyAction::from_id(id), Some(HotkeyAction::CycleListening));
+        let mut ids: Vec<i32> = with_prefs(true).iter().map(|h| h.action.id()).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), with_prefs(true).len());
+    }
 }

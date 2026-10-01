@@ -1,0 +1,47 @@
+# cargo-deny: licence gate for every crate Relay ships.
+# Run: cargo deny check licenses   (CI pins cargo-deny 0.20.2)
+#
+# Anything not on the allow list fails, which covers GPL, LGPL, AGPL and any
+# crate whose licence cannot be determined. Add to the list only after reading
+# the licence; never add a copyleft licence.
+
+[graph]
+targets = ["x86_64-pc-windows-msvc"]
+all-features = true
+# Dev-dependencies are not shipped.
+exclude-dev = true
+
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "CC0-1.0",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+# Relay's own workspace crates are MIT (see LICENSE) and unpublished.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+
+[advisories]
+# Licence gate only here; advisories are not part of this check.
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -100,7 +100,7 @@ response: Some(ResponseCandidate {
     code: 0xF5,
     levels: &[("off", 1), ("normal", 2), ("fast", 3), ("faster", 4)],
     evidence: Evidence::Osd {
-        observer: "Jake Sterns",
+        observer: "The owner Sterns",
         date: "2026-09-14",
         monitor: "LG UltraGear OLED 32GS95UE (GSM 5C7C)",
     },

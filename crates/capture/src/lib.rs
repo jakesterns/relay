@@ -20,6 +20,7 @@ pub mod codec;
 pub mod command;
 #[cfg(windows)]
 pub mod d3d;
+pub mod devices;
 #[cfg(windows)]
 pub mod decode;
 #[cfg(windows)]

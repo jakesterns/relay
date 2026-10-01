@@ -258,6 +258,11 @@ pub struct Foreground {
     /// used to target display applies at the game's monitor only.
     #[serde(default)]
     pub hmonitor: i64,
+    /// The window itself (0 = unknown), so the core can tell the app has
+    /// gone by asking whether the window still exists -- no handle to the
+    /// game's process, which anti-cheat protects (2026-09-29).
+    #[serde(default)]
+    pub hwnd: u64,
 }
 
 /// A running process that owns a visible window (for the exe picker).

@@ -178,6 +178,29 @@ pub fn forward_log_crate(debug: bool) {
             if !self.enabled(r.metadata()) {
                 return;
             }
+            // A full track queue logs once per dropped packet: hundreds of
+            // identical ERRORs a second in a doomed connect (PC2, r24/25)
+            // buried everything else. One line a second, with the count.
+            let msg = r.args().to_string();
+            if msg.starts_with("Failed to send RtpPacket") {
+                static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+                static LAST: std::sync::Mutex<Option<std::time::Instant>> =
+                    std::sync::Mutex::new(None);
+                let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                let now = std::time::Instant::now();
+                if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(1)) {
+                    SUPPRESSED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                *last = Some(now);
+                let more = SUPPRESSED.swap(0, Ordering::Relaxed);
+                // Upstream formats the whole packet, payload bytes and all
+                // (~2 KB of binary per line on PC2): keep the words only.
+                let head = msg.split(": Full").next().unwrap_or(&msg);
+                let head: String = head.chars().take(120).collect();
+                tracing::error!(from = r.target(), suppressed_since_last = more, "{head} (queue full)");
+                return;
+            }
             if r.level() == log::Level::Error {
                 tracing::error!(from = r.target(), "{}", r.args());
             } else if r.level() == log::Level::Warn {
@@ -318,7 +341,10 @@ struct CountedSocket {
 /// `RELAY_TEST_LOSS=every=N` loses the first arrival of every video packet
 /// whose RTP sequence number is a multiple of N and lets the retransmission
 /// through (the NACK path). `every=N,retx` loses the retransmissions as well
-/// (the give-up / keyframe path). The packet is not removed — a poll-based
+/// (the give-up / keyframe path). Pick N larger than a keyframe with `retx`:
+/// the loss is deterministic, so every keyframe spanning a multiple of N is
+/// damaged every time and the picture never starts (r34, 1440p static screen:
+/// ~900-packet keyframes, `every=200,retx`, nothing ever decoded). The packet is not removed — a poll-based
 /// socket has no clean way to un-receive — it is corrupted, so SRTP
 /// authentication rejects it before any interceptor sees it. SRTP leaves the
 /// RTP header in the clear, which is how the sequence number is read here.

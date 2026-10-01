@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
-import { MixerCard, type MixerRow } from "../components/Mixer";
+import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
@@ -12,6 +12,13 @@ import {
   type DesktopAudio, type DiscoveredReceiver, type Peer, type ProcessInfo, type ShareCapabilities,
   type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
 } from "../lib/ipc";
+
+/** S40: the mic picks its input; the call coming back picks where it plays.
+ *  Each shows only while its fader row does. */
+const SEND_DEVICES: MixerDevice[] = [
+  { track: "mic", row: "mic", label: "Microphone input" },
+  { track: "output", row: "call", label: "Call output" },
+];
 
 /** Instrument-strip readings, fed by the engine's `stats` events. */
 interface Strip {
@@ -445,6 +452,7 @@ export function Share() {
             the preset the engine read at start, so they match the wire. */}
         {sharing && (
           <MixerCard side="send" rows={sendRows(runningDef?.audio, strip.callLive)} sessionKey={`send-${running ?? ""}`}
+            devices={SEND_DEVICES}
             note={[
               runningDef?.audio.rest && runningDef.audio.desktop === "game"
                 ? "Recordings keep the game and the microphone; everything else is sent live but not written to disk."
@@ -477,6 +485,14 @@ function PresetCard({ def, locked, onSaved }: {
   onSaved: (select?: string) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<SharePresetDef | null>(null);
+  // Whether this PC can have Relay Camera at all: "Off" on a Windows 10 PC
+  // read as a setting the user could turn on (PC2, r39).
+  const [camOk, setCamOk] = useState(true);
+  useEffect(() => {
+    let live = true;
+    api.vdeviceStatus().then((v) => { if (live) setCamOk(v.camera_supported); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
   // Encode size is typed, not picked, and "2560x" is not a valid size — so
   // the text has to live outside the draft. Deriving the field's value from
   // `draft.size` alone makes React reset the box on every keystroke that does
@@ -523,7 +539,8 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Cursor" v={def.cursor ? "Shown" : "Hidden"} />
         <Kv k="Replay buffer" v={def.replay_secs ? `${def.replay_secs} s` : "Off"} mono />
         <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
-        <Kv k="Relay Camera here" v={def.vcam ? "On" : "Off"} />
+        <Kv k="Relay Camera here"
+          v={camOk ? (def.vcam ? "On" : "Off") : "Unavailable (needs Windows 11 22H2+)"} />
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );
@@ -598,9 +615,11 @@ function PresetCard({ def, locked, onSaved }: {
         <p className="note">Pick any combination: the microphone travels as its own track alongside the desktop mix, and the person on the other end hears them together. Nothing selected means a silent share.</p>
         <Toggle on={draft.cursor} onChange={(v) => edit({ cursor: v })}
           label="Show the mouse cursor" sub="Games draw their own, so this is usually off for Game." />
+{camOk && (
         <Toggle on={draft.vcam ?? false} onChange={(v) => edit({ vcam: v })}
           label="Also show this share as Relay Camera on this PC"
-          sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs Windows 11 and the camera installed in Settings. Video only — the streaming program captures the game's audio itself." />
+          sub="OBS, Streamlabs or TikTok Live Studio on this PC can then pick “Relay Camera” as a webcam. Needs the camera installed in Settings — on Windows 10 too. Video only — the streaming program captures the game's audio itself." />
+        )}
         <Toggle on={draft.record} onChange={(v) => edit({ record: v })}
           label="Start recording with the share"
           sub="Writes the same bitstream to disk; costs no extra encode." />

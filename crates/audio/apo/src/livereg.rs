@@ -12,8 +12,11 @@
 //!   HKLM.
 //! - Scope: the only keys ever written are one endpoint's `FxProperties`
 //!   subtree (paths come from [`FxStore`]'s *relative* keys, so nothing
-//!   outside it is expressible) and the recorded CLSID keys under
-//!   `HKLM\SOFTWARE\Classes\CLSID`.
+//!   outside it is expressible), the recorded CLSID keys under
+//!   `HKLM\SOFTWARE\Classes\CLSID`, and Relay's own audio-engine APO
+//!   registration under `HKLM\SOFTWARE\Classes\AudioEngine\
+//!   AudioProcessingObjects\{APO CLSID}` (S42b). The elevated helper vets
+//!   both machine-wide lists against those two CLSID keys before any call.
 //! - [`LiveRegistry::restore`] reconciles the live tree against the
 //!   [`Backup`]: values and sub-keys we (or anyone since) added are
 //!   deleted, prior values are rewritten, and the recorded COM keys are
@@ -278,6 +281,12 @@ impl LiveRegistry {
         Ok(FxStore { keys })
     }
 
+    /// Read-only: the values of Relay's audio-engine APO registration, or
+    /// `None` when the key is absent (audiodg will not load the APO).
+    pub fn read_audio_engine_registration() -> Option<ValueMap> {
+        Key::open(&ids::audio_engine_key(ids::APO_CLSID), KEY_READ).ok()?.read_values().ok()
+    }
+
     /// Write an [`InstallPlan`]: set the diffed FxProperties values and
     /// create the COM registration keys.
     ///
@@ -359,7 +368,13 @@ impl LiveRegistry {
         let mut com_keys = backup.com_keys.clone();
         com_keys.sort_by_key(|k| std::cmp::Reverse(k.matches('\\').count()));
         for path in &com_keys {
-            delete_tree(path)?;
+            // Already gone (a failed install that stopped before creating
+            // it, or a pre-S42b install that never wrote the audio-engine
+            // key) is the state we want, not an error.
+            match delete_tree(path) {
+                Err(LiveRegError::Win32(2)) => {}
+                other => other?,
+            }
         }
         Ok(())
     }

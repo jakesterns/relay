@@ -72,7 +72,7 @@ impl Backends {
                 #[cfg(windows)]
                 {
                     Self {
-                        audio: Arc::new(crate::audio_apo::ApoAudioControl),
+                        audio: Arc::new(crate::audio_apo::ApoAudioControl::default()),
                         hardware: Arc::new(crate::hardware::probe_win::WindowsHardwareProbe),
                         display: Arc::new(crate::display_backend::WinDisplay::new()),
                     }
@@ -143,6 +143,10 @@ struct Inner {
     /// a fresh core), so a receiver brought back after a share ends is
     /// embedded again rather than coming up with no window at all.
     recv_host: Option<u64>,
+    /// Relay Camera state the running receiver was last given (at spawn
+    /// or by a toggle), so a toggle is sent only when it changes: install
+    /// and uninstall each sent it twice (PC2, r47).
+    recv_vcam: Option<bool>,
     /// When the current receive engine started. A restarted receiver that
     /// has stayed up for a while ends the episode even if no share arrived:
     /// otherwise the episode's clock ran on and the next unrelated failure,
@@ -219,11 +223,19 @@ impl Service {
 
         let presets = PresetStore::load(paths.presets_file())?;
         let prefs = crate::uiprefs::PrefsStore::load(paths.settings_file());
-        let library = HardwareStore::load(paths.hardware_file())?;
+        let mut library = HardwareStore::load(paths.hardware_file())?;
         let report = backends.hardware.probe(false);
+        if library.migrate_listening_keys(&report) {
+            if let Err(e) = library.save() {
+                warn!(error = %e, "could not save migrated listening keys");
+            }
+        }
         let connected = library.connected(&report);
+        let mut hardware = HardwareView::from_report(report.clone(), &library);
+        hardware.other_processing = crate::hardware::other_processing::scan(&report);
+        crate::tray::set_listening_menu(tray_listening(&hardware, &library));
         let state = CoreState {
-            hardware: HardwareView::from_report(report.clone(), &library),
+            hardware,
             build: crate::types::BuildInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 data_dir: paths.root().display().to_string(),
@@ -258,6 +270,7 @@ impl Service {
             send_episode: None,
             recv_episode: None,
             recv_host: None,
+            recv_vcam: None,
             recv_started: None,
         }));
         let (events, _) = broadcast::channel(64);
@@ -319,7 +332,10 @@ impl Service {
         tx: mpsc::UnboundedSender<CoreEvent>,
         mut rx: mpsc::UnboundedReceiver<CoreEvent>,
     ) -> Result<()> {
-        let winloop = WinLoop::spawn(tx.clone(), hotkeys::defaults())?;
+        let winloop = WinLoop::spawn(
+            tx.clone(),
+            hotkeys::with_prefs(self.inner.lock().prefs.get().cycle_listening_hotkey),
+        )?;
 
         // WASAPI endpoint notifications (default switch, plug/unplug). Display
         // changes arrive via the winloop's hidden window. Keep the handle
@@ -364,8 +380,16 @@ impl Service {
         // profile with audio processing is active); footprint every 5th tick.
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut ticks = 0u32;
+        // Watches for the profiled app exiting, which fires no foreground
+        // event when nothing else takes focus. 100 ms keeps restore-on-exit
+        // inside the 200 ms budget; the branch is disabled while no profile
+        // is applied, so an idle core never wakes for it.
+        let mut exit_watch = tokio::time::interval(Duration::from_millis(100));
+        exit_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let profiled = self.inner.lock().state.active_profile.is_some();
             tokio::select! {
+                _ = exit_watch.tick(), if profiled => self.recheck_focus(),
                 ev = rx.recv() => {
                     match ev {
                         Some(CoreEvent::ForegroundChanged(fg)) => self.on_foreground(fg),
@@ -422,6 +446,17 @@ impl Service {
                 drop(g);
                 let _ = self.events.send(Event::StateChanged { state });
                 let _ = self.events.send(Event::Notice { text });
+                false
+            }
+            TrayCommand::Listen(i) => {
+                match pick_listening(&self.inner, &self.events, None, ListenPick::Index(i)) {
+                    Ok(label) => {
+                        let _ = self.events.send(Event::Notice {
+                            text: format!("Listening on {label}. Correction follows it."),
+                        });
+                    }
+                    Err(e) => warn!(error = %e, "tray listening pick not applied"),
+                }
                 false
             }
             TrayCommand::Quit => {
@@ -668,8 +703,8 @@ impl Service {
             "hardware changed"
         );
         g.connected = g.library.connected(&report);
-        g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
         g.last_report = report;
+        rebuild_hardware_view(&mut g, true);
         drop(g);
         reselect(&self.inner, &self.events);
         crate::footprint::trim_working_set();
@@ -740,6 +775,45 @@ impl Service {
         self.refresh_audio_chain();
     }
 
+    /// While a profile is applied, make sure the app it was applied for is
+    /// still the one in front. Closing the game often hands the foreground to
+    /// no window at all, and then no foreground event ever fires: the live
+    /// test closed Notepad and its profile stayed on the monitor until the
+    /// guard undid it (2026-09-29). The brief says restore on exit too.
+    fn recheck_focus(&self) {
+        #[cfg(windows)]
+        {
+            let stale = {
+                let g = self.inner.lock();
+                if g.state.active_profile.is_none() {
+                    return;
+                }
+                // Only the process exiting counts. Comparing against
+                // GetForegroundWindow every tick disagreed with the hook (it
+                // named another app with no foreground event) and undid a
+                // profile that was still wanted.
+                // By window, not process: IsWindow touches nothing in the
+                // game, where opening its process every 100 ms would be the
+                // kind of access anti-cheat watches for.
+                let applied = g.state.foreground.as_ref().map(|f| f.hwnd).filter(|h| *h != 0);
+                applied
+                    .filter(|h| !crate::winloop::window_alive(*h))
+                    .map(|_| crate::winloop::current_foreground())
+            };
+            if let Some(now) = stale {
+                let fg = now.unwrap_or(Foreground {
+                    pid: 0,
+                    exe: String::new(),
+                    title: String::new(),
+                    hmonitor: 0,
+                    hwnd: 0,
+                });
+                info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
+                self.on_foreground(fg);
+            }
+        }
+    }
+
     /// While a profile with audio processing is active, probe the default
     /// render endpoint for an exclusive-mode stream and surface
     /// `ExclusiveBypassed` in the state (and back) as it changes.
@@ -778,6 +852,14 @@ impl Service {
     fn on_hotkey(&self, action: HotkeyAction) {
         info!(?action, "hotkey");
         match action {
+            HotkeyAction::CycleListening => {
+                match pick_listening(&self.inner, &self.events, None, ListenPick::Next) {
+                    Ok(label) => {
+                        crate::winloop::balloon("Relay", &format!("Listening on {label}"));
+                    }
+                    Err(e) => warn!(error = %e, "cycle listening hotkey did nothing"),
+                }
+            }
             HotkeyAction::ToggleProfile => {
                 let mut g = self.inner.lock();
                 if g.applier.is_applied() {
@@ -901,6 +983,27 @@ fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> 
     }
 }
 
+/// S43b: after the camera is installed or removed, or consent changes, tell
+/// a running receiver (waiting or mid-share) to start or stop Relay Camera
+/// by the same rule that decides `--vcam` at spawn. Best effort.
+fn sync_receive_vcam(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    let receiving = g.receive.is_some();
+    let camera_ok = receiving && crate::vdevice::receive_routing(&g.paths).0;
+    if g.recv_vcam == Some(camera_ok) {
+        return;
+    }
+    if let Some(cmd) = crate::share::receive_vcam_sync(receiving, camera_ok) {
+        g.recv_vcam = Some(camera_ok);
+        if let Some(engine) = g.receive.as_mut() {
+            match engine.command(&cmd) {
+                Ok(()) => tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver"),
+                Err(e) => tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver"),
+            }
+        }
+    }
+}
+
 struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
@@ -949,8 +1052,8 @@ fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
     if !profile.audio.headset_correction {
         return None;
     }
-    let id = profile.headset.as_ref().or(g.connected.headset.as_ref())?;
-    g.library.headsets.iter().find(|h| &h.id == id)?.curve.clone()
+    crate::audio_bridge::correction_curve(&g.library, profile.headset.as_ref(), &g.connected)
+        .map(<[(f32, f32)]>::to_vec)
 }
 
 /// connected-hardware view. Mutates state only; the caller broadcasts.
@@ -1016,9 +1119,96 @@ fn reselect(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
 fn library_changed(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) {
     let mut g = inner.lock();
     g.connected = g.library.connected(&g.last_report);
-    g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
+    rebuild_hardware_view(&mut g, false);
     drop(g);
     reselect(inner, events);
+}
+
+/// Rebuild `state.hardware` from the last probe and the library. `rescan`
+/// re-reads the other-processing findings (FX stores and the process list,
+/// read-only); otherwise the previous findings carry over. Also refreshes the
+/// tray's listening-device list.
+fn rebuild_hardware_view(g: &mut Inner, rescan: bool) {
+    if rescan && g.library.migrate_listening_keys(&g.last_report) {
+        if let Err(e) = g.library.save() {
+            warn!(error = %e, "could not save migrated listening keys");
+        }
+    }
+    let prev = std::mem::take(&mut g.state.hardware.other_processing);
+    g.state.hardware = HardwareView::from_report(g.last_report.clone(), &g.library);
+    g.state.hardware.other_processing =
+        if rescan { crate::hardware::other_processing::scan(&g.last_report) } else { prev };
+    crate::tray::set_listening_menu(tray_listening(&g.state.hardware, &g.library));
+}
+
+/// The default output's listening devices as tray menu lines.
+fn tray_listening(view: &HardwareView, library: &HardwareStore) -> Vec<crate::tray::ListenItem> {
+    let Some(l) = view.default_listening.as_deref().and_then(|k| library.listening_for(k)) else {
+        return Vec::new();
+    };
+    let active = l.active();
+    l.devices
+        .iter()
+        .map(|d| crate::tray::ListenItem {
+            label: listening_label(d, library),
+            active: Some(d) == active,
+        })
+        .collect()
+}
+
+/// What to call a listening device in the tray and notices.
+fn listening_label(d: &crate::hardware::ListeningDevice, library: &HardwareStore) -> String {
+    match d {
+        crate::hardware::ListeningDevice::Headset { id } => {
+            library.headset(id).map(|h| h.name.clone()).unwrap_or_else(|| id.0.clone())
+        }
+        crate::hardware::ListeningDevice::Speakers => "Speakers / home theater".to_owned(),
+    }
+}
+
+/// How a listening-device change is chosen: by the UI naming it, by the
+/// tray's n-th line, or by the cycle hotkey.
+enum ListenPick {
+    Device(crate::hardware::ListeningDevice),
+    Index(usize),
+    Next,
+}
+
+/// Make a listening device active on `endpoint` (default output when
+/// `None`), save, and reselect so the correction and profile follow at once.
+/// Returns the new device's label.
+fn pick_listening(
+    inner: &Arc<Mutex<Inner>>,
+    events: &broadcast::Sender<Event>,
+    endpoint: Option<String>,
+    pick: ListenPick,
+) -> Result<String, String> {
+    let mut g = inner.lock();
+    let key = endpoint
+        .or_else(|| g.state.hardware.default_listening.clone())
+        .ok_or_else(|| "no default output".to_string())?;
+    let Some(entry) = g.library.listening.iter_mut().find(|l| l.endpoint == key) else {
+        return Err("nothing is listed for that output yet".into());
+    };
+    let chosen = match pick {
+        ListenPick::Device(d) => {
+            if !entry.set_active(&d) {
+                return Err("that device is not listed for this output".into());
+            }
+            d
+        }
+        ListenPick::Index(i) => {
+            let d = entry.devices.get(i).cloned().ok_or_else(|| "no such entry".to_string())?;
+            entry.set_active(&d);
+            d
+        }
+        ListenPick::Next => entry.cycle().cloned().ok_or_else(|| "nothing to cycle".to_string())?,
+    };
+    let label = listening_label(&chosen, &g.library);
+    g.library.save().map_err(|e| e.to_string())?;
+    drop(g);
+    library_changed(inner, events);
+    Ok(label)
 }
 
 /// Turn a `peer_id` into what the engine needs, or say why a request cannot
@@ -1101,6 +1291,14 @@ fn spawn_share(
             };
             let _ = events.send(Event::Notice { text: why.to_string() });
         }
+    }
+    // S40: the mixer's saved device picks, decided here like the other
+    // routing; nothing saved = the System default.
+    {
+        use crate::share::{DeviceTrack, MixerSide};
+        let saved = &g.prefs.prefs().audio_devices;
+        req.mic_device = saved.get(MixerSide::Send, DeviceTrack::Mic).map(str::to_string);
+        req.output_device = saved.get(MixerSide::Send, DeviceTrack::Output).map(str::to_string);
     }
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
@@ -1291,14 +1489,19 @@ fn on_receive_exit(
     last_failure: Option<String>,
     sender: Option<String>,
     ended_by_sender: bool,
+    crashed: bool,
 ) {
     let mut g = inner.lock();
     g.receive = None;
     if let Some(reason) = last_failure.as_deref() {
-        let dir = crate::crash::dir(&g.paths);
-        let log = g.paths.log_dir().join("share.log");
-        let _ = crate::crash::record_engine_exit(&dir, "relay-share-recv", None, Some(&log));
-        warn!(%reason, "receiver exited unexpectedly");
+        if crashed {
+            let dir = crate::crash::dir(&g.paths);
+            let log = g.paths.log_dir().join("share.log");
+            let _ = crate::crash::record_engine_exit(&dir, "relay-share-recv", None, Some(&log));
+            warn!(%reason, "receiver exited unexpectedly");
+        } else {
+            warn!(%reason, "receiver stopped on an error it reported");
+        }
     }
     let resilient = g.recv_intent.is_some() && g.prefs.get().resilience;
     let first = resilient && g.recv_episode.is_none();
@@ -1306,6 +1509,8 @@ fn on_receive_exit(
         g.recv_episode = Some(crate::resilience::Episode::begin(std::time::Instant::now()));
     }
     drop(g);
+    // Read before `last_failure` moves into the status below.
+    let own = last_failure.is_some() && !crashed;
     let _ = events.send(Event::ReceiveStatus {
         receiving: false,
         code: None,
@@ -1319,7 +1524,12 @@ fn on_receive_exit(
         return_exe: None,
     });
     if first && !ended_by_sender {
+        // A failure this PC reported is this PC's fault, not the sender's:
+        // "the share from X dropped" blamed the wrong machine (r39, B3).
         let text = match sender {
+            Some(s) if own => {
+                format!("This PC stopped showing the share from {s}. Relay is starting it again.")
+            }
             Some(s) => format!("The share from {s} dropped. Relay is waiting for it to come back."),
             None => "Receiving stopped on its own. Relay is starting it again.".to_string(),
         };
@@ -1346,6 +1556,13 @@ fn spawn_receive(
     // never by the client: no opt-in, no camera, no mic route.
     let mut req = req;
     (req.vcam, req.mic_route) = crate::vdevice::receive_routing(&g.paths);
+    // S40: the saved output pick; nothing saved = the System default.
+    req.output_device = g
+        .prefs
+        .prefs()
+        .audio_devices
+        .get(crate::share::MixerSide::Receive, crate::share::DeviceTrack::Output)
+        .map(str::to_string);
     // S36: the reverse of the rule in `spawn_share` -- a share that is
     // feeding Relay Camera keeps it while it runs.
     if req.vcam && g.share.is_some() && g.last_share.as_ref().is_some_and(|r| r.vcam) {
@@ -1354,6 +1571,7 @@ fn spawn_receive(
             text: "Relay Camera is showing the share this PC is sending; the incoming share plays in Relay only.".into(),
         });
     }
+    g.recv_vcam = Some(req.vcam);
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,
@@ -1389,6 +1607,9 @@ fn spawn_receive(
             // Why the engine stopped, carried to the final ReceiveStatus so a
             // failure is never reported as a plain return to idle.
             let mut last_failure: Option<String> = None;
+            // The process itself exited abnormally. A receiver that reported
+            // why and exited cleanly is a failure, not a crash (B3, r38).
+            let mut crashed = false;
             // Who was connected, for the one sentence S38 says if it drops.
             let mut last_sender: Option<String> = None;
             let mut ended_by_sender = false;
@@ -1514,6 +1735,7 @@ fn spawn_receive(
                 // made "Start receiving" look like it did nothing at all: the
                 // UI flipped straight back to Idle with no reason given.
                 ShareEvent::Exited { ok, code } => {
+                    crashed = !ok;
                     if !ok && last_failure.is_none() {
                         last_failure = Some(match code {
                             Some(c) => format!("the receiver stopped unexpectedly (exit {c})"),
@@ -1578,6 +1800,7 @@ fn spawn_receive(
                     last_failure.take(),
                     last_sender.take(),
                     ended_by_sender,
+                    crashed,
                 );
             }
         })
@@ -1770,6 +1993,40 @@ impl IpcHandler {
                     crate::share::MixerSide::Receive => receive_command(&self.inner, &cmd),
                 }
             }
+            Method::ListAudioDevices => {
+                drop(g);
+                #[cfg(windows)]
+                let devices = crate::hardware::probe_win::list_audio_devices();
+                #[cfg(not(windows))]
+                let devices = crate::share::AudioDevices::default();
+                Reply::AudioDevices { devices }
+            }
+            Method::SetAudioDevice { side, track, device } => {
+                // Saved first, so the pick holds for the next share even when
+                // nothing is running now; then sent live if something is.
+                match g.prefs.set_device(side, track, device.clone()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Reply::Error {
+                            message: "a receiver has no microphone to choose".into(),
+                        }
+                    }
+                    Err(e) => return Reply::Error { message: e.to_string() },
+                }
+                let running = match side {
+                    crate::share::MixerSide::Send => g.share.is_some(),
+                    crate::share::MixerSide::Receive => g.receive.is_some(),
+                };
+                drop(g);
+                if !running {
+                    return Reply::Ok;
+                }
+                let cmd = crate::share::EngineCmd::Device { track, device };
+                match side {
+                    crate::share::MixerSide::Send => engine_command(&self.inner, &cmd),
+                    crate::share::MixerSide::Receive => receive_command(&self.inner, &cmd),
+                }
+            }
             Method::ListPresets => Reply::Presets {
                 presets: g.presets.all().to_vec(),
                 recording: g.presets.recording.clone(),
@@ -1838,16 +2095,55 @@ impl IpcHandler {
                 drop(g);
                 edit_peers(|s| s.set_favourite(&id, favourite))
             }
-            Method::ListHardware => Reply::Hardware {
-                headsets: g.library.headsets.clone(),
-                monitors: g.library.monitors.clone(),
-                interfaces: g.library.interfaces.clone(),
-                vendor_controls: crate::hardware::vendor_controls(
-                    &g.library.monitors,
-                    &g.state.hardware.monitors,
-                ),
-                connected: Box::new(g.state.hardware.clone()),
-            },
+            Method::ListHardware => {
+                rebuild_hardware_view(&mut g, true);
+                Reply::Hardware {
+                    headsets: g.library.headsets.clone(),
+                    monitors: g.library.monitors.clone(),
+                    interfaces: g.library.interfaces.clone(),
+                    vendor_controls: crate::hardware::vendor_controls(
+                        &g.library.monitors,
+                        &g.state.hardware.monitors,
+                    ),
+                    connected: Box::new(g.state.hardware.clone()),
+                }
+            }
+            Method::SetListeningDevices { endpoint, devices } => {
+                if endpoint.trim().is_empty() {
+                    return Reply::Error { message: "which output?".into() };
+                }
+                if let Some(missing) = devices
+                    .iter()
+                    .filter_map(|d| d.headset())
+                    .find(|id| g.library.headset(id).is_none())
+                {
+                    return Reply::Error {
+                        message: format!("{} is not in the hardware library", missing.0),
+                    };
+                }
+                g.library.listening_entry(&endpoint).set_devices(devices);
+                g.library.listening.retain(|l| !l.devices.is_empty());
+                match g.library.save() {
+                    Ok(()) => {
+                        drop(g);
+                        library_changed(&self.inner, &self.events);
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: e.to_string() },
+                }
+            }
+            Method::SetActiveListening { endpoint, device } => {
+                drop(g);
+                match pick_listening(
+                    &self.inner,
+                    &self.events,
+                    Some(endpoint),
+                    ListenPick::Device(device),
+                ) {
+                    Ok(_) => Reply::Ok,
+                    Err(message) => Reply::Error { message },
+                }
+            }
             Method::SaveHardware { item } => {
                 match item {
                     crate::ipc::HardwareItem::Headset(h) => {
@@ -1919,8 +2215,8 @@ impl IpcHandler {
                     }
                 }
                 g.connected = g.library.connected(&report);
-                g.state.hardware = HardwareView::from_report(report.clone(), &g.library);
                 g.last_report = report.clone();
+                rebuild_hardware_view(&mut g, true);
                 drop(g);
                 reselect(&self.inner, &self.events);
                 Reply::Probe { report: Box::new(report) }
@@ -2036,14 +2332,15 @@ impl IpcHandler {
                 }
             }
             Method::ApoStatus => {
-                drop(g);
-                Reply::Apo { status: crate::audio_apo::apo_status() }
-            }
-            #[cfg(windows)]
-            Method::InstallApo => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
-                match crate::audio_apo::install_live(&dir) {
+                Reply::Apo { status: crate::audio_apo::apo_status(&dir) }
+            }
+            #[cfg(windows)]
+            Method::InstallApo { endpoint } => {
+                let dir = g.apo_backup_dir.clone();
+                drop(g);
+                match crate::audio_apo::install_live(&dir, endpoint.as_deref()) {
                     Ok(endpoint) => {
                         let _ = self.events.send(Event::Notice {
                             text: format!("Relay APO registered on {endpoint}"),
@@ -2054,10 +2351,10 @@ impl IpcHandler {
                 }
             }
             #[cfg(windows)]
-            Method::UninstallApo => {
+            Method::UninstallApo { endpoint } => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
-                match crate::audio_apo::uninstall_live(&dir) {
+                match crate::audio_apo::uninstall_live(&dir, endpoint.as_deref()) {
                     Ok(endpoint) => {
                         let _ = self.events.send(Event::Notice {
                             text: format!("Endpoint {endpoint} restored to its original state"),
@@ -2068,7 +2365,7 @@ impl IpcHandler {
                 }
             }
             #[cfg(not(windows))]
-            Method::InstallApo | Method::UninstallApo => {
+            Method::InstallApo { .. } | Method::UninstallApo { .. } => {
                 Reply::Error { message: "Windows only".into() }
             }
             Method::VdeviceStatus => {
@@ -2083,7 +2380,10 @@ impl IpcHandler {
                 let paths = g.paths.clone();
                 drop(g);
                 match crate::vdevice::set_consent(&paths, apo, camera, microphone) {
-                    Ok(_) => Reply::Ok,
+                    Ok(_) => {
+                        sync_receive_vcam(&self.inner);
+                        Reply::Ok
+                    }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
@@ -2095,11 +2395,12 @@ impl IpcHandler {
             Method::InstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
-                match crate::vdevice::install_camera_live(&paths) {
+                match crate::vdevice::install_vcam(&paths) {
                     Ok(()) => {
                         let _ = self
                             .events
                             .send(Event::Notice { text: "Relay Camera registered".into() });
+                        sync_receive_vcam(&self.inner);
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
@@ -2109,10 +2410,11 @@ impl IpcHandler {
             Method::UninstallVcam => {
                 let paths = g.paths.clone();
                 drop(g);
-                match crate::vdevice::uninstall_camera_live(&paths) {
+                match crate::vdevice::uninstall_vcam(&paths) {
                     Ok(()) => {
                         let _ =
                             self.events.send(Event::Notice { text: "Relay Camera removed".into() });
+                        sync_receive_vcam(&self.inner);
                         Reply::Ok
                     }
                     Err(e) => Reply::Error { message: format!("{e:#}") },
@@ -2125,7 +2427,7 @@ impl IpcHandler {
             Method::ElevationPlan { op } => {
                 let paths = g.paths.clone();
                 drop(g);
-                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, op) }
+                Reply::DryRun { lines: crate::elevate::plan_lines(&paths, &op) }
             }
             // Handled ahead of this match (it blocks on a UAC prompt), and
             // only reachable if that dispatch is ever removed.
@@ -2209,6 +2511,9 @@ impl IpcHandler {
                 for line in &lines {
                     let _ = self.events.send(Event::Notice { text: line.clone() });
                 }
+                // A camera op through the helper changes what a running
+                // receiver should do (S43b); other ops leave it as it was.
+                sync_receive_vcam(&self.inner);
                 Reply::Elevation { declined: false, ok: response.ok(), lines }
             }
             Err(crate::elevate::LaunchError::Declined) => Reply::Elevation {

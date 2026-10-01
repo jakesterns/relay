@@ -23,6 +23,33 @@ pub const WM_TRAY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 pub const ID_OPEN: u32 = 1;
 pub const ID_RESTORE: u32 = 2;
 pub const ID_QUIT: u32 = 3;
+/// S41: listening devices of the default output are `ID_LISTEN_BASE + index`.
+pub const ID_LISTEN_BASE: u32 = 100;
+/// More than this many listening devices on one output are not listed.
+pub const MAX_LISTEN: usize = 16;
+
+/// One listening-device line in the menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenItem {
+    pub label: String,
+    pub active: bool,
+}
+
+/// The default output's listening devices, published by the service whenever
+/// the hardware view changes and read by the menu when it opens. A snapshot,
+/// so the menu never takes the service lock; the service re-checks the index
+/// against the live list when a pick comes back.
+static LISTENING: std::sync::Mutex<Vec<ListenItem>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_listening_menu(items: Vec<ListenItem>) {
+    if let Ok(mut g) = LISTENING.lock() {
+        *g = items;
+    }
+}
+
+pub fn listening_menu() -> Vec<ListenItem> {
+    LISTENING.lock().map(|g| g.clone()).unwrap_or_default()
+}
 
 /// What the user picked from the icon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +60,8 @@ pub enum TrayCommand {
     Restore,
     /// Stop the core (restoring on the way out) and close the window.
     Quit,
+    /// Make the default output's n-th listening device active (S41).
+    Listen(usize),
 }
 
 impl TrayCommand {
@@ -42,6 +71,9 @@ impl TrayCommand {
             ID_OPEN => Some(Self::Open),
             ID_RESTORE => Some(Self::Restore),
             ID_QUIT => Some(Self::Quit),
+            n if (ID_LISTEN_BASE..ID_LISTEN_BASE + MAX_LISTEN as u32).contains(&n) => {
+                Some(Self::Listen((n - ID_LISTEN_BASE) as usize))
+            }
             _ => None,
         }
     }
@@ -66,9 +98,9 @@ mod imp {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, PostMessageW,
-        SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING,
-        TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
-        WM_RBUTTONUP,
+        SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_CHECKED, MF_GRAYED,
+        MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
+        WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
     };
 
     /// One icon per process. Removing it on drop matters: an icon left behind
@@ -140,6 +172,17 @@ mod imp {
 
                 let menu = CreatePopupMenu().ok()?;
                 let _ = AppendMenuW(menu, MF_STRING, ID_OPEN as usize, w("Open Relay"));
+                let listen = listening_menu();
+                if listen.len() > 1 {
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w("Listening on"));
+                    for (i, item) in listen.iter().take(MAX_LISTEN).enumerate() {
+                        let flags = if item.active { MF_STRING | MF_CHECKED } else { MF_STRING };
+                        let _ =
+                            AppendMenuW(menu, flags, (ID_LISTEN_BASE as usize) + i, w(&item.label));
+                    }
+                    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                }
                 let _ = AppendMenuW(menu, MF_STRING, ID_RESTORE as usize, w("Restore everything"));
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(menu, MF_STRING, ID_QUIT as usize, w("Quit Relay"));
@@ -307,6 +350,9 @@ mod tests {
         // TrackPopupMenu reports 0 when the menu is dismissed without a pick.
         assert_eq!(TrayCommand::from_id(0), None);
         assert_eq!(TrayCommand::from_id(99), None);
+        assert_eq!(TrayCommand::from_id(ID_LISTEN_BASE), Some(TrayCommand::Listen(0)));
+        assert_eq!(TrayCommand::from_id(ID_LISTEN_BASE + 2), Some(TrayCommand::Listen(2)));
+        assert_eq!(TrayCommand::from_id(ID_LISTEN_BASE + MAX_LISTEN as u32), None);
     }
 
     #[test]

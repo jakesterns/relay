@@ -201,8 +201,11 @@ pub struct Backup {
     pub store: FxStore,
     /// The CLSID the installer registered (matches [`ids::APO_CLSID`]).
     pub installed_clsid: String,
-    /// COM registry keys the installer adds under HKLM (recorded diff —
-    /// uninstall deletes exactly these, top-down).
+    /// Machine-wide keys the installer adds under HKLM — the COM class and
+    /// (S42b) the audio-engine APO registration (recorded diff — uninstall
+    /// deletes exactly these, deepest first; kept while another endpoint
+    /// still carries the APO). Backups from before S42b lack the
+    /// audio-engine key; nothing wrote it then, so nothing is left behind.
     pub com_keys: Vec<String>,
 }
 
@@ -231,7 +234,11 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
         timestamp: iso_now(),
         store: current.clone(),
         installed_clsid: ids::APO_CLSID.to_owned(),
-        com_keys: vec![clsid_key.clone(), inproc_key.clone()],
+        com_keys: vec![
+            clsid_key.clone(),
+            inproc_key.clone(),
+            ids::audio_engine_key(ids::APO_CLSID),
+        ],
     };
 
     let mut new_store = current.clone();
@@ -268,7 +275,34 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
     );
     com_keys.insert(inproc_key, inproc_values);
 
+    // Audio-engine registration — what audiodg actually looks up (S42b).
+    com_keys.insert(ids::audio_engine_key(ids::APO_CLSID), audio_engine_values());
+
     InstallPlan { backup, new_store, com_keys }
+}
+
+/// The values `RegisterAPO` writes for Relay's `APO_REG_PROPERTIES`, in the
+/// order and with the types it writes them (REG_SZ strings, REG_DWORD
+/// numbers; `APOInterface<n>` REG_SZ braced IIDs) — matched against a
+/// third-party registration on the dev PC. Every number mirrors
+/// `com::GetRegistrationProperties`.
+pub fn audio_engine_values() -> ValueMap {
+    let sz = |s: &str| RegValue { kind: RegKind::Sz, data: sz_bytes(s) };
+    let dword = |n: u32| RegValue { kind: RegKind::Dword, data: n.to_le_bytes().to_vec() };
+    let mut v = ValueMap::new();
+    v.insert("FriendlyName".into(), sz(ids::APO_FRIENDLY_NAME));
+    v.insert("Copyright".into(), sz(ids::APO_COPYRIGHT));
+    v.insert("MajorVersion".into(), dword(ids::APO_MAJOR_VERSION));
+    v.insert("MinorVersion".into(), dword(ids::APO_MINOR_VERSION));
+    v.insert("Flags".into(), dword(ids::APO_REG_FLAGS));
+    v.insert("MinInputConnections".into(), dword(1));
+    v.insert("MaxInputConnections".into(), dword(1));
+    v.insert("MinOutputConnections".into(), dword(1));
+    v.insert("MaxOutputConnections".into(), dword(1));
+    v.insert("MaxInstances".into(), dword(u32::MAX));
+    v.insert("NumAPOInterfaces".into(), dword(1));
+    v.insert("APOInterface0".into(), sz(ids::IID_IAUDIO_PROCESSING_OBJECT));
+    v
 }
 
 /// Plan an uninstall: the store to restore is the backup, verbatim. Trivial

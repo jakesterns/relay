@@ -10,6 +10,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod permissions;
 mod stream_host;
 mod window_state;
 
@@ -262,6 +264,28 @@ async fn set_mixer(
     }
 }
 
+/// Active audio endpoints for the mixer's device pickers (S40).
+#[tauri::command]
+async fn list_audio_devices() -> CmdResult<relay_core::share::AudioDevices> {
+    match call(Method::ListAudioDevices).await? {
+        Reply::AudioDevices { devices } => Ok(devices),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// One track's device, live and saved (S40). `device` null = System default.
+#[tauri::command]
+async fn set_audio_device(
+    side: relay_core::share::MixerSide,
+    track: relay_core::share::DeviceTrack,
+    device: Option<String>,
+) -> CmdResult<()> {
+    match call(Method::SetAudioDevice { side, track, device }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Mirrors `Reply::Presets`; the frontend gets one object.
 #[derive(Debug, serde::Serialize)]
 struct PresetsReply {
@@ -423,6 +447,28 @@ async fn save_hardware(item: relay_core::ipc::HardwareItem) -> CmdResult<()> {
 }
 
 #[tauri::command]
+async fn set_listening_devices(
+    endpoint: String,
+    devices: Vec<relay_core::hardware::ListeningDevice>,
+) -> CmdResult<()> {
+    match call(Method::SetListeningDevices { endpoint, devices }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn set_active_listening(
+    endpoint: String,
+    device: relay_core::hardware::ListeningDevice,
+) -> CmdResult<()> {
+    match call(Method::SetActiveListening { endpoint, device }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn delete_hardware(id: String) -> CmdResult<()> {
     match call(Method::DeleteHardware { id }).await? {
         Reply::Ok => Ok(()),
@@ -492,16 +538,16 @@ async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
 }
 
 #[tauri::command]
-async fn install_apo() -> CmdResult<()> {
-    match call(Method::InstallApo).await? {
+async fn install_apo(endpoint: Option<String>) -> CmdResult<()> {
+    match call(Method::InstallApo { endpoint }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
 }
 
 #[tauri::command]
-async fn uninstall_apo() -> CmdResult<()> {
-    match call(Method::UninstallApo).await? {
+async fn uninstall_apo(endpoint: Option<String>) -> CmdResult<()> {
+    match call(Method::UninstallApo { endpoint }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
@@ -931,6 +977,9 @@ pub fn run() {
         .setup(|app| {
             if let Some(w) = app.get_webview_window("main") {
                 window_state::restore(&w.as_ref().window());
+                // No device or permission prompt from our own webview (S43b).
+                #[cfg(windows)]
+                permissions::deny_all(&w);
             }
             spawn_event_bridge(app.handle().clone());
             spawn_core_autostart(app.handle().clone());
@@ -1022,6 +1071,8 @@ pub fn run() {
             save_replay,
             switch_source,
             set_mixer,
+            list_audio_devices,
+            set_audio_device,
             list_presets,
             save_preset,
             delete_preset,
@@ -1039,6 +1090,8 @@ pub fn run() {
             list_hardware,
             save_hardware,
             delete_hardware,
+            set_listening_devices,
+            set_active_listening,
             probe_hardware,
             import_curve,
             render_preview,

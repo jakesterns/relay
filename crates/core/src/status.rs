@@ -73,6 +73,7 @@ mod tests {
                 exe: "cod.exe".into(),
                 title: "CoD".into(),
                 hmonitor: 0,
+                hwnd: 0,
             }),
             ..Default::default()
         };

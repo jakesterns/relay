@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use tracing::debug;
+use tracing::{debug, info, warn};
 use windows::core::{implement, Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
@@ -33,6 +33,7 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
+use crate::devices::{self, DeviceSlot, Flow, Opened};
 use crate::time::qpc_now_100ns;
 
 /// What to capture.
@@ -68,13 +69,22 @@ pub struct AudioCapture {
 
 impl AudioCapture {
     pub fn start(source: AudioSource) -> Result<Self> {
+        Self::start_on(source, None)
+    }
+
+    /// Start on the endpoint `slot` names (S40): the System default when the
+    /// slot is empty or absent. Endpoint sources (desktop loopback, the mic)
+    /// reopen in place when the slot changes, or when they follow the default
+    /// and the OS default moves; the consumer sees the blocks carry on, with
+    /// the new endpoint's rate and channel count on each block.
+    pub fn start_on(source: AudioSource, slot: Option<Arc<DeviceSlot>>) -> Result<Self> {
         let (tx, rx) = sync_channel::<AudioBlock>(32);
         let stop = Arc::new(AtomicBool::new(false));
         let (fmt_tx, fmt_rx) = std::sync::mpsc::channel::<Result<(u32, u16)>>();
         let stop2 = stop.clone();
         let join =
             std::thread::Builder::new().name("relay-audio-capture".into()).spawn(move || {
-                if let Err(e) = capture_thread(source, tx, stop2, fmt_tx.clone()) {
+                if let Err(e) = capture_thread(source, slot, tx, stop2, fmt_tx.clone()) {
                     let _ = fmt_tx.send(Err(e));
                 }
             })?;
@@ -116,7 +126,7 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivateHandler_Impl {
     }
 }
 
-fn activate_client(source: &AudioSource) -> Result<(IAudioClient, u32)> {
+fn activate_client(source: &AudioSource, device_id: Option<&str>) -> Result<(IAudioClient, u32)> {
     // SAFETY: COM calls on this thread (already CoInitialize'd by the caller).
     unsafe {
         match source {
@@ -124,7 +134,15 @@ fn activate_client(source: &AudioSource) -> Result<(IAudioClient, u32)> {
                 let enumerator: IMMDeviceEnumerator =
                     CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
                 let flow = if matches!(source, AudioSource::Desktop) { eRender } else { eCapture };
-                let device = enumerator.GetDefaultAudioEndpoint(flow, eConsole)?;
+                let device = match device_id {
+                    Some(id) => {
+                        let wide: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
+                        enumerator
+                            .GetDevice(PCWSTR(wide.as_ptr()))
+                            .with_context(|| format!("open audio endpoint {id}"))?
+                    }
+                    None => enumerator.GetDefaultAudioEndpoint(flow, eConsole)?,
+                };
                 let client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
                 Ok((client, 0))
             }
@@ -179,92 +197,232 @@ fn activate_client(source: &AudioSource) -> Result<(IAudioClient, u32)> {
     }
 }
 
+/// One opened WASAPI capture stream. Dropping it stops the client.
+struct OpenStream {
+    client: IAudioClient,
+    capture: IAudioCaptureClient,
+    event: HANDLE,
+    rate: u32,
+    channels: u16,
+}
+
+impl Drop for OpenStream {
+    fn drop(&mut self) {
+        // SAFETY: the client and event were created by `open_stream` and are
+        // released exactly once here.
+        unsafe {
+            self.client.Stop().ok();
+            let _ = CloseHandle(self.event);
+        }
+    }
+}
+
+/// Activate, initialise and start a capture stream on `device_id` (the
+/// default endpoint for the source's direction when `None`).
+///
+/// # Safety
+/// COM must be initialised on the calling thread.
+unsafe fn open_stream(source: &AudioSource, device_id: Option<&str>) -> Result<OpenStream> {
+    let (client, is_process) = activate_client(source, device_id)?;
+
+    // Process loopback has no mix format; the endpoint paths use theirs.
+    let (format_ptr, rate, channels): (*mut WAVEFORMATEX, u32, u16) = if is_process == 1 {
+        (std::ptr::null_mut(), 48_000, 2)
+    } else {
+        let p = client.GetMixFormat()?;
+        ((p), (*p).nSamplesPerSec, (*p).nChannels)
+    };
+    if !format_ptr.is_null() {
+        if let Err(e) = check_float32(format_ptr) {
+            CoTaskMemFree(Some(format_ptr as *const _));
+            return Err(e);
+        }
+    }
+    let own_format = WAVEFORMATEX {
+        wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+        nChannels: channels,
+        nSamplesPerSec: rate,
+        nAvgBytesPerSec: rate * channels as u32 * 4,
+        nBlockAlign: channels * 4,
+        wBitsPerSample: 32,
+        cbSize: 0,
+    };
+    let fmt: *const WAVEFORMATEX =
+        if format_ptr.is_null() { &own_format } else { format_ptr as *const _ };
+
+    let mut flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+    if matches!(source, AudioSource::Desktop) || is_process == 1 {
+        flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
+    }
+    let init = client
+        .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 200_000, 0, fmt, None)
+        .context("IAudioClient::Initialize");
+    if !format_ptr.is_null() {
+        CoTaskMemFree(Some(format_ptr as *const _));
+    }
+    init?;
+    let event = CreateEventW(None, false, false, PCWSTR::null())?;
+    if let Err(e) = client.SetEventHandle(event) {
+        let _ = CloseHandle(event);
+        return Err(e.into());
+    }
+    let capture: IAudioCaptureClient = match client.GetService() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = CloseHandle(event);
+            return Err(e.into());
+        }
+    };
+    let s = OpenStream { client, capture, event, rate, channels };
+    s.client.Start()?;
+    Ok(s)
+}
+
+/// Why [`pump`] returned without an error.
+enum PumpEnd {
+    Stopped,
+    Reopen,
+}
+
+/// Move packets from `s` to `tx` until stopped, until the device choice (or
+/// the default it follows) changes, or until WASAPI fails.
+///
+/// # Safety
+/// COM must be initialised on the calling thread.
+unsafe fn pump(
+    s: &OpenStream,
+    tx: &SyncSender<AudioBlock>,
+    stop: &AtomicBool,
+    watch: Option<(&DeviceSlot, Opened, Flow)>,
+) -> Result<PumpEnd> {
+    while !stop.load(Ordering::Relaxed) {
+        if let Some((slot, opened, flow)) = watch {
+            if devices::should_reopen(&opened, slot.generation(), devices::default_generation(flow))
+            {
+                return Ok(PumpEnd::Reopen);
+            }
+        }
+        if WaitForSingleObject(s.event, 100) != WAIT_OBJECT_0 {
+            continue;
+        }
+        loop {
+            let next = s.capture.GetNextPacketSize()?;
+            if next == 0 {
+                break;
+            }
+            let mut data: *mut u8 = std::ptr::null_mut();
+            let mut frames = 0u32;
+            let mut dflags = 0u32;
+            s.capture.GetBuffer(&mut data, &mut frames, &mut dflags, None, None)?;
+            let n = frames as usize * s.channels as usize;
+            let samples = if dflags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
+                vec![0.0f32; n]
+            } else {
+                std::slice::from_raw_parts(data as *const f32, n).to_vec()
+            };
+            s.capture.ReleaseBuffer(frames)?;
+            let block = AudioBlock {
+                samples,
+                channels: s.channels,
+                sample_rate: s.rate,
+                qpc_100ns: qpc_now_100ns(),
+            };
+            if tx.try_send(block).is_err() {
+                debug!("audio consumer busy; block dropped");
+            }
+        }
+    }
+    Ok(PumpEnd::Stopped)
+}
+
+/// Sleep up to `ms`, waking early on stop.
+fn nap(stop: &AtomicBool, ms: u64) {
+    let mut left = ms;
+    while left > 0 && !stop.load(Ordering::Relaxed) {
+        let step = left.min(50);
+        std::thread::sleep(Duration::from_millis(step));
+        left -= step;
+    }
+}
+
 fn capture_thread(
     source: AudioSource,
+    slot: Option<Arc<DeviceSlot>>,
     tx: SyncSender<AudioBlock>,
     stop: Arc<AtomicBool>,
     fmt_tx: std::sync::mpsc::Sender<Result<(u32, u16)>>,
 ) -> Result<()> {
-    // SAFETY: standard WASAPI capture loop; COM is initialised for this thread.
+    // SAFETY: standard WASAPI capture loop; COM is initialised for this thread
+    // and every stream is dropped before it is uninitialised.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
         let result = (|| -> Result<()> {
-            let (client, is_process) = activate_client(&source)?;
-
-            // Process loopback has no mix format; the endpoint paths use theirs.
-            let (format_ptr, rate, channels): (*mut WAVEFORMATEX, u32, u16) = if is_process == 1 {
-                (std::ptr::null_mut(), 48_000, 2)
-            } else {
-                let p = client.GetMixFormat()?;
-                ((p), (*p).nSamplesPerSec, (*p).nChannels)
-            };
-            if !format_ptr.is_null() {
-                if let Err(e) = check_float32(format_ptr) {
-                    CoTaskMemFree(Some(format_ptr as *const _));
-                    return Err(e);
-                }
+            // Endpoint sources follow a device choice and the OS default;
+            // process loopback is not tied to an endpoint and does neither.
+            let endpoint = matches!(source, AudioSource::Desktop | AudioSource::Microphone);
+            let flow =
+                if matches!(source, AudioSource::Desktop) { Flow::Render } else { Flow::Capture };
+            let slot = slot.unwrap_or_else(|| DeviceSlot::shared(None));
+            if endpoint {
+                devices::watch_defaults();
             }
-            let own_format = WAVEFORMATEX {
-                wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
-                nChannels: channels,
-                nSamplesPerSec: rate,
-                nAvgBytesPerSec: rate * channels as u32 * 4,
-                nBlockAlign: channels * 4,
-                wBitsPerSample: 32,
-                cbSize: 0,
-            };
-            let fmt: *const WAVEFORMATEX =
-                if format_ptr.is_null() { &own_format } else { format_ptr as *const _ };
-
-            let mut flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-            if matches!(source, AudioSource::Desktop) || is_process == 1 {
-                flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
-            }
-            client
-                .Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 200_000, 0, fmt, None)
-                .context("IAudioClient::Initialize")?;
-            if !format_ptr.is_null() {
-                CoTaskMemFree(Some(format_ptr as *const _));
-            }
-            let event = CreateEventW(None, false, false, PCWSTR::null())?;
-            client.SetEventHandle(event)?;
-            let capture: IAudioCaptureClient = client.GetService()?;
-            client.Start()?;
-            fmt_tx.send(Ok((rate, channels))).ok();
-
+            // Present until the first open: a failure then is the caller's
+            // error, as it always was. After that, the share carries on and
+            // the track retries.
+            let mut fmt_tx = Some(fmt_tx);
             while !stop.load(Ordering::Relaxed) {
-                if WaitForSingleObject(event, 100) != WAIT_OBJECT_0 {
-                    continue;
+                let (choice, slot_gen) = slot.get();
+                let choice = if endpoint { choice } else { None };
+                let mut opened = Opened {
+                    slot_gen,
+                    follows_default: choice.is_none(),
+                    default_gen: devices::default_generation(flow),
+                };
+                let opened_stream = match open_stream(&source, choice.as_deref()) {
+                    Ok(s) => Ok(s),
+                    Err(e) if choice.is_some() => {
+                        warn!(
+                            error = %e, device = ?choice,
+                            "the chosen audio endpoint would not open; using the System default"
+                        );
+                        opened.follows_default = true;
+                        open_stream(&source, None)
+                    }
+                    Err(e) => Err(e),
+                };
+                let s = match opened_stream {
+                    Ok(s) => s,
+                    Err(e) if fmt_tx.is_some() => return Err(e),
+                    Err(e) => {
+                        warn!(error = %e, ?source, "audio endpoint would not reopen; retrying");
+                        nap(&stop, 500);
+                        continue;
+                    }
+                };
+                match fmt_tx.take() {
+                    Some(t) => {
+                        t.send(Ok((s.rate, s.channels))).ok();
+                    }
+                    None => info!(
+                        ?source, device = ?choice, rate = s.rate, channels = s.channels,
+                        "audio capture reopened"
+                    ),
                 }
-                loop {
-                    let next = capture.GetNextPacketSize().unwrap_or(0);
-                    if next == 0 {
-                        break;
+                let watch = endpoint.then_some((&*slot, opened, flow));
+                match pump(&s, &tx, &stop, watch) {
+                    Ok(PumpEnd::Stopped) => break,
+                    Ok(PumpEnd::Reopen) => info!(
+                        ?source,
+                        "audio capture: device choice or OS default changed; reopening"
+                    ),
+                    Err(e) if endpoint => {
+                        warn!(error = %e, ?source, "audio endpoint lost; reopening");
+                        drop(s);
+                        nap(&stop, 500);
                     }
-                    let mut data: *mut u8 = std::ptr::null_mut();
-                    let mut frames = 0u32;
-                    let mut dflags = 0u32;
-                    capture.GetBuffer(&mut data, &mut frames, &mut dflags, None, None)?;
-                    let n = frames as usize * channels as usize;
-                    let samples = if dflags & (AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 {
-                        vec![0.0f32; n]
-                    } else {
-                        std::slice::from_raw_parts(data as *const f32, n).to_vec()
-                    };
-                    capture.ReleaseBuffer(frames)?;
-                    let block = AudioBlock {
-                        samples,
-                        channels,
-                        sample_rate: rate,
-                        qpc_100ns: qpc_now_100ns(),
-                    };
-                    if tx.try_send(block).is_err() {
-                        debug!("audio consumer busy; block dropped");
-                    }
+                    Err(e) => return Err(e),
                 }
             }
-            client.Stop().ok();
-            let _ = CloseHandle(event);
             Ok(())
         })();
         CoUninitialize();
@@ -322,6 +480,8 @@ pub struct OpusStream {
     encoder: opus::Encoder,
     convert: crate::resample::ToOpus48,
     src_channels: u16,
+    /// The endpoint's rate right now; changes when a reopen lands elsewhere.
+    src_rate: u32,
     pending: Vec<f32>,
     /// Arrival stamps for the samples in `pending`: `(qpc, samples left from
     /// that block)`, oldest first. Lets a packet report when its first sample
@@ -403,7 +563,16 @@ fn take_capture_stamp(stamps: &mut VecDeque<(i64, usize)>, frame_samples: usize)
 
 impl OpusStream {
     pub fn new(source: AudioSource, profile: OpusProfile) -> Result<Self> {
-        let capture = AudioCapture::start(source)?;
+        Self::new_on(source, profile, None)
+    }
+
+    /// As [`OpusStream::new`], on the endpoint `slot` names (S40).
+    pub fn new_on(
+        source: AudioSource,
+        profile: OpusProfile,
+        slot: Option<Arc<DeviceSlot>>,
+    ) -> Result<Self> {
+        let capture = AudioCapture::start_on(source, slot)?;
         let (rate, channels) = (capture.sample_rate, capture.channels);
         crate::resample::check_format(rate, channels)?;
         let conversion = crate::resample::conversion_note(rate, channels);
@@ -421,6 +590,7 @@ impl OpusStream {
             encoder,
             convert: crate::resample::ToOpus48::new(rate),
             src_channels: channels,
+            src_rate: rate,
             pending: Vec::with_capacity(frame_samples * 4),
             stamps: VecDeque::new(),
             frame_samples,
@@ -439,7 +609,7 @@ impl OpusStream {
 
     /// The endpoint's own sample rate, before conversion.
     pub fn endpoint_rate(&self) -> u32 {
-        self.capture.sample_rate
+        self.src_rate
     }
 
     /// The endpoint's own channel count, before folding.
@@ -457,6 +627,27 @@ impl OpusStream {
             }
             match self.capture.next(deadline - now) {
                 Some(block) => {
+                    // A reopen onto another endpoint (S40) can change the
+                    // rate or channel count mid-stream: follow it, or drop
+                    // the block if the new format is one we cannot convert.
+                    if block.sample_rate != self.src_rate || block.channels != self.src_channels {
+                        if let Err(e) =
+                            crate::resample::check_format(block.sample_rate, block.channels)
+                        {
+                            debug!(error = %e, "block from the reopened endpoint dropped");
+                            continue;
+                        }
+                        self.src_rate = block.sample_rate;
+                        self.src_channels = block.channels;
+                        self.convert = crate::resample::ToOpus48::new(block.sample_rate);
+                        self.conversion =
+                            crate::resample::conversion_note(block.sample_rate, block.channels);
+                        info!(
+                            rate = block.sample_rate,
+                            channels = block.channels,
+                            "audio track now on a different endpoint format"
+                        );
+                    }
                     // The stamp must count what lands in `pending`, not what
                     // WASAPI handed us: the resampler changes the sample count,
                     // and the drain below spends `pending` units. Counting

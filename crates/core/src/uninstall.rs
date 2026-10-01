@@ -52,6 +52,9 @@ pub enum StepKind {
     RestoreApo,
     /// Delete the camera media source's COM registration.
     RemoveVcam,
+    /// Delete the per-user DirectShow camera filter registration (the
+    /// Windows 10 path, S43). HKCU only, so no elevation.
+    RemoveVcamFilter,
     /// Remove the inbound Windows Firewall rule for `relay-share.exe`.
     RemoveFirewallRule,
     /// Remove `HKCU\...\Run\Relay`.
@@ -75,6 +78,7 @@ impl StepKind {
             StepKind::StopCore => "Stop the core (restores your audio and display settings)",
             StepKind::RestoreApo => "Restore the endpoint audio chain",
             StepKind::RemoveVcam => "Unregister the virtual camera",
+            StepKind::RemoveVcamFilter => "Unregister the virtual camera (per-user filter)",
             StepKind::RemoveFirewallRule => "Remove the Windows Firewall rule",
             StepKind::RemoveRunKey => "Remove the start-at-login entry",
             StepKind::RemoveFiles => "Delete the program files",
@@ -142,18 +146,29 @@ impl Plan {
     }
 }
 
+/// One endpoint the APO step has to restore.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApoEntry {
+    /// Endpoint GUID.
+    pub endpoint: String,
+    /// The install-time FX store backup, if it is on disk.
+    pub backup: Option<PathBuf>,
+}
+
 /// Everything the plan needs to know about the machine, read once and
 /// read-only. Constructed by [`MachineState::probe`] in production and by
 /// hand in tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MachineState {
-    /// Relay's CLSID is in an endpoint's FX chain, or an install backup
-    /// exists — either way the APO needs restoring. Carries the endpoint id.
-    pub apo_endpoint: Option<String>,
-    /// The install-time FX store backup, if it is on disk.
-    pub apo_backup: Option<PathBuf>,
+    /// Every render endpoint whose FX chain carries Relay's CLSID or that
+    /// has an install backup on disk (S42: any number of outputs at once).
+    /// Each one needs restoring.
+    pub apo: Vec<ApoEntry>,
     /// Camera COM keys recorded in `installed.json`, deepest first.
     pub vcam_keys: Vec<String>,
+    /// Per-user (HKCU) camera filter keys recorded in `installed.json`,
+    /// deepest first and vetted.
+    pub vcam_user_keys: Vec<String>,
     /// Relay's firewall rule is on the machine, or `firewall.json` records
     /// that we added one. Carries the rule name, which is the handle the
     /// removal uses.
@@ -191,17 +206,24 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
     // file, not the registry, is what makes restoration exact. A registered
     // APO without a backup is listed too, because leaving it behind would
     // break the promise — the target says which case it is.
-    let apo_target = match (&state.apo_endpoint, &state.apo_backup) {
-        (Some(ep), Some(backup)) => format!("{ep} ← {}", backup.display()),
-        (Some(ep), None) => format!("{ep} (no install backup found)"),
-        (None, Some(backup)) => backup.display().to_string(),
-        (None, None) => "not installed".into(),
-    };
-    steps.push(Step {
-        kind: StepKind::RestoreApo,
-        target: apo_target,
-        present: state.apo_endpoint.is_some() || state.apo_backup.is_some(),
-    });
+    // One step per endpoint, like the camera keys below.
+    if state.apo.is_empty() {
+        steps.push(Step {
+            kind: StepKind::RestoreApo,
+            target: "not installed".into(),
+            present: false,
+        });
+    }
+    for entry in &state.apo {
+        steps.push(Step {
+            kind: StepKind::RestoreApo,
+            target: match &entry.backup {
+                Some(backup) => format!("{} ← {}", entry.endpoint, backup.display()),
+                None => format!("{} (no install backup found)", entry.endpoint),
+            },
+            present: true,
+        });
+    }
 
     // One step per recorded key, so the listing is literally the diff the VM
     // test checks.
@@ -224,6 +246,22 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
     // Present when the rule is on the machine *or* when the record says we
     // added one — either alone is enough to have something to clean up, and
     // a rule left behind would fail the clean-VM diff like any other trace.
+    if state.vcam_user_keys.is_empty() {
+        steps.push(Step {
+            kind: StepKind::RemoveVcamFilter,
+            target: "not installed".into(),
+            present: false,
+        });
+    } else {
+        for key in &state.vcam_user_keys {
+            steps.push(Step {
+                kind: StepKind::RemoveVcamFilter,
+                target: format!(r"HKCU\{key}"),
+                present: true,
+            });
+        }
+    }
+
     steps.push(Step {
         kind: StepKind::RemoveFirewallRule,
         target: state.firewall_rule.clone().unwrap_or_else(|| "not installed".into()),
@@ -328,15 +366,18 @@ mod imp {
 
     /// Read the machine, touching nothing.
     pub fn probe(paths: &Paths) -> MachineState {
-        let apo = crate::audio_apo::apo_status();
-        let apo_backup = apo
-            .endpoint
-            .as_ref()
-            .map(|ep| paths.apo_backup_dir().join(format!("{ep}.json")))
-            .filter(|p| p.exists())
-            // An endpoint switch since install would hide the backup; fall
-            // back to any backup in the folder so nothing is orphaned.
-            .or_else(|| first_backup(&paths.apo_backup_dir()));
+        // Every endpoint with a backup, plus any active endpoint whose FX
+        // chain still names our CLSID without one — none may be orphaned.
+        let dir = paths.apo_backup_dir();
+        let apo: Vec<ApoEntry> = crate::audio_apo::apo_status(&dir)
+            .endpoints
+            .into_iter()
+            .filter(|e| e.installed || e.backed_up)
+            .map(|e| ApoEntry {
+                backup: e.backed_up.then(|| crate::audio_apo::backup_file(&dir, &e.endpoint)),
+                endpoint: e.endpoint,
+            })
+            .collect();
 
         let vcam_keys = relay_vdevice::installed::load(&paths.installed_file())
             .map(|f| {
@@ -348,9 +389,9 @@ mod imp {
             .unwrap_or_default();
 
         MachineState {
-            apo_endpoint: if apo.installed { apo.endpoint } else { None },
-            apo_backup,
+            apo,
             vcam_keys,
+            vcam_user_keys: crate::vdevice::recorded_dshow_keys(paths),
             firewall_rule: firewall_rule(paths),
             run_key: crate::autostart::is_enabled().unwrap_or(false),
             install_dir: std::env::current_exe()
@@ -379,14 +420,6 @@ mod imp {
                 .flatten()
                 .map(|r| format!("{} — {}", r.rule_name, r.program))
         })
-    }
-
-    fn first_backup(dir: &Path) -> Option<PathBuf> {
-        std::fs::read_dir(dir)
-            .ok()?
-            .flatten()
-            .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|e| e == "json"))
     }
 
     /// Is a core up? Its single-instance mutex is the authoritative answer
@@ -430,8 +463,15 @@ mod imp {
                 match step.kind {
                     StepKind::StopUi => run_step(stop_ui()),
                     StepKind::StopCore => run_step(stop_core()),
+                    // Idempotent across the per-endpoint steps: the first
+                    // restores every recorded endpoint, the rest find no
+                    // backup left.
                     StepKind::RestoreApo => elevated_step(|| {
-                        crate::audio_apo::uninstall_live(&paths.apo_backup_dir()).map(|_| ())
+                        if crate::audio_apo::recorded_endpoints(&paths.apo_backup_dir()).is_empty()
+                        {
+                            return Ok(());
+                        }
+                        crate::audio_apo::uninstall_all_live(&paths.apo_backup_dir()).map(|_| ())
                     }),
                     StepKind::RemoveVcam => elevated_step(|| {
                         // Idempotent across the per-key steps: the first one
@@ -442,6 +482,14 @@ mod imp {
                             other => other,
                         }
                     }),
+                    StepKind::RemoveVcamFilter => {
+                        // Same idempotence as RemoveVcam: the first step removes
+                        // every recorded key, the rest find nothing left.
+                        run_step(match crate::vdevice::uninstall_dshow_live(paths) {
+                            Err(e) if e.to_string().contains("nothing to uninstall") => Ok(()),
+                            other => other,
+                        })
+                    }
                     StepKind::RemoveFirewallRule => {
                         elevated_step(|| crate::firewall::uninstall_live(paths).map(|_| ()))
                     }
@@ -526,7 +574,12 @@ pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
     use crate::elevate::{ElevatedOp, LaunchError};
     crate::elevate::run(
         paths,
-        &[ElevatedOp::UninstallApo, ElevatedOp::UninstallCamera, ElevatedOp::RemoveFirewall],
+        &[
+            // No endpoint: every recorded endpoint is restored.
+            ElevatedOp::UninstallApo { endpoint: None },
+            ElevatedOp::UninstallCamera,
+            ElevatedOp::RemoveFirewall,
+        ],
     )
     .map_err(|e| match e {
         LaunchError::Declined => anyhow::anyhow!("{e}"),
@@ -632,11 +685,23 @@ mod tests {
     /// A machine where the user opted into both components and autostart.
     fn everything_installed() -> MachineState {
         MachineState {
-            apo_endpoint: Some("{0.0.0.00000000}.{abc}".into()),
-            apo_backup: Some(PathBuf::from(r"C:\d\Relay\apo-backup\{abc}.json")),
+            apo: vec![
+                ApoEntry {
+                    endpoint: "{abc}".into(),
+                    backup: Some(PathBuf::from(r"C:\d\Relay\apo-backup\{abc}.json")),
+                },
+                ApoEntry {
+                    endpoint: "{def}".into(),
+                    backup: Some(PathBuf::from(r"C:\d\Relay\apo-backup\{def}.json")),
+                },
+            ],
             vcam_keys: vec![
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}\InprocServer32".into(),
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}".into(),
+            ],
+            vcam_user_keys: vec![
+                r"Software\Classes\CLSID\{5E0B7C1F}\InprocServer32".into(),
+                r"Software\Classes\CLSID\{5E0B7C1F}".into(),
             ],
             firewall_rule: Some(r"Relay (relay-share) — C:\d\Relay\relay-share.exe".into()),
             run_key: true,
@@ -672,6 +737,25 @@ mod tests {
     }
 
     #[test]
+    fn every_installed_apo_endpoint_gets_its_own_restore_step() {
+        let mut state = everything_installed();
+        // An endpoint that carries the CLSID with no backup is still listed.
+        state.apo.push(ApoEntry { endpoint: "{ghi}".into(), backup: None });
+        let plan = plan_from(&state, false);
+        let targets: Vec<&str> = plan
+            .steps
+            .iter()
+            .filter(|s| s.kind == StepKind::RestoreApo && s.present)
+            .map(|s| s.target.as_str())
+            .collect();
+        assert_eq!(targets.len(), 3);
+        assert!(targets[0].starts_with("{abc} ← ") && targets[0].ends_with("{abc}.json"));
+        assert!(targets[1].starts_with("{def} ← "));
+        assert!(targets[2].contains("{ghi} (no install backup found)"));
+        assert!(plan.needs_elevation());
+    }
+
+    #[test]
     fn every_recorded_vcam_key_gets_its_own_step() {
         let state = everything_installed();
         let plan = plan_from(&state, false);
@@ -702,6 +786,7 @@ mod tests {
             StepKind::StopCore,
             StepKind::RestoreApo,
             StepKind::RemoveVcam,
+            StepKind::RemoveVcamFilter,
             StepKind::RemoveFirewallRule,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
@@ -783,6 +868,21 @@ mod tests {
     }
 
     #[test]
+    fn per_user_camera_filter_keys_get_steps_without_elevation() {
+        let state = MachineState {
+            vcam_user_keys: vec![r"Software\Classes\CLSID\{5E0B7C1F}".into()],
+            ..Default::default()
+        };
+        let plan = plan_from(&state, false);
+        let steps: Vec<_> =
+            plan.steps.iter().filter(|s| s.kind == StepKind::RemoveVcamFilter).collect();
+        assert_eq!(steps.len(), 1);
+        assert!(steps[0].present);
+        assert_eq!(steps[0].target, r"HKCU\Software\Classes\CLSID\{5E0B7C1F}");
+        assert!(!plan.needs_elevation(), "a Windows 10 camera never asks for admin");
+    }
+
+    #[test]
     fn only_the_hklm_steps_ask_for_elevation() {
         assert!(StepKind::RestoreApo.needs_elevation());
         assert!(StepKind::RemoveVcam.needs_elevation());
@@ -791,6 +891,7 @@ mod tests {
         for kind in [
             StepKind::StopUi,
             StepKind::StopCore,
+            StepKind::RemoveVcamFilter,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
             StepKind::RemoveData,

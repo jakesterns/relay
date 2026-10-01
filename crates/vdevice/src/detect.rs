@@ -91,6 +91,14 @@ pub fn frameserver_supported() -> bool {
     vcam_export_present().unwrap_or_else(|| windows_build().is_some_and(|b| b >= MIN_VCAM_BUILD))
 }
 
+pub use crate::reg::CameraPath;
+
+/// The camera path for this PC: the frame server where it exists (probed
+/// by export, see [`frameserver_supported`]), DirectShow otherwise.
+pub fn camera_path() -> CameraPath {
+    CameraPath::for_support(frameserver_supported())
+}
+
 /// `Some(true/false)` when the loader gave a definite answer; `None` when the
 /// DLL could not be probed at all, leaving the caller to fall back.
 fn vcam_export_present() -> Option<bool> {

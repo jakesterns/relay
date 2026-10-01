@@ -900,12 +900,12 @@ pub fn status(program: &Path) -> FirewallStatus {
 mod tests {
     use super::*;
 
-    /// Captured verbatim from this dev machine's rule store.
-    const REAL_ALLOW: &str = r"v2.33|Action=Allow|Active=TRUE|Dir=In|Protocol=6|Profile=Private|App=C:\Users\stern\AppData\Local\Relay\relay-share.exe|Name=Relay (relay-share)|Desc=Relay LAN share (WebRTC + mDNS). Added by scripts/firewall-rules.ps1.|";
+    /// Captured from a dev machine's rule store (user path replaced).
+    const REAL_ALLOW: &str = r"v2.33|Action=Allow|Active=TRUE|Dir=In|Protocol=6|Profile=Private|App=%LOCALAPPDATA%\Relay\relay-share.exe|Name=Relay (relay-share)|Desc=Relay LAN share (WebRTC + mDNS). Added by scripts/firewall-rules.ps1.|";
     /// The shape Windows writes when the user dismisses the prompt.
-    const REAL_BLOCK: &str = r"v2.33|Action=Block|Active=TRUE|Dir=In|Protocol=6|Profile=Private|App=C:\Users\stern\AppData\Local\Relay\relay-share.exe|Name=relay-share.exe|Desc=|";
+    const REAL_BLOCK: &str = r"v2.33|Action=Block|Active=TRUE|Dir=In|Protocol=6|Profile=Private|App=%LOCALAPPDATA%\Relay\relay-share.exe|Name=relay-share.exe|Desc=|";
 
-    const INSTALLED: &str = r"C:\Users\stern\AppData\Local\Relay\relay-share.exe";
+    const INSTALLED: &str = r"%LOCALAPPDATA%\Relay\relay-share.exe";
 
     fn deny_policy() -> Policy {
         Policy { active_profiles: PROFILE_PRIVATE, enabled: true, default_inbound_block: true }
@@ -1053,7 +1053,7 @@ mod tests {
     fn program_matching_is_case_insensitive_but_not_loose() {
         let r = parse_rule("{a}", REAL_ALLOW).unwrap();
         assert!(r.governs(&INSTALLED.to_uppercase()));
-        assert!(!r.governs(r"C:\Users\stern\AppData\Local\Relay\relay-core.exe"));
+        assert!(!r.governs(r"%LOCALAPPDATA%\Relay\relay-core.exe"));
     }
 
     #[test]

@@ -4,13 +4,16 @@ import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
-import { MixerCard, type MixerRow } from "../components/Mixer";
+import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import type { ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
   type ShareStats, type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
+
+/** S40: where the received audio plays, as a row of its own. */
+const RECEIVE_DEVICES: MixerDevice[] = [{ track: "output", label: "Output" }];
 
 /** Warn before the user tries, not after it fails.
  *
@@ -231,6 +234,10 @@ function VirtualDeviceCard() {
       {vd.obs_virtualcam && !vd.camera_registered && (
         <p className="note">OBS VirtualCam is installed on this PC, but Relay does not feed it.</p>
       )}
+      {vd.camera_registered && vd.camera_path === "direct_show" && (
+        <p className="note">On Windows 10 Relay Camera shows up in apps that list webcams the classic
+          way — Zoom, Discord, Teams, Chrome and Edge. The Windows Camera app does not list it.</p>
+      )}
     </Card>
   );
 }
@@ -324,8 +331,10 @@ function StreamHealthCard(
       <Kv k="Lost" v={lost.toLocaleString()} mono />
       {state === "coping" && d.recovered > 0 && (
         <p className="note" data-testid="health-coping">
-          This link is dropping packets and Relay is repairing them in time. The picture is not
-          affected.
+          {/* Not "dropping": on a clean wired LAN a keyframe burst arrives slightly out of
+              order and counts here too (r36, row 6). */}
+          Some video packets are arriving late or out of order, and Relay is putting them back
+          in time. The picture is not affected.
         </p>
       )}
     </Card>
@@ -335,7 +344,7 @@ function StreamHealthCard(
 /** PCs that may send to this one without a code (S35).
  *
  *  They still need this screen to be on Start receiving. Remembering removed
- *  the code, not the consent -- Jake's call in the trust model (§5): nothing
+ *  the code, not the consent -- the owner's call in the trust model (§5): nothing
  *  can put a picture on this screen unasked. Forget is real, not a hidden
  *  row: the PC needs a code again, like a stranger. */
 function TrustedSendersCard({ tick }: { tick: number }) {
@@ -521,7 +530,9 @@ export function Receive() {
         // another window): the card shows what the receiver is doing.
         if (s.receiving) showReturnApp(s.return_pid, s.return_exe);
         if (s.sender) {
-          setSender(s.sender); setEnded(null); setEndedClean(false);
+          // A new sender paired: an earlier failure is history, not news.
+          // It sat on the idle page through later good shares (r39, B3).
+          setSender(s.sender); setEnded(null); setEndedClean(false); setError(null);
           setTrusted(!!s.trusted);
           setPeersTick((t) => t + 1);
         }
@@ -605,7 +616,11 @@ export function Receive() {
           ? ended
             ? endedClean
               ? `The share from ${ended} ended. Waiting for a sender to pair…`
-              : `The share from ${ended} dropped — waiting for it to come back…`
+              // An error here is this PC's own failure (the core sends its
+              // reason); "dropped" contradicted the notice beside it (r41).
+              : error
+                ? `This PC stopped showing the share from ${ended} — starting again…`
+                : `The share from ${ended} dropped — waiting for it to come back…`
             : "Waiting for a sender to pair…"
           : ended
             ? stoppedHere ? `You stopped receiving from ${ended}.` : `The share from ${ended} ended.`
@@ -678,9 +693,8 @@ export function Receive() {
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>
           : <button className="btn acc" onClick={start} disabled={busy}>Start receiving</button>}
-        {receiving && sender && (
-          <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender}`} />
-        )}
+        {/* Always shown: the Output pick is wanted before a share arrives. */}
+        <MixerCard side="receive" rows={receiveRows} sessionKey={`recv-${sender ?? "idle"}`} devices={RECEIVE_DEVICES} />
         {mock && <p className="note">Preview only — Relay isn't running.</p>}
         <p className="note">The stream plays here, in this window. Nothing on this PC is changed.</p>
       </aside>
