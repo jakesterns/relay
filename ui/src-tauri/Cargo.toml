@@ -7,9 +7,20 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# tauri-build writes the rest of relay-ui.exe's version resource from
+# tauri.conf.json (productName, bundle.publisher, bundle.copyright); these are
+# the two fields it leaves out. Keep in step with build-support/versioninfo.rs.
+[package.metadata.tauri-winres]
+OriginalFilename = "relay-ui.exe"
+InternalName = "relay-ui"
+
 [lib]
 name = "relay_ui_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# rlib only: staticlib/cdylib are for Tauri mobile, which Relay does not
+# target. A cdylib here would also inherit the version resources of the
+# relay-apo and relay-vdevice cdylibs (cargo passes cdylib link args on to
+# dependents) and fail to link with a duplicate VERSION resource.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }

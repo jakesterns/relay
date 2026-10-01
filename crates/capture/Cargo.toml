@@ -13,6 +13,10 @@ publish.workspace = true
 name = "relay-share"
 path = "src/bin/relay-share.rs"
 
+# Windows version resource; see build-support/versioninfo.rs.
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 relay-core.workspace = true
 anyhow.workspace = true

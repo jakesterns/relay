@@ -1,4 +1,9 @@
+include!("../../build-support/versioninfo.rs");
+
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../../build-support/versioninfo.rs");
+    versioninfo::embed(versioninfo::Target::Cdylib, "relay_vdevice.dll", "Relay virtual camera");
     // COM entry points under their canonical names, on the cdylib only.
     // The Rust symbols carry unique names (RelayVdevice*) so the rlib can
     // coexist with relay-apo's identical exports inside one binary; the

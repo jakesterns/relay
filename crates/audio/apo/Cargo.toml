@@ -19,6 +19,10 @@ crate-type = ["cdylib", "rlib"]
 default = ["com"]
 com = ["relay-audio/dsp"]
 
+# Windows version resource; see build-support/versioninfo.rs.
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 relay-audio = { workspace = true }
 serde.workspace = true

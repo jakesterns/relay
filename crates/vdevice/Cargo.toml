@@ -20,6 +20,10 @@ crate-type = ["cdylib", "rlib"]
 default = ["com"]
 com = []
 
+# Windows version resource; see build-support/versioninfo.rs.
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

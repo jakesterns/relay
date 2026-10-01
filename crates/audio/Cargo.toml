@@ -15,6 +15,10 @@ publish.workspace = true
 default = ["dsp"]
 dsp = ["dep:realfft", "dep:hound", "dep:serde_json"]
 
+# Windows version resource; see build-support/versioninfo.rs.
+[build-dependencies]
+embed-resource = "3"
+
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
