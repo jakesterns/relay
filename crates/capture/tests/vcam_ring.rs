@@ -24,8 +24,15 @@ fn ring_writer_round_trips_an_nv12_texture() {
     let (w, h) = (320u32, 180u32);
     let frame_bytes = nv12_pattern(w, h);
 
-    let gpu = relay_capture::d3d::device_for_monitor(relay_capture::d3d::primary_monitor())
-        .expect("d3d device");
+    // CI runners have no GPU (D3D11CreateDevice fails there); this test is
+    // about the copy path, so it needs real hardware and skips without it.
+    let gpu = match relay_capture::d3d::device_for_monitor(relay_capture::d3d::primary_monitor()) {
+        Ok(g) => g,
+        Err(e) => {
+            eprintln!("skipped: no D3D11 device on this machine ({e:#})");
+            return;
+        }
+    };
 
     // An NV12 texture with the pattern as initial data, standing in for the
     // decoder output (subresource 0 of a 1-element array).
