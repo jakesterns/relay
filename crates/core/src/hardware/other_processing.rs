@@ -780,14 +780,15 @@ mod tests {
     /// S42b: Relay now registers under AudioEngine\AudioProcessingObjects
     /// like any other APO, so `reg_of` finds it — it must still read as
     /// Relay, never as somebody else's processing. Installed Relay store:
-    /// legacy EFX + composite EFX both name our CLSID.
+    /// the MFX slot names our CLSID (S42d).
     #[test]
     fn relay_with_its_audio_engine_registration_is_not_other() {
         let plan = relay_apo::fxstore::plan_install(
             &FxStore::empty(),
             "{11111111-2222-3333-4444-555555555555}",
             r"C:\x.dll",
-        );
+        )
+        .unwrap();
         let registered = |c: &str| {
             c.eq_ignore_ascii_case(relay_apo::ids::APO_CLSID)
                 .then(|| apo(relay_apo::ids::APO_FRIENDLY_NAME))

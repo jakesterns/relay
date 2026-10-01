@@ -5,15 +5,22 @@
 //! fixtures before any code touches HKLM (brief risk #2). The live backend
 //! is [`crate::livereg`]; it only executes plans produced here.
 //!
-//! Install semantics (decision recorded in the M3b plan — EFX placement):
-//! - append [`ids::APO_CLSID`] to the REG_MULTI_SZ at
-//!   [`ids::PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID`] (create if absent,
-//!   keep existing entries, never duplicate);
-//! - set [`ids::PKEY_FX_ENDPOINT_EFFECT_CLSID`] to our CLSID **only if that
-//!   value is absent** — never clobber a vendor EFX; the composite key is
-//!   the chaining mechanism;
-//! - ensure [`ids::MODE_DEFAULT`] is listed in the REG_MULTI_SZ at
-//!   [`ids::PKEY_EFX_MODES`] (create/append, no duplicates).
+//! Install semantics (S42d - MFX placement, after an EFX-only registration
+//! never loaded on a live endpoint; see docs/plans/S42-apo-per-endpoint.md):
+//! - the slot is the **mode effect** (MFX): one instance per processing
+//!   mode, after the mix - everything on the endpoint, one DSP pass;
+//! - if the composite MFX list ([`ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID`])
+//!   exists, append our CLSID to it (vendor entries kept, never duplicated);
+//! - else if the legacy MFX slot ([`ids::PKEY_FX_MODE_EFFECT_CLSID`]) is
+//!   absent, empty or the nil GUID, write our CLSID there;
+//! - else a vendor owns the slot and there is no chain to join: refuse
+//!   ([`PlanError::SlotTaken`]) - never evict a vendor effect;
+//! - ensure [`ids::MODE_DEFAULT`] is listed at [`ids::PKEY_MFX_MODES`];
+//! - delete [`ids::PKEY_DISABLE_SYSFX`] when it is set ("Disable all
+//!   enhancements" would keep any APO from loading).
+//!
+//! Every value the plan touches is in [`ids::FX_WRITABLE_VALUES`]
+//! ([`vet_fx_diff`]).
 //!
 //! Nothing else is touched: every other key, value name and data byte of
 //! the store is carried over verbatim, and [`plan_uninstall`] returns the
@@ -29,6 +36,15 @@ use crate::regfile::{
 };
 
 /// Errors from building an [`FxStore`] out of a parsed .reg map.
+/// Why an install was not planned.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    /// The legacy MFX slot holds another vendor's effect and the endpoint
+    /// has no composite MFX list to chain into. Relay does not install.
+    #[error("slot taken: this output's mode effect (MFX) is {0}; Relay will not replace it")]
+    SlotTaken(String),
+}
+
 #[derive(Debug, Error)]
 pub enum FxStoreError {
     #[error("no FxProperties key for endpoint {0} in the parsed data")]
@@ -224,8 +240,13 @@ pub struct InstallPlan {
     pub com_keys: KeyMap,
 }
 
-/// Plan an install against the current store image. Pure — touches nothing.
-pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) -> InstallPlan {
+/// Plan an install against the current store image. Pure - touches nothing.
+/// Refuses with [`PlanError::SlotTaken`] rather than evict a vendor MFX.
+pub fn plan_install(
+    current: &FxStore,
+    endpoint_guid: &str,
+    apo_dll_path: &str,
+) -> Result<InstallPlan, PlanError> {
     let clsid_key = ids::clsid_key(ids::APO_CLSID);
     let inproc_key = format!(r"{clsid_key}\InprocServer32");
 
@@ -244,19 +265,31 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
     let mut new_store = current.clone();
     let root = new_store.root_mut();
 
-    // 1. Composite EFX chain: append our CLSID, preserving vendor entries.
-    append_to_multi_sz(root, ids::PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID, ids::APO_CLSID);
-
-    // 2. Legacy single-EFX slot: fill only if empty — never evict a vendor.
-    if !root.contains_key(ids::PKEY_FX_ENDPOINT_EFFECT_CLSID) {
-        root.insert(
-            ids::PKEY_FX_ENDPOINT_EFFECT_CLSID.to_owned(),
-            RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
-        );
+    // 1. The MFX slot: chain into the composite list when there is one,
+    //    else take the legacy slot only when it is free.
+    if root.contains_key(ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID) {
+        append_to_multi_sz(root, ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID, ids::APO_CLSID);
+    } else {
+        match legacy_slot_owner(root.get(ids::PKEY_FX_MODE_EFFECT_CLSID)) {
+            None => {
+                root.insert(
+                    ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
+                );
+            }
+            Some(owner) if owner.eq_ignore_ascii_case(ids::APO_CLSID) => {}
+            Some(owner) => return Err(PlanError::SlotTaken(owner)),
+        }
     }
 
-    // 3. Processing modes: make sure DEFAULT is offered for streaming.
-    append_to_multi_sz(root, ids::PKEY_EFX_MODES, ids::MODE_DEFAULT);
+    // 2. Processing modes: DEFAULT offered for the MFX.
+    append_to_multi_sz(root, ids::PKEY_MFX_MODES, ids::MODE_DEFAULT);
+
+    // 3. "Disable all enhancements" off for this endpoint (restored on
+    //    uninstall with the rest of the store).
+    if root.get(ids::PKEY_DISABLE_SYSFX).is_some_and(|v| v.data.iter().any(|b| *b != 0)) {
+        root.remove(ids::PKEY_DISABLE_SYSFX);
+    }
 
     // COM registration tree.
     let mut com_keys = KeyMap::new();
@@ -278,7 +311,38 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
     // Audio-engine registration — what audiodg actually looks up (S42b).
     com_keys.insert(ids::audio_engine_key(ids::APO_CLSID), audio_engine_values());
 
-    InstallPlan { backup, new_store, com_keys }
+    let plan = InstallPlan { backup, new_store, com_keys };
+    debug_assert!(vet_fx_diff(&plan).is_ok());
+    Ok(plan)
+}
+
+/// The CLSID occupying a legacy single-effect slot, or `None` when the slot
+/// is absent, empty, or the nil GUID (all of which mean "free").
+fn legacy_slot_owner(value: Option<&RegValue>) -> Option<String> {
+    let v = value?;
+    let text = match v.kind {
+        RegKind::MultiSz => parse_multi_sz(&v.data).into_iter().next().unwrap_or_default(),
+        _ => crate::regfile::sz_from_bytes(&v.data).unwrap_or_default(),
+    };
+    let t = text.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("{00000000-0000-0000-0000-000000000000}") {
+        None
+    } else {
+        Some(t.to_owned())
+    }
+}
+
+/// Every FxProperties change a plan makes must be one of
+/// [`ids::FX_WRITABLE_VALUES`] on the `FxProperties` key itself. The live
+/// writer checks this before its first write.
+pub fn vet_fx_diff(plan: &InstallPlan) -> Result<(), String> {
+    for (rel, name) in diff(&plan.backup.store, &plan.new_store) {
+        let allowed = ids::FX_WRITABLE_VALUES.iter().any(|w| w.eq_ignore_ascii_case(&name));
+        if !rel.is_empty() || !allowed {
+            return Err(format!("install would change FxProperties value {rel}\\{name}"));
+        }
+    }
+    Ok(())
 }
 
 /// The values `RegisterAPO` writes for Relay's `APO_REG_PROPERTIES`, in the

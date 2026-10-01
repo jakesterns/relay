@@ -947,7 +947,8 @@ mod tests {
             &relay_apo::fxstore::FxStore::empty(),
             "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}",
             r"C:\x\relay_apo.dll",
-        );
+        )
+        .unwrap();
         assert!(vet_apo_machine_keys(&plan.backup.com_keys).is_ok());
         assert!(vet_apo_machine_keys(&[audio_engine_key(APO_CLSID).to_uppercase()]).is_ok());
 
