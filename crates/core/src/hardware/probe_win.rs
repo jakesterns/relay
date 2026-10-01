@@ -483,6 +483,7 @@ mod tests {
     /// Live smoke test: on this dev machine the probe must see at least one
     /// endpoint and the LG monitor with an EDID-derived id.
     #[test]
+    #[ignore = "needs a PC with audio outputs and a monitor; CI runners have neither"]
     fn live_probe_reports_this_machine() {
         let report = WindowsHardwareProbe.probe(false);
         assert!(!report.endpoints.is_empty(), "no render endpoints found");
