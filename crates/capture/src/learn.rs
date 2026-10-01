@@ -170,18 +170,30 @@ mod tests {
     #[test]
     fn arguments_parse_and_are_required() {
         let a = LearnArgs::parse(&s(&[
-            "--pid", "42", "--exe", "game.exe", "--record", "r.json", "--goal", "dialogue",
-            "--version", "1.2.3.4",
+            "--pid",
+            "42",
+            "--exe",
+            "game.exe",
+            "--record",
+            "r.json",
+            "--goal",
+            "dialogue",
+            "--version",
+            "1.2.3.4",
         ]))
         .unwrap();
         assert_eq!(a.pid, 42);
         assert_eq!(a.goal, Goal::Dialogue);
         assert_eq!(a.version.as_deref(), Some("1.2.3.4"));
         assert!(LearnArgs::parse(&s(&["--exe", "g.exe", "--record", "r"])).is_err());
-        assert!(LearnArgs::parse(&s(&["--pid", "1", "--exe", "g.exe", "--record", "r", "--goal", "loud"]))
-            .is_err());
-        assert!(LearnArgs::parse(&s(&["--pid", "1", "--exe", "g.exe", "--record", "r", "--x", "1"]))
-            .is_err());
+        assert!(LearnArgs::parse(&s(&[
+            "--pid", "1", "--exe", "g.exe", "--record", "r", "--goal", "loud"
+        ]))
+        .is_err());
+        assert!(LearnArgs::parse(&s(&[
+            "--pid", "1", "--exe", "g.exe", "--record", "r", "--x", "1"
+        ]))
+        .is_err());
     }
 
     #[test]

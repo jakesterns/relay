@@ -3518,6 +3518,7 @@ dependencies = [
  "opus",
  "rand 0.9.5",
  "rcgen",
+ "relay-audio",
  "relay-core",
  "relay-vdevice",
  "rtc",

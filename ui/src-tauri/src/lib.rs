@@ -461,6 +461,22 @@ struct PreviewOut {
     hrtf_applied: bool,
 }
 
+/// S46: `GameEq` reply as the frontend reads it (`GameEqReply` in ipc.ts).
+#[derive(serde::Serialize)]
+struct GameEqOut {
+    status: relay_core::game_eq::GameEqStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export: Option<relay_core::game_eq::GameEqExport>,
+}
+
+#[tauri::command]
+async fn game_eq(id: Uuid, action: relay_core::game_eq::GameEqAction) -> CmdResult<GameEqOut> {
+    match call(Method::GameEq { id, action }).await? {
+        Reply::GameEq { status, export } => Ok(GameEqOut { status: *status, export }),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 #[tauri::command]
 async fn render_preview(id: Uuid, wav: Option<String>) -> CmdResult<PreviewOut> {
     match call(Method::RenderPreview { id, wav }).await? {
@@ -1141,6 +1157,7 @@ pub fn run() {
             probe_hardware,
             import_curve,
             render_preview,
+            game_eq,
             share_capabilities,
             firewall_status,
             apo_status,

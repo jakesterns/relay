@@ -111,6 +111,7 @@ relay-handoff/        original handoff bundle; do not edit
 - `service.rs` — wires the above; single-threaded tokio runtime. 1 s tick runs the WASAPI-exclusive watcher (only while a profile with audio processing is active) → `AudioChainState::ExclusiveBypassed`.
 - `firewall.rs` — the inbound Windows Firewall rule for `relay-share.exe`, the only Relay binary that listens (`relay-core` is named-pipe only, so it gets no rule). Reads are a pure parse of the firewall policy store's rule strings (no COM, no elevation, fixture-tested); writes go through `INetFwPolicy2` in the elevated helper only, gated on `RELAY_FIREWALL_ALLOW_LIVE_WRITE`, and only ever add one rule or remove rules by name. Scope is private + domain, never public. `status()` classifies the live state — `Blocked` is the one that otherwise looks like a dead network — and the Share/Receive `FirewallBanner` renders it. Recorded in `firewall.json`; removed by `uninstall::StepKind::RemoveFirewallRule`. `relay-core firewall` CLI.
 - `footprint.rs` — RSS + CPU self-measurement for the "9 MB / 0.0 %" readouts.
+- `game_eq.rs` — S46 learned game EQ: spawns/stops `relay-share learn` (process loopback of the focused game's PID, aggregates only) while a profile with learning on and a goal has focus; per-exe records in `data\game-eq\`; `Method::GameEq` actions (goal, Apply/Relearn/Reset, Import/Export). The analysis lives in `relay_audio::learn` (no FFT); design and thresholds in `docs/plans/S46-learned-game-eq.md`, file format in `docs/eq-file-format.md`.
 
 ### Build & run
 ```

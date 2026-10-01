@@ -24,9 +24,9 @@ pub mod d3d;
 pub mod decode;
 pub mod devices;
 #[cfg(windows)]
-pub mod learn;
-#[cfg(windows)]
 pub mod encode;
+#[cfg(windows)]
+pub mod learn;
 pub mod mixer;
 pub mod pace;
 #[cfg(windows)]

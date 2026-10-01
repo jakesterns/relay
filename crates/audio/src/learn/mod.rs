@@ -22,6 +22,11 @@
 //! The game layer stacks on top of the listening device's headphone
 //! correction (S41); it never replaces it.
 
+// Per-band DSP reads several parallel arrays by band index; iterator chains
+// would hide that. Tests pin the documented threshold values as asserts.
+#![allow(clippy::needless_range_loop)]
+#![cfg_attr(test, allow(clippy::assertions_on_constants))]
+
 pub mod analyzer;
 pub mod derive;
 pub mod file;

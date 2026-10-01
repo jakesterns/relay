@@ -339,7 +339,11 @@ mod tests {
         assert!(chain_params(&audio).limiter.is_none(), "cuts alone cannot overshoot");
         audio.game_eq = Some(layer(&boost));
         audio.limiter = Some(Limiter { below_hz: 120.0, threshold_db: -10.0 });
-        assert_eq!(chain_params(&audio).limiter.unwrap().below_hz, 120.0, "the user's limiter wins");
+        assert_eq!(
+            chain_params(&audio).limiter.unwrap().below_hz,
+            120.0,
+            "the user's limiter wins"
+        );
     }
 
     #[test]

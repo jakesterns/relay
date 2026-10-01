@@ -58,6 +58,21 @@ anti-cheat; **high** = would be detected or banned.
 | 23 | `crates/core/src/ipc.rs:551`, `processes.rs:218` | `OpenProcessToken(GetCurrentProcess())` | Relay itself | none | |
 | 24 | `crates/core/src/audiodg.rs`, elevated op `set_audio_effects_allowed` (S44) | Sets `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio :: DisableProtectedAudioDG = 1` so audiodg loads Relay's unsigned APO; prior state recorded first, restored on "off" and on uninstall | No | low (unverified) | **Optional and off by default.** It changes a Windows security setting for the whole PC: audiodg stops requiring Microsoft-signed audio effects, so any unsigned APO registered on an output can load, not just Relay's. It does not touch games, their processes or their files. Equalizer APO's installer sets the same value and is widely run alongside anti-cheat games; no known anti-cheat has been reported to react to it, but this is **unverified** — nobody has tested it against Vanguard, FACEIT, EAC or BattlEye for Relay. Users who play under strict anti-cheat can leave it off and lose only per-game EQ. |
 
+| 25 | `crates/capture/src/learn.rs` (`relay-share learn`, S46) | Learned game EQ: `ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK)` with the focused game's PID, include-tree mode — the same call as #12 | No: audiodg hands Relay a copy of the game's own mixed stream | low | Process loopback only, exactly what OBS 28+ "Application Audio Capture" and Discord's per-app stream audio do. Runs in a separate helper process spawned only while a profiled game with learning on has focus, and torn down on blur. Captures the game's PID only: Discord, browsers and every other app are never in it. Keeps aggregate statistics (per-band level histograms, event counts); no audio is stored or sent. |
+| 26 | `crates/capture/src/learn.rs` `input_idle_ms` (S46) | `GetLastInputInfo` + `GetTickCount` once a second while learning | No | none | One system-wide timestamp of the last input, the call screen savers and "away" indicators use. No hook (`SetWindowsHookEx` is still absent), no key or button identity, nothing per process. Used only to leave out audio heard while nobody is playing (cutscenes, menus, AFK). |
+| 27 | `crates/core/src/game_eq.rs` `exe_version` (S46) | `GetFileVersionInfoW` / `VerQueryValueW` on the game's exe **path** (from #3's query) | No: reads the file on disk | none | No process handle; the same read Explorer's Properties > Details tab does. Used to notice a game update and relearn. |
+
+## S46 summary
+
+Learned game EQ adds no new kind of access. Its audio comes from process
+loopback of the game's PID (#25, the same OS path as #12, Discord and OBS);
+"is anyone playing" is the system-wide idle timestamp (#26); a game update is
+noticed from the exe file's version resource (#27). Nothing is injected,
+hooked or read from the game, and the analysis runs in `relay-share`, never
+in the always-on core. Voice chat apps (Discord and the rest) are never
+captured; only chat the game itself plays can be, and that is recognised
+(codec band limit) and left out of the statistics.
+
 ## Open risks
 
 No medium or high findings. Residual items to watch:

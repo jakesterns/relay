@@ -17,7 +17,55 @@ export interface AudioSettings {
   bands: EqBand[]; hrtf: boolean; limiter?: Limiter; apply_to_share: boolean;
   /** Apply the headset's imported correction curve ahead of `bands`. */
   headset_correction: boolean;
+  /** S46: learn this game's EQ. Absent = the default (on with audio
+   *  processing unless the layer was imported). */
+  learn_game_eq?: boolean;
+  /** S46: the player's goal; asked before learning starts. */
+  game_eq_goal?: Goal;
+  /** S46: take a newly converged curve without asking. */
+  game_eq_auto_apply?: boolean;
+  /** S46: the applied game layer (learned, imported or tuned). */
+  game_eq?: GameEqLayer;
 }
+
+/* ---- S46: learned game EQ. Mirror of crates/core/src/game_eq.rs and
+ *      crates/audio/src/learn/{derive,file,state}.rs. ---- */
+export type Goal = "awareness" | "dialogue" | "immersion";
+export type LayerSource = "learned" | "imported" | "tuned";
+export type LearnStatus = "off" | "learning" | "ready" | "applied" | "needs_relearn";
+export interface GameEqLayer {
+  curve: [number, number][]; source: LayerSource; exe_version?: string; note?: string;
+  base?: [number, number][];
+}
+export interface GameEqStatus {
+  exe: string; state: LearnStatus;
+  learning_on: boolean; needs_goal: boolean; learning_now: boolean;
+  goal: Goal | null; auto_apply: boolean; source: LayerSource | null;
+  progress: number; active_minutes: number;
+  targets: number; maskers: number; min_targets: number; min_maskers: number;
+  distinct_voices: number; exe_version: string | null;
+  applied: [number, number][] | null; offer: [number, number][] | null;
+  note: string; last_error: string | null;
+}
+export type GameEqAction =
+  | { kind: "status" }
+  | { kind: "set_learning"; enabled: boolean }
+  | { kind: "set_goal"; goal: Goal }
+  | { kind: "set_auto_apply"; enabled: boolean }
+  | { kind: "apply" }
+  | { kind: "relearn" }
+  | { kind: "reset" }
+  | { kind: "import"; text: string }
+  | { kind: "export"; note: string };
+export interface GameEqExport { text: string; path: string }
+export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
+
+/** The three goals, each with the one line the prompt shows. */
+export const GOALS: { key: Goal; label: string; line: string }[] = [
+  { key: "awareness", label: "Awareness", line: "Hear footsteps, reloads and callouts; tame explosions, music and engines." },
+  { key: "dialogue", label: "Dialogue", line: "Keep voices clear over effects and music." },
+  { key: "immersion", label: "Immersion", line: "A gentle balance that stays close to the game's own mix." },
+];
 export interface GpuColor { vibrance: number; gamma: number; contrast: number; shadow_lift: number; hue_deg: number }
 export interface MonitorSettings { brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number }
 export interface DisplaySettings { gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean }
@@ -1150,6 +1198,11 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
   },
+  /** S46: read or act on a profile's learned game EQ. */
+  async gameEq(id: string, action: GameEqAction): Promise<GameEqReply> {
+    if (!isTauri()) return mockGameEq(id, action);
+    return invoke<GameEqReply>("game_eq", { id, action });
+  },
   // S45 updates. Browser mode has nothing to offer.
   async updateStatus(): Promise<UpdateStatus> {
     if (!isTauri()) return structuredClone(mockUpdate);
@@ -1172,6 +1225,33 @@ export const api = {
     return invoke<UpdateStatus>("skip_update", { version });
   },
 };
+
+/** Browser-mode stand-in for the learned game EQ (S46): nothing is learned
+ *  in a browser, so it only reflects the profile's own switches. */
+function mockGameEq(id: string, action: GameEqAction): GameEqReply {
+  const p = mockStore.get(id);
+  if (!p) throw new Error("no such profile");
+  const a = p.audio;
+  if (action.kind === "set_learning") a.learn_game_eq = action.enabled;
+  if (action.kind === "set_goal") a.game_eq_goal = action.goal;
+  if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
+  if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
+  if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
+    throw new Error("needs the Relay core");
+  }
+  const processing = a.bands.length > 0 || a.hrtf || !!a.limiter || !!a.game_eq;
+  const on = a.learn_game_eq ?? (processing && a.game_eq?.source !== "imported" && a.game_eq?.source !== "tuned");
+  return {
+    status: {
+      exe: p.game.exe, state: a.game_eq ? "applied" : on ? "learning" : "off",
+      learning_on: on, needs_goal: on && !a.game_eq_goal, learning_now: false,
+      goal: a.game_eq_goal ?? null, auto_apply: !!a.game_eq_auto_apply,
+      source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
+      targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
+      exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
+    },
+  };
+}
 
 /** Browser-mode stand-in for the updater (S45). */
 const mockUpdate: UpdateStatus = {

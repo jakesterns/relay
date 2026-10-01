@@ -13,7 +13,7 @@ import type {
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import type { EndpointApo } from "../lib/ipc";
+import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus } from "../lib/ipc";
 import { devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
@@ -70,6 +70,9 @@ export interface FakeCore {
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
+  /** S46: what the learner has gathered per profile id (the core keeps it
+   *  per exe; per profile is enough for screens). */
+  gameEq: Map<string, { progress: number; candidate: [number, number][] | null; needsRelearn: boolean; learningNow: boolean }>;
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -203,6 +206,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       ],
     },
     elevation: { decline: false },
+    gameEq: new Map(),
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
@@ -240,6 +244,71 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     get_ui_prefs: () => structuredClone(core.prefs),
     set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
     ack_crash: () => void (core.state.last_crash = null),
+    game_eq: (a) => {
+      const id = a.id as string;
+      const p = core.profiles.get(id);
+      if (!p) throw new Error("no such profile");
+      const action = a.action as GameEqAction;
+      const rec = core.gameEq.get(id) ?? { progress: 0, candidate: null, needsRelearn: false, learningNow: false };
+      const au = p.audio;
+      let exported: GameEqExport | undefined;
+      switch (action.kind) {
+        case "set_learning": au.learn_game_eq = action.enabled; break;
+        case "set_auto_apply": au.game_eq_auto_apply = action.enabled; break;
+        case "set_goal": {
+          au.game_eq_goal = action.goal;
+          // The fake "re-derives" by scaling: Immersion is gentler.
+          if (rec.candidate) {
+            const k = action.goal === "immersion" ? 0.5 : 1;
+            rec.candidate = rec.candidate.map(([hz, db]) => [hz, Math.round(db * k * 10) / 10]);
+            if (au.game_eq?.source === "learned") au.game_eq = { ...au.game_eq, curve: rec.candidate };
+          }
+          break;
+        }
+        case "apply":
+          if (!rec.candidate) throw new Error("there is no learned curve to apply yet");
+          au.game_eq = { curve: rec.candidate, source: au.game_eq && au.game_eq.source !== "learned" ? "tuned" : "learned" };
+          break;
+        case "relearn": rec.candidate = null; rec.progress = 0; break;
+        case "reset": delete au.game_eq; delete au.learn_game_eq; rec.candidate = null; rec.progress = 0; break;
+        case "import": {
+          const f = JSON.parse(action.text) as { game: { exe: string }; curve: [number, number][] };
+          if (f.game.exe.toLowerCase() !== p.game.exe.toLowerCase()) {
+            throw new Error(`this file is for ${f.game.exe}, not ${p.game.exe}`);
+          }
+          au.game_eq = { curve: f.curve, source: "imported", base: f.curve };
+          delete au.learn_game_eq;
+          break;
+        }
+        case "export":
+          if (!au.game_eq) throw new Error("there is no game EQ to export yet");
+          exported = {
+            text: JSON.stringify({ format: "relay-game-eq", schema: 1, game: { exe: p.game.exe }, curve: au.game_eq.curve, note: action.note }),
+            path: `C:\\Users\\test\\AppData\\Local\\Relay\\data\\exports\\${p.game.exe.replace(/\.exe$/i, "")}-game-eq.json`,
+          };
+          break;
+        default: break;
+      }
+      core.gameEq.set(id, rec);
+      const processing = au.bands.length > 0 || au.hrtf || !!au.limiter || !!au.game_eq;
+      const imported = au.game_eq?.source === "imported" || au.game_eq?.source === "tuned";
+      const on = au.learn_game_eq ?? (processing && !imported);
+      const applied = au.game_eq?.curve ?? null;
+      const offer = rec.candidate;
+      const same = !!offer && !!applied && JSON.stringify(offer) === JSON.stringify(applied);
+      const state: GameEqStatus["state"] = rec.needsRelearn && !offer
+        ? (applied || on ? "needs_relearn" : "off")
+        : same || (applied && offer && !on) ? "applied"
+          : offer && on ? "ready" : applied ? "applied" : on ? "learning" : "off";
+      const status: GameEqStatus = {
+        exe: p.game.exe, state, learning_on: on, needs_goal: on && !au.game_eq_goal,
+        learning_now: rec.learningNow, goal: au.game_eq_goal ?? null, auto_apply: !!au.game_eq_auto_apply,
+        source: au.game_eq?.source ?? null, progress: offer ? 100 : rec.progress, active_minutes: 4.5,
+        targets: 120, maskers: 20, min_targets: 300, min_maskers: 60, distinct_voices: 2,
+        exe_version: "1.0.0.0", applied, offer, note: "", last_error: null,
+      };
+      return { status, ...(exported ? { export: exported } : {}) };
+    },
     update_status: () => structuredClone(core.update),
     check_for_updates: () => {
       core.update.last_check = 1_790_000_000;
@@ -518,6 +587,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
+  "game_eq",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "set_video_area",

@@ -284,7 +284,8 @@ pub fn apply_action(
             Ok((true, None))
         }
         GameEqAction::Relearn => {
-            let mut rec = load_record_at(&file, &exe).unwrap_or_else(|| LearnRecord::new(&exe, None));
+            let mut rec =
+                load_record_at(&file, &exe).unwrap_or_else(|| LearnRecord::new(&exe, None));
             rec.relearn();
             rec.goal = goal_of(profile);
             save_record_at(&file, &rec)?;
@@ -310,8 +311,10 @@ pub fn apply_action(
             Ok((true, None))
         }
         GameEqAction::Export { note } => {
-            let layer = profile.audio.game_eq.as_ref().context("there is no game EQ to export yet")?;
-            let f = GameEqFile::export(&exe, &profile.name, layer, profile.audio.game_eq_goal, note);
+            let layer =
+                profile.audio.game_eq.as_ref().context("there is no game EQ to export yet")?;
+            let f =
+                GameEqFile::export(&exe, &profile.name, layer, profile.audio.game_eq_goal, note);
             let text = f.to_json();
             // Round-trip through our own validator: never write a file we
             // would refuse to read.
@@ -530,7 +533,8 @@ mod tests {
         let (paths, dir) = paths();
         let mut p = profile();
         let layer = GameEqLayer::learned(curve(4.0), Some("2.0".into()));
-        let text = GameEqFile::export("game.exe", "Some Game", &layer, None, "from a friend").to_json();
+        let text =
+            GameEqFile::export("game.exe", "Some Game", &layer, None, "from a friend").to_json();
         apply_action(&paths, &mut p, &GameEqAction::Import { text }).unwrap();
         let st = status(&paths, &p, false);
         assert_eq!(st.state, LearnStatus::Applied);
@@ -570,7 +574,9 @@ mod tests {
     fn export_writes_the_applied_layer_learned_or_imported() {
         let (paths, dir) = paths();
         let mut p = profile();
-        assert!(apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() }).is_err());
+        assert!(
+            apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() }).is_err()
+        );
         p.audio.game_eq = Some(GameEqLayer::learned(curve(2.0), None));
         let (_, out) =
             apply_action(&paths, &mut p, &GameEqAction::Export { note: "mine".into() }).unwrap();
@@ -592,9 +598,9 @@ mod tests {
         p.audio.game_eq_goal = Some(Goal::Awareness);
         // A real learned record, from synthetic statistics.
         let mut rec = LearnRecord::new("game.exe", None);
-        let th = Thresholds { min_cues: 1, min_maskers: 0, checkpoint_secs: 1, ..Default::default() };
-        let mut st = Stats::default();
-        st.active_frames = 10_000;
+        let th =
+            Thresholds { min_cues: 1, min_maskers: 0, checkpoint_secs: 1, ..Default::default() };
+        let mut st = Stats { active_frames: 10_000, ..Stats::default() };
         st.events[0] = 50;
         st.class_frames[0] = 500;
         st.class_frames[8] = 9_000;
