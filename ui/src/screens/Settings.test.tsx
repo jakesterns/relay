@@ -127,6 +127,10 @@ describe("the uninstall plan", () => {
 describe("the endpoint APO opt-in, per output", () => {
   const HP = "Headphones (USB DAC)";
   const OPT = "Digital Output (S/PDIF)";
+  // Installing is gated on the S44 switch; these tests start with it on.
+  beforeEach(() => {
+    core.audioEffects = { ...core.audioEffects, value: 1, allowed: true, changed_by_relay: true, prior: null };
+  });
 
   it("lists every output with its own install state", async () => {
     await mount();

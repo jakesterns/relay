@@ -13,6 +13,7 @@
 pub mod apply;
 pub mod audio_apo;
 pub mod audio_bridge;
+pub mod audiodg;
 pub mod autostart;
 pub mod backup;
 pub mod config;

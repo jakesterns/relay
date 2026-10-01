@@ -538,6 +538,14 @@ async fn apo_status() -> CmdResult<relay_core::audio_apo::ApoStatus> {
 }
 
 #[tauri::command]
+async fn audio_effects_status() -> CmdResult<relay_core::audiodg::Status> {
+    match call(Method::AudioEffectsStatus).await? {
+        Reply::AudioEffects { status } => Ok(status),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn install_apo(endpoint: Option<String>) -> CmdResult<()> {
     match call(Method::InstallApo { endpoint }).await? {
         Reply::Ok => Ok(()),
@@ -1098,6 +1106,7 @@ pub fn run() {
             share_capabilities,
             firewall_status,
             apo_status,
+            audio_effects_status,
             install_apo,
             uninstall_apo,
             vdevice_status,

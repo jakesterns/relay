@@ -3,7 +3,7 @@ import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Toggle } from "../c
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
-import { api, installApoOp, uninstallApoOp, type ApoStatus, type ElevatedOp, type ElevationResult, type EndpointApo, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
+import { api, installApoOp, setAudioEffectsOp, uninstallApoOp, type ApoStatus, type AudioEffectsStatus, type ElevatedOp, type ElevationResult, type EndpointApo, type RecordingSettings, type UiPrefs, type VdeviceStatus } from "../lib/ipc";
 
 export function Settings() {
   const { state, refresh, offline, mock } = useCore();
@@ -157,7 +157,7 @@ export function Settings() {
         </Card>
         <Card title="What Relay installs">
           <p className="p">Relay works at the OS and hardware layer only. It never injects into games, reads their memory, or changes your default devices. Two optional components need your explicit consent:</p>
-          <ApoConsentRow />
+          <AudioEffectsSection />
           <VdeviceConsentRow />
         </Card>
         <Card title="Recording">
@@ -337,8 +337,11 @@ function PlanLines({ lines }: { lines: string[] | null }) {
  *  install would write, and a remove path that restores the prior state from
  *  the on-disk backup. Both directions run in `relay-elevate.exe` behind one
  *  UAC prompt — the core itself never holds an administrator token. */
-function ApoConsentRow() {
+function ApoConsentRow({ effects }: { effects: AudioEffectsStatus | null }) {
   const { offline, mock } = useCore();
+  // S44: Windows will not load the APO until the protection switch is off,
+  // so installing it before then would change the registry for nothing.
+  const effectsOn = effects?.allowed === true;
   const [status, setStatus] = useState<ApoStatus | null>(null);
   // One open panel at a time: which output, and which direction.
   const [open, setOpen] = useState<{ endpoint: string; mode: "install" | "remove" } | null>(null);
@@ -366,6 +369,10 @@ function ApoConsentRow() {
       <div className="tog">
         <div><b>Endpoint audio processor (APO)</b><small>{sub}</small></div>
       </div>
+      {!effectsOn && endpoints.some((e) => !e.installed && !e.backed_up) && (
+        <p className="p small apo-gated">Install is unavailable until audio effects are turned on above —
+          Windows would not load it, so installing it now would change your PC for nothing.</p>
+      )}
       {endpoints.map((e) => {
         // A backup without the CLSID (half-removed, or the chain was reset by
         // a driver update) still has a restore to run, so it offers Remove.
@@ -383,6 +390,8 @@ function ApoConsentRow() {
                 <small>{e.is_default ? "Default output · " : ""}{state}</small>
               </div>
               <button className="btn q" aria-label={`${removable ? "Remove" : "Install"} on ${e.name}`}
+                disabled={!removable && !effectsOn}
+                title={!removable && !effectsOn ? "Turn on audio effects above first" : undefined}
                 onClick={() => setOpen(isOpen ? null : { endpoint: e.endpoint, mode })}>
                 {removable ? "Remove…" : "Install…"}
               </button>
@@ -407,6 +416,96 @@ function ApoConsentRow() {
         );
       })}
     </>
+  );
+}
+
+/** S44: the audio-effects card. Holds the protection status so the APO rows
+ *  below can stay disabled until Windows will actually load the APO. */
+function AudioEffectsSection() {
+  const { offline } = useCore();
+  const [status, setStatus] = useState<AudioEffectsStatus | null>(null);
+  const refresh = () => {
+    api.audioEffectsStatus().then(setStatus).catch(() => setStatus(null));
+  };
+  useEffect(refresh, [offline]);
+  return (
+    <>
+      <AudioEffectsRow status={status} onChanged={refresh} />
+      <ApoConsentRow effects={status} />
+    </>
+  );
+}
+
+/** The plain explanation, shown on the row and again before the prompt. */
+export const AUDIO_EFFECTS_EXPLAINER =
+  "Windows only loads audio effects signed by Microsoft. Relay's per-game EQ isn't, so Windows needs one audio protection turned off for the whole PC. This is what Equalizer APO does. Turning this off again, or uninstalling Relay, puts it back.";
+
+function priorText(prior: number | null | undefined): string {
+  return prior === null || prior === undefined ? "not set" : String(prior);
+}
+
+/** S44: the one switch per-game EQ depends on. Off by default; turning it on
+ *  is an explicit confirm → read the exact change → Windows prompt sequence. */
+function AudioEffectsRow({ status, onChanged }: {
+  status: AudioEffectsStatus | null;
+  onChanged: () => void;
+}) {
+  const { offline, mock } = useCore();
+  const [open, setOpen] = useState(false);
+  const [restart, setRestart] = useState(false);
+
+  const on = status?.allowed === true;
+  const ours = status?.changed_by_relay === true;
+  // Already on because another app set it: nothing for Relay to do or undo.
+  const elsewhere = status?.set_elsewhere === true;
+  const sub = status === null
+    ? (offline && !mock ? "Relay is not running — status unknown." : "Reading…")
+    : status.unknown
+      ? "Could not read this setting."
+      : elsewhere
+        ? "On — another app (such as Equalizer APO) already turned this protection off. Relay did not change it."
+        : on ? "On — Windows will load Relay's per-game EQ." : "Off — Windows protection is on, per-game EQ is unavailable.";
+  const changed = ours
+    ? `Changed on this PC: Windows audio protection is off (DisableProtectedAudioDG = 1), because you turned it on here. Before Relay it was ${priorText(status?.prior)}; turning this off or uninstalling puts that back.`
+    : "Nothing on your PC was changed by this setting.";
+  const canToggle = status !== null && !status.unknown && !elsewhere;
+
+  return (
+    <div className="audio-effects">
+      <div className="tog">
+        <div><b>Audio effects (per-game EQ)</b><small>{sub}</small></div>
+        <button className="btn q" disabled={!canToggle}
+          aria-label={on ? "Turn audio effects off" : "Turn audio effects on"}
+          onClick={() => setOpen(!open)}>
+          {on ? "Turn off…" : "Turn on…"}
+        </button>
+      </div>
+      <p className="p small">{AUDIO_EFFECTS_EXPLAINER}</p>
+      <p className="note" data-testid="audio-effects-changed">{changed}</p>
+      {open && (
+        <ElevatedPanel
+          op={setAudioEffectsOp(!on, restart)}
+          verb={on ? "Turn off" : "Turn on"}
+          onClose={() => setOpen(false)}
+          onDone={onChanged}
+          blurb={(
+            <>
+              <p className="p"><b>{on ? "What this puts back:" : "What this changes:"}</b>{" "}
+                {on
+                  ? "the one Windows value Relay changed goes back to exactly what it was before. Nothing else is touched."
+                  : <>one Windows value for the whole PC, nothing else. Its current state is saved to
+                    <span className="mono"> %LOCALAPPDATA%\Relay\apo-backup</span> first. No game, app or other setting is touched.</>}
+              </p>
+              <label className="tog">
+                <div><b>Restart Windows audio now</b>
+                  <small>Sound cuts out for 2–3 seconds. Leave unticked and it takes effect after a restart.</small></div>
+                <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)}
+                  aria-label="Restart Windows audio now" />
+              </label>
+            </>
+          )} />
+      )}
+    </div>
   );
 }
 

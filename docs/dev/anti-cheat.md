@@ -56,6 +56,7 @@ anti-cheat; **high** = would be detected or banned.
 | 21 | `crates/core/src/firewall.rs` | Reads firewall policy store; one inbound rule for `relay-share.exe` via the elevated helper | No | none | |
 | 22 | `crates/core/src/elevate.rs`, `relay-elevate` | Elevated helper writing HKLM (APO FX store, vcam, firewall) | No | low | Runs only on install/uninstall at user request. Vanguard/FACEIT do not react to admin processes; they react to drivers and handles. Mitigation: never run it while a game is up (it doesn't need to), keep the op allow-list. |
 | 23 | `crates/core/src/ipc.rs:551`, `processes.rs:218` | `OpenProcessToken(GetCurrentProcess())` | Relay itself | none | |
+| 24 | `crates/core/src/audiodg.rs`, elevated op `set_audio_effects_allowed` (S44) | Sets `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio :: DisableProtectedAudioDG = 1` so audiodg loads Relay's unsigned APO; prior state recorded first, restored on "off" and on uninstall | No | low (unverified) | **Optional and off by default.** It changes a Windows security setting for the whole PC: audiodg stops requiring Microsoft-signed audio effects, so any unsigned APO registered on an output can load, not just Relay's. It does not touch games, their processes or their files. Equalizer APO's installer sets the same value and is widely run alongside anti-cheat games; no known anti-cheat has been reported to react to it, but this is **unverified** — nobody has tested it against Vanguard, FACEIT, EAC or BattlEye for Relay. Users who play under strict anti-cheat can leave it off and lose only per-game EQ. |
 
 ## Open risks
 
@@ -73,7 +74,11 @@ No medium or high findings. Residual items to watch:
    driver may never ship to game-playing users; document that.
 4. **Gamma / vibrance fairness (#17, #18).** Not detection, but tournament
    rules (FACEIT/ESL) sometimes ban "visibility" tools. Neutral note in UI.
-5. **Future code.** Any new `OpenProcess` with more than
+5. **The audio-protection switch (#24).** A deliberate trade-off the user
+   opts into: per-game EQ in exchange for turning off one Windows audio
+   protection. Anti-cheat reaction is unverified; the UI says what it changes
+   and how to put it back, and the uninstaller restores the recorded state.
+6. **Future code.** Any new `OpenProcess` with more than
    `PROCESS_QUERY_LIMITED_INFORMATION`, any `SetWindowsHookEx`, any
    `SendInput`, or any in-process capture is high risk. Suggested CI grep
    gate over `crates/` and `ui/src-tauri/` for those symbols.

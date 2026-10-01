@@ -76,6 +76,8 @@ async fn every_op_can_be_previewed_before_the_prompt() {
         ElevatedOp::UninstallApo { endpoint: None },
         ElevatedOp::InstallCamera,
         ElevatedOp::UninstallCamera,
+        ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: false },
+        ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: true },
     ] {
         let reply = client.call(Method::ElevationPlan { op: op.clone() }).await.expect("plan");
         let lines = match reply {
@@ -94,6 +96,13 @@ async fn every_op_can_be_previewed_before_the_prompt() {
     // Nothing above may have touched the machine: no backup, no record.
     assert!(!root.join("apo-backup").exists(), "a preview must not write a backup");
     assert!(!root.join("installed.json").exists(), "a preview must not record an install");
+
+    // S44: the status read is read-only too, and says Relay changed nothing.
+    match client.call(Method::AudioEffectsStatus).await.expect("status") {
+        Reply::AudioEffects { status } => assert!(!status.changed_by_relay),
+        other => panic!("unexpected reply {other:?}"),
+    }
+    assert!(!root.join("apo-backup").exists(), "a status read must not write a record");
 
     let _ = client.call(Method::Shutdown).await;
     let _ = std::fs::remove_dir_all(&root);

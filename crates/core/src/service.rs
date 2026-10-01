@@ -997,8 +997,12 @@ fn sync_receive_vcam(inner: &Arc<Mutex<Inner>>) {
         g.recv_vcam = Some(camera_ok);
         if let Some(engine) = g.receive.as_mut() {
             match engine.command(&cmd) {
-                Ok(()) => tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver"),
-                Err(e) => tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver"),
+                Ok(()) => {
+                    tracing::info!(on = camera_ok, "Relay Camera toggled on the running receiver")
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not toggle Relay Camera on the receiver")
+                }
             }
         }
     }
@@ -2331,6 +2335,11 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
+            Method::AudioEffectsStatus => {
+                let dir = g.apo_backup_dir.clone();
+                drop(g);
+                Reply::AudioEffects { status: audio_effects_status(&dir) }
+            }
             Method::ApoStatus => {
                 let dir = g.apo_backup_dir.clone();
                 drop(g);
@@ -2552,4 +2561,24 @@ impl crate::ipc::server::Handler for IpcHandler {
         }
         self.handle_sync(method)
     }
+}
+
+/// S44: read-only state of the protected-audiodg switch.
+#[cfg(windows)]
+fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Status {
+    crate::audiodg::status(&crate::audiodg::LiveValue, &crate::audiodg::record_file(apo_backup_dir))
+}
+
+#[cfg(not(windows))]
+fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Status {
+    struct Absent;
+    impl crate::audiodg::ProtectionValue for Absent {
+        fn read(&self) -> anyhow::Result<Option<u32>> {
+            anyhow::bail!("Windows-only")
+        }
+        fn write(&mut self, _: Option<u32>) -> anyhow::Result<()> {
+            anyhow::bail!("Windows-only")
+        }
+    }
+    crate::audiodg::status(&Absent, &crate::audiodg::record_file(apo_backup_dir))
 }
