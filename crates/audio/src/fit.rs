@@ -247,6 +247,14 @@ fn error_stats(target: &[f64], current: &[f64]) -> (f32, f32) {
 /// curve's own endpoints. Log spacing matters: the points are log-spaced, so
 /// interpolating linearly in Hz would skew everything below a few hundred Hz.
 fn sample_curve(curve: &[(f32, f32)], hz: f64) -> f64 {
+    interp_db(curve, hz)
+}
+
+/// [`sample_curve`] for callers outside this module; 0 dB for an empty curve.
+pub fn interp_db(curve: &[(f32, f32)], hz: f64) -> f64 {
+    if curve.is_empty() {
+        return 0.0;
+    }
     let first = curve[0];
     let last = curve[curve.len() - 1];
     if hz <= first.0 as f64 {
