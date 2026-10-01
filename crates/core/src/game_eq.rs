@@ -484,6 +484,53 @@ pub fn exe_version(_path: &str) -> Option<String> {
     None
 }
 
+/// After the game loses focus the learner pauses (learns nothing) for this
+/// long before it is stopped, so Alt-Tab and back resumes it instead of
+/// starting a new helper. The profile itself still restores on blur at once.
+pub const LEARNER_BLUR_GRACE: Duration = Duration::from_secs(15);
+
+/// What to do with the learner helper on a focus change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearnerStep {
+    /// Nothing runs and nothing should.
+    Nothing,
+    /// Start one.
+    Start,
+    /// The right one is listening already.
+    Keep,
+    /// Pause it (focus left); the grace period starts.
+    Pause,
+    /// The same game came back within the grace period.
+    Resume,
+    /// A different game or process: stop the old one, start a new one.
+    Restart,
+}
+
+/// The learner state machine. `current` is the running helper (profile, pid,
+/// paused); `want` the one the focused window calls for, if any.
+pub fn learner_step(current: Option<(Uuid, u32, bool)>, want: Option<(Uuid, u32)>) -> LearnerStep {
+    match (current, want) {
+        (None, None) => LearnerStep::Nothing,
+        (None, Some(_)) => LearnerStep::Start,
+        (Some((p, pid, paused)), Some((wp, wpid))) if p == wp && pid == wpid => {
+            if paused {
+                LearnerStep::Resume
+            } else {
+                LearnerStep::Keep
+            }
+        }
+        (Some(_), Some(_)) => LearnerStep::Restart,
+        // Out of focus: pause once; while paused the grace runs on the tick.
+        (Some((_, _, true)), None) => LearnerStep::Keep,
+        (Some((_, _, false)), None) => LearnerStep::Pause,
+    }
+}
+
+/// The grace period of a paused learner has run out.
+pub fn grace_expired(paused_since: Option<Instant>, now: Instant) -> bool {
+    paused_since.is_some_and(|t| now.saturating_duration_since(t) >= LEARNER_BLUR_GRACE)
+}
+
 /// The running learner helper for one focused game.
 pub struct Learner {
     child: Child,
@@ -491,6 +538,8 @@ pub struct Learner {
     pub profile: Uuid,
     pub pid: u32,
     fresh: Arc<AtomicBool>,
+    /// Set while paused for a blur; the tick stops it after the grace.
+    pub paused_since: Option<Instant>,
 }
 
 impl Learner {
@@ -541,7 +590,28 @@ impl Learner {
                 })?;
         }
         tracing::info!(exe = %profile.game.exe, pid = fg.pid, ?version, "learning the game's sound");
-        Ok(Self { child, stdin, profile: profile.id, pid: fg.pid, fresh })
+        Ok(Self { child, stdin, profile: profile.id, pid: fg.pid, fresh, paused_since: None })
+    }
+
+    /// Learn nothing until [`Self::resume`]; the capture stays open.
+    pub fn pause(&mut self) {
+        if self.paused_since.is_none() {
+            self.send(b"pause\n");
+            self.paused_since = Some(Instant::now());
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if self.paused_since.take().is_some() {
+            self.send(b"resume\n");
+        }
+    }
+
+    fn send(&mut self, line: &[u8]) {
+        if let Some(s) = self.stdin.as_mut() {
+            let _ = s.write_all(line);
+            let _ = s.flush();
+        }
     }
 
     /// A new curve was offered since the last call.
@@ -870,6 +940,29 @@ mod tests {
         assert_eq!(names[0], "\"footsteps\"");
         assert_eq!(names[8], "\"ambience\"");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn alt_tab_pauses_and_resumes_without_a_restart() {
+        use LearnerStep::*;
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        assert_eq!(learner_step(None, None), Nothing);
+        assert_eq!(learner_step(None, Some((a, 10))), Start);
+        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 10))), Keep);
+        // Alt-Tab away: pause, and stay paused (no restart) while out.
+        assert_eq!(learner_step(Some((a, 10, false)), None), Pause);
+        assert_eq!(learner_step(Some((a, 10, true)), None), Keep);
+        // Back within the grace: resume the same helper.
+        assert_eq!(learner_step(Some((a, 10, true)), Some((a, 10))), Resume);
+        // Another game, or the game relaunched (new pid): a new helper.
+        assert_eq!(learner_step(Some((a, 10, true)), Some((b, 11))), Restart);
+        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 12))), Restart);
+        // The grace runs out only after LEARNER_BLUR_GRACE.
+        let t = Instant::now();
+        assert!(!grace_expired(None, t + LEARNER_BLUR_GRACE * 2));
+        assert!(!grace_expired(Some(t), t + LEARNER_BLUR_GRACE - Duration::from_millis(1)));
+        assert!(grace_expired(Some(t), t + LEARNER_BLUR_GRACE));
+        assert_eq!(LEARNER_BLUR_GRACE, Duration::from_secs(15));
     }
 
     #[test]

@@ -113,13 +113,19 @@ pub fn run(args: LearnArgs) -> Result<()> {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    // `pause` while the game is out of focus (the core's blur grace): keep
+    // the capture open, learn nothing; `resume` when it is back.
+    let paused = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
+        let paused = paused.clone();
         std::thread::Builder::new().name("relay-learn-stdin".into()).spawn(move || {
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
-                match line {
-                    Ok(l) if l.trim() == "stop" => break,
+                match line.as_deref().map(str::trim) {
+                    Ok("stop") => break,
+                    Ok("pause") => paused.store(true, Ordering::Relaxed),
+                    Ok("resume") => paused.store(false, Ordering::Relaxed),
                     Ok(_) => continue,
                     Err(_) => break,
                 }
@@ -147,7 +153,9 @@ pub fn run(args: LearnArgs) -> Result<()> {
                 rate = block.sample_rate;
                 an = Analyzer::new(rate);
             }
-            an.push_interleaved(&block.samples, block.channels as usize);
+            if !paused.load(Ordering::Relaxed) {
+                an.push_interleaved(&block.samples, block.channels as usize);
+            }
         }
         if last_fold.elapsed() >= FOLD_EVERY {
             last_fold = Instant::now();

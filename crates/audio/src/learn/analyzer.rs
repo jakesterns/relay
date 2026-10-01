@@ -191,16 +191,21 @@ const RECENT_FRAMES: usize = 8;
 /// A gunshot's crack: its added energy above 1 kHz is at least this share
 /// of the energy it added below 250 Hz (an explosion's is far less).
 pub const GUN_MIN_HIGH_RATIO: f32 = 0.25;
-/// Gunshot: onset at least this sharp...
-pub const GUN_MIN_ONSET_DB: f32 = 15.0;
+/// Gunshot. Every test is relative to what was there just before (the local
+/// bed), never to an absolute level, so loudness-normalised or heavily
+/// compressed game audio classifies the same as a raw mix.
+/// Onset at least this far above the previous frame and the floor...
+pub const GUN_MIN_ONSET_DB: f32 = 10.0;
 /// ...rising that sharply in at least this many bands below 250 Hz and
 /// above 1 kHz (a crack and a thump together: broadband)...
 pub const GUN_MIN_LOW_BANDS: usize = 2;
 pub const GUN_MIN_HIGH_BANDS: usize = 4;
-/// ...this far above the session loudness...
-pub const GUN_LOUD_DB: f32 = 15.0;
-/// ...with a tail at least this long.
-pub const GUN_MIN_TAIL_MS: u32 = 50;
+/// ...a peak this far above the local bed (crest)...
+pub const GUN_MIN_CREST_DB: f32 = 12.0;
+/// ...and a decay tail in this range (a click has almost none, an
+/// explosion rumbles on).
+pub const GUN_MIN_TAIL_MS: u32 = 80;
+pub const GUN_MAX_TAIL_MS: u32 = 600;
 /// Events this far above the running loudness are loud.
 pub const LOUD_ABOVE_DB: f32 = 30.0;
 /// Spectral weighting margin (power ratio, 3 dB).
@@ -1111,12 +1116,17 @@ impl Analyzer {
                 db((lin(level[b]) - lin(before)).max(TINY))
             };
         }
+        // Only a step that keeps the walking rhythm is counted here. A lone
+        // bright onset inside another sound is far more often part of that
+        // sound (the crack of a burst of gunfire, debris) than a reload, and
+        // counting those as clicks swamped "mechanical" on real game audio.
         let rhythmic = self.rhythmic(self.now);
-        let c = if rhythmic { SoundClass::Footsteps } else { SoundClass::Mechanical };
-        if rhythmic {
-            self.stats.rhythmic_steps += 1;
-        }
         self.last_steps = [self.last_steps[1], self.now];
+        if !rhythmic {
+            return;
+        }
+        let c = SoundClass::Footsteps;
+        self.stats.rhythmic_steps += 1;
         let rel = self.rel();
         self.stats.events[c.index()] += 1;
         self.stats.class_frames[c.index()] += 1;
@@ -1505,12 +1515,14 @@ impl Analyzer {
             .filter(|&&l| l as usize == SoundClass::Voice.index())
             .count();
         let under_voice = voiced * 2 > e.nframes;
+        let bed_db = db(e.floor_lin.iter().sum::<f32>());
+        let crest = e.peak_db - bed_db;
         if !under_voice
             && e.onset_db >= GUN_MIN_ONSET_DB
             && e.rising_low >= GUN_MIN_LOW_BANDS
             && e.rising_high >= GUN_MIN_HIGH_BANDS
-            && above >= GUN_LOUD_DB
-            && dur_ms >= GUN_MIN_TAIL_MS
+            && crest >= GUN_MIN_CREST_DB
+            && (GUN_MIN_TAIL_MS..=GUN_MAX_TAIL_MS).contains(&dur_ms)
             && high >= low * GUN_MIN_HIGH_RATIO
         {
             return Some(SoundClass::Gunshot);
@@ -1527,7 +1539,8 @@ impl Analyzer {
             if under_voice {
                 return None;
             }
-            if dur_ms <= MECH_MAX_MS && e.onset_db >= MECH_MIN_ONSET_DB {
+            // A click: short, little tail, and narrow — nothing low rises.
+            if dur_ms <= MECH_MAX_MS && e.onset_db >= MECH_MIN_ONSET_DB && e.rising_low == 0 {
                 return Some(SoundClass::Mechanical);
             }
             if e.onset_db < FOLIAGE_MAX_ONSET_DB
@@ -1653,6 +1666,61 @@ mod tests {
         let g = s.count(SoundClass::Gunshot);
         assert!(g >= 15, "{:?}", s.events);
         assert!(g > 2 * s.count(SoundClass::Explosion), "{:?}", s.events);
+    }
+
+    /// Real game audio arrives loudness-normalised and compressed. Gunshots
+    /// and reload clicks must classify the same at any level, compressed or
+    /// not: every rule is relative to the local bed.
+    #[test]
+    fn gunshots_and_clicks_hold_at_any_level_and_under_compression() {
+        fn compress(x: &mut [f32], env: &mut f32) {
+            // Fast feed-forward compressor: -30 dBFS threshold, 8:1, 1 ms
+            // attack, 60 ms release, 18 dB make-up (a loud, squashed mix).
+            let (att, rel) = (
+                1.0 - (-1.0f32 / (0.001 * FS as f32)).exp(),
+                1.0 - (-1.0f32 / (0.06 * FS as f32)).exp(),
+            );
+            for s in x.iter_mut() {
+                let a = s.abs();
+                *env += (if a > *env { att } else { rel }) * (a - *env);
+                let lvl = 20.0 * env.max(1e-9).log10();
+                let gain_db =
+                    if lvl > -30.0 { (-30.0 - lvl) * (1.0 - 1.0 / 8.0) } else { 0.0 } + 18.0;
+                *s = (*s * 10f32.powf(gain_db / 20.0)).clamp(-0.98, 0.98);
+            }
+        }
+        // Roughly -30, -20 and -14 LUFS for this material, then compressed.
+        for (gain_db, squash) in [(-16.0f32, false), (-6.0, false), (0.0, false), (-6.0, true)] {
+            let g = 10f32.powf(gain_db / 20.0);
+            let run_at = |seg: Segment| {
+                let mut a = Analyzer::new(FS);
+                let mut s = Synth::new(FS, 0x5eed);
+                let mut env = 0f32;
+                s.render(seg, 30.0, |b| {
+                    let mut v: Vec<f32> = b.iter().map(|x| x * g).collect();
+                    if squash {
+                        compress(&mut v, &mut env);
+                    }
+                    a.push(&v);
+                });
+                a.into_stats()
+            };
+            let gun = run_at(Segment::Gunfire);
+            let (gs, gm) = (gun.count(SoundClass::Gunshot), gun.count(SoundClass::Mechanical));
+            assert!(
+                gs >= 15 && gs > 3 * gm,
+                "{gain_db} dB squash={squash}: gunfire {:?}",
+                gun.events
+            );
+            let clicks = run_at(Segment::Reload);
+            let (cm, cg) =
+                (clicks.count(SoundClass::Mechanical), clicks.count(SoundClass::Gunshot));
+            assert!(
+                cm >= 15 && cm > 3 * cg,
+                "{gain_db} dB squash={squash}: clicks {:?}",
+                clicks.events
+            );
+        }
     }
 
     #[test]

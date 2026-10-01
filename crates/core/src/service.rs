@@ -546,6 +546,11 @@ impl Service {
             g.learner = None;
             return;
         }
+        if crate::game_eq::grace_expired(l.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the learner");
+            stop_learner(&mut g);
+            return;
+        }
         if !l.take_fresh() {
             return;
         }
@@ -1482,17 +1487,32 @@ fn stop_learner(g: &mut Inner) {
 /// S46: run the learner for `profile` on the focused game when its learning
 /// is on and a goal is chosen; otherwise make sure none runs.
 fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
+    use crate::game_eq::LearnerStep;
     let want = profile.filter(|p| p.audio.learning_active() && fg.pid != 0);
-    if let (Some(p), Some(l)) = (want, g.learner.as_mut()) {
-        if l.profile == p.id && l.pid == fg.pid && l.running() {
-            return;
-        }
+    if g.learner.as_mut().is_some_and(|l| !l.running()) {
+        g.learner = None;
     }
-    stop_learner(g);
-    if let Some(p) = want {
-        match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
-            Ok(l) => g.learner = Some(l),
-            Err(e) => warn!(error = %e, "could not start learning this game's sound"),
+    let current = g.learner.as_ref().map(|l| (l.profile, l.pid, l.paused_since.is_some()));
+    match crate::game_eq::learner_step(current, want.map(|p| (p.id, fg.pid))) {
+        LearnerStep::Nothing | LearnerStep::Keep => {}
+        LearnerStep::Pause => {
+            if let Some(l) = g.learner.as_mut() {
+                l.pause();
+            }
+        }
+        LearnerStep::Resume => {
+            if let Some(l) = g.learner.as_mut() {
+                l.resume();
+            }
+        }
+        LearnerStep::Start | LearnerStep::Restart => {
+            stop_learner(g);
+            if let Some(p) = want {
+                match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
+                    Ok(l) => g.learner = Some(l),
+                    Err(e) => warn!(error = %e, "could not start learning this game's sound"),
+                }
+            }
         }
     }
 }
