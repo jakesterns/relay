@@ -180,6 +180,136 @@ AudioEndpointBuilder, play speech/music to S/PDIF, then read the log:
 - `shm create … S_OK` -> `relay-core apo status` should read `reachable`.
 
 ## Live test plan (VM or the owner's machine, with the owner — NOT unattended)
+## S42d — MFX placement, after Equalizer APO (branch `feat/s42d-apo-mfx`)
+
+**Live result that started it (2026-09-30, Win11 26200, unused Realtek USB
+S/PDIF render endpoint).** Fully registered (COM class; AudioEngine key Flags
+0x0e; FxProperties `{d04e05a6…},7` and `,15` = our CLSID; `{d3993a3f…},7` =
+MODE_DEFAULT), audio services restarted, a WAV played to that endpoint: the
+diag log (written from DllMain) never appeared — audiodg never loaded the DLL.
+That endpoint already had `{d3993a3f…},5` and `,6` = MODE_DEFAULT (SFX/MFX
+modes), no SFX/MFX CLSIDs, and `{d04e05a6…},0` = nil GUID.
+
+**What Equalizer APO does** (SourceForge `equalizerapo/code`, commit
+`bbfcc3e`, 2025-11-28):
+- Value names, `DeviceAPOInfo.cpp:54-61`: LFX `,1`, GFX `,2`, SFX `,5`, MFX
+  `,6`, EFX `,7`, composite `,13/,14/,15`; modes `{d3993a3f…},5/6/7`
+  (`:74-76`); `PKEY_AudioEndpoint_Disable_SysFx` `{1da5d803…},5` (`:78`). No
+  `{fc52a749…}` value. It only ever **writes** the legacy single slots
+  (`,1/,2/,5/,6/,7`), never the composite lists.
+- Default mode (`:398-413`): LFX/GFX only on pre-8.1 style stores; otherwise
+  **SFX + MFX** when the endpoint has `{b3f8fa53…},41` (combined device),
+  else **SFX + EFX**. So EAPO itself runs post-mix as EFX on many endpoints —
+  the EFX slot is not inherently unloadable.
+- Install (`:498-645`): copies the original CLSIDs of all five legacy slots to
+  `HKLM\SOFTWARE\EqualizerAPO\Child APOs\{device}` (`:538-547`, also a `.reg`
+  backup file), **overwrites** the SFX/MFX (or SFX/EFX) slot with its own
+  CLSID (`:599-614`), deletes the other legacy slots, writes the modes value
+  only if absent (`:603-605`, `:611-613`), and deletes Disable_SysFx
+  (`:643-644`). The vendor APO is kept by wrapping: EAPO's APO instantiates
+  the recorded "PreMixChild"/"PostMixChild" CLSID and forwards to it
+  (`:436-496`, `EqualizerAPO/EqualizerAPO.cpp:228-280`). Uninstall writes the
+  recorded originals back (`:647-683`).
+- Registration (`EqualizerAPO/EqualizerAPO.cpp:35-40`, `DllMain.cpp:71-78`):
+  two CLSIDs (pre-mix, post-mix), interface list = IAudioProcessingObject
+  only, Flags = FPS_MUST_MATCH | BPS_MUST_MATCH | INPLACE (0x0d). QI also
+  answers IAudioSystemEffects (`EqualizerAPO.cpp:529`). Ours (0x0e, same
+  interface list, IAudioSystemEffects{,2}) is equivalent for loading.
+- **Machine-wide switch**: `Setup/Setup.nsi:279` writes
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio\DisableProtectedAudioDG
+  = 1`, and DeviceSelector re-applies it on every run
+  (`DeviceSelector.cpp:101`, `DeviceAPOInfo.cpp:141-153`). This is what lets
+  an unsigned/test-signed APO load in audiodg, and it is the most likely
+  reason ours never loaded. Relay does **not** write it: it is global config
+  (non-negotiable), and it is the owner's call. Live check below.
+
+**Relay's decision: MFX.** Per-game EQ applies to everything on the
+endpoint, so post-mix. MFX vs EFX: both post-mix; MFX runs once per
+processing mode (we offer DEFAULT only, so one instance in practice) and is
+where EAPO goes on combined-device endpoints. SFX was rejected: it runs per
+stream (one instance per app), costs N DSP passes, and can see non-float
+formats; our parameters are per endpoint anyway. MFX input is the engine mix
+format (float32), so the existing float32-stereo negotiation stands; a
+multichannel mix is refused (the engine then drops the APO — audio still
+plays, unprocessed).
+
+**Install plan (`fxstore::plan_install`, now `Result<_, PlanError>`):**
+- composite MFX `,14` present → append our CLSID (chain, vendor kept);
+- else legacy MFX `,6` absent / empty / nil GUID → write our CLSID;
+- else ~~refuse `PlanError::SlotTaken(clsid)`~~ — **superseded by S44b
+  below**: Relay now chains the owner instead of refusing.
+- `{d3993a3f…},6` gets MODE_DEFAULT (append if missing);
+- Disable_SysFx deleted when non-zero (as EAPO), restored by uninstall.
+- No EFX values are written any more; `fx_has_relay` still reads them, so a
+  pre-S42d install is recognised and uninstalls from its backup as before.
+- Vetting: `ids::FX_WRITABLE_VALUES` (the four names above);
+  `fxstore::vet_fx_diff` refuses any plan touching another value or a
+  sub-key, and `livereg::apply_install` checks it before the first write.
+- Backup/restore unchanged (full store, byte-identical — fixtures), first/last
+  endpoint rules unchanged. Tests: `tests/fxstore_fixtures.rs` (RODECaster
+  slot taken, RODECaster with MFX freed byte-for-byte, S/PDIF-shaped store
+  with a vendor SFX, nil-GUID slot, composite chain, Disable_SysFx, vetting),
+  `tests/apo_com.rs` (IAudioSystemEffects{,2} QI).
+
+### S44b — chain the displaced MFX (branch `feat/s44b-apo-chain`)
+
+Why: on the dev PC the default output's MFX slot holds Microsoft's "WM audio
+GFX APO" `{13AB3EBD-137E-4903-9D89-60BE8277FD17}` (WMALFXGFXDSP.dll);
+Realtek PCs hold RtkAPO. Refusing left per-game EQ unavailable on most real
+outputs. Equalizer APO's answer, adopted here: take the slot and host the
+original as a child.
+
+- **Install** (`fxstore::plan_install_with`): legacy `,6` owned by another
+  CLSID → write Relay's CLSID there and record the owner as REG_SZ at
+  `ids::PKEY_RELAY_CHILD_MFX` = `{7c3f2a91-5e4d-4b8a-a1f6-3d92c0e4b7a5},1`
+  (a Relay-owned fmtid, added to `FX_WRITABLE_VALUES`), and in
+  `Backup::chained_clsid`. FxProperties is where the APO can read it:
+  audiodg hands its property store to Initialize as
+  `APOInitSystemEffects::pAPOSystemEffectsProperties`. Composite `,14`
+  lists are still joined, not chained.
+- **Refuse `SlotTaken` only when chaining is impossible**: the owner is not
+  a braced CLSID, has no `HKLM\SOFTWARE\Classes\CLSID\{x}\InprocServer32`
+  (live check `LiveRegistry::clsid_is_chainable`, read-only), or the
+  single-effect slot holds a list. Wording: "…Relay cannot host it…".
+- **APO** (`com.rs`): Initialize reads the record, `CoCreateInstance`s the
+  child in-proc, forwards Initialize (same bytes, `APOInit.clsid` patched to
+  the child's). Format queries must pass both (child must accept the
+  requested format unchanged). LockForProcess locks the child with its input
+  on a Relay-owned mid buffer and the engine's output. Order: **Relay's EQ,
+  then the child** — the vendor/Windows effect is usually loudness/room/
+  limiter, and EQ belongs before the limiter. Bypass (or no chain built) =
+  the child alone on the engine buffers; zero allocations on the RT path.
+  GetEffectsList = the child's; GetLatency = sum; Reset/Unlock forwarded.
+  A child that fails to create/init/lock is dropped and Relay runs alone
+  (diag lines say which).
+- **Uninstall / uninstall-all**: unchanged — the backup store is restored
+  verbatim, so the original CLSID returns byte-for-byte and the record value
+  disappears (`microsoft_gfx_mfx_is_chained_and_restored`,
+  `realtek_mfx_is_chained_and_restored`).
+- Dry-run lists a `chain:` line naming the child.
+- Tests: `tests/fxstore_fixtures.rs` (MS GFX on the RODECaster baseline,
+  Realtek-shaped store, unchainable refusals), `tests/apo_chain.rs` (fake
+  child COM object: forwarding, both-must-agree negotiation, Relay→child
+  order, bypass = child only, effects list, latency, failed child → Relay
+  alone). `elevate_ipc` no longer depends on the dev PC's slot state.
+- Live pass owed (with the owner): install on the default output, confirm
+  the diag log shows `child … initialized`, Windows' own enhancement still
+  audible in bypass, EQ audible when a profile is active; uninstall and
+  `reg export` diff empty.
+
+**Live retest (with the owner; not run in this session).**
+1. Read-only first: `reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio" /v DisableProtectedAudioDG`
+   and `reg query HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects /s`
+   (an EAPO install, if any, shows what loads on this PC).
+2. Uninstall the S42c install (restores the EFX values from its backup),
+   rebuild, install again: the dry-run must list only `{d04e05a6…},6`
+   (and `,6` modes if missing) on the S/PDIF endpoint.
+3. `apo-diag.on`, restart AudioEndpointBuilder, play speech/music to S/PDIF,
+   read the log. Still no DllMain line → the remaining difference from EAPO
+   is `DisableProtectedAudioDG`; decide with the owner whether to test it by hand
+   (a global switch Relay would then have to own, back up and restore).
+
+## Live test plan (VM or the owner's machine, with the owner — NOT unattended)
 
 Pre-reqs: test-signed build per `docs/dev/apo-testsign.md`; elevated flow per
 `docs/dev/elevation-live.md`. Export `HKLM\...\MMDevices\Audio\Render` first

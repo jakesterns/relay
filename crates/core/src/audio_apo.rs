@@ -171,6 +171,19 @@ pub fn params_section(endpoint: &str, instance: &str, local: bool) -> String {
     }
 }
 
+/// Plain-English refusal for an output whose effect slot another vendor
+/// already uses. Nothing is installed and nothing on the PC changes.
+pub fn slot_taken_line(e: &relay_apo::fxstore::PlanError) -> String {
+    match e {
+        relay_apo::fxstore::PlanError::SlotTaken(clsid) => format!(
+            "Slot taken: this output already runs another audio effect ({clsid}) where Relay \
+             would go, and Relay cannot host it (it is not a registered audio effect Relay \
+             can load). Relay will not replace it, so per-game EQ is unavailable on this \
+             output. Nothing on your PC was changed."
+        ),
+    }
+}
+
 /// Does this FX chain text name Relay's CLSID?
 fn names_relay(text: &str) -> bool {
     text.to_ascii_lowercase().contains(&relay_apo::ids::APO_CLSID.to_ascii_lowercase())
@@ -185,6 +198,12 @@ pub fn plan_lines(plan: &relay_apo::fxstore::InstallPlan) -> Vec<String> {
     for (rel, name) in relay_apo::fxstore::diff(&plan.backup.store, &plan.new_store) {
         let key = if rel.is_empty() { fx_root.clone() } else { format!(r"{fx_root}\{rel}") };
         lines.push(format!(r"HKLM\{key} :: {name}"));
+    }
+    if let Some(child) = &plan.backup.chained_clsid {
+        lines.push(format!(
+            "chain: this output's existing effect {child} keeps running inside Relay's; \
+             uninstall puts it back in its slot exactly as it was"
+        ));
     }
     let ae = relay_apo::ids::audio_engine_key(relay_apo::ids::APO_CLSID);
     for path in plan.com_keys.keys() {
@@ -260,7 +279,10 @@ pub fn fx_has_relay(guid: &str) -> bool {
     }
     let key: Vec<u16> =
         relay_apo::ids::fx_key(guid).encode_utf16().chain(std::iter::once(0)).collect();
+    // MFX (S42d) first; the EFX pair still reads installs made before it.
     for (value, flags) in [
+        (relay_apo::ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID, RRF_RT_REG_MULTI_SZ),
+        (relay_apo::ids::PKEY_FX_MODE_EFFECT_CLSID, RRF_RT_REG_SZ),
         (relay_apo::ids::PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID, RRF_RT_REG_MULTI_SZ),
         (relay_apo::ids::PKEY_FX_ENDPOINT_EFFECT_CLSID, RRF_RT_REG_SZ),
     ] {
@@ -352,10 +374,15 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
 
     let mut lines = Vec::new();
     match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
-        Ok(current) => {
-            let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll_text);
-            lines.extend(plan_lines(&plan));
-        }
+        Ok(current) => match relay_apo::fxstore::plan_install_with(
+            &current,
+            &endpoint,
+            &dll_text,
+            &relay_apo::livereg::LiveRegistry::clsid_is_chainable,
+        ) {
+            Ok(plan) => lines.extend(plan_lines(&plan)),
+            Err(e) => lines.push(slot_taken_line(&e)),
+        },
         Err(e) => lines.push(format!("Could not read the endpoint's FX chain: {e}")),
     }
     lines.push(format!(
@@ -397,7 +424,13 @@ pub fn install_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<String>
 
     let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
         .with_context(|| format!("reading FX store of {endpoint}"))?;
-    let plan = relay_apo::fxstore::plan_install(&current, &endpoint, &dll.to_string_lossy());
+    let plan = relay_apo::fxstore::plan_install_with(
+        &current,
+        &endpoint,
+        &dll.to_string_lossy(),
+        &relay_apo::livereg::LiveRegistry::clsid_is_chainable,
+    )
+    .map_err(|e| anyhow::anyhow!(slot_taken_line(&e)))?;
     // The machine-wide keys (COM class + audio-engine registration) are
     // derived here, never taken from a request — and still vetted, so no
     // plan can write outside the APO's own two CLSID keys.
@@ -585,6 +618,7 @@ mod tests {
 
     fn backup(ep: &str) -> relay_apo::fxstore::Backup {
         relay_apo::fxstore::plan_install(&relay_apo::fxstore::FxStore::empty(), ep, r"C:\x.dll")
+            .unwrap()
             .backup
     }
 
@@ -670,7 +704,8 @@ mod tests {
             &relay_apo::fxstore::FxStore::empty(),
             A,
             r"C:\x\relay_apo.dll",
-        );
+        )
+        .unwrap();
         let lines = plan_lines(&plan);
         let ae = format!(
             r"HKLM\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\{}",
@@ -680,8 +715,38 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l == &format!(r"HKLM\SOFTWARE\Classes\CLSID\{}", relay_apo::ids::APO_CLSID)));
-        assert_eq!(lines.iter().filter(|l| l.contains(" :: ")).count(), 3);
-        assert_eq!(lines.len(), 6);
+        // Empty store: the MFX slot and its modes list.
+        assert_eq!(lines.iter().filter(|l| l.contains(" :: ")).count(), 2);
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn taken_slot_reads_as_slot_taken() {
+        use relay_apo::regfile::{sz_bytes, RegKind, RegValue};
+        let mut store = relay_apo::fxstore::FxStore::empty();
+        store.keys.get_mut("").unwrap().insert(
+            relay_apo::ids::PKEY_FX_MODE_EFFECT_CLSID.into(),
+            RegValue {
+                kind: RegKind::Sz,
+                data: sz_bytes("{11111111-2222-3333-4444-555555555555}"),
+            },
+        );
+        // S44b: a registered child is chained, and the listing says so.
+        let plan = relay_apo::fxstore::plan_install(&store, A, r"C:\x.dll").unwrap();
+        let lines = plan_lines(&plan);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("chain:")
+                    && l.contains("{11111111-2222-3333-4444-555555555555}")),
+            "{lines:#?}"
+        );
+        // One Relay cannot host still refuses.
+        let e =
+            relay_apo::fxstore::plan_install_with(&store, A, r"C:\x.dll", &|_| false).unwrap_err();
+        let line = slot_taken_line(&e);
+        assert!(line.starts_with("Slot taken"), "{line}");
+        assert!(line.contains("Nothing on your PC was changed"));
     }
 
     #[test]

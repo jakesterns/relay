@@ -24,10 +24,14 @@ Relay is pre-release and developed by one person. Be aware of what works today:
   strip (bitrate, latency, drops, load) work.
 - **Display profiles** (GPU colour through NVIDIA/AMD APIs, monitor settings
   over DDC/CI) work, and are restored on blur, exit, crash or reboot.
-- **Per-game audio EQ and spatial sound are not available to most users yet.**
-  They run inside a Windows audio component (an endpoint APO) that has to be
-  signed by Microsoft before Windows will load it on a normal PC. That signing
-  is pending. The DSP itself is written and tested.
+- **Per-game audio EQ and spatial sound are optional and off by default.**
+  They run inside a Windows audio component (an endpoint APO). Windows only
+  loads audio components signed by Microsoft, and Relay's is not, so per-game
+  EQ needs one Windows audio protection (`DisableProtectedAudioDG`) turned off
+  for the whole PC — the same switch Equalizer APO uses. Relay never changes
+  it unless you turn it on in Settings, after a confirmation that lists the
+  exact change; turning it off again, or uninstalling Relay, puts back exactly
+  what was there before. Everything else in Relay works without it.
 - The **virtual camera** works on Windows 11; Windows 10 support is limited.
 
 Only Windows 10 and 11 (x64) are supported.

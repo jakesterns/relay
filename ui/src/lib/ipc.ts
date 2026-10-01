@@ -345,7 +345,29 @@ export type ElevatedOp =
   | { install_apo: { endpoint: string | null } }
   | { uninstall_apo: { endpoint: string | null } }
   | "install_camera" | "uninstall_camera"
-  | "allow_firewall" | "remove_firewall";
+  | "allow_firewall" | "remove_firewall"
+  | { set_audio_effects_allowed: { on: boolean; restart_audio: boolean } };
+
+/** S44: let Windows load unsigned audio effects (on) or put its protection
+ *  back to the state recorded before Relay changed it (off). */
+export const setAudioEffectsOp = (on: boolean, restartAudio: boolean): ElevatedOp =>
+  ({ set_audio_effects_allowed: { on, restart_audio: restartAudio } });
+
+/** Mirror of relay-core's `audiodg::Status`: Windows' protected-audiodg
+ *  switch (`DisableProtectedAudioDG`). `value` null = absent. */
+export interface AudioEffectsStatus {
+  value: number | null;
+  /** Windows will load Relay's unsigned audio effect (value is 1). */
+  allowed: boolean;
+  /** Relay changed it and holds the prior state on record. */
+  changed_by_relay: boolean;
+  /** The recorded prior state (null inside = it was absent). */
+  prior?: number | null;
+  /** Already on without Relay — another app (e.g. Equalizer APO) set it. */
+  set_elsewhere: boolean;
+  /** Could not be read; the fields above are defaults, not facts. */
+  unknown: boolean;
+}
 
 /** The APO ops name one render endpoint by GUID (S42). `null` = the default
  *  output (install) / every recorded output (uninstall). */
@@ -359,7 +381,9 @@ export function opKind(op: ElevatedOp): string {
 /** The endpoint an APO op names, if any. */
 export function opEndpoint(op: ElevatedOp): string | null {
   if (typeof op === "string") return null;
-  return "install_apo" in op ? op.install_apo.endpoint : op.uninstall_apo.endpoint;
+  if ("install_apo" in op) return op.install_apo.endpoint;
+  if ("uninstall_apo" in op) return op.uninstall_apo.endpoint;
+  return null;
 }
 
 /** Result of one `runElevated`. `declined` means the user dismissed the UAC
@@ -589,6 +613,11 @@ const mockVdevice: VdeviceStatus = {
   elevated: false,
 };
 
+/** Browser-only stand-in for the audio-effects switch: off, as shipped. */
+const mockAudioEffects: AudioEffectsStatus = {
+  value: null, allowed: false, changed_by_relay: false, set_elsewhere: false, unknown: false,
+};
+
 /** Browser-only stand-in for the dry-run listings, so the Settings cards can
  *  be read without a core. The real lines come from the uninstall planner and
  *  the live FX store. */
@@ -608,6 +637,20 @@ function mockElevationPlan(op: ElevatedOp): string[] {
       return [cam, cam + "\\InprocServer32", ...tail];
     case "uninstall_apo":
       return ["[x] Restore the endpoint audio chain — " + ep + " (needs admin)", ...tail];
+    case "set_audio_effects_allowed": {
+      const on = typeof op !== "string" && "set_audio_effects_allowed" in op && op.set_audio_effects_allowed.on;
+      const restart = typeof op !== "string" && "set_audio_effects_allowed" in op && op.set_audio_effects_allowed.restart_audio;
+      const target = "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio :: DisableProtectedAudioDG";
+      return [
+        ...(on
+          ? [target + ": absent → 1 (REG_DWORD)", "backup: %LOCALAPPDATA%\\Relay\\apo-backup\\audiodg-protection.json records 'absent' before anything is written"]
+          : [target + ": 1 → absent (the state before Relay)"]),
+        restart
+          ? "Then Windows audio restarts (AudioEndpointBuilder and Audiosrv): sound cuts out for 2–3 seconds."
+          : "Takes effect after Windows audio restarts or the PC restarts.",
+        ...tail,
+      ];
+    }
     default:
       return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
   }
@@ -929,6 +972,11 @@ export const api = {
     }
     return invoke<ApoStatus>("apo_status");
   },
+  /** S44: Windows' protected-audiodg switch. Read-only. */
+  async audioEffectsStatus(): Promise<AudioEffectsStatus> {
+    if (!isTauri()) return { ...mockAudioEffects };
+    return invoke<AudioEffectsStatus>("audio_effects_status");
+  },
   /** Register the APO (backup-then-apply). Direct, unelevated path — the
    *  Settings card goes through `runElevated` instead. Kept for the CLI and
    *  the VM runbook, where the gates are already armed. */
@@ -953,6 +1001,13 @@ export const api = {
     if (!isTauri()) {
       if (op === "install_camera") mockVdevice.camera_registered = true;
       if (op === "uninstall_camera") mockVdevice.camera_registered = false;
+      if (typeof op !== "string" && "set_audio_effects_allowed" in op) {
+        const on = op.set_audio_effects_allowed.on;
+        Object.assign(mockAudioEffects, on
+          ? { value: 1, allowed: true, changed_by_relay: true, prior: null }
+          : { value: null, allowed: false, changed_by_relay: false, prior: undefined });
+        return { declined: false, ok: true, lines: [`${opKind(op)}: done (mock)`] };
+      }
       return { declined: false, ok: true, lines: [`${op}: done (mock)`] };
     }
     return invoke<ElevationResult>("run_elevated", { op });

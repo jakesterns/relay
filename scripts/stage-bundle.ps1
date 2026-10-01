@@ -127,9 +127,17 @@ Write-Host ("  resource autoeq-index.tsv ({0:N0} models, {1:N0} KB)" -f `
     (Get-Content $catalog).Count, ((Get-Item $catalog).Length / 1KB))
 
 # Third-party licences (Rust crates, npm packages, bundled assets). The
-# installer must carry them, so a missing tool is an error, not a skip.
-& (Join-Path $PSScriptRoot 'licenses.ps1') -Out (Join-Path $staging 'licenses.html')
-Write-Host '  resource licenses.html'
+# installer must carry them: CI fails without the tool.
+# CI installs cargo-about and must ship the real page; a dev box without it
+# gets a placeholder so local builds and the post-commit installer still work.
+$licOut = Join-Path $staging 'licenses.html'
+if ($env:CI -or (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
+    & (Join-Path $PSScriptRoot 'licenses.ps1') -Out $licOut
+    Write-Host '  resource licenses.html'
+} else {
+    Set-Content -Path $licOut -Encoding ascii -Value '<!doctype html><title>Licences</title><p>Development build: the licence list is generated in CI releases. See THIRD_PARTY_NOTICES.md.</p>'
+    Write-Warning 'cargo-about not installed: licenses.html is a placeholder (CI builds the real one)'
+}
 
 Write-Host ''
 Write-Host "staged into $staging"

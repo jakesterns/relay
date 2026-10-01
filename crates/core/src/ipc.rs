@@ -212,6 +212,9 @@ pub enum Method {
     /// Is the endpoint APO registered, per render endpoint (S42)? Read-only
     /// registry probe plus the backups on disk.
     ApoStatus,
+    /// S44: is Windows' protected-audiodg check off (unsigned audio effects
+    /// load), did Relay turn it off, and what was it before? Read-only.
+    AudioEffectsStatus,
     /// Register the APO on one render endpoint (default output when
     /// `endpoint` is absent), backup-then-apply. Refused unless the
     /// live-write gate is set — VM / installer only; the UI goes through
@@ -378,6 +381,10 @@ pub enum Reply {
     },
     Apo {
         status: crate::audio_apo::ApoStatus,
+    },
+    /// S44: the protected-audiodg switch.
+    AudioEffects {
+        status: crate::audiodg::Status,
     },
     /// What Windows Firewall will do to an incoming share on this PC.
     Firewall {
@@ -862,6 +869,45 @@ mod tests {
         assert_eq!(v["params"]["id"], Uuid::nil().to_string());
         let back: Request = serde_json::from_value(v).unwrap();
         assert!(matches!(back.method, Method::GetProfile { .. }));
+    }
+
+    /// S44: locks the shape `ui/src/lib/ipc.ts` mirrors for the audio-effects
+    /// switch — the status call, its reply, and the elevated op.
+    #[test]
+    fn audio_effects_wire_shape() {
+        let r: Request =
+            serde_json::from_str(r#"{"id":1,"method":"audio_effects_status"}"#).unwrap();
+        assert!(matches!(r.method, Method::AudioEffectsStatus));
+        let r: Request = serde_json::from_str(
+            r#"{"id":2,"method":"run_elevated","params":{"op":{"set_audio_effects_allowed":{"on":true,"restart_audio":false}}}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            r.method,
+            Method::RunElevated {
+                op: crate::elevate::ElevatedOp::SetAudioEffectsAllowed {
+                    on: true,
+                    restart_audio: false
+                }
+            }
+        ));
+        let reply = serde_json::to_value(Reply::AudioEffects {
+            status: crate::audiodg::Status {
+                value: Some(1),
+                allowed: true,
+                changed_by_relay: true,
+                prior: Some(None),
+                set_elsewhere: false,
+                unknown: false,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            reply,
+            serde_json::json!({ "type": "audio_effects", "status": {
+                "value": 1, "allowed": true, "changed_by_relay": true, "prior": null,
+                "set_elsewhere": false, "unknown": false } })
+        );
     }
 
     /// Locks the wire shape that `ui/src/lib/ipc.ts` mirrors.

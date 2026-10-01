@@ -5,15 +5,26 @@
 //! fixtures before any code touches HKLM (brief risk #2). The live backend
 //! is [`crate::livereg`]; it only executes plans produced here.
 //!
-//! Install semantics (decision recorded in the M3b plan — EFX placement):
-//! - append [`ids::APO_CLSID`] to the REG_MULTI_SZ at
-//!   [`ids::PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID`] (create if absent,
-//!   keep existing entries, never duplicate);
-//! - set [`ids::PKEY_FX_ENDPOINT_EFFECT_CLSID`] to our CLSID **only if that
-//!   value is absent** — never clobber a vendor EFX; the composite key is
-//!   the chaining mechanism;
-//! - ensure [`ids::MODE_DEFAULT`] is listed in the REG_MULTI_SZ at
-//!   [`ids::PKEY_EFX_MODES`] (create/append, no duplicates).
+//! Install semantics (S42d - MFX placement, after an EFX-only registration
+//! never loaded on a live endpoint; see docs/plans/S42-apo-per-endpoint.md):
+//! - the slot is the **mode effect** (MFX): one instance per processing
+//!   mode, after the mix - everything on the endpoint, one DSP pass;
+//! - if the composite MFX list ([`ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID`])
+//!   exists, append our CLSID to it (vendor entries kept, never duplicated);
+//! - else if the legacy MFX slot ([`ids::PKEY_FX_MODE_EFFECT_CLSID`]) is
+//!   absent, empty or the nil GUID, write our CLSID there;
+//! - else another APO owns the slot (S44b): take the slot and record the
+//!   owner's CLSID at [`ids::PKEY_RELAY_CHILD_MFX`] and in the backup;
+//!   Relay's APO hosts it as a child, so the vendor/Windows effect keeps
+//!   running. Refuse ([`PlanError::SlotTaken`]) only when that is
+//!   impossible: the owner is not a CLSID, has no COM registration, or the
+//!   slot holds a list;
+//! - ensure [`ids::MODE_DEFAULT`] is listed at [`ids::PKEY_MFX_MODES`];
+//! - delete [`ids::PKEY_DISABLE_SYSFX`] when it is set ("Disable all
+//!   enhancements" would keep any APO from loading).
+//!
+//! Every value the plan touches is in [`ids::FX_WRITABLE_VALUES`]
+//! ([`vet_fx_diff`]).
 //!
 //! Nothing else is touched: every other key, value name and data byte of
 //! the store is carried over verbatim, and [`plan_uninstall`] returns the
@@ -29,6 +40,19 @@ use crate::regfile::{
 };
 
 /// Errors from building an [`FxStore`] out of a parsed .reg map.
+/// Why an install was not planned.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    /// The legacy MFX slot holds another effect Relay cannot host as a
+    /// child (not a CLSID, not COM-registered, or a list) and the endpoint
+    /// has no composite MFX list to join. Relay does not install.
+    #[error(
+        "slot taken: this output's mode effect (MFX) is {0}, which Relay cannot chain; \
+         Relay will not replace it"
+    )]
+    SlotTaken(String),
+}
+
 #[derive(Debug, Error)]
 pub enum FxStoreError {
     #[error("no FxProperties key for endpoint {0} in the parsed data")]
@@ -207,6 +231,12 @@ pub struct Backup {
     /// still carries the APO). Backups from before S42b lack the
     /// audio-engine key; nothing wrote it then, so nothing is left behind.
     pub com_keys: Vec<String>,
+    /// S44b: the MFX that held the slot before the install, now hosted as
+    /// Relay's child. Uninstall puts it back by restoring `store` verbatim;
+    /// this field is the readable record. `None` for a free slot, a
+    /// composite-list join, and backups from before S44b.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chained_clsid: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,12 +254,33 @@ pub struct InstallPlan {
     pub com_keys: KeyMap,
 }
 
-/// Plan an install against the current store image. Pure — touches nothing.
-pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) -> InstallPlan {
+/// Plan an install against the current store image. Pure - touches nothing.
+/// Any well-formed CLSID in the slot is treated as chainable; live callers
+/// use [`plan_install_with`] to also require its COM registration.
+pub fn plan_install(
+    current: &FxStore,
+    endpoint_guid: &str,
+    apo_dll_path: &str,
+) -> Result<InstallPlan, PlanError> {
+    plan_install_with(current, endpoint_guid, apo_dll_path, &|_| true)
+}
+
+/// [`plan_install`] with a check on the slot's current owner: `child_ok`
+/// says whether that CLSID is a registration Relay's APO can host (the live
+/// caller checks `HKLM\SOFTWARE\Classes\CLSID\{x}\InprocServer32`). Refuses
+/// with [`PlanError::SlotTaken`] only when chaining is impossible - the
+/// owner is not a CLSID, not registered, or the slot holds a list.
+pub fn plan_install_with(
+    current: &FxStore,
+    endpoint_guid: &str,
+    apo_dll_path: &str,
+    child_ok: &dyn Fn(&str) -> bool,
+) -> Result<InstallPlan, PlanError> {
     let clsid_key = ids::clsid_key(ids::APO_CLSID);
     let inproc_key = format!(r"{clsid_key}\InprocServer32");
 
-    let backup = Backup {
+    let mut backup = Backup {
+        chained_clsid: None,
         endpoint_guid: endpoint_guid.to_owned(),
         timestamp: iso_now(),
         store: current.clone(),
@@ -244,19 +295,53 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
     let mut new_store = current.clone();
     let root = new_store.root_mut();
 
-    // 1. Composite EFX chain: append our CLSID, preserving vendor entries.
-    append_to_multi_sz(root, ids::PKEY_COMPOSITEFX_ENDPOINT_EFFECT_CLSID, ids::APO_CLSID);
-
-    // 2. Legacy single-EFX slot: fill only if empty — never evict a vendor.
-    if !root.contains_key(ids::PKEY_FX_ENDPOINT_EFFECT_CLSID) {
-        root.insert(
-            ids::PKEY_FX_ENDPOINT_EFFECT_CLSID.to_owned(),
-            RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
-        );
+    // 1. The MFX slot: chain into the composite list when there is one,
+    //    else take the legacy slot only when it is free.
+    if root.contains_key(ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID) {
+        append_to_multi_sz(root, ids::PKEY_COMPOSITEFX_MODE_EFFECT_CLSID, ids::APO_CLSID);
+    } else {
+        let slot = root.get(ids::PKEY_FX_MODE_EFFECT_CLSID);
+        if slot.is_some_and(|v| v.kind == RegKind::MultiSz && parse_multi_sz(&v.data).len() > 1) {
+            // A list in the single-effect slot: not a shape Relay can host.
+            return Err(PlanError::SlotTaken(legacy_slot_owner(slot).unwrap_or_default()));
+        }
+        match legacy_slot_owner(slot) {
+            None => {
+                root.insert(
+                    ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
+                );
+            }
+            Some(owner) if owner.eq_ignore_ascii_case(ids::APO_CLSID) => {}
+            Some(owner) => {
+                // S44b: chain. Relay takes the slot and hosts the owner as
+                // its child, so the vendor/Windows effect keeps running.
+                // Only a well-formed CLSID with a COM registration Relay's
+                // APO can CoCreate inside audiodg qualifies.
+                if !ids::is_braced_guid(&owner) || !child_ok(&owner) {
+                    return Err(PlanError::SlotTaken(owner));
+                }
+                root.insert(
+                    ids::PKEY_FX_MODE_EFFECT_CLSID.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(ids::APO_CLSID) },
+                );
+                root.insert(
+                    ids::PKEY_RELAY_CHILD_MFX.to_owned(),
+                    RegValue { kind: RegKind::Sz, data: sz_bytes(&owner) },
+                );
+                backup.chained_clsid = Some(owner);
+            }
+        }
     }
 
-    // 3. Processing modes: make sure DEFAULT is offered for streaming.
-    append_to_multi_sz(root, ids::PKEY_EFX_MODES, ids::MODE_DEFAULT);
+    // 2. Processing modes: DEFAULT offered for the MFX.
+    append_to_multi_sz(root, ids::PKEY_MFX_MODES, ids::MODE_DEFAULT);
+
+    // 3. "Disable all enhancements" off for this endpoint (restored on
+    //    uninstall with the rest of the store).
+    if root.get(ids::PKEY_DISABLE_SYSFX).is_some_and(|v| v.data.iter().any(|b| *b != 0)) {
+        root.remove(ids::PKEY_DISABLE_SYSFX);
+    }
 
     // COM registration tree.
     let mut com_keys = KeyMap::new();
@@ -278,7 +363,38 @@ pub fn plan_install(current: &FxStore, endpoint_guid: &str, apo_dll_path: &str) 
     // Audio-engine registration — what audiodg actually looks up (S42b).
     com_keys.insert(ids::audio_engine_key(ids::APO_CLSID), audio_engine_values());
 
-    InstallPlan { backup, new_store, com_keys }
+    let plan = InstallPlan { backup, new_store, com_keys };
+    debug_assert!(vet_fx_diff(&plan).is_ok());
+    Ok(plan)
+}
+
+/// The CLSID occupying a legacy single-effect slot, or `None` when the slot
+/// is absent, empty, or the nil GUID (all of which mean "free").
+fn legacy_slot_owner(value: Option<&RegValue>) -> Option<String> {
+    let v = value?;
+    let text = match v.kind {
+        RegKind::MultiSz => parse_multi_sz(&v.data).into_iter().next().unwrap_or_default(),
+        _ => crate::regfile::sz_from_bytes(&v.data).unwrap_or_default(),
+    };
+    let t = text.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("{00000000-0000-0000-0000-000000000000}") {
+        None
+    } else {
+        Some(t.to_owned())
+    }
+}
+
+/// Every FxProperties change a plan makes must be one of
+/// [`ids::FX_WRITABLE_VALUES`] on the `FxProperties` key itself. The live
+/// writer checks this before its first write.
+pub fn vet_fx_diff(plan: &InstallPlan) -> Result<(), String> {
+    for (rel, name) in diff(&plan.backup.store, &plan.new_store) {
+        let allowed = ids::FX_WRITABLE_VALUES.iter().any(|w| w.eq_ignore_ascii_case(&name));
+        if !rel.is_empty() || !allowed {
+            return Err(format!("install would change FxProperties value {rel}\\{name}"));
+        }
+    }
+    Ok(())
 }
 
 /// The values `RegisterAPO` writes for Relay's `APO_REG_PROPERTIES`, in the

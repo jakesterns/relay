@@ -8,7 +8,7 @@
  * assert that Save actually reached the core and that a re-read sees it.
  */
 import type {
-  ApoStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
+  ApoStatus, AudioEffectsStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
   ElevatedOp, FirewallStatus, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
@@ -46,6 +46,8 @@ export interface FakeCore {
   processes: ProcessInfo[];
   catalog: CatalogEntry[];
   apo: ApoStatus;
+  /** S44: Windows' protected-audiodg switch. Off by default, as shipped. */
+  audioEffects: AudioEffectsStatus;
   vdevice: VdeviceStatus;
   capabilities: ShareCapabilities;
   /** What Windows Firewall will do to an incoming share. Defaults to the
@@ -146,6 +148,9 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       { endpoint: DAC, name: "Headphones (USB DAC)", is_default: true, installed: false, backed_up: false, running: false },
       { endpoint: SPDIF, name: "Digital Output (S/PDIF)", is_default: false, installed: false, backed_up: false, running: false },
     ]),
+    audioEffects: {
+      value: null, allowed: false, changed_by_relay: false, set_elsewhere: false, unknown: false,
+    },
     vdevice: {
       windows_build: 26200,
       camera_supported: true,
@@ -317,6 +322,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     share_capabilities: () => structuredClone(core.capabilities),
     firewall_status: () => structuredClone(core.firewall),
     apo_status: () => structuredClone(core.apo),
+    audio_effects_status: () => structuredClone(core.audioEffects),
     // The two halves of the S6 flow. `elevation_plan` is read-only and is
     // what the user reads *before* Windows asks; `run_elevated` is the only
     // thing that changes the machine.
@@ -337,6 +343,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           return [cam, cam + "\InprocServer32", ...tail];
         case "uninstall_apo":
           return ["[x] Restore the endpoint audio chain — " + ep + " (needs admin)", ...tail];
+        case "set_audio_effects_allowed": {
+          const { on, restart_audio } = (op as { set_audio_effects_allowed: { on: boolean; restart_audio: boolean } }).set_audio_effects_allowed;
+          const target = "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio :: DisableProtectedAudioDG";
+          return [
+            on ? target + ": absent → 1 (REG_DWORD)" : target + ": 1 → absent (the state before Relay)",
+            restart_audio
+              ? "Then Windows audio restarts (AudioEndpointBuilder and Audiosrv): sound cuts out for 2–3 seconds."
+              : "Takes effect after Windows audio restarts or the PC restarts.",
+            ...tail,
+          ];
+        }
         default:
           return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
       }
@@ -352,6 +369,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       if (opKind(op) === "install_apo") setApo(core, opEndpoint(op) ?? DAC, true);
       if (opKind(op) === "uninstall_apo") setApo(core, opEndpoint(op), false);
       if (op === "install_camera") core.vdevice.camera_registered = true;
+      if (opKind(op) === "set_audio_effects_allowed") {
+        const on = (op as { set_audio_effects_allowed: { on: boolean } }).set_audio_effects_allowed.on;
+        core.audioEffects = on
+          ? { value: 1, allowed: true, changed_by_relay: true, prior: null, set_elsewhere: false, unknown: false }
+          : { value: null, allowed: false, changed_by_relay: false, set_elsewhere: false, unknown: false };
+      }
       if (op === "uninstall_camera") core.vdevice.camera_registered = false;
       if (op === "allow_firewall") {
         core.firewall = {
@@ -470,7 +493,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "set_stream_mode", "stream_status", "list_hardware",
   "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
-  "apo_status", "install_apo", "uninstall_apo",
+  "apo_status", "audio_effects_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",

@@ -18,19 +18,38 @@
 //! (never resample — brief). Everything else is refused at negotiation time
 //! with `APOERR_FORMAT_NOT_SUPPORTED`, which makes the engine fall back to
 //! running the endpoint without us (pass-through by absence).
+//!
+//! Child APO (S44b). When the installer took an MFX slot that held another
+//! APO (Microsoft's "WM audio GFX APO", Realtek's RtkAPO MFX, ...), it
+//! recorded that CLSID at [`crate::ids::PKEY_RELAY_CHILD_MFX`] in the FX
+//! property store. Initialize reads it from `pAPOSystemEffectsProperties`,
+//! CoCreates the child in-process and forwards Initialize (same payload,
+//! `APOInit.clsid` patched to the child's own). Format negotiation must
+//! satisfy both; LockForProcess locks the child with its input re-pointed
+//! at a Relay-owned mid buffer; GetEffectsList is the child's (Relay lists
+//! none); GetLatency is the sum.
+//!
+//! Order: **Relay's EQ first, then the child.** The vendor/Windows effect is
+//! typically loudness, room correction or a limiter - an EQ boost belongs
+//! in front of the limiter that protects the output, never behind it.
+//! Bypass (and "no chain built") = the child alone, straight from the
+//! engine's buffers, zero allocations. A child that fails to load,
+//! initialize or lock is dropped and Relay runs alone (logged via diag).
 
 // COM plumbing and RT buffer access are inherently unsafe; every block
 // carries a SAFETY note.
 #![allow(unsafe_code)]
 #![allow(non_snake_case)] // COM method names come from the interfaces.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use relay_audio::dsp::Chain;
 use relay_audio::shm::{section_name, SharedParams};
 use windows::core::{implement, Interface, Ref, GUID, HRESULT, PCWSTR};
+use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Foundation::{
     CLASS_E_CLASSNOTAVAILABLE, CLASS_E_NOAGGREGATION, E_INVALIDARG, E_POINTER, S_FALSE, S_OK,
     WAIT_OBJECT_0,
@@ -42,18 +61,47 @@ use windows::Win32::Media::Audio::Apo::{
     IAudioProcessingObjectRT_Impl, IAudioProcessingObject_Impl, IAudioSystemEffects,
     IAudioSystemEffects2, IAudioSystemEffects2_Impl, IAudioSystemEffects_Impl,
     APOERR_ALREADY_INITIALIZED, APOERR_ALREADY_UNLOCKED, APOERR_FORMAT_NOT_SUPPORTED,
-    APOERR_NOT_INITIALIZED, APO_CONNECTION_DESCRIPTOR, APO_CONNECTION_PROPERTY, APO_FLAG_DEFAULT,
-    APO_REG_PROPERTIES, UNCOMPRESSEDAUDIOFORMAT,
+    APOERR_NOT_INITIALIZED, APO_CONNECTION_BUFFER_TYPE_EXTERNAL, APO_CONNECTION_DESCRIPTOR,
+    APO_CONNECTION_PROPERTY, APO_FLAG_DEFAULT, APO_REG_PROPERTIES, UNCOMPRESSEDAUDIOFORMAT,
 };
 use windows::Win32::Media::Audio::PKEY_AudioEndpoint_GUID;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
 use windows::Win32::System::Com::StructuredStorage::PropVariantClear;
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::System::Com::{CoTaskMemAlloc, IClassFactory, IClassFactory_Impl};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::System::Variant::VT_LPWSTR;
 
 /// CLSID of the Relay endpoint APO — the GUID form of [`crate::ids::APO_CLSID`].
 pub const CLSID_RELAY_APO: GUID = GUID::from_u128(0x5A8E9C3B_1F6D_4B0A_9C41_7E2D83A6F0B4);
+
+/// [`crate::ids::PKEY_RELAY_CHILD_MFX`] as a property key.
+pub const PKEY_RELAY_CHILD_MFX: PROPERTYKEY =
+    PROPERTYKEY { fmtid: GUID::from_u128(0x7c3f2a91_5e4d_4b8a_a1f6_3d92c0e4b7a5), pid: 1 };
+
+/// Parse a braced CLSID string (`{8-4-4-4-12}`).
+pub fn parse_clsid(s: &str) -> Option<GUID> {
+    let s = s.trim();
+    if !crate::ids::is_braced_guid(s) {
+        return None;
+    }
+    let hex: String = s[1..37].chars().filter(|c| *c != '-').collect();
+    u128::from_str_radix(&hex, 16).ok().map(GUID::from_u128)
+}
+
+/// The hosted child APO and the interfaces Relay forwards to.
+struct Child {
+    apo: IAudioProcessingObject,
+    rt: IAudioProcessingObjectRT,
+    cfg: IAudioProcessingObjectConfiguration,
+    fx2: Option<IAudioSystemEffects2>,
+}
+
+impl Child {
+    fn new(apo: IAudioProcessingObject) -> windows::core::Result<Self> {
+        Ok(Self { rt: apo.cast()?, cfg: apo.cast()?, fx2: apo.cast().ok(), apo })
+    }
+}
 
 /// Rebuild-check cadence for the control thread when no event arrives (it
 /// also lets the thread notice `stop` without an extra wake object).
@@ -88,6 +136,12 @@ struct RtShared {
     stop: AtomicBool,
     /// Last shm sequence number the control thread built a chain from.
     built_seq: AtomicU32,
+    /// True while the child APO is locked for processing (S44b).
+    child_live: AtomicBool,
+    /// Mid buffer between Relay's chain and the child (owned by `Locked`),
+    /// and its length in samples. Null when there is no live child.
+    mid: AtomicPtr<f32>,
+    mid_len: AtomicUsize,
 }
 
 impl RtShared {
@@ -98,6 +152,9 @@ impl RtShared {
             rt_busy: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             built_seq: AtomicU32::new(0),
+            child_live: AtomicBool::new(false),
+            mid: AtomicPtr::new(std::ptr::null_mut()),
+            mid_len: AtomicUsize::new(0),
         })
     }
 
@@ -157,6 +214,9 @@ fn build_chain(shared: &RtShared, rate: u32, max_block: usize) -> *mut RtChain {
 /// Config-path state, valid between LockForProcess and UnlockForProcess.
 struct Locked {
     control: Option<std::thread::JoinHandle<()>>,
+    /// The mid buffer the RT path hands the child (S44b); `RtShared::mid`
+    /// points into it while the child is live.
+    _mid: Option<Box<[f32]>>,
 }
 
 /// Init-path state, valid after Initialize.
@@ -177,6 +237,14 @@ pub struct RelayApo {
     locked: Mutex<Option<Locked>>,
     shared: Arc<RtShared>,
     latency_hns: AtomicI64,
+    /// Child latency, added to ours while the child is locked.
+    child_latency_hns: AtomicI64,
+    /// A child handed in before Initialize (tests); otherwise Initialize
+    /// creates one from the FX store's record.
+    pending_child: Mutex<Option<IAudioProcessingObject>>,
+    /// The initialized child. Set once at Initialize; read lock-free by the
+    /// RT path.
+    child: OnceLock<Child>,
 }
 
 impl Default for RelayApo {
@@ -186,11 +254,128 @@ impl Default for RelayApo {
             locked: Mutex::new(None),
             shared: RtShared::new(),
             latency_hns: AtomicI64::new(0),
+            child_latency_hns: AtomicI64::new(0),
+            pending_child: Mutex::new(None),
+            child: OnceLock::new(),
         }
     }
 }
 
 impl RelayApo {
+    /// An APO that will host `child` (instead of the CLSID recorded in the
+    /// FX store). Initialize still forwards to it; if that fails Relay runs
+    /// alone. The in-process tests' way to drive the chain.
+    pub fn with_child(child: IAudioProcessingObject) -> Self {
+        let apo = Self::default();
+        *apo.pending_child.lock().unwrap() = Some(child);
+        apo
+    }
+
+    /// Create (if needed) and initialize the child. `payload` is the
+    /// engine's Initialize bytes; the copy the child gets carries its own
+    /// CLSID in `APOInit.clsid` when it is known.
+    fn init_child(&self, clsid: Option<GUID>, payload: &[u8]) {
+        let pending = self.pending_child.lock().unwrap().take();
+        let apo = match (pending, clsid) {
+            (Some(apo), _) => apo,
+            (None, Some(c)) if c != CLSID_RELAY_APO => {
+                // SAFETY: plain COM activation; audiodg's thread has COM up.
+                match unsafe {
+                    CoCreateInstance::<_, IAudioProcessingObject>(&c, None, CLSCTX_INPROC_SERVER)
+                } {
+                    Ok(a) => a,
+                    Err(e) => {
+                        crate::diag!(
+                            "child {c:?} CoCreateInstance -> {:#010x}; Relay runs alone",
+                            e.code().0 as u32
+                        );
+                        return;
+                    }
+                }
+            }
+            _ => return,
+        };
+        // Same payload, 8-byte aligned, with the child's own CLSID.
+        let mut words = vec![0u64; payload.len().div_ceil(8)];
+        // SAFETY: `words` holds at least payload.len() bytes.
+        let bytes = unsafe {
+            std::ptr::copy_nonoverlapping(
+                payload.as_ptr(),
+                words.as_mut_ptr() as *mut u8,
+                payload.len(),
+            );
+            std::slice::from_raw_parts(words.as_ptr() as *const u8, payload.len())
+        };
+        if let Some(c) = clsid {
+            // APOInitBaseStruct: cbSize (u32) then clsid (GUID) at offset 4.
+            if payload.len() >= 4 + std::mem::size_of::<GUID>() {
+                // SAFETY: in bounds (checked); unaligned write of a POD.
+                unsafe { (words.as_mut_ptr() as *mut u8).add(4).cast::<GUID>().write_unaligned(c) };
+            }
+        }
+        // SAFETY: the payload's interface pointers are borrowed for the
+        // call exactly as the engine lent them to us.
+        let r = unsafe { apo.Initialize(bytes) }.and_then(|()| Child::new(apo));
+        match r {
+            Ok(child) => {
+                let _ = self.child.set(child);
+                crate::diag!("child {clsid:?} initialized; chained after Relay");
+            }
+            Err(e) => {
+                crate::diag!(
+                    "child {clsid:?} Initialize -> {:#010x}; Relay runs alone",
+                    e.code().0 as u32
+                )
+            }
+        }
+    }
+
+    /// Unlock a live child and forget the mid buffer (the caller drops the
+    /// `Locked` that owns it afterwards). Not on the RT path.
+    fn unlock_child(&self) {
+        if self.shared.child_live.swap(false, Ordering::AcqRel) {
+            if let Some(c) = self.child.get() {
+                // SAFETY: plain COM call; the engine is not processing.
+                let _ = unsafe { c.cfg.UnlockForProcess() };
+            }
+        }
+        self.shared.mid.store(std::ptr::null_mut(), Ordering::Release);
+        self.shared.mid_len.store(0, Ordering::Release);
+        self.child_latency_hns.store(0, Ordering::Release);
+    }
+
+    /// Ask the child whether it takes `requested` unchanged. Relay's format
+    /// is 1:1, so the child sees the same format on both sides.
+    fn child_agrees(
+        &self,
+        output: bool,
+        opposite: Option<&IAudioMediaType>,
+        requested: &IAudioMediaType,
+    ) -> windows::core::Result<()> {
+        let Some(c) = self.child.get() else { return Ok(()) };
+        // SAFETY: valid interface pointers.
+        let r = unsafe {
+            if output {
+                c.apo.IsOutputFormatSupported(opposite, requested)
+            } else {
+                c.apo.IsInputFormatSupported(opposite, requested)
+            }
+        };
+        let refuse = || windows::core::Error::from_hresult(APOERR_FORMAT_NOT_SUPPORTED);
+        let got = uncompressed(&r.map_err(|_| refuse())?)?;
+        let want = uncompressed(requested)?;
+        let same = got.guidFormatType == want.guidFormatType
+            && got.dwSamplesPerFrame == want.dwSamplesPerFrame
+            && got.dwBytesPerSampleContainer == want.dwBytesPerSampleContainer
+            && got.dwValidBitsPerSample == want.dwValidBitsPerSample
+            && got.fFramesPerSecond == want.fFramesPerSecond;
+        if same {
+            Ok(())
+        } else {
+            Err(refuse())
+        }
+    }
+
     /// Attach to (create) the endpoint's parameter section. Failure is not
     /// an error: the APO simply stays a wire.
     fn attach_shm(&self, endpoint_guid: &str) -> Option<SharedParams> {
@@ -263,11 +448,16 @@ fn negotiate(
 
 impl IAudioProcessingObject_Impl for RelayApo_Impl {
     fn Reset(&self) -> windows::core::Result<()> {
+        if let Some(c) = self.child.get() {
+            // SAFETY: plain COM call.
+            let _ = unsafe { c.apo.Reset() };
+        }
         Ok(())
     }
 
     fn GetLatency(&self) -> windows::core::Result<i64> {
-        Ok(self.latency_hns.load(Ordering::Acquire))
+        Ok(self.latency_hns.load(Ordering::Acquire)
+            + self.child_latency_hns.load(Ordering::Acquire))
     }
 
     fn GetRegistrationProperties(&self) -> windows::core::Result<*mut APO_REG_PROPERTIES> {
@@ -308,6 +498,9 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         Ok(p)
     }
 
+    // COM ABI: raw payload pointer behind a safe trait; the engine
+    // guarantees cbdatasize readable bytes.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     fn Initialize(&self, cbdatasize: u32, pbydata: *const u8) -> windows::core::Result<()> {
         let mut g = self.init.lock().unwrap();
         if g.is_some() {
@@ -321,6 +514,7 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         // v2 size and silently dropped the endpoint for v1, so the params
         // section was never created.
         let mut endpoint_guid: Option<String> = None;
+        let mut child_clsid: Option<GUID> = None;
         let mut discovery_only = false;
         let kind = init_kind(cbdatasize as usize);
         crate::diag!("Initialize cbDataSize={cbdatasize} kind={kind:?} null={}", pbydata.is_null());
@@ -332,7 +526,7 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
             // SAFETY: the engine hands us at least cbdatasize readable bytes
             // and `kind` was chosen by size, so each read stays in bounds.
             // Interface fields are borrowed, never dropped here.
-            let store = unsafe {
+            let (store, fx_store) = unsafe {
                 let base = &*(pbydata as *const APOInitSystemEffects);
                 match kind {
                     InitKind::V2 => {
@@ -345,8 +539,25 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
                     }
                     _ => {}
                 }
-                base.pAPOEndpointProperties.as_ref()
+                (base.pAPOEndpointProperties.as_ref(), base.pAPOSystemEffectsProperties.as_ref())
             };
+            // S44b: the FX store (this endpoint's FxProperties) records the
+            // APO Relay displaced, if any.
+            if let Some(fx) = fx_store {
+                // SAFETY: as below - a PROPVARIANT read out and cleared.
+                unsafe {
+                    if let Ok(mut v) = fx.GetValue(&PKEY_RELAY_CHILD_MFX) {
+                        let inner = &v.Anonymous.Anonymous;
+                        if inner.vt == VT_LPWSTR {
+                            let ws: PCWSTR = PCWSTR(inner.Anonymous.pwszVal.0);
+                            if !ws.is_null() {
+                                child_clsid = ws.to_string().ok().and_then(|s| parse_clsid(&s));
+                            }
+                        }
+                        let _ = PropVariantClear(&mut v);
+                    }
+                }
+            }
             if let Some(store) = store {
                 // SAFETY: VT_LPWSTR PROPVARIANT out of a live store; cleared
                 // after copying the string out.
@@ -375,6 +586,14 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
             (Some(guid), false) => self.attach_shm(guid),
             _ => None,
         };
+        crate::diag!("Initialize child={child_clsid:?}");
+        let payload: &[u8] = if pbydata.is_null() {
+            &[]
+        } else {
+            // SAFETY: the engine hands us cbdatasize readable bytes.
+            unsafe { std::slice::from_raw_parts(pbydata, cbdatasize as usize) }
+        };
+        self.init_child(child_clsid, payload);
         *g = Some(Initialized { shm });
         crate::diag!("Initialize -> S_OK");
         Ok(())
@@ -386,7 +605,8 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         requested: Ref<IAudioMediaType>,
     ) -> windows::core::Result<IAudioMediaType> {
         let (opposite, requested) = (opposite.as_ref(), requested.as_ref());
-        let r = negotiate(opposite, requested);
+        let r = negotiate(opposite, requested)
+            .and_then(|m| self.child_agrees(false, opposite, &m).map(|()| m));
         diag_format("IsInputFormatSupported", opposite, requested, &r);
         r
     }
@@ -397,7 +617,8 @@ impl IAudioProcessingObject_Impl for RelayApo_Impl {
         requested: Ref<IAudioMediaType>,
     ) -> windows::core::Result<IAudioMediaType> {
         let (opposite, requested) = (opposite.as_ref(), requested.as_ref());
-        let r = negotiate(opposite, requested);
+        let r = negotiate(opposite, requested)
+            .and_then(|m| self.child_agrees(true, opposite, &m).map(|()| m));
         diag_format("IsOutputFormatSupported", opposite, requested, &r);
         r
     }
@@ -437,6 +658,45 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
         };
         let max_frames = max_frames.max(1);
         crate::diag!("LockForProcess rate={rate} max_frames={max_frames}");
+
+        // S44b: lock the child with its input re-pointed at our mid buffer
+        // and the engine's output descriptor as its own.
+        let mut mid_buf: Option<Box<[f32]>> = None;
+        self.shared.child_live.store(false, Ordering::Release);
+        self.child_latency_hns.store(0, Ordering::Release);
+        if let Some(c) = self.child.get() {
+            let mut buf = vec![0.0f32; 2 * max_frames].into_boxed_slice();
+            // SAFETY: bitwise copy of the engine's descriptor; its media
+            // type is ManuallyDrop, so no reference is taken or released.
+            let mut d: APO_CONNECTION_DESCRIPTOR = unsafe { std::ptr::read(*in_desc) };
+            d.Type = APO_CONNECTION_BUFFER_TYPE_EXTERNAL;
+            d.pBuffer = buf.as_mut_ptr() as usize;
+            d.u32MaxFrameCount = max_frames as u32;
+            let dp: *const APO_CONNECTION_DESCRIPTOR = &d;
+            // SAFETY: one input descriptor (ours, alive for the call) and
+            // the engine's output descriptor array.
+            let r = unsafe {
+                c.cfg.LockForProcess(&[dp], std::slice::from_raw_parts(out_desc, num_out as usize))
+            };
+            match r {
+                Ok(()) => {
+                    // SAFETY: plain COM call.
+                    let lat = unsafe { c.apo.GetLatency() }.unwrap_or(0);
+                    self.child_latency_hns.store(lat, Ordering::Release);
+                    self.shared.mid.store(buf.as_mut_ptr(), Ordering::Release);
+                    self.shared.mid_len.store(buf.len(), Ordering::Release);
+                    self.shared.child_live.store(true, Ordering::Release);
+                    mid_buf = Some(buf);
+                    crate::diag!("child LockForProcess -> S_OK latency={lat}");
+                }
+                Err(e) => {
+                    crate::diag!(
+                        "child LockForProcess -> {:#010x}; Relay runs alone",
+                        e.code().0 as u32
+                    );
+                }
+            }
+        }
 
         // Initial chain, then the control thread for live updates.
         let first = build_chain(&self.shared, rate, max_frames);
@@ -481,7 +741,7 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
                     .expect("spawn relay-apo-control")
             })
         };
-        *self.locked.lock().unwrap() = Some(Locked { control });
+        *self.locked.lock().unwrap() = Some(Locked { control, _mid: mid_buf });
         Ok(())
     }
 
@@ -503,6 +763,8 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
         // UnlockForProcess, so publishing null frees the chain immediately.
         self.shared.publish(std::ptr::null_mut());
         self.latency_hns.store(0, Ordering::Release);
+        // The mid buffer (in `locked`) drops at scope end, after this.
+        self.unlock_child();
         Ok(())
     }
 }
@@ -536,7 +798,40 @@ impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
             let block = self.shared.block.load(Ordering::Acquire);
             let bypass = block.is_null() || (*block).bypass();
             let chain = self.shared.active.load(Ordering::Acquire);
-            if bypass || chain.is_null() {
+            let child = if self.shared.child_live.load(Ordering::Acquire) {
+                self.child.get()
+            } else {
+                None
+            };
+            let mid = self.shared.mid.load(Ordering::Acquire);
+            let mid_ok = !mid.is_null() && n <= self.shared.mid_len.load(Ordering::Acquire);
+            if let (Some(c), true) = (child, bypass || chain.is_null()) {
+                // Bypass: the child alone, on the engine's own buffers.
+                c.rt.APOProcess(num_in, in_conn, num_out, out_conn);
+            } else if let (Some(c), true) = (child, mid_ok) {
+                // Relay's EQ into the mid buffer, then the child to output.
+                let rt = &mut *chain;
+                let mid_s = std::slice::from_raw_parts_mut(mid, n);
+                let step = rt.max_block * 2;
+                let mut off = 0;
+                while off < n {
+                    let end = (off + step).min(n);
+                    rt.chain.process(&src[off..end], &mut mid_s[off..end]);
+                    off = end;
+                }
+                let mid_c = APO_CONNECTION_PROPERTY {
+                    pBuffer: mid as usize,
+                    u32ValidFrameCount: frames as u32,
+                    u32BufferFlags: input.u32BufferFlags,
+                    u32Signature: input.u32Signature,
+                };
+                let mid_p: *const APO_CONNECTION_PROPERTY = &mid_c;
+                c.rt.APOProcess(1, &mid_p, num_out, out_conn);
+            } else if let Some(c) = child {
+                // A block larger than the lock promised: keep the child's
+                // effect rather than ours.
+                c.rt.APOProcess(num_in, in_conn, num_out, out_conn);
+            } else if bypass || chain.is_null() {
                 if input.pBuffer != output.pBuffer {
                     dst.copy_from_slice(src);
                 }
@@ -557,8 +852,11 @@ impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
                     off = end;
                 }
             }
-            output.u32ValidFrameCount = frames as u32;
-            output.u32BufferFlags = input.u32BufferFlags;
+            if child.is_none() {
+                // (A child sets the output connection itself.)
+                output.u32ValidFrameCount = frames as u32;
+                output.u32BufferFlags = input.u32BufferFlags;
+            }
             self.shared.rt_busy.store(false, Ordering::Release);
         }
     }
@@ -587,6 +885,14 @@ impl IAudioSystemEffects2_Impl for RelayApo_Impl {
     ) -> windows::core::Result<()> {
         if ids.is_null() || count.is_null() {
             return Err(windows::core::Error::from_hresult(E_POINTER));
+        }
+        // S44b: Relay lists none of its own, so the merged list is the
+        // child's (its effects stay visible to Windows' UI).
+        if let Some(fx2) = self.child.get().and_then(|c| c.fx2.as_ref()) {
+            // SAFETY: the caller's checked out-pointers, passed straight on.
+            let r = unsafe { fx2.GetEffectsList(ids, count, _event) };
+            crate::diag!("GetEffectsList -> child's ({})", r.is_ok());
+            return r;
         }
         // SAFETY: checked non-null out-pointers.
         unsafe {
@@ -700,6 +1006,7 @@ impl Drop for RelayApo {
                 }
             }
         }
+        self.unlock_child();
         self.shared.publish(std::ptr::null_mut());
         self.shared.block.store(std::ptr::null_mut(), Ordering::Release);
     }

@@ -76,6 +76,8 @@ async fn every_op_can_be_previewed_before_the_prompt() {
         ElevatedOp::UninstallApo { endpoint: None },
         ElevatedOp::InstallCamera,
         ElevatedOp::UninstallCamera,
+        ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: false },
+        ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: true },
     ] {
         let reply = client.call(Method::ElevationPlan { op: op.clone() }).await.expect("plan");
         let lines = match reply {
@@ -94,6 +96,13 @@ async fn every_op_can_be_previewed_before_the_prompt() {
     // Nothing above may have touched the machine: no backup, no record.
     assert!(!root.join("apo-backup").exists(), "a preview must not write a backup");
     assert!(!root.join("installed.json").exists(), "a preview must not record an install");
+
+    // S44: the status read is read-only too, and says Relay changed nothing.
+    match client.call(Method::AudioEffectsStatus).await.expect("status") {
+        Reply::AudioEffects { status } => assert!(!status.changed_by_relay),
+        other => panic!("unexpected reply {other:?}"),
+    }
+    assert!(!root.join("apo-backup").exists(), "a status read must not write a record");
 
     let _ = client.call(Method::Shutdown).await;
     let _ = std::fs::remove_dir_all(&root);
@@ -120,8 +129,18 @@ async fn the_apo_listing_names_the_real_endpoint_and_our_clsid() {
         .expect("plan");
     let Reply::DryRun { lines } = reply else { panic!("unexpected reply") };
     let text = lines.join("\n");
-    assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
-    assert!(text.contains("FxProperties"), "{text}");
+    // The listing depends on this machine's default output (free slot,
+    // chained vendor effect, or one Relay cannot host); assert on whichever
+    // plan it produced rather than on the dev PC's audio state.
+    if text.contains("Slot taken") {
+        assert!(text.contains("Nothing on your PC was changed"), "{text}");
+    } else {
+        assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
+        assert!(text.contains("FxProperties"), "{text}");
+        if text.contains(relay_apo::ids::PKEY_RELAY_CHILD_MFX) {
+            assert!(text.contains("chain:"), "{text}");
+        }
+    }
     assert!(text.contains("written before anything is changed"), "{text}");
 
     let _ = client.call(Method::Shutdown).await;

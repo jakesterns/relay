@@ -50,6 +50,9 @@ pub enum StepKind {
     StopCore,
     /// Restore one endpoint's FX property store from its install backup.
     RestoreApo,
+    /// Put `DisableProtectedAudioDG` back to the state recorded before Relay
+    /// changed it (S44: absent / 0 / 1 exactly as it was).
+    RestoreAudioProtection,
     /// Delete the camera media source's COM registration.
     RemoveVcam,
     /// Delete the per-user DirectShow camera filter registration (the
@@ -68,7 +71,13 @@ pub enum StepKind {
 impl StepKind {
     /// HKLM is involved, so a non-elevated uninstaller cannot do it.
     pub fn needs_elevation(self) -> bool {
-        matches!(self, StepKind::RestoreApo | StepKind::RemoveVcam | StepKind::RemoveFirewallRule)
+        matches!(
+            self,
+            StepKind::RestoreApo
+                | StepKind::RestoreAudioProtection
+                | StepKind::RemoveVcam
+                | StepKind::RemoveFirewallRule
+        )
     }
 
     /// Plain-English name for the dry-run listing and the Settings card.
@@ -77,6 +86,7 @@ impl StepKind {
             StepKind::StopUi => "Close the Relay window",
             StepKind::StopCore => "Stop the core (restores your audio and display settings)",
             StepKind::RestoreApo => "Restore the endpoint audio chain",
+            StepKind::RestoreAudioProtection => "Put Windows audio protection back",
             StepKind::RemoveVcam => "Unregister the virtual camera",
             StepKind::RemoveVcamFilter => "Unregister the virtual camera (per-user filter)",
             StepKind::RemoveFirewallRule => "Remove the Windows Firewall rule",
@@ -166,6 +176,10 @@ pub struct MachineState {
     pub apo: Vec<ApoEntry>,
     /// Camera COM keys recorded in `installed.json`, deepest first.
     pub vcam_keys: Vec<String>,
+    /// S44: Relay turned off Windows' protected-audiodg check and recorded
+    /// the prior state. Carries the target line (value and what it goes
+    /// back to).
+    pub audio_protection: Option<String>,
     /// Per-user (HKCU) camera filter keys recorded in `installed.json`,
     /// deepest first and vetted.
     pub vcam_user_keys: Vec<String>,
@@ -224,6 +238,12 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
             present: true,
         });
     }
+
+    steps.push(Step {
+        kind: StepKind::RestoreAudioProtection,
+        target: state.audio_protection.clone().unwrap_or_else(|| "not changed".into()),
+        present: state.audio_protection.is_some(),
+    });
 
     // One step per recorded key, so the listing is literally the diff the VM
     // test checks.
@@ -391,6 +411,7 @@ mod imp {
         MachineState {
             apo,
             vcam_keys,
+            audio_protection: audio_protection_target(paths),
             vcam_user_keys: crate::vdevice::recorded_dshow_keys(paths),
             firewall_rule: firewall_rule(paths),
             run_key: crate::autostart::is_enabled().unwrap_or(false),
@@ -401,6 +422,12 @@ mod imp {
             core_running: core_is_running(),
             ui_running: process_running("relay-ui.exe"),
         }
+    }
+
+    /// The protected-audiodg value Relay changed, if it holds a record.
+    fn audio_protection_target(paths: &Paths) -> Option<String> {
+        let rec = crate::audiodg::record_file(&paths.apo_backup_dir());
+        crate::audiodg::load_record(&rec).ok().flatten().map(|r| audio_protection_line(&r))
     }
 
     /// The firewall rule to remove, if there is one. Checks the live rules
@@ -472,6 +499,11 @@ mod imp {
                             return Ok(());
                         }
                         crate::audio_apo::uninstall_all_live(&paths.apo_backup_dir()).map(|_| ())
+                    }),
+                    StepKind::RestoreAudioProtection => elevated_step(|| {
+                        let mut reg = crate::audiodg::LiveValue;
+                        let rec = crate::audiodg::record_file(&paths.apo_backup_dir());
+                        crate::audiodg::disable(&mut reg, &rec).map(|_| ())
                     }),
                     StepKind::RemoveVcam => elevated_step(|| {
                         // Idempotent across the per-key steps: the first one
@@ -577,6 +609,7 @@ pub fn finish_elevated(paths: &Paths) -> Result<crate::elevate::Response> {
         &[
             // No endpoint: every recorded endpoint is restored.
             ElevatedOp::UninstallApo { endpoint: None },
+            ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false },
             ElevatedOp::UninstallCamera,
             ElevatedOp::RemoveFirewall,
         ],
@@ -673,6 +706,16 @@ pub fn execute(_paths: &Paths, _plan: &Plan) -> Report {
     Report::default()
 }
 
+/// The uninstall listing's target for the S44 step: the value and the exact
+/// state it goes back to.
+pub fn audio_protection_line(rec: &crate::audiodg::Record) -> String {
+    let back = match rec.prior {
+        None => "remove the value (it was absent)".to_string(),
+        Some(v) => format!("set back to {v}"),
+    };
+    format!(r"HKLM\{} :: {} — {back}", crate::audiodg::KEY, crate::audiodg::VALUE)
+}
+
 /// The plan for this machine right now.
 pub fn plan(paths: &Paths, keep_data: bool) -> Plan {
     plan_from(&probe(paths), keep_data)
@@ -699,6 +742,7 @@ mod tests {
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}\InprocServer32".into(),
                 r"SOFTWARE\Classes\CLSID\{9B7E62D4}".into(),
             ],
+            audio_protection: None,
             vcam_user_keys: vec![
                 r"Software\Classes\CLSID\{5E0B7C1F}\InprocServer32".into(),
                 r"Software\Classes\CLSID\{5E0B7C1F}".into(),
@@ -785,6 +829,7 @@ mod tests {
             StepKind::StopUi,
             StepKind::StopCore,
             StepKind::RestoreApo,
+            StepKind::RestoreAudioProtection,
             StepKind::RemoveVcam,
             StepKind::RemoveVcamFilter,
             StepKind::RemoveFirewallRule,
@@ -816,6 +861,38 @@ mod tests {
             .lines()
             .iter()
             .any(|l| l.contains("Windows Firewall") && l.contains("needs admin")));
+    }
+
+    /// S44: the protection value Relay changed is restored by the uninstall,
+    /// named with the exact state it goes back to, and needs elevation;
+    /// untouched, it is listed as nothing to do and triggers no prompt.
+    #[test]
+    fn the_audio_protection_value_is_restored_on_uninstall() {
+        use crate::audiodg::Record;
+        for (prior, want) in
+            [(None, "remove the value (it was absent)"), (Some(0), "set back to 0")]
+        {
+            let state = MachineState {
+                audio_protection: Some(audio_protection_line(&Record { prior, changed_at: 0 })),
+                ..Default::default()
+            };
+            let plan = plan_from(&state, true);
+            let step =
+                plan.steps.iter().find(|s| s.kind == StepKind::RestoreAudioProtection).unwrap();
+            assert!(step.present);
+            assert!(step.target.contains("DisableProtectedAudioDG"), "{}", step.target);
+            assert!(step.target.contains(want), "{}", step.target);
+            assert!(plan.needs_elevation());
+            // Runs before the core's data goes: after the APO, before files.
+            let kinds: Vec<_> = plan.steps.iter().map(|s| s.kind).collect();
+            let at = kinds.iter().position(|k| *k == StepKind::RestoreAudioProtection).unwrap();
+            assert!(at > kinds.iter().position(|k| *k == StepKind::RestoreApo).unwrap());
+            assert!(at < kinds.iter().position(|k| *k == StepKind::RemoveData).unwrap());
+        }
+        let plan = plan_from(&MachineState::default(), false);
+        let step = plan.steps.iter().find(|s| s.kind == StepKind::RestoreAudioProtection).unwrap();
+        assert!(!step.present);
+        assert!(!plan.needs_elevation());
     }
 
     /// A machine that never added a rule still lists the step, as "nothing to

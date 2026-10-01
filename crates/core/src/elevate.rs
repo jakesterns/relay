@@ -24,7 +24,7 @@
 //!
 //! # What keeps this honest
 //!
-//! 1. **A closed op set.** [`ElevatedOp`] has six variants and no free-form
+//! 1. **A closed op set.** [`ElevatedOp`] has seven variants and no free-form
 //!    "run this key" escape hatch. A request that does not deserialise into
 //!    one of them is refused before anything is touched.
 //! 2. **The helper re-derives the work; the request never carries it.** No
@@ -66,7 +66,8 @@ pub const HELPER_EXE: &str = "relay-elevate.exe";
 /// Request-format version. The helper refuses anything else, so a stale
 /// request left by an older build can never be replayed against a new one.
 /// v2 (S42): the two APO ops carry the target endpoint GUID.
-pub const REQUEST_VERSION: u32 = 2;
+/// v3 (S44): `set_audio_effects_allowed`.
+pub const REQUEST_VERSION: u32 = 3;
 
 /// How long a request stays actionable. Long enough for a slow UAC prompt,
 /// short enough that a file left behind by a crash is dead on arrival.
@@ -102,6 +103,16 @@ pub enum ElevatedOp {
     AllowFirewall,
     /// Remove the firewall rule Relay added.
     RemoveFirewall,
+    /// S44: allow (or stop allowing) Windows to load audio effects without a
+    /// Microsoft signature — `HKLM\...\CurrentVersion\Audio ::
+    /// DisableProtectedAudioDG`. The request carries two bools, never the
+    /// path; on records the prior state first, off puts back exactly that
+    /// state. `restart_audio` restarts the Windows audio engine afterwards.
+    SetAudioEffectsAllowed {
+        on: bool,
+        #[serde(default)]
+        restart_audio: bool,
+    },
 }
 
 impl ElevatedOp {
@@ -114,6 +125,12 @@ impl ElevatedOp {
             ElevatedOp::UninstallCamera => "Unregister the virtual camera",
             ElevatedOp::AllowFirewall => "Allow Relay through Windows Firewall",
             ElevatedOp::RemoveFirewall => "Remove Relay's Windows Firewall rule",
+            ElevatedOp::SetAudioEffectsAllowed { on: true, .. } => {
+                "Let Windows load unsigned audio effects"
+            }
+            ElevatedOp::SetAudioEffectsAllowed { on: false, .. } => {
+                "Put Windows audio protection back"
+            }
         }
     }
 
@@ -126,6 +143,8 @@ impl ElevatedOp {
             ElevatedOp::UninstallCamera => "uninstall-camera",
             ElevatedOp::AllowFirewall => "allow-firewall",
             ElevatedOp::RemoveFirewall => "remove-firewall",
+            ElevatedOp::SetAudioEffectsAllowed { on: true, .. } => "allow-audio-effects",
+            ElevatedOp::SetAudioEffectsAllowed { on: false, .. } => "disallow-audio-effects",
         }
     }
 
@@ -150,6 +169,12 @@ impl ElevatedOp {
             "uninstall-camera" => Some(ElevatedOp::UninstallCamera),
             "allow-firewall" => Some(ElevatedOp::AllowFirewall),
             "remove-firewall" => Some(ElevatedOp::RemoveFirewall),
+            "allow-audio-effects" => {
+                Some(ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: false })
+            }
+            "disallow-audio-effects" => {
+                Some(ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false })
+            }
             _ => None,
         }
     }
@@ -444,6 +469,13 @@ pub fn plan_lines(paths: &Paths, op: &ElevatedOp) -> Vec<String> {
         ElevatedOp::RemoveFirewall => {
             uninstall_step_lines(paths, crate::uninstall::StepKind::RemoveFirewallRule)
         }
+        ElevatedOp::SetAudioEffectsAllowed { on, restart_audio } => {
+            use crate::audiodg::ProtectionValue;
+            let current = crate::audiodg::LiveValue.read().ok().flatten();
+            let record = crate::audiodg::record_file(&paths.apo_backup_dir());
+            let rec = crate::audiodg::load_record(&record).ok().flatten();
+            crate::audiodg::plan_lines(*on, current, rec.as_ref(), *restart_audio)
+        }
     };
     lines.push(String::new());
     lines.push(
@@ -704,6 +736,9 @@ mod imp {
             ElevatedOp::UninstallCamera => uninstall_camera(paths),
             ElevatedOp::AllowFirewall => allow_firewall(paths),
             ElevatedOp::RemoveFirewall => remove_firewall(paths),
+            ElevatedOp::SetAudioEffectsAllowed { on, restart_audio } => {
+                set_audio_effects(paths, *on, *restart_audio)
+            }
         }
     }
 
@@ -755,6 +790,40 @@ mod imp {
             Ok(n) => OpOutcome::Done { detail: format!("{n} rule(s) removed") },
             Err(e) => OpOutcome::Failed { error: format!("{e:#}") },
         }
+    }
+
+    /// The one value, at the one path — both constants in `audiodg`, vetted
+    /// again inside the live writer. Backup-then-apply on; exact restore off.
+    fn set_audio_effects(paths: &Paths, on: bool, restart: bool) -> OpOutcome {
+        use crate::audiodg::{self as dg, Change};
+        if let Err(reason) = dg::vet_target(dg::KEY, dg::VALUE) {
+            return OpOutcome::Refused { reason };
+        }
+        let record = dg::record_file(&paths.apo_backup_dir());
+        let mut reg = dg::LiveValue;
+        let change = armed(dg::LIVE_WRITE_GATE, || {
+            if on {
+                dg::enable(&mut reg, &record, now_secs())
+            } else {
+                dg::disable(&mut reg, &record)
+            }
+        });
+        let detail = match change {
+            Ok(Change::Unchanged(reason)) => return OpOutcome::Skipped { reason },
+            Ok(Change::Changed(d)) => format!("{} {d}", dg::VALUE),
+            Err(e) => return OpOutcome::Failed { error: format!("{e:#}") },
+        };
+        let tail = if restart {
+            match dg::restart_audio() {
+                Ok(()) => "; Windows audio restarted".to_string(),
+                Err(e) => format!(
+                    "; Windows audio did not restart ({e:#}) — takes effect after a restart"
+                ),
+            }
+        } else {
+            "; takes effect after Windows audio or the PC restarts".to_string()
+        };
+        OpOutcome::Done { detail: detail + &tail }
     }
 
     fn install_apo(paths: &Paths, endpoint: Option<&str>) -> OpOutcome {
@@ -903,6 +972,8 @@ mod tests {
             ElevatedOp::UninstallCamera,
             ElevatedOp::AllowFirewall,
             ElevatedOp::RemoveFirewall,
+            ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: false },
+            ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false },
         ] {
             assert_eq!(ElevatedOp::parse(op.as_str()), Some(op));
         }
@@ -947,7 +1018,8 @@ mod tests {
             &relay_apo::fxstore::FxStore::empty(),
             "{f8ae226b-a4e3-45ab-97fc-3977dad232d1}",
             r"C:\x\relay_apo.dll",
-        );
+        )
+        .unwrap();
         assert!(vet_apo_machine_keys(&plan.backup.com_keys).is_ok());
         assert!(vet_apo_machine_keys(&[audio_engine_key(APO_CLSID).to_uppercase()]).is_ok());
 
@@ -1051,6 +1123,34 @@ mod tests {
         let mut v1 = good;
         v1.version = 1;
         assert!(v1.vet(1_000).is_err());
+    }
+
+    /// S44: the audio-effects op carries two bools and nothing else. A
+    /// smuggled key or value name is ignored data; the helper writes only
+    /// `audiodg::KEY :: audiodg::VALUE`.
+    #[test]
+    fn the_audio_effects_op_carries_no_path() {
+        let op = ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: true };
+        let v = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({ "set_audio_effects_allowed": { "on": true, "restart_audio": true } })
+        );
+        let smuggled: ElevatedOp = serde_json::from_str(
+            r#"{"set_audio_effects_allowed":{"on":false,"key":"SYSTEM\\Run","value":"x"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            smuggled,
+            ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false }
+        );
+        assert!(serde_json::from_str::<ElevatedOp>(r#"{"set_audio_effects_allowed":{}}"#).is_err());
+        assert!(crate::audiodg::vet_target(crate::audiodg::KEY, crate::audiodg::VALUE).is_ok());
+        // A v2 request (pre-S44) is refused on version alone.
+        let mut r = req(vec![op], 1_000);
+        assert!(r.vet(1_000).is_ok());
+        r.version = 2;
+        assert!(r.vet(1_000).is_err());
     }
 
     fn req(ops: Vec<ElevatedOp>, created_at: u64) -> Request {

@@ -499,6 +499,17 @@ fn run(args: Args) -> Result<()> {
     };
     args.paths.ensure()?;
     logging::init_service(&args.paths.log_file(), args.verbose)?;
+    // S44: the audio-protection switch is a deliberate, persistent machine
+    // setting, so a restart keeps it — but never silently: say so in the log
+    // (Settings and the uninstall listing say so on screen).
+    let dg = relay_core::audiodg::record_file(&args.paths.apo_backup_dir());
+    if let Ok(Some(rec)) = relay_core::audiodg::load_record(&dg) {
+        tracing::info!(
+            prior = ?rec.prior,
+            "Windows audio protection is off at the user's request (DisableProtectedAudioDG); \
+             turning it back on in Settings or uninstalling restores the recorded state"
+        );
+    }
     // S38: a panic leaves a record the next start can name, not just a
     // stderr line nobody was watching.
     relay_core::crash::install_panic_hook(relay_core::crash::dir(&args.paths), "relay-core");
@@ -554,7 +565,8 @@ relay-core [--data-dir DIR] [--verbose] [run|status [--json]|restore|shutdown|au
              RELAY_FIREWALL_ALLOW_LIVE_WRITE=1 and an elevated prompt
   elevate [plan|run] <op>   the elevated install helper. <op> is one of
              install-apo, uninstall-apo, install-camera, uninstall-camera,
-             allow-firewall, remove-firewall.
+             allow-firewall, remove-firewall, allow-audio-effects,
+             disallow-audio-effects.
              `plan` prints what would change and touches nothing; `run` raises
              one UAC prompt and runs relay-elevate.exe. Declining changes
              nothing.
