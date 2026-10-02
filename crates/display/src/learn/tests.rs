@@ -730,6 +730,84 @@ fn the_exclusion_breakdown_counts_warmup() {
 }
 
 #[test]
+fn panel_type_is_guessed_from_the_model() {
+    assert_eq!(PanelKind::guess_from_model("AW2518H", "DEL40E0-x"), Some(PanelKind::Tn));
+    assert_eq!(PanelKind::guess_from_model("Dell AW2518HF", ""), Some(PanelKind::Tn));
+    assert_eq!(PanelKind::guess_from_model("LG ULTRAGEAR+", "GSM5C7C-abc"), Some(PanelKind::Oled));
+    assert_eq!(PanelKind::guess_from_model("Some QD-OLED 27", ""), Some(PanelKind::Oled));
+    assert_eq!(PanelKind::guess_from_model("Odyssey G7", ""), Some(PanelKind::Va));
+    assert_eq!(PanelKind::guess_from_model("Generic PnP Monitor", "ABC1234"), None);
+}
+
+/// Bright daylight sky over snow: lots of near-white, but a real scene.
+fn snow_and_sky(t: usize) -> Vec<u8> {
+    frame(|x, y| {
+        if y < H / 3 {
+            let v = 251 + (t % 3) as u8 * 2; // blown sky, drifting cloud light
+            (v, v, 255)
+        } else if y < H * 2 / 3 {
+            let v = 240 + ((x + t * 9) % 16) as u8; // snow field, some texture
+            (v, v, v)
+        } else {
+            let v = 90 + ((x * 2 + y + t * 13) % 80) as u8; // trees, player
+            (v / 2, v, v / 3)
+        }
+    })
+}
+
+#[test]
+fn bright_sky_and_snow_are_gameplay_not_outliers() {
+    let mut an = Analyser::new();
+    run(&mut an, &snow_and_sky(0));
+    for t in 1..5 {
+        let r = run(&mut an, &snow_and_sky(t));
+        assert!(r.stats.clip_frac > 0.3, "the hard case: {:?}", r.stats);
+        assert_eq!(r.class, FrameClass::Gameplay, "{:?}", r.stats);
+    }
+    assert_eq!(OUTLIER_CLIP_FRAC, 0.9);
+}
+
+#[test]
+fn agreement_is_judged_on_what_would_be_applied() {
+    let a = LookTargets { shadow: 0.30, saturation: 0.20, highlight: 0.0 };
+    // 0.10 apart in look units: two lift points, ~1 vibrance point: agrees.
+    let b = LookTargets { shadow: 0.40, saturation: 0.30, highlight: 0.0 };
+    let d = CheckpointDelta::between(&a, &b);
+    assert!(d.agrees(), "{d:?}");
+    // 0.30 apart: six lift points: does not.
+    let c = LookTargets { shadow: 0.60, ..a };
+    assert!(!CheckpointDelta::between(&a, &c).agrees());
+    assert_eq!((AGREE_GAMMA, AGREE_SHADOW_LIFT, AGREE_VIBRANCE), (0.02, 3, 2));
+}
+
+/// Minute-to-minute swings of real play: each interval is a different mix of
+/// night, indoor, daylight and snow, with crush and saturation jumping around.
+#[test]
+fn a_highly_varied_session_converges_within_the_frame_budget() {
+    let mut rng = Lcg(42);
+    let mut l = Learner::new("b1");
+    let mut frames = 0;
+    while l.phase() == Phase::Learning && frames < 2400 {
+        // A new "situation" every 40 s.
+        let apl = [0.04, 0.18, 0.35, 0.55, 0.8][(rng.next() * 5.0) as usize % 5];
+        let crush = rng.next() * 0.35;
+        let sat = 0.15 + rng.next() * 0.45;
+        for _ in 0..40 {
+            let mut r = gameplay(apl + rng.next() * 0.05, crush * (0.5 + rng.next()));
+            r.stats.sat_mean = sat * (0.7 + rng.next() * 0.6);
+            r.stats.sat_p90 = (r.stats.sat_mean + 0.2).min(0.84);
+            r.stats.clip_frac = rng.next() * 0.08;
+            l.observe(&r);
+            frames += 1;
+        }
+    }
+    assert_eq!(l.phase(), Phase::Converged, "{:?} after {frames}", l.readiness());
+    assert!(frames <= 1200, "converged only after {frames} frames");
+    let d = l.readiness().delta.unwrap();
+    assert!(d.agrees(), "{d:?}");
+}
+
+#[test]
 fn pc2_constants() {
     assert_eq!(LOADING_MAX_CV, 0.25);
     assert_eq!(LOADING_MIN_DETAIL, 0.005);

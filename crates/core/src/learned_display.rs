@@ -201,6 +201,23 @@ pub fn panel_caps(panel_label: &str) -> PanelCaps {
     PanelCaps { kind: PanelKind::from_label(panel_label), black_equalizer_max: None }
 }
 
+/// The panel type to use: what the user wrote in the library, else a guess
+/// from the model name / EDID id (`true` = guessed, so the UI asks the user
+/// to confirm), else Unknown.
+pub fn panel_kind(label: &str, name: &str, id: &str) -> (PanelKind, bool) {
+    match PanelKind::from_label(label) {
+        PanelKind::Unknown => match PanelKind::guess_from_model(name, id) {
+            Some(k) => (k, true),
+            None => (PanelKind::Unknown, false),
+        },
+        k => (k, false),
+    }
+}
+
+pub fn caps_for(label: &str, name: &str, id: &str) -> PanelCaps {
+    PanelCaps { kind: panel_kind(label, name, id).0, black_equalizer_max: None }
+}
+
 /// Fold learned adjustments into a profile's display settings. The profile
 /// stays the user's taste; the learned look is a correction on top, and the
 /// result goes through the ordinary capture → apply → restore path.
@@ -250,6 +267,9 @@ pub struct MonitorLearnView {
     pub monitor: MonitorId,
     pub monitor_name: String,
     pub panel: PanelKind,
+    /// The panel type was guessed from the model, not set by the user.
+    #[serde(default)]
+    pub panel_guessed: bool,
     pub phase: Phase,
     pub readiness: Readiness,
     #[serde(default)]
@@ -298,13 +318,15 @@ pub fn view(
         .map(|(id, m)| {
             let id = MonitorId(id.clone());
             let (name, panel) = names(&id);
-            let caps = panel_caps(&panel);
+            let (kind, guessed) = panel_kind(&panel, &name, &id.0);
+            let caps = PanelCaps { kind, ..panel_caps(&panel) };
             let l = &m.learner;
             let ex = l.excluded;
             MonitorLearnView {
                 monitor: id.clone(),
                 monitor_name: name,
                 panel: caps.kind,
+                panel_guessed: guessed,
                 phase: l.phase(),
                 readiness: l.readiness(),
                 converged: l.converged,
@@ -577,9 +599,41 @@ pub struct Sampler {
     pub exe: String,
     pub monitor: MonitorId,
     pub rx: Receiver<SamplerLine>,
+    /// Set while the game is out of focus: the sampler is told to stop
+    /// sampling, and is dropped once `LOOK_BLUR_GRACE` passes.
+    pub paused_since: Option<std::time::Instant>,
+}
+
+/// Alt-Tab grace, the same as the audio learner's: a game out of focus for
+/// less than this keeps its sampler (paused) and resumes without a restart.
+pub const LOOK_BLUR_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub fn grace_expired(paused_since: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    paused_since.is_some_and(|t| now.saturating_duration_since(t) >= LOOK_BLUR_GRACE)
 }
 
 impl Sampler {
+    fn send(&mut self, line: &str) {
+        if let Some(s) = self.stdin.as_mut() {
+            let _ = s.write_all(line.as_bytes());
+            let _ = s.flush();
+        }
+    }
+
+    /// Stop sampling (the game lost focus); keep the process.
+    pub fn pause(&mut self) {
+        if self.paused_since.is_none() {
+            self.send("pause\n");
+            self.paused_since = Some(std::time::Instant::now());
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if self.paused_since.take().is_some() {
+            self.send("resume\n");
+        }
+    }
+
     pub fn start(exe: &str, monitor: MonitorId, hmonitor: i64) -> Result<Self> {
         let bin = crate::share::share_binary()?;
         anyhow::ensure!(bin.exists(), "sampler not found at {}", bin.display());
@@ -609,7 +663,7 @@ impl Sampler {
                 }
             },
         )?;
-        Ok(Self { child, stdin, exe: key(exe), monitor, rx })
+        Ok(Self { child, stdin, exe: key(exe), monitor, rx, paused_since: None })
     }
 
     pub fn exited(&mut self) -> bool {

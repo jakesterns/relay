@@ -579,6 +579,14 @@ impl Service {
         use crate::learned_display::SamplerLine;
         let mut g = self.inner.lock();
         let Some(s) = g.look.as_mut() else { return };
+        if crate::learned_display::grace_expired(s.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the look sampler");
+            g.look = None;
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+            return;
+        }
         let exited = s.exited();
         let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
         let (exe, mon) = (s.exe.clone(), s.monitor.clone());
@@ -1330,7 +1338,7 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
 /// goes through the ordinary capture → apply → restore path, so restore
 /// covers it exactly like a hand-set value.
 fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
-    use crate::learned_display::{overlay, panel_caps};
+    use crate::learned_display::{caps_for, overlay};
     let mut p = profile.clone();
     let Some(t) = target else { return p };
     if !p.display.follow_focus {
@@ -1346,7 +1354,14 @@ fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) 
         .find(|m| m.id == t.id)
         .map(|m| m.panel.clone())
         .unwrap_or_default();
-    let adj = relay_display::learn::realize(&look, &panel_caps(&panel));
+    let name = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| t.name.clone());
+    let adj = relay_display::learn::realize(&look, &caps_for(&panel, &name, &t.id.0));
     overlay(&mut p.display, &adj);
     p
 }
@@ -1364,10 +1379,18 @@ fn sync_look(g: &mut Inner) {
         })
         .filter(|fg| g.learn.is_enabled(&fg.exe))
         .and_then(|fg| resolve_target(g, fg.hmonitor).map(|t| (fg, t)));
-    if let (Some(s), Some((fg, t))) = (&g.look, &want) {
-        if s.exe == key(&fg.exe) && s.monitor == t.id {
+    match (g.look.as_mut(), &want) {
+        (Some(s), Some((fg, t))) if s.exe == key(&fg.exe) && s.monitor == t.id => {
+            s.resume();
             return;
         }
+        // Out of focus: pause and keep it for the grace period (Alt-Tab
+        // must not restart the helper); learn_tick drops it after that.
+        (Some(s), None) => {
+            s.pause();
+            return;
+        }
+        _ => {}
     }
     if g.look.take().is_some() {
         // Keep the evidence gathered since the last checkpoint.

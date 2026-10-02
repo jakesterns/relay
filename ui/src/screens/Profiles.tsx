@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Pill } from "../components/Controls";
+import { Card, Chips, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
@@ -14,6 +14,14 @@ const shareLabel: Record<ProfileSummary["share"], string> = { game: "Game", daw:
 const kindLabel: Record<HeadsetKind, string> = { headphone: "Headphones", iem: "IEM", speakers: "Speakers" };
 
 /** Which controls Relay can drive on this panel, from its advertised VCP codes. */
+/** What a scan found, one clause per monitor. */
+export function scanSummary(monitors: { name: string; ddc?: number[] }[]): string {
+  if (monitors.length === 0) return "No monitors found.";
+  return monitors.map((m) => m.ddc && m.ddc.length > 0
+    ? `${m.name || "Monitor"}: ${ddcControls(m.ddc)}`
+    : `${m.name || "Monitor"}: no DDC/CI response (turn on DDC/CI in the monitor's menu)`).join(" · ");
+}
+
 function ddcControls(codes: number[]): string {
   const known: [number, string][] = [[0x10, "brightness"], [0x12, "contrast"], [0x87, "sharpness"]];
   const names = known.filter(([c]) => codes.includes(c)).map(([, n]) => n);
@@ -33,6 +41,7 @@ export function Profiles() {
   const [hwError, setHwError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState<string | null>(null);
 
   const apply = async (id: string) => {
     setListError(null);
@@ -76,7 +85,12 @@ export function Profiles() {
   const rescan = async () => {
     setScanning(true);
     setHwError(null);
-    try { await api.probeHardware(); await refresh(); }
+    setScanNote(null);
+    try {
+      const report = await api.probeHardware();
+      await refresh();
+      setScanNote(scanSummary(report.monitors));
+    }
     catch (e) { setHwError(errText(e)); }
     finally { setScanning(false); }
   };
@@ -207,6 +221,7 @@ export function Profiles() {
           <button className="btn q" disabled={scanning} onClick={() => void rescan()}>
             {scanning ? "Scanning…" : "Scan monitor controls"}
           </button>
+          <DoneNote text={scanNote} onDismiss={() => setScanNote(null)} />
           <ErrorNote text={hwError} onDismiss={() => setHwError(null)} />
         </Card>
         <Card>

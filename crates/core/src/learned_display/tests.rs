@@ -282,6 +282,44 @@ fn a_fast_exit_never_loses_the_hdr_line() {
 }
 
 #[test]
+fn the_panel_is_guessed_from_the_model_when_unset() {
+    assert_eq!(panel_kind("", "AW2518H", "DEL40E0-1"), (PanelKind::Tn, true));
+    assert_eq!(panel_kind("IPS", "AW2518H", "DEL40E0-1"), (PanelKind::Ips, false), "the user wins");
+    assert_eq!(panel_kind("", "Generic", "ABC"), (PanelKind::Unknown, false));
+    let v = {
+        let mut s = tmp_store("guess");
+        s.game_mut("game.exe").monitor_mut(&MonitorId("DEL40E0-1".into()));
+        view(&s, "game.exe", false, &|_| ("AW2518H".into(), String::new()))
+    };
+    assert_eq!((v.monitors[0].panel, v.monitors[0].panel_guessed), (PanelKind::Tn, true));
+}
+
+#[test]
+fn alt_tab_grace_is_fifteen_seconds() {
+    let now = std::time::Instant::now();
+    assert_eq!(LOOK_BLUR_GRACE, std::time::Duration::from_secs(15));
+    assert!(!grace_expired(None, now));
+    assert!(!grace_expired(Some(now), now + std::time::Duration::from_secs(14)));
+    assert!(grace_expired(Some(now), now + LOOK_BLUR_GRACE));
+}
+
+#[test]
+fn a_sampler_restart_keeps_the_learners_evidence() {
+    // The learner lives in the store, not the sampler: a new sampler process
+    // for the same game, monitor and build continues where the last left off.
+    let mut s = tmp_store("restart");
+    let l = converged_learner();
+    let frames = l.agg.frames;
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: l, hdr_skipped: false });
+    let rec = s.game_mut("game.exe").monitor_mut(&mon());
+    assert!(!rec.learner.check_build("b1"), "same build: no reset");
+    assert_eq!(rec.learner.agg.frames, frames);
+    assert_eq!(rec.learner.phase(), Phase::Converged);
+}
+
+#[test]
 fn build_fingerprint_changes_with_the_file() {
     let dir = std::env::temp_dir().join(format!("relay-s47-fp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

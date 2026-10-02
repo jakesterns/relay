@@ -13,7 +13,42 @@
 use serde::{Deserialize, Serialize};
 
 use super::analyse::{FrameClass, FrameReport};
-use super::derive::{derive_look, Aggregate, LookTargets};
+use super::derive::{derive_look, realize, Aggregate, LookTargets, PanelCaps, PanelKind};
+
+/// Largest per-axis difference, in applied units, between the newest
+/// checkpoint and the others kept. Shown in status so a tester can see which
+/// axis keeps the learner from settling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct CheckpointDelta {
+    pub gamma: f32,
+    pub shadow_lift: i32,
+    pub vibrance: i32,
+}
+
+impl CheckpointDelta {
+    pub fn between(a: &LookTargets, b: &LookTargets) -> Self {
+        let (x, y) = (realize(a, &REFERENCE_PANEL), realize(b, &REFERENCE_PANEL));
+        Self {
+            gamma: ((x.gamma - y.gamma).abs() * 1000.0).round() / 1000.0,
+            shadow_lift: (x.shadow_lift - y.shadow_lift).abs(),
+            vibrance: (x.vibrance - y.vibrance).abs(),
+        }
+    }
+
+    pub fn agrees(&self) -> bool {
+        self.gamma <= AGREE_GAMMA + 1e-6
+            && self.shadow_lift <= AGREE_SHADOW_LIFT
+            && self.vibrance <= AGREE_VIBRANCE
+    }
+
+    fn max(self, o: Self) -> Self {
+        Self {
+            gamma: self.gamma.max(o.gamma),
+            shadow_lift: self.shadow_lift.max(o.shadow_lift),
+            vibrance: self.vibrance.max(o.vibrance),
+        }
+    }
+}
 
 /// Gameplay frames needed before a result can count (10 min at 1 fps).
 pub const MIN_GAMEPLAY_FRAMES: u64 = 600;
@@ -25,8 +60,22 @@ pub const MIN_SCENES: usize = 3;
 pub const CHECKPOINT_FRAMES: u32 = 120;
 /// Consecutive checkpoints that must agree for convergence.
 pub const CONVERGE_CHECKPOINTS: usize = 3;
-/// Agreement means every look axis within this of the others.
+/// Kept for the look-space distance used by the freeze rule's tests; the
+/// convergence test itself is on realized adjustments (below).
 pub const CONVERGE_TOLERANCE: f32 = 0.05;
+/// Checkpoints agree when what would actually be applied differs by no more
+/// than this per axis, on the reference panel ([`REFERENCE_PANEL`], the one
+/// with the widest ranges, so agreement there holds on every panel):
+/// gamma multiplier ...
+pub const AGREE_GAMMA: f32 = 0.02;
+/// ... ramp shadow lift (profile units, 0..=100) ...
+pub const AGREE_SHADOW_LIFT: i32 = 3;
+/// ... and vibrance points.
+pub const AGREE_VIBRANCE: i32 = 2;
+/// Panel the agreement is judged on: an LCD without a verified black
+/// equalizer uses every learned control at its full range.
+pub const REFERENCE_PANEL: PanelCaps =
+    PanelCaps { kind: PanelKind::Ips, black_equalizer_max: None };
 /// Rolling window after convergence (~1 h of gameplay at 1 fps).
 pub const ROLLING_WINDOW_FRAMES: f64 = 3600.0;
 /// The applied look only moves when a new converged result is at least this
@@ -101,6 +150,9 @@ pub struct Readiness {
     /// can see which scenes are missing.
     #[serde(default)]
     pub scene_frames: Vec<u64>,
+    /// Largest disagreement among the kept checkpoints, per applied axis.
+    #[serde(default)]
+    pub delta: Option<CheckpointDelta>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
 }
@@ -128,7 +180,22 @@ impl Learner {
 
     fn stable_checkpoints(&self) -> usize {
         let Some(last) = self.checkpoints.last() else { return 0 };
-        self.checkpoints.iter().rev().take_while(|c| c.distance(last) <= CONVERGE_TOLERANCE).count()
+        self.checkpoints
+            .iter()
+            .rev()
+            .take_while(|c| CheckpointDelta::between(c, last).agrees())
+            .count()
+    }
+
+    /// Max per-axis delta between the newest checkpoint and the others kept.
+    pub fn checkpoint_delta(&self) -> Option<CheckpointDelta> {
+        let last = self.checkpoints.last()?;
+        Some(
+            self.checkpoints
+                .iter()
+                .map(|c| CheckpointDelta::between(c, last))
+                .fold(CheckpointDelta::default(), CheckpointDelta::max),
+        )
     }
 
     pub fn readiness(&self) -> Readiness {
@@ -154,6 +221,7 @@ impl Learner {
             checkpoints_needed: CONVERGE_CHECKPOINTS,
             checkpoints: self.checkpoints.len(),
             scene_frames: self.agg.apl_buckets.iter().map(|w| w.round() as u64).collect(),
+            delta: self.checkpoint_delta(),
             progress: (ev + conv).min(1.0),
         }
     }
@@ -246,6 +314,9 @@ impl Learner {
         true
     }
 
+    /// The checkpoint look is derived from the whole (rolling) aggregate,
+    /// never from the last interval alone: minute-to-minute swings in real
+    /// gameplay must not decide convergence.
     fn checkpoint(&mut self) {
         let look = derive_look(&self.agg.summary());
         self.checkpoints.push(look);

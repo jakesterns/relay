@@ -198,11 +198,13 @@ export interface LookReadiness {
   stable_checkpoints: number; checkpoints_needed: number; progress: number;
   /** Checkpoints taken so far; gameplay frames per scene bucket, dark → bright. */
   checkpoints?: number; scene_frames?: number[];
+  /** Largest disagreement among kept checkpoints, in applied units. */
+  delta?: { gamma: number; shadow_lift: number; vibrance: number } | null;
 }
 export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
 export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
 export interface MonitorLearnView {
-  monitor: MonitorId; monitor_name: string; panel: PanelKind; phase: LookPhase;
+  monitor: MonitorId; monitor_name: string; panel: PanelKind; panel_guessed?: boolean; phase: LookPhase;
   readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
   use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
   adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;

@@ -136,6 +136,19 @@ describe("the learn-this-game's-look card", () => {
     expect(tauri.calls.find((c) => c.cmd === "learn_display_export")?.args).toMatchObject({ exe: "game.exe", note: "dark maps" });
   });
 
+  it("shows a guessed panel type and saves the user's confirmation", async () => {
+    core.hardware.monitors.push({ id: "DEL40E0-1", name: "AW2518H", panel: "" });
+    seed({ monitors: [monitor({ monitor: "DEL40E0-1", monitor_name: "AW2518H", panel: "tn", panel_guessed: true,
+      readiness: { ...monitor().readiness, delta: { gamma: 0.01, shadow_lift: 4, vibrance: 1 } } })] });
+    const user = await mount();
+    expect(screen.getByText("TN (guessed from the model)")).toBeInTheDocument();
+    expect(screen.getByTestId("look-delta")).toHaveTextContent("gamma 0.010 · lift 4 · vibrance 1");
+    await user.selectOptions(screen.getByRole("combobox", { name: /Panel type of AW2518H/ }), "TN");
+    await act(async () => { await Promise.resolve(); });
+    const saved = core.hardware.monitors.find((m) => m.id === "DEL40E0-1");
+    expect(saved?.panel).toBe("TN");
+  });
+
   it("an HDR monitor says nothing was learned there", async () => {
     seed({ status: "hdr_skipped", monitors: [monitor({ hdr_skipped: true, status: "hdr_skipped" })] });
     await mount();

@@ -220,10 +220,45 @@ impl PanelKind {
         }
     }
 
+    /// Guess from the model name or EDID id when the user has not said.
+    /// "OLED" in the name wins; otherwise a short table of models whose
+    /// panel type is published. `None` = no idea (stays Unknown).
+    pub fn guess_from_model(name: &str, id: &str) -> Option<Self> {
+        let hay = format!("{} {}", name, id).to_ascii_uppercase();
+        if hay.contains("OLED") {
+            return Some(PanelKind::Oled);
+        }
+        KNOWN_PANELS.iter().find(|(needle, _)| hay.contains(needle)).map(|(_, k)| *k)
+    }
+
     fn is_lcd(self) -> bool {
         matches!(self, PanelKind::Ips | PanelKind::Va | PanelKind::Tn)
     }
 }
+
+/// Models with a published panel type, matched as a substring of the EDID
+/// display name or the monitor id (upper-case). Short on purpose: a guess is
+/// shown as a guess and the user can correct it.
+pub const KNOWN_PANELS: &[(&str, PanelKind)] = &[
+    ("GSM5C7C", PanelKind::Oled), // LG 32GS95UE (WOLED)
+    ("32GS95UE", PanelKind::Oled),
+    ("AW3423", PanelKind::Oled),
+    ("AW2725DF", PanelKind::Oled),
+    ("AW3225QF", PanelKind::Oled),
+    ("PG27AQDM", PanelKind::Oled),
+    ("AW2518H", PanelKind::Tn),
+    ("XL2546", PanelKind::Tn),
+    ("XL2566K", PanelKind::Tn),
+    ("XL2411", PanelKind::Tn),
+    ("AW2521H", PanelKind::Ips),
+    ("AW2723DF", PanelKind::Ips),
+    ("27GP850", PanelKind::Ips),
+    ("27GN950", PanelKind::Ips),
+    ("VG27AQ", PanelKind::Ips),
+    ("C27G7", PanelKind::Va),
+    ("C32G7", PanelKind::Va),
+    ("ODYSSEY G7", PanelKind::Va),
+];
 
 /// What one monitor can do, as the core resolved it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

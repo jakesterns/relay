@@ -34,7 +34,7 @@ pub const LETTERBOX_BLACK: f32 = 0.03;
 /// loading screen, a fade, a black transition.
 pub const LOADING_MAX_STDDEV: f32 = 0.03;
 /// More than this fraction clipped is a flash / white-out: an outlier.
-pub const OUTLIER_CLIP_FRAC: f32 = 0.6;
+pub const OUTLIER_CLIP_FRAC: f32 = 0.9;
 /// No keyboard/mouse/pad input anywhere on the system for longer than this
 /// means nobody is playing: a cutscene, a menu left open, AFK. Read from
 /// `GetLastInputInfo` — one system-wide timestamp, no hooks, no keylogging.

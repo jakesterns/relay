@@ -57,6 +57,21 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
     if (fileRef.current) fileRef.current.value = "";
   };
 
+  /** Write the panel type into the hardware library (the user confirming
+   *  or correcting a guess), then refresh the view. */
+  const setPanel = async (monitor: string, panel: string) => {
+    if (!exe) return;
+    setErr(null); setDone(null);
+    try {
+      const hw = await api.listHardware();
+      const m = hw.monitors.find((x) => x.id === monitor);
+      if (!m) throw new Error("this monitor is not in the hardware library yet");
+      await api.saveHardware({ kind: "monitor", value: { ...m, panel } });
+      setView(await api.learnDisplayStatus(exe));
+      setDone(`Panel type set to ${panel}.`);
+    } catch (e) { setErr(errText(e)); }
+  };
+
   if (!exe) {
     return (
       <Card title="Learn this game's look">
@@ -78,7 +93,9 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
         sub={imported
           ? "Starts from the imported look and changes it only if this monitor clearly needs something different."
           : "While the game has focus, Relay studies its frames and suggests gentle shadow and colour corrections for each monitor."} />
-      {view?.monitors.map((m) => <MonitorRow key={m.monitor} m={m} />)}
+      {view?.monitors.map((m) => (
+        <MonitorRow key={m.monitor} m={m} onPanel={(p) => void setPanel(m.monitor, p)} />
+      ))}
       {imported && (
         <Kv k="Imported" v={imported.note ? `"${imported.note}"` : "No note"} />
       )}
@@ -128,13 +145,28 @@ function skippedText(e: NonNullable<MonitorLearnView["excluded_by"]>): string {
 
 function pct(v: number): string { return `${Math.round(v * 100)}%`; }
 
-function MonitorRow({ m }: { m: MonitorLearnView }) {
+const PANELS = ["OLED", "IPS", "VA", "TN"] as const;
+
+function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: string) => void }) {
   const r = m.readiness;
   const lit = Math.round(r.progress * 10);
   const a = m.adjustments;
   return (
     <div className="look-monitor" data-testid="look-monitor">
-      <Kv k={m.monitor_name || "Monitor"} v={m.panel === "unknown" ? "Panel type unknown" : m.panel.toUpperCase()} />
+      <Kv k={m.monitor_name || "Monitor"}
+        v={m.panel === "unknown" ? "Panel type unknown"
+          : m.panel_guessed ? `${m.panel.toUpperCase()} (guessed from the model)` : m.panel.toUpperCase()} />
+      {(m.panel === "unknown" || m.panel_guessed) && (
+        <label className="field">
+          <span>Panel type</span>
+          <select aria-label={`Panel type of ${m.monitor_name || "this monitor"}`}
+            value={m.panel === "unknown" ? "" : m.panel.toUpperCase()}
+            onChange={(e) => { if (e.target.value) onPanel(e.target.value); }}>
+            <option value="">Not sure</option>
+            {PANELS.map((p) => <option key={p} value={p}>{p}</option>)}
+          </select>
+        </label>
+      )}
       {m.hdr_skipped ? (
         <p className="p small">HDR was on. Relay only learns from SDR; turn HDR off for this game to learn its look.</p>
       ) : (
@@ -147,6 +179,11 @@ function MonitorRow({ m }: { m: MonitorLearnView }) {
             {r.frames} / {r.frames_needed} gameplay frames · {r.scenes} / {r.scenes_needed} kinds of scene
             {` · checkpoints ${r.stable_checkpoints} stable of ${r.checkpoints ?? 0}`}
           </p>
+          {r.delta && (
+            <p className="p small mono" data-testid="look-delta">
+              Checkpoint spread: gamma {r.delta.gamma.toFixed(3)} · lift {r.delta.shadow_lift} · vibrance {r.delta.vibrance}
+            </p>
+          )}
           {r.scene_frames && (
             <p className="p small mono" data-testid="look-scenes">
               Scenes (dark → bright): {r.scene_frames.join(" / ")}
