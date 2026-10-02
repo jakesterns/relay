@@ -56,6 +56,18 @@ pub const HIST_STEP_DB: f32 = 2.0;
 /// keeps up to 8 and the user's own bands keep theirs.
 pub const GAME_BUDGET: usize = 4;
 
+/// Fit a game layer to cascade bands: [`crate::fit::fit_curve_with`] with
+/// the 1.6-5 kHz detail / presence region emphasised, so a small band budget
+/// does not smooth the lift there away.
+pub fn fit_game_layer(curve: &[(f32, f32)], max_bands: usize) -> Vec<crate::params::BandParams> {
+    crate::fit::fit_curve_with(
+        curve,
+        max_bands,
+        Some(crate::fit::Emphasis { lo_hz: 1600.0, hi_hz: 5000.0, weight: 2.0 }),
+    )
+    .bands
+}
+
 /// The histogram bin a level falls in (clamped at both ends).
 pub(crate) fn bin_of(db: f32) -> usize {
     let i = ((db - HIST_LO_DB) / HIST_STEP_DB).floor();

@@ -38,6 +38,9 @@ pub enum Segment {
     Reload,
     Foliage,
     Gunfire,
+    /// Automatic fire: a crack + thump every 120 ms with a 300 ms tail
+    /// riding under the next shots, over the ambience bed.
+    GunBurst,
     Explosions,
     Vehicle,
     Music,
@@ -384,6 +387,17 @@ impl Synth {
                     None => 0.0,
                 };
                 self.bed() + y
+            }
+            Segment::GunBurst => {
+                let w = self.rng.white();
+                let thump = self.gun_lp.run(self.rng.white() as f64) as f32;
+                let every = self.ms(120.0);
+                let p = self.t % every;
+                let t = p as f32 / fs;
+                // Each shot: 1 ms attack, a 30 ms crack, a 120 ms decaying tail.
+                let crack = (t / 0.001).min(1.0) * (-(t / 0.03)).exp();
+                let tail = (-(t / 0.12)).exp();
+                self.bed() + crack * 0.6 * w + 2.0 * tail * thump
             }
             Segment::Vehicle => self.bed() + self.engine(),
             Segment::Music => 0.3 * self.bed() + self.melody(),

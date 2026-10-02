@@ -64,7 +64,7 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
         // The final gate: whatever stored this curve (the learner, an import,
         // IPC, a hand-edited profiles.json), it is guarded before fitting.
         let curve = relay_audio::learn::derive::guard_curve(&layer.curve);
-        let game = relay_audio::fit::fit_curve(&curve, GAME_LAYER_BUDGET.min(left)).bands;
+        let game = relay_audio::learn::fit_game_layer(&curve, GAME_LAYER_BUDGET.min(left));
         // Judged on the curve, not the fitted filters: a shelf that shapes a
         // pure cut can carry a small positive band without boosting anything.
         layer_boosts = curve.iter().any(|&(_, db)| db > 0.05);

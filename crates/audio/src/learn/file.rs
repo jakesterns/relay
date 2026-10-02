@@ -298,7 +298,7 @@ impl GameEqFile {
         goal: Option<Goal>,
         note: &str,
     ) -> Self {
-        let bands = crate::fit::fit_curve(&layer.curve, super::GAME_BUDGET).bands;
+        let bands = super::fit_game_layer(&layer.curve, super::GAME_BUDGET);
         let round = |x: f32| (x * 100.0).round() / 100.0;
         Self {
             format: FORMAT.into(),

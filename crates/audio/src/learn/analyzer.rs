@@ -200,6 +200,9 @@ pub const GUN_MIN_ONSET_DB: f32 = 10.0;
 /// above 1 kHz (a crack and a thump together: broadband)...
 pub const GUN_MIN_LOW_BANDS: usize = 2;
 pub const GUN_MIN_HIGH_BANDS: usize = 4;
+/// A shot inside a burst: its crack rises sharply across at least this many
+/// of the ten ≥ 1 kHz bands (a footstep's 2-5 kHz click spans about five).
+pub const GUN_BURST_HIGH_BANDS: usize = 7;
 /// ...a peak this far above the local bed (crest)...
 pub const GUN_MIN_CREST_DB: f32 = 12.0;
 /// ...and a decay tail in this range (a click has almost none, an
@@ -1068,7 +1071,26 @@ impl Analyzer {
                     self.floor[b] = db(f + FLOOR_DOWN * (l - f));
                 }
             }
-            if is_onset && rising_hf >= ONSET_MIN_BANDS && self.event.loud_frames > 2 {
+            // Inside a burst that opened like a gunshot (broadband), each new
+            // crack is a shot; its thump lands on the last one's tail, so
+            // only the highs need to rise sharply.
+            if is_onset
+                && self.event.rising_low >= GUN_MIN_LOW_BANDS
+                && self.event.rising_high >= GUN_MIN_HIGH_BANDS
+                && self.event_has_crack()
+                && sharp_hf >= GUN_BURST_HIGH_BANDS
+                && label != SoundClass::Voice
+                && self.event.loud_frames > 2
+            {
+                // Automatic fire: each shot lands in the previous one's tail,
+                // so the burst is one long event. Every sharp broadband
+                // onset inside it is a shot.
+                let rel = self.rel();
+                let k = SoundClass::Gunshot;
+                self.stats.events[k.index()] += 1;
+                self.stats.class_frames[k.index()] += 1;
+                Stats::add(self.stats.hist_mut(k), &level, rel);
+            } else if is_onset && rising_hf >= ONSET_MIN_BANDS && self.event.loud_frames > 2 {
                 // A cue-like onset inside a running event: time overlap.
                 self.event.overlaps = self.event.overlaps.saturating_add(1);
                 // Bright, sharp, and nothing below 1 kHz rising with it (a
@@ -1451,6 +1473,24 @@ impl Analyzer {
         e.nframes = 0;
     }
 
+    /// The open event so far carries a gunshot's crack: the energy it added
+    /// above 1 kHz is at least [`GUN_MIN_HIGH_RATIO`] of what it added below
+    /// 250 Hz (an explosion's rumble is almost all low).
+    fn event_has_crack(&self) -> bool {
+        let e = &self.event;
+        let n = e.loud_frames.max(1) as f32;
+        let (mut low, mut high) = (0f32, 0f32);
+        for b in 0..NBANDS {
+            let added = (e.sum_lin[b] / n - e.floor_lin[b]).max(0.0);
+            if BANDS_HZ[b] < 250.0 {
+                low += added;
+            } else if BANDS_HZ[b] >= 1000.0 {
+                high += added;
+            }
+        }
+        high >= low * GUN_MIN_HIGH_RATIO
+    }
+
     /// The last two inter-onset intervals agree and sit in the walking range.
     fn rhythmic(&self, onset: u64) -> bool {
         let [a, b] = self.last_steps;
@@ -1723,6 +1763,21 @@ mod tests {
         }
     }
 
+    /// The r50 mix: rapid gunfire bursts with tails over ambience. Gunshots
+    /// must dominate, not reload clicks.
+    #[test]
+    fn rapid_gunfire_bursts_are_gunshots_not_clicks() {
+        let mut a = Analyzer::new(FS);
+        let mut s = Synth::new(FS, 21);
+        for _ in 0..6 {
+            s.render(Segment::GunBurst, 3.0, |b| a.push(b));
+            s.render(Segment::Ambience, 2.0, |b| a.push(b));
+        }
+        let st = a.into_stats();
+        let (g, m) = (st.count(SoundClass::Gunshot), st.count(SoundClass::Mechanical));
+        assert!(g >= 20 && g > 3 * m, "{:?}", st.events);
+    }
+
     #[test]
     fn low_loud_bursts_are_explosions() {
         let s = run(&[(Segment::Explosions, 40.0)]);
@@ -1832,7 +1887,7 @@ mod tests {
         let booms = s.hist(SoundClass::Explosion);
         assert!(Stats::median(booms, b63).unwrap() > Stats::median(booms, b3k).unwrap() + 10.0);
         // Steps keep coming during explosions: some land inside one.
-        assert!(s.overlaps[SoundClass::Explosion.index()] > 0, "{:?}", s.overlaps);
+        assert!(s.overlaps[SoundClass::Explosion.index()] > 0, "{:?} {:?}", s.overlaps, s.events);
     }
 
     #[test]

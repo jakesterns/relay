@@ -66,6 +66,13 @@ pub const SPEECH_GUARD_DB: f32 = 2.0;
 pub const CUE_DETAIL_LO_HZ: f32 = 2000.0;
 pub const CUE_DETAIL_HI_HZ: f32 = 5000.0;
 pub const CUE_DETAIL_FLOOR: f32 = 0.35;
+/// Dialogue: a modest presence lift where voice is heard at all, flat
+/// across this band (the target, before the hearing rule).
+pub const DIALOGUE_PRESENCE_LO_HZ: f32 = 1500.0;
+pub const DIALOGUE_PRESENCE_HI_HZ: f32 = 4000.0;
+pub const DIALOGUE_PRESENCE_DB: f32 = 2.0;
+/// Voice counts as present from this share of classified frames.
+pub const VOICE_PRESENT_SHARE: f32 = 0.01;
 /// Consonants and presence: Dialogue never cuts here.
 pub const PRESENCE_LO_HZ: f32 = 1000.0;
 pub const PRESENCE_HI_HZ: f32 = 4000.0;
@@ -204,7 +211,7 @@ impl Derived {
 
     /// Fitted to at most [`GAME_BUDGET`] cascade bands.
     pub fn bands(&self) -> Vec<BandParams> {
-        crate::fit::fit_curve(&self.curve(), GAME_BUDGET).bands
+        super::fit_game_layer(&self.curve(), GAME_BUDGET)
     }
 }
 
@@ -285,6 +292,16 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
         level[t.index()] = lv;
     }
 
+    // The cue classes' detail lift is flat across 2-5 kHz at their strongest
+    // presence anywhere in that band, so it does not fade where the
+    // footstep energy tails off (the live curve fell to +0.3 dB by 4 kHz).
+    let detail_presence: [f32; NCLASSES] = std::array::from_fn(|k| {
+        (0..NBANDS)
+            .filter(|&b| (CUE_DETAIL_LO_HZ..=CUE_DETAIL_HI_HZ).contains(&BANDS_HZ[b]))
+            .map(|b| presence[k][b])
+            .fold(0f32, f32::max)
+    });
+
     // Lift: how often each target is buried, per band, by the maskers.
     for b in 0..NBANDS {
         let mut best = 0f32;
@@ -309,12 +326,19 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
             let mut bur = if den > 0.0 { num / den } else { 0.0 };
             if t.is_cue() && (CUE_DETAIL_LO_HZ..=CUE_DETAIL_HI_HZ).contains(&BANDS_HZ[b]) {
                 bur = bur.max(CUE_DETAIL_FLOOR);
+                best = best.max(tw * detail_presence[t.index()] * CUE_DETAIL_FLOOR);
             }
             buried[b] = buried[b].max(bur);
             best = best.max(tw * p * bur);
         }
         if BANDS_HZ[b] > limits.no_boost_below_hz {
             gains[b] = limits.max_boost_db * best;
+        }
+        if goal == Goal::Dialogue
+            && share(SoundClass::Voice) >= VOICE_PRESENT_SHARE
+            && (DIALOGUE_PRESENCE_LO_HZ..=DIALOGUE_PRESENCE_HI_HZ).contains(&BANDS_HZ[b])
+        {
+            gains[b] = gains[b].max(DIALOGUE_PRESENCE_DB);
         }
     }
 
@@ -437,25 +461,59 @@ pub fn guard_gains(
             0.0
         }
     };
-    // Gain compensation: lower everything by the excess, within the guard.
-    let excess = power(gains, 1.0);
-    if excess > 0.0 {
-        let room = (0..NBANDS)
-            .map(|b| {
-                let floor = if kept(BANDS_HZ[b]) {
-                    0.0
-                } else if in_speech_band(BANDS_HZ[b]) {
-                    -limits.speech_guard_db
+    // Gain compensation: lower every band the goal does not keep (each down
+    // to its own floor at most) until the curve is not louder overall. Kept
+    // bands (Dialogue presence, Awareness detail) hold their lift.
+    if power(gains, 1.0) > 0.0 {
+        let base = *gains;
+        let floor_of = |b: usize| {
+            if in_speech_band(BANDS_HZ[b]) {
+                -limits.speech_guard_db
+            } else {
+                -limits.max_cut_db
+            }
+        };
+        let shifted = |s: f32| -> [f32; NBANDS] {
+            std::array::from_fn(|b| {
+                if kept(BANDS_HZ[b]) {
+                    base[b]
                 } else {
-                    -limits.max_cut_db
-                };
-                gains[b] - floor
+                    (base[b] - s).max(floor_of(b).min(base[b]))
+                }
             })
-            .fold(f32::MAX, f32::min)
-            .max(0.0);
-        let shift = excess.min(room);
-        for g in gains.iter_mut() {
-            *g -= shift;
+        };
+        let (mut lo, mut hi) = (0.0f32, limits.max_boost_db + limits.max_cut_db);
+        for _ in 0..30 {
+            let mid = 0.5 * (lo + hi);
+            if power(&shifted(mid), 1.0) > 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        *gains = shifted(hi);
+        // The kept bands' edges may now step too far: raise the lower side
+        // (never lowers anything, so no floor or guard is crossed).
+        for _ in 0..NBANDS {
+            let mut changed = false;
+            for b in 1..NBANDS {
+                if gains[b] < gains[b - 1] - limits.max_step_db {
+                    gains[b] = gains[b - 1] - limits.max_step_db;
+                    changed = true;
+                }
+                if gains[b - 1] < gains[b] - limits.max_step_db {
+                    gains[b - 1] = gains[b] - limits.max_step_db;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for b in 0..NBANDS {
+            if BANDS_HZ[b] <= limits.no_boost_below_hz {
+                gains[b] = gains[b].min(0.0);
+            }
         }
     }
     if power(gains, 1.0) > 0.0 {
@@ -702,6 +760,39 @@ mod tests {
         assert!(detail >= 1.0, "3-4 kHz lift {detail}: {g:?}");
         assert!(detail >= g[idx(1000.0)] && detail >= g[idx(500.0)], "{g:?}");
         assert!((16..=20).all(|b| g[b] >= 0.0), "never cuts the detail band: {g:?}");
+    }
+
+    #[test]
+    fn dialogue_lifts_presence_when_voice_is_heard() {
+        let d = derive(&scene(), &Limits::default(), Goal::Dialogue);
+        let band: Vec<f32> = (0..NBANDS)
+            .filter(|&b| (1600.0..=4000.0).contains(&BANDS_HZ[b]))
+            .map(|b| d.gains[b])
+            .collect();
+        let mean = band.iter().sum::<f32>() / band.len() as f32;
+        assert!(mean >= 0.8 && band.iter().all(|&g| g <= MAX_BOOST_DB), "{:?}", d.gains);
+        // No voice: no presence lift is invented.
+        let none = derive(&learned(60.0, 0.05), &Limits::default(), Goal::Dialogue);
+        assert!(none.gains[idx(2500.0)] < 0.8, "{:?}", none.gains);
+    }
+
+    /// The fitted filters keep the 2-5 kHz detail lift the target asks for.
+    #[test]
+    fn the_fit_keeps_the_footstep_detail_lift() {
+        for s in [learned(90.0, 0.12), learned(90.0, 0.05), scene()] {
+            let d = derive(&s, &Limits::default(), Goal::Awareness);
+            let bands = d.bands();
+            for hz in [3150.0, 4000.0] {
+                let want = d.gains[idx(hz)];
+                let got = crate::fit::response_db(&bands, hz as f64) as f32;
+                if want >= 1.0 {
+                    assert!(got >= 1.0, "{hz} Hz: target {want}, fitted {got}; {:?}", bands);
+                }
+            }
+            // And the derived target holds through 5 kHz, not fading by 4.
+            let g = d.gains;
+            assert!(g[idx(5000.0)] >= 0.7 * g[idx(2500.0)] - 0.05, "{g:?}");
+        }
     }
 
     #[test]

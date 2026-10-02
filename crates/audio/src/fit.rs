@@ -98,6 +98,22 @@ pub struct Fit {
 /// Returns an empty fit for an empty curve or a budget of zero, which is the
 /// "no correction" case rather than an error.
 pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
+    fit_curve_with(curve, max_bands, None)
+}
+
+/// A band of the spectrum whose errors count `weight` times when choosing
+/// where the next peaking filter goes, plus a refinement pass on the peaks.
+/// The learned game layer uses it so the 1.6-5 kHz detail lift survives
+/// the fit with a small band budget.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Emphasis {
+    pub lo_hz: f64,
+    pub hi_hz: f64,
+    pub weight: f64,
+}
+
+/// [`fit_curve`], optionally emphasising one region.
+pub fn fit_curve_with(curve: &[(f32, f32)], max_bands: usize, emphasis: Option<Emphasis>) -> Fit {
     let budget = max_bands.min(MAX_BANDS);
     if curve.len() < 2 || budget == 0 {
         return Fit { bands: Vec::new(), max_error_db: 0.0, rms_error_db: 0.0 };
@@ -175,7 +191,7 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
     let mut peak_centres: Vec<f64> = Vec::new();
     while bands.len() < budget {
         let Some((idx, residual)) =
-            best_peak_candidate(&grid, &target, &current, &peak_centres, &shelves)
+            best_peak_candidate(&grid, &target, &current, &peak_centres, &shelves, emphasis)
         else {
             break;
         };
@@ -186,6 +202,25 @@ pub fn fit_curve(curve: &[(f32, f32)], max_bands: usize) -> Fit {
         place(FilterKind::Peaking, grid[idx], residual, PEAK_Q, &mut bands, &mut current);
     }
 
+    if emphasis.is_some() {
+        // Refine the peaks' gains a few times against everything else, so
+        // overlapping filters land on the target instead of under it.
+        for _ in 0..4 {
+            for i in 0..bands.len() {
+                if bands[i].kind != FilterKind::Peaking {
+                    continue;
+                }
+                let hz = bands[i].freq_hz as f64;
+                let err = sample_curve(curve, hz) - response_db(&bands, hz);
+                let g = (bands[i].gain_db as f64 + 0.8 * err)
+                    .clamp(-MAX_BAND_GAIN_DB, MAX_BAND_GAIN_DB);
+                bands[i].gain_db = g as f32;
+            }
+        }
+        for (slot, &f) in current.iter_mut().zip(grid.iter()) {
+            *slot = response_db(&bands, f);
+        }
+    }
     let (max_error_db, rms_error_db) = error_stats(&target, &current);
     Fit { bands, max_error_db, rms_error_db }
 }
@@ -224,7 +259,12 @@ fn best_peak_candidate(
     current: &[f64],
     peak_centres: &[f64],
     shelves: &[(f64, f64)],
+    emphasis: Option<Emphasis>,
 ) -> Option<(usize, f64)> {
+    let weight = |hz: f64| match emphasis {
+        Some(e) if (e.lo_hz..=e.hi_hz).contains(&hz) => e.weight,
+        _ => 1.0,
+    };
     let mut best: Option<(usize, f64)> = None;
     for (i, (&t, &c)) in target.iter().zip(current).enumerate() {
         let hz = grid[i];
@@ -241,7 +281,8 @@ fn best_peak_candidate(
         {
             continue;
         }
-        if best.is_none_or(|(_, b): (usize, f64)| e.abs() > b.abs()) {
+        if best.is_none_or(|(j, b): (usize, f64)| e.abs() * weight(hz) > b.abs() * weight(grid[j]))
+        {
             best = Some((i, e));
         }
     }
