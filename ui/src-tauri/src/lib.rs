@@ -192,6 +192,62 @@ async fn skip_update(version: String) -> CmdResult<relay_core::update::UpdateSta
     update_call(Method::SkipUpdate { version }).await
 }
 
+/// S47: every learn method but export answers with the game's learn view.
+async fn learn_call(method: Method) -> CmdResult<relay_core::learned_display::LearnView> {
+    match call(method).await? {
+        Reply::LearnDisplay { view } => Ok(*view),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_display_status(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayStatus { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_set(
+    exe: String,
+    enabled: bool,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplaySet { exe, enabled }).await
+}
+
+#[tauri::command]
+async fn learn_display_apply(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayApply { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_relearn(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayRelearn { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_reset(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayReset { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_export(
+    exe: String,
+    name: Option<String>,
+    note: String,
+) -> CmdResult<String> {
+    match call(Method::LearnDisplayExport { exe, name, note }).await? {
+        Reply::GameDisplayFile { json } => Ok(json),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_display_import(
+    exe: String,
+    json: String,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayImport { exe, json }).await
+}
+
 #[tauri::command]
 async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::GetUiPrefs).await? {
@@ -459,6 +515,22 @@ struct PreviewOut {
     processed: String,
     sample_rate: u32,
     hrtf_applied: bool,
+}
+
+/// S46: `GameEq` reply as the frontend reads it (`GameEqReply` in ipc.ts).
+#[derive(serde::Serialize)]
+struct GameEqOut {
+    status: relay_core::game_eq::GameEqStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export: Option<relay_core::game_eq::GameEqExport>,
+}
+
+#[tauri::command]
+async fn game_eq(id: Uuid, action: relay_core::game_eq::GameEqAction) -> CmdResult<GameEqOut> {
+    match call(Method::GameEq { id, action }).await? {
+        Reply::GameEq { status, export } => Ok(GameEqOut { status: *status, export }),
+        other => Err(unexpected(other).into()),
+    }
 }
 
 #[tauri::command]
@@ -1133,6 +1205,13 @@ pub fn run() {
             install_update,
             update_later,
             skip_update,
+            learn_display_status,
+            learn_display_set,
+            learn_display_apply,
+            learn_display_relearn,
+            learn_display_reset,
+            learn_display_export,
+            learn_display_import,
             list_hardware,
             save_hardware,
             delete_hardware,
@@ -1141,6 +1220,7 @@ pub fn run() {
             probe_hardware,
             import_curve,
             render_preview,
+            game_eq,
             share_capabilities,
             firewall_status,
             apo_status,

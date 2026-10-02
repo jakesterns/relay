@@ -280,6 +280,13 @@ pub enum Method {
     /// The user has seen the last-crash line; clear it and mark the records
     /// seen (S38).
     AckCrash,
+    /// S46: a profile's learned game EQ — read its status, or act on it
+    /// (learning switch, goal, auto-apply, Apply / Relearn / Reset, Import /
+    /// Export). Every action replies with the status after it.
+    GameEq {
+        id: Uuid,
+        action: crate::game_eq::GameEqAction,
+    },
     /// S45: what the updater knows and is doing.
     UpdateStatus,
     /// S45: "Check now" — check regardless of the daily limit.
@@ -292,6 +299,42 @@ pub enum Method {
     /// S45: "Skip this version".
     SkipUpdate {
         version: String,
+    },
+    /// S47: what Relay has learned about one game's look, per monitor.
+    LearnDisplayStatus {
+        exe: String,
+    },
+    /// S47: "Learn this game's look" on/off. With an imported look this is
+    /// "Keep learning to fine-tune for my monitor".
+    LearnDisplaySet {
+        exe: String,
+        enabled: bool,
+    },
+    /// S47: use the settled look (every monitor that has one).
+    LearnDisplayApply {
+        exe: String,
+    },
+    /// S47: drop the evidence and learn again; what is applied stays until
+    /// a new look settles.
+    LearnDisplayRelearn {
+        exe: String,
+    },
+    /// S47: forget everything for this game (learned, applied, imported).
+    LearnDisplayReset {
+        exe: String,
+    },
+    /// S47: the current game layer as a versioned JSON file.
+    LearnDisplayExport {
+        exe: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        note: String,
+    },
+    /// S47: apply a game display file now ("applied (imported)").
+    LearnDisplayImport {
+        exe: String,
+        json: String,
     },
     Subscribe,
     Shutdown,
@@ -341,6 +384,14 @@ pub enum Reply {
     /// Reply to every S45 update method.
     Update {
         status: crate::update::UpdateStatus,
+    },
+    /// Reply to every S47 learn method except export.
+    LearnDisplay {
+        view: Box<crate::learned_display::LearnView>,
+    },
+    /// Reply to `LearnDisplayExport`: the file's text, for the shell to save.
+    GameDisplayFile {
+        json: String,
     },
     /// Reply to `ListAudioDevices` (S40).
     AudioDevices {
@@ -423,6 +474,12 @@ pub enum Reply {
     Presets {
         presets: Vec<SharePresetDef>,
         recording: RecordingSettings,
+    },
+    /// Reply to `GameEq` (S46). `export` is set for an Export.
+    GameEq {
+        status: Box<crate::game_eq::GameEqStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        export: Option<crate::game_eq::GameEqExport>,
     },
     Ok,
     Error {
@@ -1093,6 +1150,41 @@ mod tests {
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(v["type"], "audio_devices");
         assert!(v["devices"]["render"].is_array() && v["devices"]["capture"].is_array());
+    }
+
+    #[test]
+    fn learn_display_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (learnDisplay*).
+        let m = Method::LearnDisplaySet { exe: "game.exe".into(), enabled: true };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "learn_display_set");
+        assert_eq!(v["params"]["exe"], "game.exe");
+        assert_eq!(v["params"]["enabled"], true);
+        for (name, json) in [
+            ("learn_display_status", r#"{"exe":"g.exe"}"#),
+            ("learn_display_apply", r#"{"exe":"g.exe"}"#),
+            ("learn_display_relearn", r#"{"exe":"g.exe"}"#),
+            ("learn_display_reset", r#"{"exe":"g.exe"}"#),
+            ("learn_display_export", r#"{"exe":"g.exe"}"#),
+            ("learn_display_import", r#"{"exe":"g.exe","json":"{}"}"#),
+        ] {
+            let line = format!(r#"{{"id":2,"method":"{name}","params":{json}}}"#);
+            assert!(serde_json::from_str::<Request>(&line).is_ok(), "{name}");
+        }
+        let r: Request = serde_json::from_str(
+            r#"{"id":3,"method":"learn_display_export","params":{"exe":"g.exe","note":"n"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.method, Method::LearnDisplayExport { name: None, .. }));
+        let store = crate::learned_display::LearnStore::load(std::env::temp_dir().join("none"));
+        let view = crate::learned_display::view(&store, "g.exe", false, &|_| Default::default());
+        let v = serde_json::to_value(Reply::LearnDisplay { view: Box::new(view) }).unwrap();
+        assert_eq!(v["type"], "learn_display");
+        assert_eq!(v["view"]["status"], "off");
+        assert!(v["view"]["monitors"].is_array());
+        assert!(v["view"]["tournament"].as_str().unwrap().starts_with("Relay's visual"));
+        let v = serde_json::to_value(Reply::GameDisplayFile { json: "{}".into() }).unwrap();
+        assert_eq!(v["type"], "game_display_file");
     }
 
     #[test]

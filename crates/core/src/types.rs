@@ -74,6 +74,43 @@ pub struct AudioSettings {
     /// behaviour.
     #[serde(default = "default_true")]
     pub headset_correction: bool,
+    /// S46: learn this game's EQ from its own audio. `None` = the default:
+    /// on when the profile has audio processing and its game layer was not
+    /// imported, off otherwise. `Some` is the user's explicit choice. Either
+    /// way nothing is learned until a goal is chosen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learn_game_eq: Option<bool>,
+    /// S46: what the player wants from this game. Asked before learning
+    /// starts; changing it re-derives the curve from the saved aggregates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_eq_goal: Option<relay_audio::learn::Goal>,
+    /// S46: take a newly converged curve without asking.
+    #[serde(default)]
+    pub game_eq_auto_apply: bool,
+    /// S46: the game layer this profile applies, learned or imported. Stacks
+    /// after the headset correction and before the bands above. Independent
+    /// of the headset: changing the listening device only changes the
+    /// correction underneath it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_eq: Option<relay_audio::learn::GameEqLayer>,
+}
+
+impl AudioSettings {
+    /// Whether learning is switched on (before the goal question).
+    pub fn learning_on(&self) -> bool {
+        match self.learn_game_eq {
+            Some(on) => on,
+            None => {
+                crate::audio_bridge::wants_processing(self)
+                    && !self.game_eq.as_ref().is_some_and(|l| l.is_imported())
+            }
+        }
+    }
+
+    /// Whether the learner should actually run: switched on and a goal chosen.
+    pub fn learning_active(&self) -> bool {
+        self.learning_on() && self.game_eq_goal.is_some()
+    }
 }
 
 /// GPU-side colour controls (NvAPI / ADLX). Units follow the vendor APIs.
@@ -263,6 +300,12 @@ pub struct Foreground {
     /// game's process, which anti-cheat protects (2026-09-29).
     #[serde(default)]
     pub hwnd: u64,
+    /// Full image path, read with the one query-limited open the exe name
+    /// already needs. Used only to fingerprint the game build (S47: file
+    /// size and modified time, from the file on disk). Never sent over IPC:
+    /// it can carry the user's name.
+    #[serde(default, skip_serializing)]
+    pub image: String,
 }
 
 /// A running process that owns a visible window (for the exe picker).
@@ -302,6 +345,9 @@ pub enum AudioChainState {
     /// The game opened the endpoint in WASAPI-exclusive mode: APO is bypassed
     /// by Windows and the user must be told.
     ExclusiveBypassed,
+    /// The profile has audio processing but Relay's audio effect is not
+    /// registered on the output: nothing is audible. Never claim "active".
+    NotInstalled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -560,10 +560,14 @@ impl AudioControl for ApoAudioControl {
             return Ok(AudioChainState::Bypass);
         }
         let Some(guid) = target_endpoint() else { return Ok(AudioChainState::Bypass) };
+        // The parameter block can outlive an uninstall; only a registered
+        // effect is heard. Say so instead of "active".
+        if !fx_has_relay(&guid) {
+            return Ok(AudioChainState::NotInstalled);
+        }
         let Some(s) = open_endpoint(&guid) else {
-            // APO not installed on this output / not running: nothing
-            // applied, nothing to restore.
-            return Ok(AudioChainState::Bypass);
+            // Registered but not loaded yet: nothing applied, nothing to restore.
+            return Ok(AudioChainState::NotInstalled);
         };
         s.block().write_params(&params);
         s.block().set_bypass(false);

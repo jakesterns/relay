@@ -5,12 +5,14 @@ import { useCore } from "../lib/core";
 import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
-  api, isTauri, presetAudioLabel,
-  type ApoStatus, type ColorInfo, type EqBand, type GpuColor, type Limiter, type Preview, type Profile,
+  api, GOALS, isTauri, presetAudioLabel,
+  type ApoStatus, type ColorInfo, type EqBand, type GameEqAction, type GameEqExport, type GameEqStatus,
+  type Goal, type GpuColor, type Limiter, type Preview, type Profile,
   type SharePreset, type SharePresetDef,
 } from "../lib/ipc";
 import { buildRamp, cascadeDb } from "../lib/honest";
 import { colorSummary } from "./Profiles";
+import { LearnLookCard } from "../components/LearnLookCard";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -68,6 +70,22 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
     clearDraft();
   };
   const discard = () => clearDraft();
+  /** S46: a game-EQ action saved the profile in the core. Bring its game-EQ
+   *  fields into whatever this screen holds, so a later Save of an unsaved
+   *  slider edit cannot put the old values back. */
+  const syncGameEq = (fresh: Profile) => {
+    const kept = getDraft()?.profile;
+    if (!kept || kept.id !== fresh.id) {
+      setLoaded(fresh);
+      return;
+    }
+    const next = structuredClone(kept);
+    for (const k of ["learn_game_eq", "game_eq_goal", "game_eq_auto_apply", "game_eq"] as const) {
+      if (fresh.audio[k] === undefined) delete next.audio[k];
+      else (next.audio as unknown as Record<string, unknown>)[k] = structuredClone(fresh.audio[k]);
+    }
+    setDraft(next);
+  };
 
   // The edit belongs to a profile that is no longer the one in focus.
   const stray = kept && subjectId !== null && kept.profile.id !== subjectId ? kept.profile : null;
@@ -93,7 +111,7 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
         )}
         <Chips label="Section" value={section} onChange={onSection}
           options={[{ key: "audio", label: "Audio" }, { key: "display", label: "Display" }, { key: "sharing", label: "Sharing" }]} />
-        {section === "audio" && <AudioSection draft={draft} update={update} />}
+        {section === "audio" && <AudioSection draft={draft} update={update} onGameEq={syncGameEq} />}
         {section === "display" && <DisplaySection draft={draft} update={update} />}
         {section === "sharing" && <SharingSection draft={draft} update={update} />}
       </section>
@@ -161,9 +179,10 @@ function setGain(p: Profile, index: number, gain: number) {
   p.audio.bands.sort((a, b) => a.freq_hz - b.freq_hz);
 }
 
-function AudioSection({ draft, update }: {
+function AudioSection({ draft, update, onGameEq }: {
   draft: Profile | null;
   update: (fn: (p: Profile) => void) => void;
+  onGameEq: (fresh: Profile) => void;
 }) {
   const { hardware } = useCore();
   const gains = gainsOf(draft);
@@ -185,14 +204,202 @@ function AudioSection({ draft, update }: {
               onChange={(v) => update((p) => setGain(p, i, v))} />
           ))}
         </Card>
-        <Card title="Tune with your assistant">
-          <p className="p">Planned for a later release, not built yet: compare footsteps against explosions and ambience in live game audio, then adjust the profile for this headset using your own API key.</p>
-          <p className="note">Until then, the A/B listening test below renders the same clip with and without your chain so you can judge a change by ear.</p>
-        </Card>
+        <GameEqCard profileId={draft?.id ?? null} onChanged={onGameEq} />
       </div>
       <HeadsetCorrectionCard draft={draft} update={update} />
       <AbListeningCard profileId={draft?.id ?? null} />
     </>
+  );
+}
+
+/** How often the card re-reads progress while the learner is listening. */
+const GAME_EQ_POLL_MS = 5000;
+
+function gameEqStateText(s: GameEqStatus): string {
+  switch (s.state) {
+    case "off": return "Off";
+    case "learning":
+      if (s.needs_goal) return "Waiting for a goal";
+      return s.learning_now ? `Learning · ${s.progress}%` : `Learning · ${s.progress}% · resumes when the game is in focus`;
+    case "ready": return "Ready · a learned curve is waiting";
+    case "applied":
+      return s.source === "imported" ? "Applied (imported)"
+        : s.source === "tuned" ? "Applied (imported, fine-tuned here)" : "Applied";
+    case "needs_relearn": return "Game updated · relearning, the previous curve stays on";
+  }
+}
+
+/** S46: "Learn this game's sound". Relay listens to the focused game's own
+ *  audio, keeps statistics only, and derives a game layer for the goal the
+ *  player picks — asked before any learning starts. */
+function GameEqCard({ profileId, onChanged }: {
+  profileId: string | null;
+  onChanged: (fresh: Profile) => void;
+}) {
+  const [status, setStatus] = useState<GameEqStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [exported, setExported] = useState<GameEqExport | null>(null);
+
+  useEffect(() => {
+    setStatus(null);
+    setAsking(false);
+    setExported(null);
+    if (!profileId) return;
+    let live = true;
+    api.gameEq(profileId, { kind: "status" })
+      .then((r) => { if (live) setStatus(r.status); })
+      .catch(() => { if (live) setStatus(null); });
+    return () => { live = false; };
+  }, [profileId]);
+
+  // Progress moves only while the game is in focus and the learner listens.
+  const listening = !!status?.learning_now;
+  useEffect(() => {
+    if (!profileId || !listening) return;
+    const t = setInterval(() => {
+      api.gameEq(profileId, { kind: "status" }).then((r) => setStatus(r.status)).catch(() => {});
+    }, GAME_EQ_POLL_MS);
+    return () => clearInterval(t);
+  }, [profileId, listening]);
+
+  const act = async (action: GameEqAction): Promise<boolean> => {
+    if (!profileId) return false;
+    setErr(null);
+    setBusy(true);
+    try {
+      const r = await api.gameEq(profileId, action);
+      setStatus(r.status);
+      if (r.export) setExported(r.export);
+      if (action.kind !== "status" && action.kind !== "export") {
+        onChanged(await api.getProfile(profileId));
+      }
+      return true;
+    } catch (e) {
+      setErr(errText(e));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const choose = async (goal: Goal) => {
+    if (!(await act({ kind: "set_goal", goal }))) return;
+    if (!status?.learning_on) await act({ kind: "set_learning", enabled: true });
+    setAsking(false);
+  };
+
+  const readFile = (f: File | undefined) => {
+    if (!f) return;
+    void f.text().then(setImportText).catch((e) => setErr(errText(e)));
+  };
+
+  const { state: core } = useCore();
+  const off = !profileId || !status || busy;
+  const imported = status?.source === "imported" || status?.source === "tuned";
+  const canExport = !!status && (!!status.applied || !!status.offer);
+  const prompt = !!status && (asking || status.needs_goal);
+  const goalLabel = GOALS.find((g) => g.key === status?.goal)?.label;
+
+  return (
+    <Card title="Learn this game's sound">
+      {!profileId ? <p className="p">No profile selected.</p> : !status ? <p className="p">Reading…</p> : (
+        <>
+          <Toggle on={status.learning_on}
+            label={imported ? "Keep learning to fine-tune for my setup" : "Learn this game's sound"}
+            sub={imported
+              ? "Blends the imported curve towards what Relay hears on this PC, under the same rules."
+              : "On by default for games with audio processing. Listens only while the game is in focus."}
+            onChange={off ? undefined : (v) => {
+              if (v && !status.goal) { setAsking(true); return; }
+              void act({ kind: "set_learning", enabled: v });
+            }} />
+          {prompt ? (
+            <div role="group" aria-label="Choose a goal" className="goals">
+              <p className="p"><b>What do you want from this game?</b> Learning starts once you choose.</p>
+              {GOALS.map((g) => (
+                <button key={g.key} type="button" className="btn q" disabled={busy}
+                  aria-label={g.label} onClick={() => void choose(g.key)}>
+                  <b>{g.label}</b> <small>{g.line}</small>
+                </button>
+              ))}
+              {asking && !status.needs_goal && (
+                <button type="button" className="btn q" onClick={() => setAsking(false)}>Not now</button>
+              )}
+            </div>
+          ) : status.goal && (
+            <Chips label="Goal" value={status.goal}
+              onChange={(g) => { if (!busy) void act({ kind: "set_goal", goal: g }); }}
+              options={GOALS.map((g) => ({ key: g.key, label: g.label }))} />
+          )}
+          <Kv k="State" v={gameEqStateText(status)} />
+          {imported && !status.learning_on && (
+            <p className="note" data-testid="game-eq-paused">
+              Learning paused because you imported this EQ. Turn on to fine-tune.
+            </p>
+          )}
+          {status.applied && core.audio_chain === "notinstalled" && (
+            <p className="note" data-testid="game-eq-inaudible">
+              Learned, not audible: audio effects are not installed on this output.
+            </p>
+          )}
+          {(status.state === "learning" || status.state === "needs_relearn") && !status.needs_goal && (
+            <div className="meter" role="progressbar" aria-label="Learning progress"
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={status.progress}>
+              <i style={{ width: `${status.progress}%` }} />
+            </div>
+          )}
+          {status.learning_on && !status.needs_goal && (
+            <Kv k="Heard" mono
+              v={`${status.targets}/${status.min_targets} ${status.goal === "dialogue" ? "voice" : "cues"} · ${status.maskers}/${status.min_maskers} loud · ${status.active_minutes} min`} />
+          )}
+          {goalLabel && status.goal === "dialogue" && status.distinct_voices > 0 && (
+            <Kv k="Voices" v={`${status.distinct_voices} distinct`} />
+          )}
+          <div className="ab">
+            <button className="btn acc" disabled={off || status.state !== "ready"}
+              onClick={() => void act({ kind: "apply" })}>Apply</button>
+            <ConfirmButton label="Relearn" confirm="Forget and relearn" disabled={off}
+              onConfirm={() => void act({ kind: "relearn" })} />
+            <ConfirmButton label="Reset" confirm="Remove game EQ" disabled={off}
+              onConfirm={() => void act({ kind: "reset" })} />
+            <button className="btn q" disabled={off} onClick={() => setImporting(!importing)}>Import…</button>
+            <button className="btn q" disabled={off || !canExport}
+              onClick={() => void act({ kind: "export", note: "" })}>Export…</button>
+          </div>
+          <Toggle on={status.auto_apply} label="Apply new curves automatically"
+            sub="Otherwise Relay offers them and waits for Apply."
+            onChange={off ? undefined : (v) => void act({ kind: "set_auto_apply", enabled: v })} />
+          {importing && (
+            <div className="import">
+              <label className="field">
+                <span>Game EQ file</span>
+                <textarea aria-label="Game EQ file" rows={4} value={importText}
+                  placeholder="Paste a .json game EQ, or choose a file" onChange={(e) => setImportText(e.target.value)} />
+              </label>
+              <input type="file" accept=".json,application/json" aria-label="Choose a game EQ file"
+                onChange={(e) => readFile(e.target.files?.[0])} />
+              <button className="btn acc" disabled={busy || !importText.trim()}
+                onClick={() => void act({ kind: "import", text: importText }).then((ok) => {
+                  if (ok) { setImporting(false); setImportText(""); }
+                })}>Import</button>
+            </div>
+          )}
+          {status.notice && <p className="note" role="status">{status.notice}</p>}
+          {exported && (
+            <p className="note" data-testid="game-eq-exported">
+              Saved to <span className="m">{exported.path}</span>{" "}
+              <button type="button" className="btn q" onClick={() => void navigator.clipboard?.writeText(exported.text)}>Copy</button>
+            </p>
+          )}
+          <ErrorNote text={err} onDismiss={() => setErr(null)} />
+        </>
+      )}
+      <p className="note">Listens only to this game's own audio, keeps statistics — never a recording — and nothing leaves this PC. Voice chat in other apps is never heard; in-game player chat is left out.</p>
+    </Card>
   );
 }
 
@@ -256,7 +463,8 @@ function ChainReadout({ chain, hrtf, tamer }: { chain: string; hrtf: boolean; ta
   return (
     <Card>
       <Kv k="Processing" v={chain === "active" ? `${ms.toFixed(1)} ms` : "0 ms"} mono />
-      <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Bypassed by game (exclusive)"} />
+      <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active"
+        : chain === "notinstalled" ? "Not audible · audio effects not installed" : "Bypassed by game (exclusive)"} />
       <Kv k="Route" v={route} />
     </Card>
   );
@@ -573,6 +781,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
           )}
         </Card>
       </div>
+      <LearnLookCard exe={draft?.game.exe ?? null} />
     </>
   );
 }

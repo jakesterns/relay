@@ -9,7 +9,7 @@ import { renderScreen, settle } from "../test/render";
 import { card, field, inCard, kv } from "../test/dom";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
-import { Profiles } from "./Profiles";
+import { Profiles, scanSummary } from "./Profiles";
 
 let core: FakeCore;
 
@@ -252,6 +252,14 @@ describe("the hardware library", () => {
     await h.user.click(screen.getByRole("button", { name: "Scan monitor controls" }));
     await settle();
     expect(tauri.lastCall("probe_hardware")).toBeDefined();
+    // The result is said, not just applied.
+    expect(screen.getByRole("status")).toHaveTextContent(/:/);
+  });
+
+  it("the scan summary names found controls or the lack of a response", () => {
+    expect(scanSummary([{ name: "AW2518H" }])).toMatch(/AW2518H: no DDC\/CI response/);
+    expect(scanSummary([{ name: "LG", ddc: [0x10, 0x12] }])).toMatch(/LG: controls: brightness, contrast/);
+    expect(scanSummary([])).toBe("No monitors found.");
   });
 
   it("names the DDC/CI controls the panel actually advertises", async () => {
