@@ -196,6 +196,9 @@ function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: stri
           )}
         </>
       )}
+      {!m.converged && r.candidate && (
+        <Kv k="So far" v={`shadows ${pct(r.candidate.shadow)} · colour ${pct(r.candidate.saturation)} · highlights ${pct(r.candidate.highlight)}${m.candidate_adjustments ? ` → gamma ${m.candidate_adjustments.gamma.toFixed(2)} · lift ${m.candidate_adjustments.shadow_lift} · vibrance ${m.candidate_adjustments.vibrance}` : ""}`} mono />
+      )}
       {m.converged && (
         <Kv k="Learned" v={`shadows ${pct(m.converged.shadow)} · colour ${pct(m.converged.saturation)} · highlights ${pct(m.converged.highlight)}`} mono />
       )}

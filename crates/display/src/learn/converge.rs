@@ -56,6 +56,13 @@ pub const MIN_GAMEPLAY_FRAMES: u64 = 600;
 pub const MIN_FRAMES_PER_SCENE: f64 = 30.0;
 /// Distinct scenes needed: one dark level only would teach the wrong thing.
 pub const MIN_SCENES: usize = 3;
+/// A game whose frames sit overwhelmingly in one scene bucket (a night-only
+/// raid) is legitimately one-scene: it may converge without `MIN_SCENES`
+/// once this share of its weight is in one bucket ...
+pub const DOMINANT_SCENE_SHARE: f64 = 0.9;
+/// ... and it has this many gameplay frames (15 min at 1 fps: more than the
+/// varied case, since one scene is less evidence per frame).
+pub const MIN_FRAMES_ONE_SCENE: u64 = 900;
 /// Gameplay frames between checkpoints (2 min at 1 fps).
 pub const CHECKPOINT_FRAMES: u32 = 120;
 /// Consecutive checkpoints that must agree for convergence.
@@ -153,6 +160,10 @@ pub struct Readiness {
     /// Largest disagreement among the kept checkpoints, per applied axis.
     #[serde(default)]
     pub delta: Option<CheckpointDelta>,
+    /// The newest checkpoint's look, before convergence too, so a tester can
+    /// see what is being derived.
+    #[serde(default)]
+    pub candidate: Option<LookTargets>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
 }
@@ -174,8 +185,33 @@ impl Learner {
         self.agg.apl_buckets.iter().filter(|w| **w >= MIN_FRAMES_PER_SCENE).count()
     }
 
+    /// The content is overwhelmingly one scene (see [`DOMINANT_SCENE_SHARE`]).
+    pub fn single_scene(&self) -> bool {
+        let total: f64 = self.agg.apl_buckets.iter().sum();
+        let top = self.agg.apl_buckets.iter().cloned().fold(0.0, f64::max);
+        total > 0.0 && top / total >= DOMINANT_SCENE_SHARE
+    }
+
+    fn scenes_needed(&self) -> usize {
+        if self.single_scene() {
+            1
+        } else {
+            MIN_SCENES
+        }
+    }
+
+    fn frames_needed(&self) -> u64 {
+        if self.single_scene() {
+            MIN_FRAMES_ONE_SCENE
+        } else {
+            MIN_GAMEPLAY_FRAMES
+        }
+    }
+
+    /// Varied content needs `MIN_SCENES`; content that really is one scene
+    /// needs more frames instead.
     fn has_evidence(&self) -> bool {
-        self.agg.frames >= MIN_GAMEPLAY_FRAMES && self.scenes() >= MIN_SCENES
+        self.agg.frames >= self.frames_needed() && self.scenes() >= self.scenes_needed()
     }
 
     fn stable_checkpoints(&self) -> usize {
@@ -204,8 +240,8 @@ impl Learner {
         // Reported whether or not there is evidence yet: "0 stable" while
         // checkpoints agree read as stuck on PC2. Convergence still needs both.
         let stable = self.stable_checkpoints();
-        let ev = 0.5 * (frames as f32 / MIN_GAMEPLAY_FRAMES as f32).min(1.0)
-            + 0.3 * (scenes as f32 / MIN_SCENES as f32).min(1.0);
+        let ev = 0.5 * (frames as f32 / self.frames_needed() as f32).min(1.0)
+            + 0.3 * (scenes as f32 / self.scenes_needed() as f32).min(1.0);
         let conv = if self.converged.is_some() {
             0.2
         } else {
@@ -214,9 +250,10 @@ impl Learner {
         };
         Readiness {
             frames,
-            frames_needed: MIN_GAMEPLAY_FRAMES,
+            frames_needed: self.frames_needed(),
             scenes,
-            scenes_needed: MIN_SCENES,
+            scenes_needed: self.scenes_needed(),
+            candidate: self.checkpoints.last().copied(),
             stable_checkpoints: stable,
             checkpoints_needed: CONVERGE_CHECKPOINTS,
             checkpoints: self.checkpoints.len(),
@@ -229,7 +266,14 @@ impl Learner {
     /// A different game build: the evidence is for another game now.
     /// Returns true when it reset.
     pub fn check_build(&mut self, build: &str) -> bool {
-        if self.build == build {
+        if self.build == build || build.is_empty() {
+            return false;
+        }
+        // Evidence gathered while the build was unknown (the image path was
+        // not readable then) belongs to this build: adopt it, don't relearn.
+        // This is what turned a 15 s Alt-Tab into "learning afresh" on PC2.
+        if self.build.is_empty() {
+            self.build = build.to_string();
             return false;
         }
         self.build = build.to_string();

@@ -423,9 +423,9 @@ fn not_ready_without_enough_frames() {
 }
 
 #[test]
-fn not_ready_with_one_kind_of_scene() {
+fn one_kind_of_scene_needs_the_longer_one_scene_budget() {
     let mut l = Learner::new("b1");
-    for _ in 0..MIN_GAMEPLAY_FRAMES * 3 {
+    for _ in 0..MIN_FRAMES_ONE_SCENE - 1 {
         l.observe(&gameplay(0.3, 0.2));
     }
     assert_eq!(l.scenes(), 1);
@@ -815,4 +815,63 @@ fn pc2_constants() {
     assert_eq!(ACTIVE_BLOCK_DELTA, 0.003);
     assert_eq!((LOADING_UNIFORM_FRAC, LOADING_NEAR), (0.95, 0.02));
     assert_eq!(MIN_ACTIVE_FRAC, 0.05);
+}
+
+// --- r51 ---------------------------------------------------------------------
+
+#[test]
+fn a_night_only_game_converges_and_asks_for_shadow() {
+    let mut l = Learner::new("b1");
+    let mut frames = 0;
+    while l.phase() == Phase::Learning && frames < 3000 {
+        l.observe(&gameplay(0.04 + (frames % 7) as f32 * 0.005, 0.2));
+        frames += 1;
+    }
+    assert!(l.single_scene());
+    assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
+    assert!(frames as u64 >= MIN_FRAMES_ONE_SCENE);
+    assert!(l.converged.unwrap().shadow > 0.0);
+    assert_eq!(l.readiness().scenes_needed, 1);
+}
+
+#[test]
+fn varied_content_still_needs_three_scenes() {
+    let mut l = Learner::new("b1");
+    // 80 % night, 20 % daylight: not one scene, only two buckets.
+    for i in 0..3000 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert!(!l.single_scene());
+    assert_eq!(l.readiness().scenes_needed, MIN_SCENES);
+    assert_eq!(l.phase(), Phase::Learning);
+    assert_eq!((DOMINANT_SCENE_SHARE, MIN_FRAMES_ONE_SCENE), (0.9, 900));
+}
+
+#[test]
+fn an_unknown_build_adopts_the_first_fingerprint_without_relearning() {
+    let mut l = Learner::new("");
+    feed(&mut l, 300, 0.14);
+    assert!(!l.check_build("123-456"), "evidence kept");
+    assert_eq!((l.build.as_str(), l.agg.frames), ("123-456", 300));
+    // Stop, restart and resume with the same fingerprint: nothing lost.
+    let saved: Learner = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+    let mut resumed = saved;
+    assert!(!resumed.check_build("123-456"));
+    assert!(!resumed.check_build(""), "an unreadable path is not a new build");
+    feed(&mut resumed, 10, 0.14);
+    assert_eq!(resumed.agg.frames, 310);
+    // A real change still relearns.
+    assert!(resumed.check_build("999-1"));
+    assert_eq!(resumed.agg.frames, 0);
+}
+
+#[test]
+fn the_candidate_look_is_visible_before_convergence() {
+    let mut l = Learner::new("b1");
+    assert!(l.readiness().candidate.is_none());
+    for _ in 0..CHECKPOINT_FRAMES {
+        l.observe(&gameplay(0.3, 0.14));
+    }
+    assert_eq!(l.phase(), Phase::Learning);
+    assert_eq!(l.readiness().candidate.unwrap().shadow, 0.5);
 }

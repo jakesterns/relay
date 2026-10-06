@@ -283,6 +283,9 @@ pub struct MonitorLearnView {
     #[serde(default)]
     pub adjustments: Option<Adjustments>,
     pub excluded: u64,
+    /// What the newest checkpoint would apply on this panel (learning too).
+    #[serde(default)]
+    pub candidate_adjustments: Option<Adjustments>,
     /// Why frames were skipped, by kind, so a tester can see the cause.
     #[serde(default)]
     pub excluded_by: relay_display::learn::converge::Excluded,
@@ -302,6 +305,28 @@ pub struct LearnView {
     pub imported: Option<ImportedLook>,
     pub privacy: String,
     pub tournament: String,
+}
+
+/// The game-level status, agreeing with the monitors: the most advanced
+/// monitor state wins (Applied > Applied (imported) > Ready > Learning >
+/// HDR skipped > Off). With no monitor seen yet, the record decides.
+pub fn overall_status(rec: &GameRecord, monitors: &[MonitorLearnView]) -> LookStatus {
+    let rank = |s: LookStatus| match s {
+        LookStatus::Applied => 5,
+        LookStatus::AppliedImported => 4,
+        LookStatus::Ready => 3,
+        LookStatus::Learning => 2,
+        LookStatus::HdrSkipped => 1,
+        LookStatus::Off => 0,
+    };
+    let best = monitors.iter().map(|m| m.status).max_by_key(|s| rank(*s));
+    match best {
+        // A monitor that has learned nothing yet reads Off/Learning by the
+        // game's switch; keep that consistent at the top.
+        Some(LookStatus::Off) | None => rec.status(None),
+        Some(LookStatus::Learning) if !rec.enabled => rec.status(None),
+        Some(s) => s,
+    }
 }
 
 /// `names` maps monitor id → (display name, panel label).
@@ -335,15 +360,16 @@ pub fn view(
                 hdr_skipped: m.hdr_skipped,
                 status: rec.status(Some(&id)),
                 adjustments: rec.effective(&id).map(|look| realize(&look, &caps)),
+                candidate_adjustments: l.readiness().candidate.map(|c| realize(&c, &caps)),
                 excluded: ex.total(),
                 excluded_by: ex,
             }
         })
-        .collect();
+        .collect::<Vec<MonitorLearnView>>();
     LearnView {
         exe: key(exe),
         enabled: rec.enabled,
-        status: rec.status(None),
+        status: overall_status(&rec, &monitors),
         sampling,
         monitors,
         imported: rec.imported.clone(),

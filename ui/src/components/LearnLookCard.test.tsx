@@ -78,6 +78,15 @@ describe("the learn-this-game's-look card", () => {
     expect(screen.getByText(/checkpoints 1 stable of 2/)).toBeInTheDocument();
   });
 
+  it("shows the candidate look while still learning", async () => {
+    seed({ monitors: [monitor({
+      readiness: { ...monitor().readiness, candidate: { shadow: 0.35, saturation: 0.1, highlight: 0 } },
+      candidate_adjustments: { gamma: 1.05, shadow_lift: 0, vibrance: 51, notes: [] },
+    })] });
+    await mount();
+    expect(screen.getByText(/shadows 35% · colour 10% · highlights 0% → gamma 1\.05 · lift 0 · vibrance 51/)).toBeInTheDocument();
+  });
+
   it("Apply is offered once a look has settled, and applies it", async () => {
     const look = { shadow: 0.4, saturation: 0.1, highlight: 0 };
     seed({ status: "ready", monitors: [monitor({ phase: "converged", converged: look, status: "ready" })] });

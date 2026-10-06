@@ -200,6 +200,8 @@ export interface LookReadiness {
   checkpoints?: number; scene_frames?: number[];
   /** Largest disagreement among kept checkpoints, in applied units. */
   delta?: { gamma: number; shadow_lift: number; vibrance: number } | null;
+  /** The newest checkpoint's look, shown while still learning. */
+  candidate?: LookTargets | null;
 }
 export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
 export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
@@ -208,6 +210,8 @@ export interface MonitorLearnView {
   readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
   use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
   adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;
+  /** What the newest checkpoint would apply on this panel. */
+  candidate_adjustments?: LookAdjustments | null;
 }
 export interface ImportedLook { look: LookTargets; note: string }
 export interface LearnView {

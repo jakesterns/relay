@@ -320,6 +320,22 @@ fn a_sampler_restart_keeps_the_learners_evidence() {
 }
 
 #[test]
+fn top_level_status_agrees_with_the_monitors() {
+    let mut s = tmp_store("overall");
+    s.game_mut("game.exe").enabled = true;
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    let v = view(&s, "game.exe", true, &|_| ("x".into(), "WOLED".into()));
+    assert_eq!(v.monitors[0].status, LookStatus::Ready);
+    assert_eq!(v.status, LookStatus::Ready, "was 'learning' on PC2");
+    // The candidate shows even before Apply, fitted to the panel.
+    assert!(v.monitors[0].candidate_adjustments.is_some());
+    let empty = view(&tmp_store("overall2"), "game.exe", false, &|_| Default::default());
+    assert_eq!(empty.status, LookStatus::Off);
+}
+
+#[test]
 fn build_fingerprint_changes_with_the_file() {
     let dir = std::env::temp_dir().join(format!("relay-s47-fp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

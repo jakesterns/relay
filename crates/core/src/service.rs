@@ -1054,22 +1054,20 @@ impl Service {
         let now = crate::winloop::foreground_hwnd();
         let mut g = self.inner.lock();
         let known = g.state.foreground.as_ref().map(|f| f.hwnd).unwrap_or(0);
-        if now == 0 || now == known {
-            g.fg_mismatch = 0;
-            if now != 0 {
+        let (count, step) = fg_reconcile_step(now, known, g.fg_mismatch);
+        g.fg_mismatch = count;
+        match step {
+            FgStep::Wait => return,
+            FgStep::Same => {
                 if let Some(t) = crate::winloop::window_title(now) {
                     if let Some(f) = g.state.foreground.as_mut() {
                         f.title = t;
                     }
                 }
+                return;
             }
-            return;
+            FgStep::CatchUp => {}
         }
-        g.fg_mismatch = g.fg_mismatch.saturating_add(1);
-        if g.fg_mismatch < 2 {
-            return;
-        }
-        g.fg_mismatch = 0;
         drop(g);
         if let Some(fg) = crate::winloop::current_foreground() {
             warn!(exe = %fg.exe, pid = fg.pid, "missed a foreground change; catching up");
@@ -1331,6 +1329,38 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
         }
     }
     Some(t)
+}
+
+/// What one reconcile tick should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FgStep {
+    /// Nothing yet (no window, or one mismatch so far).
+    Wait,
+    /// The known window is still in front.
+    Same,
+    /// Two mismatching ticks: the hook missed a change.
+    CatchUp,
+}
+
+/// Mismatches needed before catching up.
+const FG_MISMATCH_TICKS: u8 = 2;
+
+/// Pure step of the foreground reconcile. A `0` window (a toast or the
+/// shell between windows) neither confirms nor resets: only a match resets
+/// the count. Resetting on 0 made a switch take ~8 s on PC2 instead of ~2.
+fn fg_reconcile_step(now: u64, known: u64, count: u8) -> (u8, FgStep) {
+    if now == 0 {
+        return (count, FgStep::Wait);
+    }
+    if now == known {
+        return (0, FgStep::Same);
+    }
+    let count = count.saturating_add(1);
+    if count < FG_MISMATCH_TICKS {
+        (count, FgStep::Wait)
+    } else {
+        (0, FgStep::CatchUp)
+    }
 }
 
 /// S47: the profile with this game's learned (or imported) look folded into
@@ -3222,4 +3252,24 @@ fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Sta
         }
     }
     crate::audiodg::status(&Absent, &crate::audiodg::record_file(apo_backup_dir))
+}
+
+#[cfg(test)]
+mod fg_reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn zero_windows_do_not_reset_the_count() {
+        let (c, s) = fg_reconcile_step(7, 5, 0);
+        assert_eq!((c, s), (1, FgStep::Wait));
+        let (c, s) = fg_reconcile_step(0, 5, c);
+        assert_eq!((c, s), (1, FgStep::Wait), "a toast's 0 must not reset");
+        assert_eq!(fg_reconcile_step(7, 5, c), (0, FgStep::CatchUp));
+    }
+
+    #[test]
+    fn a_match_resets() {
+        assert_eq!(fg_reconcile_step(5, 5, 1), (0, FgStep::Same));
+        assert_eq!(fg_reconcile_step(7, 5, 0).1, FgStep::Wait);
+    }
 }
