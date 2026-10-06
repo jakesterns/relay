@@ -71,6 +71,11 @@ pub const CUE_DETAIL_FLOOR: f32 = 0.35;
 pub const DIALOGUE_PRESENCE_LO_HZ: f32 = 1500.0;
 pub const DIALOGUE_PRESENCE_HI_HZ: f32 = 4000.0;
 pub const DIALOGUE_PRESENCE_DB: f32 = 2.0;
+/// Dialogue's deepest cut at ≤ 80 Hz and ≥ 6.3 kHz.
+pub const DIALOGUE_EDGE_CUT_DB: f32 = 2.0;
+/// The spectrum's edges for [`ClassWeights::edge_floor_db`].
+pub const EDGE_LOW_HZ: f32 = 80.0;
+pub const EDGE_HIGH_HZ: f32 = 6300.0;
 /// Voice counts as present from this share of classified frames.
 pub const VOICE_PRESENT_SHARE: f32 = 0.01;
 /// Consonants and presence: Dialogue never cuts here.
@@ -105,6 +110,9 @@ pub struct ClassWeights {
     /// A band the goal never cuts (gain ≥ 0 there): Dialogue keeps the
     /// consonant / presence region, Awareness the footstep detail.
     pub keep: Option<(f32, f32)>,
+    /// The deepest cut allowed at the spectrum's edges (≤ 80 Hz and
+    /// ≥ 6.3 kHz), when the goal wants them gentler than the global cap.
+    pub edge_floor_db: Option<f32>,
 }
 
 impl Goal {
@@ -130,18 +138,23 @@ impl Goal {
                 masker: [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 0.8, 0.8, 0.5],
                 scale: 1.0,
                 keep: Some((CUE_DETAIL_LO_HZ, CUE_DETAIL_HI_HZ)),
+                edge_floor_db: None,
             },
             Goal::Dialogue => ClassWeights {
                 target: [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 masker: [0.2, 0.2, 0.2, 0.0, 0.6, 0.8, 0.6, 1.0, 0.6],
                 scale: 1.0,
                 keep: Some((PRESENCE_LO_HZ, PRESENCE_HI_HZ)),
+                // Dialogue is about the middle; it has no reason to carve the
+                // extremes (r53 measured -3.3 dB there).
+                edge_floor_db: Some(DIALOGUE_EDGE_CUT_DB),
             },
             Goal::Immersion => ClassWeights {
                 target: [0.4, 0.3, 0.3, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 masker: [0.0, 0.0, 0.0, 0.0, 0.2, 0.4, 0.2, 0.2, 0.2],
                 scale: IMMERSION_SCALE,
                 keep: None,
+                edge_floor_db: None,
             },
         }
     }
@@ -401,7 +414,7 @@ pub fn derive(stats: &Stats, limits: &Limits, goal: Goal) -> Derived {
     let wb: [f32; NBANDS] = std::array::from_fn(|b| {
         Stats::median(&stats.frame_hist, b).map(|d| 10f32.powf(d / 10.0)).unwrap_or(0.0)
     });
-    let overall_db = guard_gains(&mut gains, limits, &wb, w.keep);
+    let overall_db = guard_gains(&mut gains, limits, &wb, w.keep, w.edge_floor_db);
     Derived { gains, buried, overall_db }
 }
 
@@ -415,8 +428,13 @@ pub fn guard_gains(
     limits: &Limits,
     wb: &[f32; NBANDS],
     keep: Option<(f32, f32)>,
+    edge_floor_db: Option<f32>,
 ) -> f32 {
     let kept = |hz: f32| keep.is_some_and(|(lo, hi)| (lo..=hi).contains(&hz));
+    let cut_cap = |hz: f32| match edge_floor_db {
+        Some(e) if hz <= EDGE_LOW_HZ || hz >= EDGE_HIGH_HZ => e.min(limits.max_cut_db),
+        _ => limits.max_cut_db,
+    };
     for g in gains.iter_mut() {
         if !g.is_finite() {
             *g = 0.0;
@@ -432,7 +450,7 @@ pub fn guard_gains(
             } else if in_speech_band(BANDS_HZ[b]) {
                 -limits.speech_guard_db
             } else {
-                -limits.max_cut_db
+                -cut_cap(BANDS_HZ[b])
             };
             gains[b] = gains[b].clamp(lo, hi);
         }
@@ -481,7 +499,7 @@ pub fn guard_gains(
             if in_speech_band(BANDS_HZ[b]) {
                 -limits.speech_guard_db
             } else {
-                -limits.max_cut_db
+                -cut_cap(BANDS_HZ[b])
             }
         };
         let shifted = |s: f32| -> [f32; NBANDS] {
@@ -554,7 +572,7 @@ pub fn guard_curve(curve: &[(f32, f32)]) -> Vec<(f32, f32)> {
         curve.iter().copied().filter(|(h, d)| h.is_finite() && d.is_finite() && *h > 0.0).collect();
     let mut gains: [f32; NBANDS] =
         std::array::from_fn(|b| crate::fit::interp_db(&clean, BANDS_HZ[b] as f64) as f32);
-    guard_gains(&mut gains, &Limits::default(), &[1.0; NBANDS], None);
+    guard_gains(&mut gains, &Limits::default(), &[1.0; NBANDS], None, None);
     // Rounding to 0.1 dB happens in `curve_from_gains`; re-guard the rounded
     // values so rounding cannot step over a limit.
     let mut out = curve_from_gains(&gains);
@@ -771,6 +789,23 @@ mod tests {
         assert!(detail >= 1.0, "3-4 kHz lift {detail}: {g:?}");
         assert!(detail >= g[idx(1000.0)] && detail >= g[idx(500.0)], "{g:?}");
         assert!((16..=20).all(|b| g[b] >= 0.0), "never cuts the detail band: {g:?}");
+    }
+
+    #[test]
+    fn dialogue_keeps_the_extremes_gentle() {
+        for s in [scene(), learned(90.0, 0.05)] {
+            let d = derive(&s, &Limits::default(), Goal::Dialogue);
+            for b in 0..NBANDS {
+                if BANDS_HZ[b] <= EDGE_LOW_HZ || BANDS_HZ[b] >= EDGE_HIGH_HZ {
+                    assert!(
+                        d.gains[b] >= -DIALOGUE_EDGE_CUT_DB - 1e-3,
+                        "{} Hz {:?}",
+                        BANDS_HZ[b],
+                        d.gains
+                    );
+                }
+            }
+        }
     }
 
     #[test]

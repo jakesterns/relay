@@ -61,6 +61,19 @@ does not move the statistics.
 Voice **with** input (callouts, NPCs) is gameplay and is kept; voice or music
 with no input for 20 s is a cutscene and is excluded.
 
+**Overlay voice** (r53 run B: a streamer's commentary kept the curve from
+converging). When voice fills at least `OVERLAY_VOICE_SHARE` = 35 % of the
+last `OVERLAY_WINDOW_SECS` = 60 s and `OVERLAY_DOMINANT_SHARE` = 70 % of the
+recent voice chunks sit within 5 semitones of one pitch, that voice is one
+speaker over the game. Its frames never become voice, background or masking
+statistics (released below 20 %); the game underneath still counts, so an
+explosion under a sentence is still an explosion. Short, intermittent voice
+during input stays as callouts. A synthetic game with and without commentary
+converges to curves within 1 dB from 300 Hz to 4 kHz. Status reports frames
+left out per reason (overlay voice, player chat, cutscene/idle, silence,
+clipping, volume change) and what the last step waits on (agreeing
+checkpoints n/3, largest band change).
+
 **Classes** (each a feature rule with a synthetic test):
 
 | Class | Rule (constants in `analyzer.rs`) |

@@ -126,6 +126,14 @@ impl Outcome {
     }
 }
 
+/// The convergence gate's state, for status.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Convergence {
+    pub agreeing: usize,
+    pub needed: usize,
+    pub max_delta_db: f32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LearnRecord {
     pub schema: u32,
@@ -318,6 +326,22 @@ impl LearnRecord {
             k += 1;
         }
         k
+    }
+
+    /// What the convergence gate is waiting on: how many of the newest
+    /// checkpoints agree, out of how many are needed, and the largest
+    /// per-band difference among the last `converge_checkpoints` of them.
+    pub fn convergence(&self, th: &Thresholds) -> Convergence {
+        let need = th.converge_checkpoints.max(1);
+        let n = self.checkpoints.len();
+        let tail = &self.checkpoints[n.saturating_sub(need)..];
+        let mut worst = 0f32;
+        for i in 0..tail.len() {
+            for j in i + 1..tail.len() {
+                worst = worst.max(max_delta(&tail[i], &tail[j]));
+            }
+        }
+        Convergence { agreeing: self.agreeing(th).min(need), needed: need, max_delta_db: worst }
     }
 
     /// The last `converge_checkpoints` checkpoints agree.
@@ -514,6 +538,56 @@ mod tests {
         });
         eprintln!("S46 r51-like time to ready: {m} min");
         assert!((10..=20).contains(&m), "{m} min");
+    }
+
+    /// r53 run B: a streamer talking over the game kept the curve moving.
+    /// With the overlay voice left out, the same game with and without
+    /// commentary converges to curves within 1 dB in 300 Hz - 4 kHz.
+    #[test]
+    fn commentary_on_top_converges_to_the_same_curve() {
+        let th = quick();
+        let learn = |seg: Segment| {
+            let mut r = LearnRecord::new("game.exe", None);
+            let mut a = Analyzer::new(FS);
+            let mut s = Synth::new(FS, 53);
+            s.step = 0.12;
+            let mut ready = false;
+            for _ in 0..360 {
+                s.render(seg, 1.0, |b| a.push(b));
+                r.absorb(&a.take_stats(), &th);
+                ready |= r.checkpoint(&th, &Limits::default()).offers();
+            }
+            (r, ready)
+        };
+        let (plain, ok_plain) = learn(Segment::Gameplay);
+        let (talk, ok_talk) = learn(Segment::Commentary);
+        assert!(ok_plain && ok_talk, "both converge: {:?}", talk.convergence(&th));
+        assert!(
+            talk.window().overlay_voice_frames > 3_000,
+            "{}",
+            talk.window().overlay_voice_frames
+        );
+        let curve = |r: &LearnRecord| {
+            crate::learn::derive::derive(&r.window(), &Limits::default(), r.goal).gains
+        };
+        let (a, b) = (curve(&plain), curve(&talk));
+        for k in 0..crate::learn::NBANDS {
+            let hz = crate::learn::BANDS_HZ[k];
+            if (300.0..=4000.0).contains(&hz) {
+                assert!((a[k] - b[k]).abs() <= 1.0, "{hz} Hz: {} vs {}\n{a:?}\n{b:?}", a[k], b[k]);
+            }
+        }
+    }
+
+    #[test]
+    fn convergence_detail_says_what_the_gate_waits_on() {
+        let th = quick();
+        let mut r = LearnRecord::new("game.exe", None);
+        assert_eq!(r.convergence(&th).agreeing, 0);
+        r.checkpoints = vec![vec![0.0; 3], vec![0.2; 3], vec![2.0; 3]];
+        let c = r.convergence(&th);
+        assert_eq!((c.agreeing, c.needed), (1, 3));
+        assert!((c.max_delta_db - 2.0).abs() < 1e-6);
     }
 
     #[test]

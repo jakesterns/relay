@@ -336,6 +336,18 @@ function GameEqCard({ profileId, onChanged }: {
               options={GOALS.map((g) => ({ key: g.key, label: g.label }))} />
           )}
           <Kv k="State" v={gameEqStateText(status)} />
+          {status.state === "learning" && status.progress >= 90 && status.convergence && (
+            <p className="note" data-testid="game-eq-settling">
+              Heard enough; waiting for the curve to settle
+              ({status.convergence.agreeing}/{status.convergence.needed} checks agree,
+              largest change {status.convergence.max_delta_db.toFixed(1)} dB).
+            </p>
+          )}
+          {!!status.excluded?.overlay_voice && (
+            <p className="note" data-testid="game-eq-overlay">
+              Commentary or voice chat over the game is left out of what Relay learns.
+            </p>
+          )}
           {imported && !status.learning_on && (
             <p className="note" data-testid="game-eq-paused">
               Learning paused because you imported this EQ. Turn on to fine-tune.

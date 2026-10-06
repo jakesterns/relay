@@ -119,6 +119,21 @@ const SPEECH_EVAL_EVERY: u32 = 10;
 pub const CHAT_EDGE_DB: f32 = -20.0;
 /// Smoothing of the chat measure over voiced frames (~0.5 s).
 const CHAT_ALPHA: f32 = 0.05;
+/// Overlay voice (a streamer's commentary, voice chat routed through the
+/// game): one dominant speaker talking for a large share of a long window.
+/// Look-back window, seconds...
+pub const OVERLAY_WINDOW_SECS: usize = 60;
+/// ...voice in at least this share of its frames turns overlay detection on...
+pub const OVERLAY_VOICE_SHARE: f32 = 0.35;
+/// ...and it turns off again below this share.
+pub const OVERLAY_RELEASE_SHARE: f32 = 0.2;
+/// One speaker: this share of recent voice chunks within
+/// [`VOICE_CLUSTER_SEMITONES`] of their median pitch.
+pub const OVERLAY_DOMINANT_SHARE: f32 = 0.7;
+/// An event frame's label slot for overlay voice: kept out of every class.
+const OVERLAY_LABEL: u8 = u8::MAX;
+/// Recent voice chunks the dominance check looks at.
+pub const OVERLAY_PITCH_CHUNKS: usize = 48;
 /// Voice pitch range, Hz.
 pub const VOICE_MIN_HZ: f32 = 70.0;
 pub const VOICE_MAX_HZ: f32 = 400.0;
@@ -343,6 +358,8 @@ pub struct Stats {
     pub level_jump_frames: u64,
     pub input_idle_frames: u64,
     pub chat_frames: u64,
+    #[serde(default)]
+    pub overlay_voice_frames: u64,
     /// Volume changes the session loudness re-based over.
     pub level_jumps: u64,
     /// Events cut short by the gate and thrown away.
@@ -368,6 +385,7 @@ impl Default for Stats {
             level_jump_frames: 0,
             input_idle_frames: 0,
             chat_frames: 0,
+            overlay_voice_frames: 0,
             level_jumps: 0,
             discarded_events: 0,
             unclassified_events: 0,
@@ -424,6 +442,7 @@ impl Stats {
             + self.level_jump_frames
             + self.input_idle_frames
             + self.chat_frames
+            + self.overlay_voice_frames
     }
 
     /// Add `other` into `self`. A malformed `other` is ignored.
@@ -461,6 +480,7 @@ impl Stats {
         self.level_jump_frames += other.level_jump_frames;
         self.input_idle_frames += other.input_idle_frames;
         self.chat_frames += other.chat_frames;
+        self.overlay_voice_frames += other.overlay_voice_frames;
         self.level_jumps += other.level_jumps;
         self.discarded_events += other.discarded_events;
         self.unclassified_events += other.unclassified_events;
@@ -680,6 +700,19 @@ struct Labels {
     chunk_n: u32,
     /// Stationary frame counters per class.
     stationary_frames: [u64; NCLASSES],
+    /// Overlay-voice detector: this second's frame and voice counts, the
+    /// per-second voice shares over the window, and recent chunk pitches.
+    sec_frames: u32,
+    sec_voice: u32,
+    shares: Box<[f32]>,
+    share_pos: usize,
+    share_filled: usize,
+    ov_sum: f32,
+    ov_n: u32,
+    pitches: Box<[f32]>,
+    pitch_pos: usize,
+    pitch_filled: usize,
+    overlay: bool,
 }
 
 impl Labels {
@@ -715,7 +748,66 @@ impl Labels {
             chunk_sum: 0.0,
             chunk_n: 0,
             stationary_frames: [0; NCLASSES],
+            sec_frames: 0,
+            sec_voice: 0,
+            shares: vec![0f32; OVERLAY_WINDOW_SECS].into_boxed_slice(),
+            share_pos: 0,
+            share_filled: 0,
+            ov_sum: 0.0,
+            ov_n: 0,
+            pitches: vec![0f32; OVERLAY_PITCH_CHUNKS].into_boxed_slice(),
+            pitch_pos: 0,
+            pitch_filled: 0,
+            overlay: false,
         }
+    }
+
+    /// Feed one frame to the overlay-voice detector (every non-silent
+    /// frame, gated or not: the question is what the stream is doing).
+    fn track_overlay(&mut self, voice: bool, voiced_hz: Option<f32>) {
+        self.sec_frames += 1;
+        self.sec_voice += voice as u32;
+        if let (true, Some(hz)) = (voice, voiced_hz) {
+            self.ov_sum += hz.ln();
+            self.ov_n += 1;
+            if self.ov_n >= VOICE_CHUNK_FRAMES {
+                self.pitches[self.pitch_pos] = self.ov_sum / self.ov_n as f32;
+                self.pitch_pos = (self.pitch_pos + 1) % OVERLAY_PITCH_CHUNKS;
+                self.pitch_filled = (self.pitch_filled + 1).min(OVERLAY_PITCH_CHUNKS);
+                self.ov_sum = 0.0;
+                self.ov_n = 0;
+            }
+        }
+        if self.sec_frames * FRAME_MS < 1000 {
+            return;
+        }
+        self.shares[self.share_pos] = self.sec_voice as f32 / self.sec_frames as f32;
+        self.share_pos = (self.share_pos + 1) % OVERLAY_WINDOW_SECS;
+        self.share_filled = (self.share_filled + 1).min(OVERLAY_WINDOW_SECS);
+        self.sec_frames = 0;
+        self.sec_voice = 0;
+        let mean =
+            self.shares[..self.share_filled].iter().sum::<f32>() / self.share_filled.max(1) as f32;
+        self.overlay = if self.overlay {
+            mean >= OVERLAY_RELEASE_SHARE
+        } else {
+            self.share_filled >= OVERLAY_WINDOW_SECS
+                && mean >= OVERLAY_VOICE_SHARE
+                && self.one_speaker()
+        };
+    }
+
+    /// Most recent voice chunks sit around one pitch.
+    fn one_speaker(&self) -> bool {
+        if self.pitch_filled < OVERLAY_PITCH_CHUNKS / 3 {
+            return false;
+        }
+        let mut p: Vec<f32> = self.pitches[..self.pitch_filled].to_vec();
+        p.sort_by(f32::total_cmp);
+        let med = p[p.len() / 2];
+        let width = VOICE_CLUSTER_SEMITONES / 12.0 * std::f32::consts::LN_2;
+        let near = p.iter().filter(|&&x| (x - med).abs() <= width).count();
+        near as f32 >= OVERLAY_DOMINANT_SHARE * p.len() as f32
     }
 
     /// Syllable-rate share of the envelope's variance and its depth (dB std).
@@ -881,6 +973,8 @@ pub struct Analyzer {
     labels: Labels,
     pitch: Pitch,
     input_idle_ms: u32,
+    /// This frame is overlay voice (commentary).
+    overlay_now: bool,
     stats: Stats,
 }
 
@@ -934,6 +1028,7 @@ impl Analyzer {
             labels: Labels::new(),
             pitch: Pitch::new(fs),
             input_idle_ms: 0,
+            overlay_now: false,
             stats: Stats::default(),
         }
     }
@@ -1060,6 +1155,11 @@ impl Analyzer {
         let is_onset = rising >= ONSET_MIN_BANDS;
 
         let (label, chat) = self.update_labels(&level);
+        // Overlay voice (commentary) is not rejected wholesale: the game
+        // underneath still plays, and an explosion under a sentence is still
+        // an explosion. Its frames just never become voice, background or
+        // masking statistics (`OVERLAY_LABEL`).
+        self.overlay_now = self.labels.overlay && label == SoundClass::Voice;
 
         let verdict = self.gate_frame(total, clipped).or(chat.then_some(Reject::PlayerChat));
         if let Some(why) = verdict {
@@ -1076,7 +1176,11 @@ impl Analyzer {
         self.loud_ref_db -= LOUD_REF_DECAY_DB_PER_S * FRAME_MS as f32 / 1000.0;
         let alpha = LT_ALPHA.max(1.0 / self.lt_n as f32);
         self.lt_db += alpha * (total - self.lt_db);
-        self.count_stationary(label);
+        if self.overlay_now {
+            self.stats.overlay_voice_frames += 1;
+        } else {
+            self.count_stationary(label);
+        }
 
         if self.event.open {
             // The background can always be found to be lower, even mid-event.
@@ -1129,10 +1233,12 @@ impl Analyzer {
             // Background frame: the floor follows it; it is the mix and it
             // belongs to its stationary label.
             self.follow_floor(&level);
-            let rel = self.rel();
-            Stats::add(&mut self.stats.frame_hist, &level, rel);
-            Stats::add(self.stats.hist_mut(label), &level, rel);
-            self.stats.class_frames[label.index()] += 1;
+            if !self.overlay_now {
+                let rel = self.rel();
+                Stats::add(&mut self.stats.frame_hist, &level, rel);
+                Stats::add(self.stats.hist_mut(label), &level, rel);
+                self.stats.class_frames[label.index()] += 1;
+            }
         }
         self.recent[self.recent_pos] = level;
         self.recent_pos = (self.recent_pos + 1) % RECENT_FRAMES;
@@ -1246,8 +1352,10 @@ impl Analyzer {
         let vehicle = !voice && l.vehicle();
         let music = !voice && !vehicle && l.tonal >= TONAL_MIN_FRACTION;
 
+        l.track_overlay(voice, (voiced && !chat).then_some(pitch_hz));
+
         // Voice clustering, half a second of voiced game voice at a time.
-        if voice && voiced && !chat {
+        if voice && voiced && !chat && !l.overlay {
             l.chunk_sum += pitch_hz.ln();
             l.chunk_n += 1;
         }
@@ -1400,7 +1508,8 @@ impl Analyzer {
         let e = &mut self.event;
         if e.nframes < EVENT_MAX_FRAMES {
             e.frames[e.nframes] = *level;
-            e.labels[e.nframes] = label.index() as u8;
+            e.labels[e.nframes] =
+                if self.overlay_now { OVERLAY_LABEL } else { label.index() as u8 };
             e.nframes += 1;
         }
         if !still_on {
@@ -1486,6 +1595,9 @@ impl Analyzer {
                     s.unclassified_events += 1;
                 }
                 for (f, &lab) in e.frames[..e.nframes].iter().zip(e.labels.iter()) {
+                    if lab == OVERLAY_LABEL {
+                        continue;
+                    }
                     let k = lab as usize;
                     Stats::add(&mut s.frame_hist, f, rel);
                     Stats::add(&mut s.class_hist[k * n..(k + 1) * n], f, rel);
@@ -1564,7 +1676,9 @@ impl Analyzer {
         if dur_ms >= ADOPT_LABEL_MS {
             let mut votes = [0u32; NCLASSES];
             for &l in &e.labels[..e.nframes] {
-                votes[l as usize] += 1;
+                if l != OVERLAY_LABEL {
+                    votes[l as usize] += 1;
+                }
             }
             for c in [SoundClass::Voice, SoundClass::Vehicle, SoundClass::Music] {
                 if votes[c.index()] * 2 > e.nframes as u32 {
@@ -1885,6 +1999,31 @@ mod tests {
         assert!(chat.class_frames[SoundClass::Voice.index()] < 400, "{:?}", chat.class_frames);
         // At most the half second before the chat measure settles.
         assert!(chat.voices.iter().map(|v| v.chunks).sum::<u32>() <= 2, "{:?}", chat.voices);
+    }
+
+    #[test]
+    fn continuous_commentary_is_overlay_but_short_callouts_are_not() {
+        // A streamer talking over the game for three minutes.
+        let st = run(&[(Segment::Commentary, 180.0)]);
+        assert!(
+            st.overlay_voice_frames >= 6000,
+            "overlay {} {:?}",
+            st.overlay_voice_frames,
+            st.class_frames
+        );
+        // The game under it still counts: footsteps and explosions are heard.
+        assert!(st.count(SoundClass::Footsteps) >= 50, "{:?}", st.events);
+        assert!(st.count(SoundClass::Explosion) >= 5, "{:?}", st.events);
+        // Callouts: a few seconds of voice now and then during play.
+        let mut a = Analyzer::new(FS);
+        let mut s = Synth::new(FS, 9);
+        for _ in 0..9 {
+            s.render(Segment::Gameplay, 17.0, |b| a.push(b));
+            s.render(Segment::Speech, 3.0, |b| a.push(b));
+        }
+        let c = a.into_stats();
+        assert_eq!(c.overlay_voice_frames, 0, "callouts are kept");
+        assert!(c.class_frames[SoundClass::Voice.index()] > 1000, "{:?}", c.class_frames);
     }
 
     #[test]

@@ -148,6 +148,26 @@ describe("learning, applying and files", () => {
     expect(eq().getByTestId("game-eq-inaudible")).toHaveTextContent(/not audible/);
   });
 
+  it("says what the last step waits on and that commentary is left out", async () => {
+    const p = profile1();
+    p.audio.game_eq_goal = "awareness";
+    p.audio.learn_game_eq = true;
+    core.gameEq.set("1", { progress: 90, candidate: null, needsRelearn: false, learningNow: true });
+    const real = core.handler;
+    tauri.useFakeCore((cmd, args) => {
+      const r = real(cmd, args);
+      if (cmd === "game_eq") {
+        const st = (r as { status: Record<string, unknown> }).status;
+        st.convergence = { agreeing: 1, needed: 3, max_delta_db: 0.9 };
+        st.excluded = { overlay_voice: 3080, player_chat: 0, cutscene_or_idle: 0, silence: 0, clipped: 0, volume_change: 0 };
+      }
+      return r;
+    });
+    const { eq } = await mount();
+    expect(eq().getByTestId("game-eq-settling")).toHaveTextContent(/1\/3 checks agree, largest change 0\.9 dB/);
+    expect(eq().getByTestId("game-eq-overlay")).toBeInTheDocument();
+  });
+
   it("a file for another game is refused in plain words", async () => {
     const { h, eq } = await mount();
     await h.user.click(eq().getByRole("button", { name: "Import…" }));

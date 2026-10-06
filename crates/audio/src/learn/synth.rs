@@ -46,6 +46,9 @@ pub enum Segment {
     Music,
     Speech,
     PlayerChat,
+    /// Gameplay with one streamer talking over it: phrases of 3-8 s with
+    /// 1.5-3 s breaths, full-band, the same voice throughout.
+    Commentary,
     MixedScene,
     Clipped,
     #[allow(dead_code)]
@@ -136,6 +139,8 @@ pub struct Synth {
     phase: f64,
     engine_phase: f64,
     voice: Syllables,
+    phrase_left: u64,
+    phrase_on: bool,
     click: Shot,
     leaf: Shot,
     gun: Shot,
@@ -175,6 +180,8 @@ impl Synth {
             phase: 0.0,
             engine_phase: 0.0,
             voice: Syllables { gain: 1.0, ..Default::default() },
+            phrase_left: 0,
+            phrase_on: false,
             click: Shot::default(),
             leaf: Shot::default(),
             gun: Shot::default(),
@@ -409,6 +416,22 @@ impl Synth {
                     c = f.run(c);
                 }
                 0.3 * self.bed() + c as f32
+            }
+            Segment::Commentary => {
+                if self.phrase_left == 0 {
+                    self.phrase_on = !self.phrase_on;
+                    let secs = if self.phrase_on {
+                        3.0 + 5.0 * self.rng.unit()
+                    } else {
+                        1.5 + 1.5 * self.rng.unit()
+                    };
+                    self.phrase_left = (secs * fs) as u64;
+                }
+                self.phrase_left -= 1;
+                let s = self.footstep(self.step_ms);
+                let game = self.bed() + s + self.explosion();
+                let talk = self.talker(false);
+                game + if self.phrase_on { 0.8 * talk } else { 0.0 }
             }
             Segment::MixedScene => {
                 let s = 2.0 * self.footstep(500);

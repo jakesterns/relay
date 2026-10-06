@@ -106,6 +106,27 @@ pub struct GameEqStatus {
     /// Evidence per sound class, by name, in the record's array order.
     #[serde(default)]
     pub classes: Vec<ClassCount>,
+    /// Frames left out of the statistics, by reason (the rolling window).
+    #[serde(default)]
+    pub excluded: Excluded,
+    /// What the 90 % → ready step is waiting on.
+    #[serde(default)]
+    pub convergence: Option<relay_audio::learn::state::Convergence>,
+}
+
+/// Frames the learner did not learn from, by reason. Music is not here: it
+/// is a class (a masker), not an exclusion.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Excluded {
+    /// One speaker talking over the game (commentary, routed voice chat).
+    pub overlay_voice: u64,
+    /// Codec band-limited in-game player chat.
+    pub player_chat: u64,
+    /// No input for over 20 s: cutscenes, menus, idle / AFK.
+    pub cutscene_or_idle: u64,
+    pub silence: u64,
+    pub clipped: u64,
+    pub volume_change: u64,
 }
 
 /// One sound class's evidence in the rolling window.
@@ -261,6 +282,21 @@ pub fn status_with(
         }
     };
     let goal = audio.game_eq_goal;
+    let th_c = Thresholds::default();
+    let convergence = rec.map(|r| r.convergence(&th_c));
+    let excluded = rec
+        .map(|r| {
+            let w = r.window();
+            Excluded {
+                overlay_voice: w.overlay_voice_frames,
+                player_chat: w.chat_frames,
+                cutscene_or_idle: w.input_idle_frames,
+                silence: w.silent_frames,
+                clipped: w.clipped_frames,
+                volume_change: w.level_jump_frames,
+            }
+        })
+        .unwrap_or_default();
     let (targets, maskers, minutes, voices, classes) = match rec {
         Some(r) => {
             let w = r.window();
@@ -300,6 +336,8 @@ pub fn status_with(
         last_error: rec.and_then(|r| r.last_error.clone()),
         notice: None,
         classes,
+        excluded,
+        convergence,
     }
 }
 
@@ -929,6 +967,26 @@ mod tests {
         let back = GameEqFile::parse(&out.text).unwrap();
         assert_eq!(back.curve.as_deref(), Some(&curve(2.0)[..]));
         assert!(p.audio.game_eq.is_none(), "exporting does not apply");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn status_says_what_was_left_out_and_what_the_gate_waits_on() {
+        let (paths, dir) = paths();
+        let p = profile();
+        let mut rec = ready_record("game.exe", curve(1.0));
+        let mut st = Stats { overlay_voice_frames: 3080, chat_frames: 12, ..Stats::default() };
+        st.input_idle_frames = 40;
+        rec.absorb(&st, &Thresholds::default());
+        rec.checkpoints = vec![vec![0.0; 3], vec![0.1; 3], vec![0.9; 3]];
+        save_record_at(&record_file(&paths, "game.exe"), &rec).unwrap();
+        let s = status(&paths, &p, false);
+        assert_eq!(s.excluded.overlay_voice, 3080);
+        assert_eq!(s.excluded.player_chat, 12);
+        assert_eq!(s.excluded.cutscene_or_idle, 40);
+        let c = s.convergence.unwrap();
+        assert_eq!((c.agreeing, c.needed), (1, 3));
+        assert!((c.max_delta_db - 0.9).abs() < 1e-6);
         std::fs::remove_dir_all(dir).ok();
     }
 

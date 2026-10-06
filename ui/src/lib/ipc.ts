@@ -50,6 +50,13 @@ export interface GameEqStatus {
   notice?: string;
   /** Evidence per sound class, by name (the record's arrays are in this order). */
   classes?: ClassCount[];
+  /** Frames left out of the statistics, by reason. */
+  excluded?: {
+    overlay_voice: number; player_chat: number; cutscene_or_idle: number;
+    silence: number; clipped: number; volume_change: number;
+  };
+  /** What the last step to ready waits on. */
+  convergence?: { agreeing: number; needed: number; max_delta_db: number } | null;
 }
 export interface ClassCount { class: string; events: number; frames: number }
 export type GameEqAction =
