@@ -212,10 +212,12 @@ export interface MonitorLearnView {
   adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;
   /** What the newest checkpoint would apply on this panel. */
   candidate_adjustments?: LookAdjustments | null;
+  /** A settled look waiting for Apply; `adjustments` is only what is applied. */
+  offer?: LookTargets | null; offer_adjustments?: LookAdjustments | null;
 }
 export interface ImportedLook { look: LookTargets; note: string }
 export interface LearnView {
-  exe: string; enabled: boolean; status: LookStatus; sampling: boolean;
+  exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
   monitors: MonitorLearnView[]; imported: ImportedLook | null;
   privacy: string; tournament: string;
 }
@@ -1258,6 +1260,10 @@ export const api = {
   async learnDisplayApply(exe: string): Promise<LearnView> {
     if (!isTauri()) throw new Error("this game's look has not settled yet; keep playing");
     return invoke<LearnView>("learn_display_apply", { exe });
+  },
+  async learnDisplayAutoApply(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.auto_apply = enabled; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_auto_apply", { exe, enabled });
   },
   async learnDisplayRelearn(exe: string): Promise<LearnView> {
     if (!isTauri()) return structuredClone(mockLearn(exe));

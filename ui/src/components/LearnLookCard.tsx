@@ -93,6 +93,11 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
         sub={imported
           ? "Starts from the imported look and changes it only if this monitor clearly needs something different."
           : "While the game has focus, Relay studies its frames and suggests gentle shadow and colour corrections for each monitor."} />
+      <Toggle
+        on={view?.auto_apply ?? false}
+        onChange={view === null ? undefined : (v) => void run(() => api.learnDisplayAutoApply(exe, v))}
+        label="Apply new looks automatically"
+        sub="Off: a settled look waits for you to press Apply." />
       {view?.monitors.map((m) => (
         <MonitorRow key={m.monitor} m={m} onPanel={(p) => void setPanel(m.monitor, p)} />
       ))}
@@ -128,7 +133,7 @@ function statusLine(s: LookStatus, sampling: boolean): string {
   switch (s) {
     case "off": return "Off. Relay is not looking at this game.";
     case "learning": return sampling ? "Learning now, from this game's own frames." : "Learning. Play the game and progress continues.";
-    case "ready": return "Ready. The look has settled — press Apply to use it.";
+    case "ready": return "A look is ready — Apply to use it.";
     case "applied": return "Applied. Relay keeps watching for game updates and only changes it if the look clearly moves.";
     case "applied_imported": return "Applied (imported).";
     case "hdr_skipped": return "This monitor was in HDR mode, so nothing was learned there.";
@@ -201,6 +206,9 @@ function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: stri
       )}
       {m.converged && (
         <Kv k="Learned" v={`shadows ${pct(m.converged.shadow)} · colour ${pct(m.converged.saturation)} · highlights ${pct(m.converged.highlight)}`} mono />
+      )}
+      {m.offer && (
+        <Kv k="Ready to apply" v={`shadows ${pct(m.offer.shadow)} · colour ${pct(m.offer.saturation)}${m.offer_adjustments ? ` → gamma ${m.offer_adjustments.gamma.toFixed(2)} · lift ${m.offer_adjustments.shadow_lift} · vibrance ${m.offer_adjustments.vibrance}` : ""}`} mono />
       )}
       {a && (
         <Kv k="On this panel" v={`gamma ${a.gamma.toFixed(2)} · lift ${a.shadow_lift} · vibrance ${a.vibrance}${a.black_equalizer !== undefined ? ` · black eq ${a.black_equalizer}` : ""}`} mono />

@@ -67,9 +67,33 @@ pub struct GameRecord {
     pub monitors: BTreeMap<String, MonitorRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<ImportedLook>,
+    /// Take a newly settled look without asking (the S46 audio flow's
+    /// "auto-apply"). Off by default: a settled look is an *offer* until the
+    /// user presses Apply.
+    #[serde(default)]
+    pub auto_apply: bool,
 }
 
 impl GameRecord {
+    /// The settled look waiting for Apply on `monitor`, if any. Once a look
+    /// is in use the freeze rule decides later changes, so there is no
+    /// offer then.
+    pub fn offer(&self, monitor: &MonitorId) -> Option<LookTargets> {
+        let m = self.monitors.get(&monitor.0)?;
+        if m.learner.use_learned {
+            return None;
+        }
+        m.learner.converged
+    }
+
+    /// With auto-apply on, take the offer on `monitor`. True when it did.
+    pub fn take_offer_if_auto(&mut self, monitor: &MonitorId) -> bool {
+        if !self.auto_apply || self.offer(monitor).is_none() {
+            return false;
+        }
+        self.monitors.get_mut(&monitor.0).is_some_and(|m| m.learner.apply())
+    }
+
     /// The look in use on `monitor`, panel-neutral:
     /// 1. this monitor's applied learned look;
     /// 2. else the applied learned look with the most evidence on any other
@@ -286,6 +310,12 @@ pub struct MonitorLearnView {
     /// What the newest checkpoint would apply on this panel (learning too).
     #[serde(default)]
     pub candidate_adjustments: Option<Adjustments>,
+    /// A settled look waiting for Apply, and what it would apply here.
+    /// `adjustments` is only ever what is actually applied.
+    #[serde(default)]
+    pub offer: Option<LookTargets>,
+    #[serde(default)]
+    pub offer_adjustments: Option<Adjustments>,
     /// Why frames were skipped, by kind, so a tester can see the cause.
     #[serde(default)]
     pub excluded_by: relay_display::learn::converge::Excluded,
@@ -298,6 +328,9 @@ pub struct LearnView {
     pub enabled: bool,
     /// Game-level state, for the card header.
     pub status: LookStatus,
+    /// New settled looks apply without asking.
+    #[serde(default)]
+    pub auto_apply: bool,
     /// The sampler is running for this game right now.
     pub sampling: bool,
     pub monitors: Vec<MonitorLearnView>,
@@ -361,6 +394,8 @@ pub fn view(
                 status: rec.status(Some(&id)),
                 adjustments: rec.effective(&id).map(|look| realize(&look, &caps)),
                 candidate_adjustments: l.readiness().candidate.map(|c| realize(&c, &caps)),
+                offer: rec.offer(&id),
+                offer_adjustments: rec.offer(&id).map(|o| realize(&o, &caps)),
                 excluded: ex.total(),
                 excluded_by: ex,
             }
@@ -369,6 +404,7 @@ pub fn view(
     LearnView {
         exe: key(exe),
         enabled: rec.enabled,
+        auto_apply: rec.auto_apply,
         status: overall_status(&rec, &monitors),
         sampling,
         monitors,

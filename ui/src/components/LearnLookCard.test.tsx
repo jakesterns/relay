@@ -91,7 +91,7 @@ describe("the learn-this-game's-look card", () => {
     const look = { shadow: 0.4, saturation: 0.1, highlight: 0 };
     seed({ status: "ready", monitors: [monitor({ phase: "converged", converged: look, status: "ready" })] });
     const user = await mount();
-    expect(screen.getByTestId("look-status")).toHaveTextContent(/^Ready/);
+    expect(screen.getByTestId("look-status")).toHaveTextContent("A look is ready — Apply to use it.");
     expect(screen.getByText(/shadows 40% · colour 10% · highlights 0%/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(cmds()).toContain("learn_display_apply");
@@ -156,6 +156,20 @@ describe("the learn-this-game's-look card", () => {
     await act(async () => { await Promise.resolve(); });
     const saved = core.hardware.monitors.find((m) => m.id === "DEL40E0-1");
     expect(saved?.panel).toBe("TN");
+  });
+
+  it("a settled look is offered, and auto-apply takes it", async () => {
+    const look = { shadow: 0.55, saturation: 0, highlight: 0 };
+    const adj = { gamma: 1.05, shadow_lift: 11, vibrance: 50, notes: [] };
+    seed({ status: "ready", monitors: [monitor({ phase: "converged", converged: look, status: "ready", offer: look, offer_adjustments: adj })] });
+    const user = await mount();
+    expect(screen.getByText(/Ready to apply/)).toBeInTheDocument();
+    expect(screen.getByText(/gamma 1\.05 · lift 11 · vibrance 50/)).toBeInTheDocument();
+    expect(screen.queryByText("On this panel")).toBeNull();
+    await user.click(screen.getByRole("switch", { name: /Apply new looks automatically/ }));
+    expect(tauri.calls.find((c) => c.cmd === "learn_display_auto_apply")?.args).toEqual({ exe: "game.exe", enabled: true });
+    expect(screen.getByText("On this panel")).toBeInTheDocument();
+    expect(screen.queryByText(/Ready to apply/)).toBeNull();
   });
 
   it("an HDR monitor says nothing was learned there", async () => {

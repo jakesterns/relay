@@ -219,6 +219,14 @@ async fn learn_display_apply(exe: String) -> CmdResult<relay_core::learned_displ
 }
 
 #[tauri::command]
+async fn learn_display_auto_apply(
+    exe: String,
+    enabled: bool,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayAutoApply { exe, enabled }).await
+}
+
+#[tauri::command]
 async fn learn_display_relearn(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
     learn_call(Method::LearnDisplayRelearn { exe }).await
 }
@@ -1209,6 +1217,7 @@ pub fn run() {
             learn_display_set,
             learn_display_apply,
             learn_display_relearn,
+            learn_display_auto_apply,
             learn_display_reset,
             learn_display_export,
             learn_display_import,

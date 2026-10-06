@@ -342,6 +342,18 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       v.status = "applied";
       return structuredClone(v);
     },
+    learn_display_auto_apply: (a) => {
+      const v = learnView(String(a.exe));
+      v.auto_apply = Boolean(a.enabled);
+      if (v.auto_apply) {
+        for (const m of v.monitors.filter((x) => x.offer)) {
+          m.applied = m.offer ?? null; m.adjustments = m.offer_adjustments ?? null;
+          m.offer = null; m.offer_adjustments = null; m.use_learned = true; m.status = "applied";
+          v.status = "applied";
+        }
+      }
+      return structuredClone(v);
+    },
     learn_display_relearn: (a) => {
       const v = learnView(String(a.exe));
       for (const m of v.monitors) { m.converged = null; m.phase = "learning"; m.readiness.frames = 0; m.readiness.progress = 0; }
@@ -644,7 +656,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "game_eq",
-  "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn",
+  "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
   "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",

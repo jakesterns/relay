@@ -496,9 +496,16 @@ impl Service {
         // is applied, so an idle core never wakes for it.
         let mut exit_watch = tokio::time::interval(Duration::from_millis(100));
         exit_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Foreground reconcile on its own cadence, first in the select: on
+        // the shared 1 s tick it ran behind the audio probe, the learners and
+        // the updater, and a missed switch took ~5 s on PC2.
+        let mut fg_watch = tokio::time::interval(FG_RECONCILE_INTERVAL);
+        fg_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let profiled = self.inner.lock().state.active_profile.is_some();
             tokio::select! {
+                biased;
+                _ = fg_watch.tick() => self.reconcile_foreground(),
                 _ = exit_watch.tick(), if profiled => self.recheck_focus(),
                 ev = rx.recv() => {
                     match ev {
@@ -524,7 +531,6 @@ impl Service {
                     }
                     self.refresh_audio_chain();
                     self.recheck_monitor();
-                    self.reconcile_foreground();
                     self.supervise();
                     self.update_tick();
                     self.learner_tick();
@@ -597,7 +603,12 @@ impl Service {
             match line {
                 SamplerLine::Frame(r) => {
                     rec.hdr_skipped = false;
-                    save |= rec.learner.observe(&r);
+                    if rec.learner.observe(&r) {
+                        save = true;
+                        if g.learn.game_mut(&exe).take_offer_if_auto(&mon) {
+                            info!(exe = %exe, "auto-applied the newly settled look");
+                        }
+                    }
                 }
                 SamplerLine::Hdr => {
                     info!(exe = %exe, "monitor is in HDR mode; not learning there");
@@ -1341,6 +1352,9 @@ enum FgStep {
     /// Two mismatching ticks: the hook missed a change.
     CatchUp,
 }
+
+/// How often the foreground reconcile runs.
+const FG_RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Mismatches needed before catching up.
 const FG_MISMATCH_TICKS: u8 = 2;
@@ -2537,6 +2551,7 @@ impl IpcHandler {
             | Method::LearnDisplaySet { ref exe, .. }
             | Method::LearnDisplayApply { ref exe }
             | Method::LearnDisplayRelearn { ref exe }
+            | Method::LearnDisplayAutoApply { ref exe, .. }
             | Method::LearnDisplayReset { ref exe }
             | Method::LearnDisplayExport { ref exe, .. }
             | Method::LearnDisplayImport { ref exe, .. }
@@ -2568,6 +2583,22 @@ impl IpcHandler {
                     return r;
                 }
                 reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayAutoApply { exe, enabled } => {
+                let rec = g.learn.game_mut(&exe);
+                rec.auto_apply = enabled;
+                let ids: Vec<String> = rec.monitors.keys().cloned().collect();
+                let mut took = false;
+                for id in ids {
+                    took |= rec.take_offer_if_auto(&crate::types::MonitorId(id));
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                if took {
+                    reapply_learned(&mut g);
+                }
                 learn_reply(&g, &exe)
             }
             Method::LearnDisplayRelearn { exe } => {
@@ -3265,6 +3296,28 @@ mod fg_reconcile_tests {
         let (c, s) = fg_reconcile_step(0, 5, c);
         assert_eq!((c, s), (1, FgStep::Wait), "a toast's 0 must not reset");
         assert_eq!(fg_reconcile_step(7, 5, c), (0, FgStep::CatchUp));
+    }
+
+    /// At the 500 ms cadence a missed switch is caught within 1 s, and a toast
+    /// (a 0 window) in between costs one tick, not a reset.
+    #[test]
+    fn a_missed_switch_is_caught_within_a_second_at_500_ms() {
+        assert_eq!(FG_RECONCILE_INTERVAL, Duration::from_millis(500));
+        let ticks_to_catch = |seq: &[u64]| {
+            let mut c = 0;
+            for (i, now) in seq.iter().enumerate() {
+                let (n, step) = fg_reconcile_step(*now, 5, c);
+                c = n;
+                if step == FgStep::CatchUp {
+                    return Some(i + 1);
+                }
+            }
+            None
+        };
+        let t = ticks_to_catch(&[7, 7, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_secs(1), "{t} ticks");
+        let t = ticks_to_catch(&[7, 0, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_millis(1500), "{t} ticks");
     }
 
     #[test]

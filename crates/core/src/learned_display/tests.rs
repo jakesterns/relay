@@ -336,6 +336,39 @@ fn top_level_status_agrees_with_the_monitors() {
 }
 
 #[test]
+fn a_settled_look_is_an_offer_until_applied() {
+    let mut s = tmp_store("offer");
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    let v = view(&s, "game.exe", false, &|_| ("AW2518H".into(), "TN".into()));
+    let m = &v.monitors[0];
+    assert_eq!(m.status, LookStatus::Ready);
+    assert!(m.adjustments.is_none(), "nothing is applied yet");
+    assert!(m.offer.is_some() && m.offer_adjustments.is_some());
+    // Apply: the offer becomes what is applied.
+    assert!(s.game_mut("game.exe").monitors.get_mut(&mon().0).unwrap().learner.apply());
+    let v = view(&s, "game.exe", false, &|_| ("AW2518H".into(), "TN".into()));
+    let m = &v.monitors[0];
+    assert_eq!(m.status, LookStatus::Applied);
+    assert!(m.offer.is_none());
+    assert_eq!(m.adjustments, Some(realize(&m.applied.unwrap(), &panel_caps("TN"))));
+}
+
+#[test]
+fn auto_apply_takes_the_offer_only_when_allowed() {
+    let mut g = GameRecord::default();
+    g.monitors.insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    assert!(!g.take_offer_if_auto(&mon()), "off by default");
+    assert!(g.offer(&mon()).is_some());
+    g.auto_apply = true;
+    assert!(g.take_offer_if_auto(&mon()));
+    assert!(g.offer(&mon()).is_none());
+    assert_eq!(g.status(Some(&mon())), LookStatus::Applied);
+    assert!(!g.take_offer_if_auto(&mon()), "nothing left to take");
+}
+
+#[test]
 fn build_fingerprint_changes_with_the_file() {
     let dir = std::env::temp_dir().join(format!("relay-s47-fp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

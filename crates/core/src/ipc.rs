@@ -314,6 +314,11 @@ pub enum Method {
     LearnDisplayApply {
         exe: String,
     },
+    /// S47: apply new settled looks without asking (like S46 auto-apply).
+    LearnDisplayAutoApply {
+        exe: String,
+        enabled: bool,
+    },
     /// S47: drop the evidence and learn again; what is applied stays until
     /// a new look settles.
     LearnDisplayRelearn {
