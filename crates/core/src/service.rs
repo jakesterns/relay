@@ -1585,6 +1585,9 @@ fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
 }
 
 /// connected-hardware view. Mutates state only; the caller broadcasts.
+///
+/// (See also [`after_profile_edit`], which re-runs this when a save or
+/// delete changes what should be applied right now.)
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     let hw = g.connected.clone();
     let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
@@ -1630,6 +1633,59 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.state.display_via = DisplayVia::default();
         }
     }
+}
+
+/// Does a profile edit change what should be applied now? Yes when the
+/// edited profile is the active one (its settings may have changed, or it
+/// went Draft / was deleted), or when selection now picks something else.
+fn needs_reselect(active: Option<uuid::Uuid>, edited: uuid::Uuid, now: Option<uuid::Uuid>) -> bool {
+    active == Some(edited) || now != active
+}
+
+/// After a profile save or delete: re-run selection at once instead of on
+/// the next focus change. Restores when nothing matches any more (Draft,
+/// deleted, exe changed) and stops its learners; re-applies when the active
+/// profile's own settings changed. Returns true when state may have changed.
+fn after_profile_edit(g: &mut Inner, edited: uuid::Uuid, deleted: bool) -> bool {
+    let active = g.state.active_profile.as_ref().map(|p| p.id);
+    if g.pinned {
+        if active != Some(edited) {
+            return false;
+        }
+        if deleted {
+            if let Err(e) = g.applier.restore() {
+                warn!(error = %e, "restore after deleting the applied profile failed");
+            }
+            g.pinned = false;
+            g.state.active_profile = None;
+            g.state.audio_chain = AudioChainState::Bypass;
+            g.state.display_state = DisplayState::Default;
+            g.applied_audio = AudioChainState::Bypass;
+            g.audio_watch = false;
+            g.state.display_via = DisplayVia::default();
+            stop_learner(g);
+            sync_look(g);
+        } else {
+            reapply_learned(g);
+        }
+        return true;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return false };
+    let now = g.store.select(&fg.exe, &fg.title, &g.connected).map(|p| p.id);
+    if !needs_reselect(active, edited, now) {
+        return false;
+    }
+    info!(profile = %edited, "profile edited while relevant to the focused app; re-selecting");
+    // Restore first so a changed profile re-applies (the applier treats the
+    // same profile on the same monitor as already applied).
+    if g.applier.is_applied() {
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-selecting failed");
+        }
+    }
+    select_and_apply(g, &fg);
+    sync_look(g);
+    true
 }
 
 /// Re-run selection for whatever is in the foreground (no focus change
@@ -2459,11 +2515,17 @@ impl IpcHandler {
                 None => Reply::Error { message: "no such profile".into() },
             },
             Method::SaveProfile { profile } => {
+                let id = profile.id;
                 g.store.upsert(*profile);
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, false) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
             }
             Method::GameEq { id, action } => {
                 let Some(mut profile) = g.store.get(id).cloned() else {
@@ -2511,10 +2573,15 @@ impl IpcHandler {
                 if !g.store.remove(id) {
                     return Reply::Error { message: "no such profile".into() };
                 }
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, true) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
             }
             Method::ApplyProfile { id } => {
                 let Some(profile) = g.store.get(id).cloned() else {
@@ -3318,6 +3385,21 @@ mod fg_reconcile_tests {
         assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_secs(1), "{t} ticks");
         let t = ticks_to_catch(&[7, 0, 7]).unwrap();
         assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_millis(1500), "{t} ticks");
+    }
+
+    #[test]
+    fn profile_edits_reselect_only_when_they_matter() {
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        // The applied profile went Draft / was deleted: nothing selects now.
+        assert!(needs_reselect(Some(a), a, None));
+        // The applied profile's settings changed: still selected, re-apply.
+        assert!(needs_reselect(Some(a), a, Some(a)));
+        // Another profile became Ready for the focused app.
+        assert!(needs_reselect(None, b, Some(b)));
+        assert!(needs_reselect(Some(a), b, Some(b)));
+        // An unrelated edit leaves things alone.
+        assert!(!needs_reselect(Some(a), b, Some(a)));
+        assert!(!needs_reselect(None, b, None));
     }
 
     #[test]
