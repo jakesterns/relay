@@ -211,6 +211,11 @@ pub const GUN_MIN_TAIL_MS: u32 = 80;
 pub const GUN_MAX_TAIL_MS: u32 = 600;
 /// Events this far above the running loudness are loud.
 pub const LOUD_ABOVE_DB: f32 = 30.0;
+/// A gunshot peaking at least this far below the session's recent loud
+/// impacts (the loudest gunshot or explosion, decaying by
+/// [`LOUD_REF_DECAY_DB_PER_S`]) is distant: a cue, not a masker.
+pub const DISTANT_GUN_BELOW_DB: f32 = 12.0;
+pub const LOUD_REF_DECAY_DB_PER_S: f32 = 0.1;
 /// Spectral weighting margin (power ratio, 3 dB).
 pub const WEIGHT_RATIO: f32 = 2.0;
 /// A long event takes its frames' stationary label when it lasts this long.
@@ -326,6 +331,10 @@ pub struct Stats {
     pub overlaps: Vec<u64>,
     /// Footsteps that were part of a rhythmic train.
     pub rhythmic_steps: u64,
+    /// Gunshots that peaked well below the session's loud events (at least
+    /// [`DISTANT_GUN_BELOW_DB`] under the loud level): far away, a cue.
+    #[serde(default)]
+    pub distant_gunshots: u64,
     /// Distinct voices by pitch (game voice only; chat is not kept).
     pub voices: Vec<VoiceCluster>,
     /// Frames rejected by each gate rule.
@@ -352,6 +361,7 @@ impl Default for Stats {
             frame_hist: vec![0; NBANDS * HIST_BINS],
             overlaps: vec![0; NCLASSES],
             rhythmic_steps: 0,
+            distant_gunshots: 0,
             voices: Vec::new(),
             silent_frames: 0,
             clipped_frames: 0,
@@ -442,6 +452,7 @@ impl Stats {
             }
         }
         self.rhythmic_steps += other.rhythmic_steps;
+        self.distant_gunshots += other.distant_gunshots;
         for v in &other.voices {
             add_voice(&mut self.voices, v.hz, v.chunks);
         }
@@ -855,6 +866,8 @@ pub struct Analyzer {
     /// mean until it has 30 s behind it, so a loud first frame does not
     /// skew it for minutes.
     lt_n: u32,
+    /// The session's recent loud-impact peak (dB), for distant gunshots.
+    loud_ref_db: f32,
     st_db: f32,
     jump_frames: u32,
     /// The last few frames' band levels (a ring).
@@ -893,6 +906,7 @@ impl Analyzer {
             primed: false,
             lt_db: -40.0,
             lt_n: 0,
+            loud_ref_db: -120.0,
             st_db: -40.0,
             jump_frames: 0,
             recent: [[-120.0; NBANDS]; RECENT_FRAMES],
@@ -1059,6 +1073,7 @@ impl Analyzer {
 
         self.stats.active_frames += 1;
         self.lt_n = self.lt_n.saturating_add(1);
+        self.loud_ref_db -= LOUD_REF_DECAY_DB_PER_S * FRAME_MS as f32 / 1000.0;
         let alpha = LT_ALPHA.max(1.0 / self.lt_n as f32);
         self.lt_db += alpha * (total - self.lt_db);
         self.count_stationary(label);
@@ -1422,6 +1437,14 @@ impl Analyzer {
             }
             self.last_steps = [self.last_steps[1], self.event.start_frame];
         }
+        if matches!(class, Some(SoundClass::Gunshot | SoundClass::Explosion)) {
+            let peak = self.event.peak_db;
+            if class == Some(SoundClass::Gunshot) && peak < self.loud_ref_db - DISTANT_GUN_BELOW_DB
+            {
+                self.stats.distant_gunshots += 1;
+            }
+            self.loud_ref_db = self.loud_ref_db.max(peak);
+        }
         let e = &mut self.event;
         e.open = false;
         let s = &mut self.stats;
@@ -1776,6 +1799,34 @@ mod tests {
         let st = a.into_stats();
         let (g, m) = (st.count(SoundClass::Gunshot), st.count(SoundClass::Mechanical));
         assert!(g >= 20 && g > 3 * m, "{:?}", st.events);
+    }
+
+    #[test]
+    fn faint_gunfire_is_distant_loud_gunfire_is_not() {
+        let near = run(&[(Segment::Gunfire, 20.0)]);
+        assert!(near.distant_gunshots * 4 < near.count(SoundClass::Gunshot), "{near:?}");
+        // The same shots 14 dB down under busy play: far away.
+        let mut a = Analyzer::new(FS);
+        let mut s = Synth::new(FS, 0x5eed);
+        s.render(Segment::Gameplay, 20.0, |b| a.push(b));
+        let mut s2 = Synth::new(FS, 77);
+        let mut bed = Synth::new(FS, 78);
+        let mut buf = Vec::new();
+        bed.render(Segment::Gameplay, 20.0, |b| buf.extend_from_slice(b));
+        let mut i = 0;
+        s2.render(Segment::Gunfire, 20.0, |b| {
+            let mix: Vec<f32> = b
+                .iter()
+                .map(|x| {
+                    let y = buf[i] + 0.2 * x;
+                    i += 1;
+                    y
+                })
+                .collect();
+            a.push(&mix);
+        });
+        let far = a.into_stats();
+        assert!(far.distant_gunshots >= 5, "{:?} distant {}", far.events, far.distant_gunshots);
     }
 
     #[test]

@@ -113,12 +113,22 @@ and a learned layer follows immediately.
 
 ### Readiness, rolling window, versions
 
-Evidence, not a timer: ready when the window holds `MIN_CUES` = 300 target
+Evidence, not a timer: ready when the window holds `MIN_CUES` = 120 target
 events and `MIN_MASKERS` = 60 masker events for the goal (stationary classes
-count one per 0.5 s), **and** the curve has converged: the last
+count one per 0.5 s) over at least `MIN_ACTIVE_SECS` = 10 min of active play,
+**and** the curve has converged: the last
 `CONVERGE_CHECKPOINTS` = 3 checkpoints, one per `CHECKPOINT_SECS` = 60 s of
 active play, agree within `CONVERGE_DB` = 0.5 dB in every band. Progress is
 90 % evidence + 10 % convergence.
+
+Targets per goal (r51 rebalance; real games give ~10 cues/min once gunfire
+is no longer misfiled as clicks): **Awareness** counts footsteps, foliage,
+reloads, voice heard during input (callouts) and *distant* gunshots — ones
+peaking `DISTANT_GUN_BELOW_DB` = 12 dB under the session's recent loud
+impacts (decaying 0.1 dB/s); near gunshots and explosions stay maskers.
+**Dialogue** counts voice. **Immersion** counts all cue classes and voice.
+An r51-like synthetic replay (10 steps/min, callouts, gunfire, explosions)
+is ready in 10 min (`r51_like_play_is_ready_in_ten_to_twenty_minutes`).
 
 After that the applied curve is **frozen**. Learning continues in a rolling
 window (`WINDOW_SEGMENTS` 6 × `SEGMENT_SECS` 600 s = the last 60 min of active

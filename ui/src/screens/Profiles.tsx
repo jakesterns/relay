@@ -23,7 +23,14 @@ export function scanSummary(monitors: { name: string; ddc?: number[] }[]): strin
 }
 
 function ddcControls(codes: number[]): string {
-  const known: [number, string][] = [[0x10, "brightness"], [0x12, "contrast"], [0x87, "sharpness"]];
+  // Every MCCS control Relay recognises, in the order a person reads them.
+  const known: [number, string][] = [
+    [0x10, "brightness"], [0x12, "contrast"], [0x14, "colour preset"],
+    [0x16, "red gain"], [0x18, "green gain"], [0x1a, "blue gain"],
+    [0x6c, "red black level"], [0x6e, "green black level"], [0x70, "blue black level"],
+    [0x87, "sharpness"], [0x60, "input source"], [0x62, "volume"], [0x8d, "mute"],
+    [0xdc, "display mode"], [0xd6, "power mode"],
+  ];
   const names = known.filter(([c]) => codes.includes(c)).map(([, n]) => n);
   return names.length ? `controls: ${names.join(", ")}` : `DDC/CI ${codes.length} codes`;
 }

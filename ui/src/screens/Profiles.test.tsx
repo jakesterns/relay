@@ -260,6 +260,9 @@ describe("the hardware library", () => {
     expect(scanSummary([{ name: "AW2518H" }])).toMatch(/AW2518H: no DDC\/CI response/);
     expect(scanSummary([{ name: "LG", ddc: [0x10, 0x12] }])).toMatch(/LG: controls: brightness, contrast/);
     expect(scanSummary([])).toBe("No monitors found.");
+    // AW2518H caps: presets and RGB gain are listed too, not just the first two.
+    expect(scanSummary([{ name: "AW2518H", ddc: [0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x60] }]))
+      .toMatch(/brightness, contrast, colour preset, red gain, green gain, blue gain, input source/);
   });
 
   it("names the DDC/CI controls the panel actually advertises", async () => {

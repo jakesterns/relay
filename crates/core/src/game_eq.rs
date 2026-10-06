@@ -790,8 +790,13 @@ mod tests {
         p.audio.game_eq_goal = Some(Goal::Awareness);
         // A real learned record, from synthetic statistics.
         let mut rec = LearnRecord::new("game.exe", None);
-        let th =
-            Thresholds { min_cues: 1, min_maskers: 0, checkpoint_secs: 1, ..Default::default() };
+        let th = Thresholds {
+            min_cues: 1,
+            min_maskers: 0,
+            min_active_secs: 0,
+            checkpoint_secs: 1,
+            ..Default::default()
+        };
         let mut st = Stats { active_frames: 10_000, ..Stats::default() };
         st.events[0] = 50;
         st.class_frames[0] = 500;

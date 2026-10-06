@@ -36,12 +36,16 @@ use super::derive::{derive_checked, max_delta, Goal, Limits};
 pub const RECORD_SCHEMA: u32 = 3;
 /// Target events the window must hold (for Awareness: footsteps, foliage,
 /// reloads; for Dialogue: half-second chunks of game voice).
-pub const MIN_CUES: u64 = 300;
+pub const MIN_CUES: u64 = 120;
 /// Masker events (gunshots, explosions, and half-second chunks of vehicles
 /// and music) the window must hold.
 pub const MIN_MASKERS: u64 = 60;
 /// Active-play seconds between checkpoints.
 pub const CHECKPOINT_SECS: u64 = 60;
+/// And at least this much active play, so a short burst of action cannot
+/// count as knowing the game. With the counts and convergence this lands
+/// typical games at 10-20 min (r51: ~25 targets/min, 30 maskers/min).
+pub const MIN_ACTIVE_SECS: u64 = 10 * 60;
 /// Converged: the last checkpoints agree within this in every band, dB.
 pub const CONVERGE_DB: f32 = 0.5;
 /// ...over this many checkpoints.
@@ -57,6 +61,7 @@ pub const WINDOW_SEGMENTS: usize = 6;
 pub struct Thresholds {
     pub min_cues: u64,
     pub min_maskers: u64,
+    pub min_active_secs: u64,
     pub checkpoint_secs: u64,
     pub converge_db: f32,
     pub converge_checkpoints: usize,
@@ -70,6 +75,7 @@ impl Default for Thresholds {
         Self {
             min_cues: MIN_CUES,
             min_maskers: MIN_MASKERS,
+            min_active_secs: MIN_ACTIVE_SECS,
             checkpoint_secs: CHECKPOINT_SECS,
             converge_db: CONVERGE_DB,
             converge_checkpoints: CONVERGE_CHECKPOINTS,
@@ -267,8 +273,9 @@ impl LearnRecord {
 
     /// Whether the window holds enough target and masker events for the goal.
     pub fn enough_evidence(&self, th: &Thresholds) -> bool {
-        let (t, m) = self.goal.evidence(&self.window());
-        t >= th.min_cues && m >= th.min_maskers
+        let w = self.window();
+        let (t, m) = self.goal.evidence(&w);
+        t >= th.min_cues && m >= th.min_maskers && w.active_secs() >= th.min_active_secs
     }
 
     /// Switch goal. The aggregates are goal-independent, so a curve that was
@@ -373,8 +380,11 @@ impl LearnRecord {
                 (have as f32 / want as f32).min(1.0)
             }
         };
-        let (t, m) = self.goal.evidence(&self.window());
-        let evidence = frac(t, th.min_cues).min(frac(m, th.min_maskers));
+        let w = self.window();
+        let (t, m) = self.goal.evidence(&w);
+        let evidence = frac(t, th.min_cues)
+            .min(frac(m, th.min_maskers))
+            .min(frac(w.active_secs(), th.min_active_secs));
         let need = th.converge_checkpoints.max(1);
         let stable = if need <= 1 {
             1.0
@@ -433,6 +443,7 @@ mod tests {
         Thresholds {
             min_cues: 60,
             min_maskers: 10,
+            min_active_secs: 30,
             checkpoint_secs: 20,
             segment_secs: 60,
             window_segments: 3,
@@ -470,6 +481,39 @@ mod tests {
             }
             out
         }
+    }
+
+    /// r51 on PC2 (Warzone, no commentary): ~10 cues/min, voice callouts
+    /// while playing, plenty of gunfire and explosions. Ready in 10-20 min.
+    #[test]
+    fn r51_like_play_is_ready_in_ten_to_twenty_minutes() {
+        let th = Thresholds::default();
+        let mut r = LearnRecord::new("game.exe", None);
+        let mut a = Analyzer::new(FS);
+        let mut s = Synth::new(FS, 51);
+        s.step = 0.12;
+        s.step_ms = 6000; // ~10 footsteps / min
+        s.boom_ms = 6000;
+        let mut ready_at = None;
+        'outer: for minute in 0..25u32 {
+            for (seg, secs) in
+                [(Segment::Gameplay, 50u32), (Segment::Speech, 6), (Segment::Gunfire, 4)]
+            {
+                for _ in 0..secs {
+                    s.render(seg, 1.0, |b| a.push(b));
+                    r.absorb(&a.take_stats(), &th);
+                    if r.checkpoint(&th, &Limits::default()) == Outcome::FirstCurve {
+                        ready_at = Some(minute + 1);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+        let m = ready_at.unwrap_or_else(|| {
+            panic!("not ready in 25 min: {}% {:?}", r.progress(&th), r.window().events)
+        });
+        eprintln!("S46 r51-like time to ready: {m} min");
+        assert!((10..=20).contains(&m), "{m} min");
     }
 
     #[test]

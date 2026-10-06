@@ -150,17 +150,28 @@ impl Goal {
     pub fn evidence_classes(self) -> (&'static [SoundClass], &'static [SoundClass]) {
         use SoundClass::*;
         const MASKERS: &[SoundClass] = &[Gunshot, Explosion, Vehicle, Music];
+        // Voice in the statistics was heard with the player giving input
+        // (cutscenes are gated out), so for Awareness it is callouts.
         match self {
-            Goal::Awareness => (&[Footsteps, Foliage, Mechanical], MASKERS),
+            Goal::Awareness => (&[Footsteps, Foliage, Mechanical, Voice], MASKERS),
             Goal::Dialogue => (&[Voice], MASKERS),
             Goal::Immersion => (&[Footsteps, Foliage, Mechanical, Voice], MASKERS),
         }
     }
 
-    /// (target events, masker events) in `stats` for this goal.
+    /// (target events, masker events) in `stats` for this goal. Awareness
+    /// and Immersion also count distant gunshots (well below the session's
+    /// loud events) as cues: you listen for them, they do not cover anything.
     pub fn evidence(self, stats: &Stats) -> (u64, u64) {
         let (t, m) = self.evidence_classes();
-        (t.iter().map(|&c| stats.count(c)).sum(), m.iter().map(|&c| stats.count(c)).sum())
+        let mut targets: u64 = t.iter().map(|&c| stats.count(c)).sum();
+        let mut maskers: u64 = m.iter().map(|&c| stats.count(c)).sum();
+        if self != Goal::Dialogue {
+            let far = stats.distant_gunshots.min(stats.count(SoundClass::Gunshot));
+            targets += far;
+            maskers -= far;
+        }
+        (targets, maskers)
     }
 }
 
@@ -800,7 +811,7 @@ mod tests {
         let s = scene();
         let (t_a, m_a) = Goal::Awareness.evidence(&s);
         let (t_d, m_d) = Goal::Dialogue.evidence(&s);
-        assert_eq!(t_a, s.cue_events());
+        assert_eq!(t_a, s.cue_events() + s.count(SoundClass::Voice) + s.distant_gunshots);
         assert_eq!(t_d, s.count(SoundClass::Voice));
         assert_eq!(m_a, m_d);
     }
