@@ -44,6 +44,10 @@ pub struct RecvOpts {
     /// Play received audio on this endpoint (S40); `None` = the System
     /// default, followed if it changes. `mic_route` wins when both are set.
     pub output_device: Option<String>,
+    /// What this same PC is sharing at spawn (S50), from the core's
+    /// `--local-share`; later changes come as `local_share` commands. The
+    /// stream window is hidden from capture only while this covers it.
+    pub local_share: Option<crate::command::SourceTarget>,
 }
 
 /// One depacketized video access unit.
@@ -200,6 +204,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Relay Camera can be switched on or off while waiting (S43b): the
     // choice is carried into the render thread when a sender connects.
     let mut vcam = opts.vcam;
+    // What this PC is sharing (S50), kept up to date while waiting so the
+    // window is created with the right capture decision.
+    let mut local_share = opts.local_share;
     // Where received audio plays (S40). Made here so a pick while waiting
     // for a sender is kept; the virtual-mic route, when set, is the output.
     let output = crate::devices::DeviceSlot::shared(
@@ -215,7 +222,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                             info!("stop command received while waiting for a sender");
                             return Ok(());
                         }
-                        Some(crate::command::EngineCmd::Host { mode, owner }) => {
+                        Some(crate::command::EngineCmd::LocalShare { target }) => {
+                            info!(?target, "local share changed while waiting for a sender");
+                            local_share = target;
+                        }
+                        Some(crate::command::EngineCmd::Host { mode, owner, .. }) => {
                             host = match mode {
                                 crate::command::HostMode::Embedded if owner != 0 => Some(owner),
                                 _ => None,
@@ -646,6 +657,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         mic_route: opts.mic_route.clone(),
         host,
         output: output.clone(),
+        local_share,
+        sender: Some(sender_name.clone()),
     };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.

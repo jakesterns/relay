@@ -35,12 +35,13 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-use crate::command::{self, EngineCmd, HostMode};
+use crate::command::{self, CleanFeed, EngineCmd, HostMode, SourceTarget};
 use crate::decode::mf::MfDecoder;
 use crate::transport::receiver::{AccessUnit, RecvStats};
 use crate::{probe, signal_now_ns};
 
 pub mod host;
+pub mod placement;
 
 /// Receiver output options beyond the window itself.
 #[derive(Debug, Default, Clone)]
@@ -57,6 +58,11 @@ pub struct RenderOpts {
     /// The output endpoint received audio plays on (S40), changed live by a
     /// `device` command. Empty = the System default, followed if it moves.
     pub output: Arc<crate::devices::DeviceSlot>,
+    /// What this same PC is sharing, as the core last said (S50); `None` =
+    /// not sharing. Decides whether the stream window is hidden from capture.
+    pub local_share: Option<SourceTarget>,
+    /// The sender's name, for the window title call apps list it by.
+    pub sender: Option<String>,
 }
 
 /// Apply a `device` command on the receiver. Only `Output` means anything
@@ -92,7 +98,15 @@ pub type AbortTx = mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>;
 /// a host command that arrived before it did.
 pub struct HostLink {
     hwnd: AtomicIsize,
-    pending: Mutex<Option<(HostMode, u64)>>,
+    pending: Mutex<Option<(HostMode, u64, CleanFeed)>>,
+    /// What this PC is sharing right now (S50), the capture guard's input.
+    /// Written by the transport from the core's `local_share` command, read
+    /// by the window thread.
+    local_share: Mutex<Option<SourceTarget>>,
+    /// The back buffer size the window wants instead of the stream's: a
+    /// clean feed's fixed size, which the render thread letterboxes into.
+    /// Set by the window thread before it bumps `surface_gen`.
+    surface_size: Mutex<Option<(u32, u32)>>,
     /// Bumped by the window thread after every hosting-mode change. The
     /// render thread recreates its swapchain when it sees a new value: a
     /// flip-model swapchain does not reliably keep presenting into a window
@@ -102,12 +116,37 @@ pub struct HostLink {
 }
 
 impl HostLink {
-    fn new() -> Arc<Self> {
+    fn new(local_share: Option<SourceTarget>) -> Arc<Self> {
         Arc::new(Self {
             hwnd: AtomicIsize::new(0),
             pending: Mutex::new(None),
+            local_share: Mutex::new(local_share),
+            surface_size: Mutex::new(None),
             surface_gen: AtomicU64::new(0),
         })
+    }
+
+    /// The core says what this PC is sharing now (S50). The window thread
+    /// re-takes the capture decision at once if the window exists, and at
+    /// creation otherwise.
+    pub fn set_local_share(&self, target: Option<SourceTarget>) {
+        *self.local_share.lock().unwrap() = target;
+        let hwnd = self.hwnd.load(Ordering::Acquire);
+        if hwnd != 0 {
+            host::post_guard(HWND(hwnd as *mut _));
+        }
+    }
+
+    pub(crate) fn local_share(&self) -> Option<SourceTarget> {
+        *self.local_share.lock().unwrap()
+    }
+
+    pub(crate) fn set_surface_size(&self, size: Option<(u32, u32)>) {
+        *self.surface_size.lock().unwrap() = size;
+    }
+
+    fn surface_size(&self) -> Option<(u32, u32)> {
+        *self.surface_size.lock().unwrap()
     }
 
     /// The window changed mode; the swapchain should be rebuilt.
@@ -122,16 +161,16 @@ impl HostLink {
     /// Ask the window thread to change hosting mode. Before the window
     /// exists the request is parked and applied at creation, so a command
     /// that races the first frame is not lost.
-    pub fn post(&self, mode: HostMode, owner: u64) {
+    pub fn post(&self, mode: HostMode, owner: u64, feed: CleanFeed) {
         let hwnd = self.hwnd.load(Ordering::Acquire);
         if hwnd == 0 {
-            *self.pending.lock().unwrap() = Some((mode, owner));
+            *self.pending.lock().unwrap() = Some((mode, owner, feed));
             return;
         }
-        host::post_mode(HWND(hwnd as *mut _), mode, owner);
+        host::post_mode(HWND(hwnd as *mut _), mode, owner, feed);
     }
 
-    fn take_pending(&self) -> Option<(HostMode, u64)> {
+    fn take_pending(&self) -> Option<(HostMode, u64, CleanFeed)> {
         self.pending.lock().unwrap().take()
     }
 
@@ -201,11 +240,12 @@ pub async fn run(
     let failure2 = failure.clone();
     let quit = Arc::new(AtomicBool::new(false));
     let quit2 = quit.clone();
-    let link = HostLink::new();
+    let link = HostLink::new(opts.local_share);
     let link2 = link.clone();
     let host_owner = opts.host;
+    let title = placement::window_title(opts.sender.as_deref());
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner) {
+        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner, title) {
             // ERROR, and in share.log: the one line someone reads when a
             // receive dies (the dead-host fatal used to reach core.log only).
             tracing::error!(error = %e, "receiver failed; telling the sender why");
@@ -300,9 +340,13 @@ pub async fn run(
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
                         Some(EngineCmd::Stop) => { info!("stop command received"); break; }
-                        Some(EngineCmd::Host { mode, owner }) => {
-                            info!(?mode, owner, "host command received on stdin");
-                            link.post(mode, owner)
+                        Some(EngineCmd::Host { mode, owner, feed }) => {
+                            info!(?mode, owner, ?feed, "host command received on stdin");
+                            link.post(mode, owner, feed.unwrap_or_default())
+                        }
+                        Some(EngineCmd::LocalShare { target }) => {
+                            info!(?target, "local share changed; re-checking capture exclusion");
+                            link.set_local_share(target)
                         }
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received; Relay Camera follows live");
@@ -405,14 +449,21 @@ pub struct Surface {
     vp_device: ID3D11VideoDevice,
     vp_context: ID3D11VideoContext,
     hwnd: HWND,
+    /// The stream's size: the back buffer's unless the window asks for
+    /// another (a clean feed).
     size: (u32, u32),
+    /// The back buffer's size now. The picture is letterboxed into it.
+    target: (u32, u32),
 }
 
 impl Surface {
     /// Replace the swapchain with a new one on the same window and device.
     /// Called after the window's hosting mode changed; see `HostLink`.
-    fn recreate_swapchain(&mut self) -> Result<()> {
-        let (w, h) = self.size;
+    /// `target` is the back buffer the mode wants (a clean feed's fixed
+    /// size), `None` = the stream's own size.
+    fn recreate_swapchain(&mut self, target: Option<(u32, u32)>) -> Result<()> {
+        let (w, h) = target.unwrap_or(self.size);
+        self.target = (w, h);
         let dxgi_device: IDXGIDevice = self.device.cast()?;
         // SAFETY: live device. The old chain must be *gone* before the new
         // one is created: a window carries one swapchain, and creating a
@@ -501,6 +552,7 @@ impl Surface {
             vp_context,
             hwnd,
             size: (w, h),
+            target: (w, h),
         })
     }
 }
@@ -555,6 +607,7 @@ fn follow_vcam(
 }
 
 /// Decode + present. Owns the D3D objects; the window is on its own thread.
+#[allow(clippy::too_many_arguments)]
 fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
@@ -563,6 +616,7 @@ fn video_thread(
     quit: Arc<AtomicBool>,
     link: Arc<HostLink>,
     host_owner: Option<u64>,
+    title: String,
 ) -> Result<()> {
     // SAFETY: COM MTA for MF + free-threaded D3D; balanced on return.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
@@ -587,7 +641,7 @@ fn video_thread(
     let (w, h) = crate::decode::probe_dimensions(codec, &first.data).unwrap_or((2560, 1440));
     info!(w, h, codec = codec.label(), "stream dimensions");
 
-    let win = host::WindowThread::start(w, h, host_owner, link.clone(), quit.clone())?;
+    let win = host::WindowThread::start(w, h, host_owner, title, link.clone(), quit.clone())?;
     let mut surface = Surface::new(win.hwnd, w, h)?;
     let mut surface_gen = link.surface_gen();
     let mut decoder = MfDecoder::new(&surface.device, codec, w, h)?;
@@ -655,7 +709,7 @@ fn video_thread(
         let gen = link.surface_gen();
         if gen != surface_gen {
             surface_gen = gen;
-            if let Err(e) = surface.recreate_swapchain() {
+            if let Err(e) = surface.recreate_swapchain(link.surface_size()) {
                 // Retry next frame rather than present into nothing.
                 warn!(error = %e, "could not recreate the swapchain; retrying");
                 surface_gen = gen.wrapping_sub(1);
@@ -851,6 +905,18 @@ impl VideoPresent {
             let src =
                 RECT { left: 0, top: 0, right: frame.width as i32, bottom: frame.height as i32 };
             win.vp_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&src));
+            // Into the whole back buffer when it is the stream's size; a
+            // clean feed's fixed buffer gets the picture letterboxed, with
+            // black bars rather than a stretch (S50).
+            let fit = placement::letterbox(win.target, (frame.width, frame.height));
+            let dst = RECT { left: fit.left, top: fit.top, right: fit.right, bottom: fit.bottom };
+            win.vp_context.VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&dst));
+            let black = D3D11_VIDEO_COLOR {
+                Anonymous: D3D11_VIDEO_COLOR_0 {
+                    RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 },
+                },
+            };
+            win.vp_context.VideoProcessorSetOutputBackgroundColor(&self.processor, false, &black);
             let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 pInputSurface: std::mem::ManuallyDrop::new(in_view),
@@ -879,7 +945,7 @@ impl VideoPresent {
 /// the sending PC captures itself (B9) — and the hosting mechanics (owner
 /// changes, affinity, z-order, the app positioning the window) are the part
 /// most likely to go wrong. Nothing here captures anything.
-pub async fn run_stub(host: Option<u64>) -> Result<()> {
+pub async fn run_stub(host: Option<u64>, local_share: Option<SourceTarget>) -> Result<()> {
     println!(
         "{}",
         serde_json::json!({ "event": "waiting", "name": "stub", "port": 0, "code": "000000" })
@@ -888,7 +954,7 @@ pub async fn run_stub(host: Option<u64>) -> Result<()> {
     println!("{}", serde_json::json!({ "event": "codec", "codec": "h264" }));
 
     let quit = Arc::new(AtomicBool::new(false));
-    let link = HostLink::new();
+    let link = HostLink::new(local_share);
     let presented = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (q2, l2, p2) = (quit.clone(), link.clone(), presented.clone());
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
@@ -923,7 +989,10 @@ pub async fn run_stub(host: Option<u64>) -> Result<()> {
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
                         Some(EngineCmd::Stop) => break,
-                        Some(EngineCmd::Host { mode, owner }) => link.post(mode, owner),
+                        Some(EngineCmd::Host { mode, owner, feed }) => {
+                            link.post(mode, owner, feed.unwrap_or_default())
+                        }
+                        Some(EngineCmd::LocalShare { target }) => link.set_local_share(target),
                         _ => {}
                     },
                     _ if spawned_by_core => break,
@@ -948,7 +1017,8 @@ fn stub_thread(
     // SAFETY: balanced below.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
     let (w, h) = (1920u32, 1080u32);
-    let win = host::WindowThread::start(w, h, host, link.clone(), quit.clone())?;
+    let title = placement::window_title(Some("host-stub"));
+    let win = host::WindowThread::start(w, h, host, title, link.clone(), quit.clone())?;
     let mut surface = Surface::new(win.hwnd, w, h)?;
     let mut surface_gen = link.surface_gen();
     // `ClearView` (a rect-bounded clear) is on the 11.1 context.
@@ -967,7 +1037,7 @@ fn stub_thread(
         let gen = link.surface_gen();
         if gen != surface_gen {
             surface_gen = gen;
-            if let Err(e) = surface.recreate_swapchain() {
+            if let Err(e) = surface.recreate_swapchain(link.surface_size()) {
                 warn!(error = %e, "could not recreate the swapchain; retrying");
                 surface_gen = gen.wrapping_sub(1);
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -986,6 +1056,8 @@ fn stub_thread(
             surface.device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
             let rtv = rtv.context("render target view")?;
             surface.context.ClearRenderTargetView(&rtv, &[r * 0.25, g * 0.25, b * 0.25, 1.0]);
+            // The back buffer, which is a clean feed's size in that mode.
+            let (w, h) = surface.target;
             let x = ((t * 0.5).fract() * w as f32) as i32;
             let bar = RECT { left: x, top: 0, right: (x + 24).min(w as i32), bottom: h as i32 };
             ctx1.ClearView(&rtv, &[r, g, b, 1.0], Some(std::slice::from_ref(&bar)));

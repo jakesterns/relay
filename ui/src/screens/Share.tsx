@@ -467,11 +467,15 @@ export function Share() {
   );
 }
 
-/** The three ids `presets.rs::builtins()` ships, pinned on the Rust side by
+/** The ids `presets.rs::builtins()` ships, pinned on the Rust side by
  *  `builtins_match_the_plan`. They can be edited like any other preset, but
  *  not deleted: `PresetStore::load` only re-seeds them when presets.json is
  *  missing entirely, so removing one here would be permanent. */
-const BUILTIN_PRESETS = ["game", "daw", "desktop"];
+export const BUILTIN_PRESETS = ["game", "daw", "desktop", "discord", "discord-720"];
+
+/** The call presets (S50): sized for what Discord, Zoom, Teams and Meet do
+ *  with a picture, which is re-encode it at 1080p60 or less. */
+export const CALL_PRESETS = ["discord", "discord-720"];
 
 /** The selected preset: its settings, and an editor for them.
  *
@@ -541,6 +545,11 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
         <Kv k="Relay Camera here"
           v={camOk ? (def.vcam ? "On" : "Off") : "Unavailable (needs Windows 11 22H2+)"} />
+        {CALL_PRESETS.includes(def.id) && (
+          <p className="note" data-testid="call-preset-note">For a PC that passes the share on to a call:
+            Discord, Zoom, Teams and Meet re-encode what they get, and none sends more than
+            1080p60. Use 720p30 on a slow call or a free Discord account.</p>
+        )}
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );

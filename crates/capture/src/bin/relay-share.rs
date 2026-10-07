@@ -185,7 +185,7 @@ fn run() -> Result<()> {
         #[cfg(windows)]
         "host-stub" => {
             let opts = parse_recv_args(&args[1..])?;
-            run_async(relay_capture::render::run_stub(opts.host))
+            run_async(relay_capture::render::run_stub(opts.host, opts.local_share))
         }
         #[cfg(windows)]
         "learn" => {
@@ -353,6 +353,7 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         host: None,
         return_pid: None,
         output_device: None,
+        local_share: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -371,6 +372,11 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             }
             "--host" => {
                 opts.host = Some(it.next().context("--host <hwnd>")?.parse().context("--host")?)
+            }
+            // S50: what this PC is sharing at spawn, as `SourceTarget` JSON.
+            "--local-share" => {
+                let json = it.next().context("--local-share <target json>")?;
+                opts.local_share = Some(serde_json::from_str(json).context("--local-share")?)
             }
             other => bail!("unknown recv flag `{other}`"),
         }
@@ -969,6 +975,11 @@ mod tests {
         assert_eq!(o.output_device, None);
         let o = parse_recv_args(&s(&["--output-device", "{spk}"])).unwrap();
         assert_eq!(o.output_device.as_deref(), Some("{spk}"));
+        // S50: what this PC is sharing at spawn; absent = not sharing.
+        assert_eq!(o.local_share, None);
+        let o = parse_recv_args(&s(&["--local-share", r#"{"kind":"display","index":1}"#])).unwrap();
+        assert_eq!(o.local_share, Some(relay_capture::command::SourceTarget::Display { index: 1 }));
+        assert!(parse_recv_args(&s(&["--local-share", "screen"])).is_err());
 
         assert!(parse_recv_args(&s(&["--wat"])).is_err());
     }

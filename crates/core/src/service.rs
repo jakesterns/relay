@@ -147,6 +147,12 @@ struct Inner {
     /// or by a toggle), so a toggle is sent only when it changes: install
     /// and uninstall each sent it twice (PC2, r47).
     recv_vcam: Option<bool>,
+    /// S50: what the running share engine captures, from its `source`
+    /// lines (`None` before the first one: it starts on the primary).
+    share_target: Option<crate::share::SourceTarget>,
+    /// S50: what the running receiver was last told this PC is sharing (at
+    /// spawn or by a `local_share` command), so it is told once per change.
+    recv_local_told: Option<Option<crate::share::SourceTarget>>,
     /// Consecutive 1 s ticks on which Windows' foreground window differed
     /// from the one the hook last reported (see `reconcile_foreground`).
     fg_mismatch: u8,
@@ -368,6 +374,8 @@ impl Service {
             recv_episode: None,
             recv_host: None,
             recv_vcam: None,
+            share_target: None,
+            recv_local_told: None,
             fg_mismatch: 0,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
@@ -1280,6 +1288,38 @@ fn engine_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> R
     }
 }
 
+/// S50: what this PC is sharing right now, for the receiver's capture guard.
+/// A share engine that has not reported a source yet is on the primary.
+fn local_share_now(g: &Inner) -> Option<crate::share::SourceTarget> {
+    g.share.as_ref().map(|_| g.share_target.unwrap_or(crate::share::INITIAL_SHARE_TARGET))
+}
+
+/// S50: tell a running receiver what this PC is sharing (`now`), if that is
+/// news to it. The stream window is hidden from capture only while a local
+/// share covers it, so a receive on a PC that is not sharing stays pickable
+/// in call apps, and one on a PC that is sharing never captures itself (B9).
+fn sync_local_share_locked(g: &mut Inner, now: Option<crate::share::SourceTarget>) {
+    let receiving = g.receive.is_some();
+    let Some(cmd) = crate::share::local_share_sync(receiving, g.recv_local_told, now) else {
+        return;
+    };
+    if let Some(engine) = g.receive.as_mut() {
+        match engine.command(&cmd) {
+            Ok(()) => {
+                info!(?now, "told the receiver what this PC is sharing");
+                g.recv_local_told = Some(now);
+            }
+            Err(e) => warn!(error = %e, "could not tell the receiver about the local share"),
+        }
+    }
+}
+
+fn sync_local_share(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    let now = local_share_now(&g);
+    sync_local_share_locked(&mut g, now);
+}
+
 /// Like `engine_command`, for the receive engine.
 fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> Reply {
     let mut g = inner.lock();
@@ -1931,10 +1971,17 @@ fn spawn_share(
         req.mic_device = saved.get(MixerSide::Send, DeviceTrack::Mic).map(str::to_string);
         req.output_device = saved.get(MixerSide::Send, DeviceTrack::Output).map(str::to_string);
     }
+    // S50: a receive on this PC hides its window from capture *before* the
+    // first frame is captured, not a moment after.
+    g.share_target = None;
+    sync_local_share_locked(&mut g, Some(crate::share::INITIAL_SHARE_TARGET));
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
-        Err(e) => return Reply::Error { message: e.to_string() },
+        Err(e) => {
+            sync_local_share_locked(&mut g, None);
+            return Reply::Error { message: e.to_string() };
+        }
     };
     g.share = Some(engine);
     g.preview_fps = req.preview_fps;
@@ -2007,6 +2054,10 @@ fn spawn_share(
                     let _ = events2.send(Event::ReplaySaved { path, ms });
                 }
                 ShareEvent::SourceChanged { data } => {
+                    if let Some(t) = crate::share::source_target_of(&data) {
+                        inner2.lock().share_target = Some(t);
+                        sync_local_share(&inner2);
+                    }
                     let _ = events2.send(Event::SourceChanged { data });
                 }
                 // The sender's stats lines carry the codec for the strip.
@@ -2053,6 +2104,9 @@ fn on_share_exit(
 ) {
     let mut g = inner.lock();
     g.share = None;
+    g.share_target = None;
+    // S50: nothing is being captured here now; a receive becomes pickable.
+    sync_local_share_locked(&mut g, None);
     // Refused by the other PC: a final answer, not a drop. No crash record,
     // no reconnecting -- clear the intent and say why.
     if let Some(message) = refused {
@@ -2203,6 +2257,9 @@ fn spawn_receive(
         });
     }
     g.recv_vcam = Some(req.vcam);
+    // S50: what this PC is sharing, decided here like the other routing.
+    req.local_share = local_share_now(&g);
+    g.recv_local_told = Some(req.local_share);
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,
@@ -2379,9 +2436,9 @@ fn spawn_receive(
                 // shell everything it needs.
                 ShareEvent::RenderUp { hwnd, width, height, host, excluded_from_capture } => {
                     stream_size = (width, height);
-                    if !excluded_from_capture {
-                        warn!("stream window is NOT excluded from capture (B9)");
-                    }
+                    // S50: capturable is the normal state now; the engine
+                    // hides it only while this PC shares what it is on.
+                    info!(excluded_from_capture, "stream window up");
                     let _ = events2.send(Event::StreamWindow {
                         hwnd,
                         width,
@@ -2392,9 +2449,6 @@ fn spawn_receive(
                 }
                 ShareEvent::Host { mode, hwnd, excluded_from_capture } => {
                     info!(mode, hwnd, excluded_from_capture, "stream window mode from the engine");
-                    if !excluded_from_capture {
-                        warn!(mode, "stream window is NOT excluded from capture (B9)");
-                    }
                     let _ = events2.send(Event::StreamWindow {
                         hwnd,
                         width: stream_size.0,
@@ -2490,6 +2544,9 @@ fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> R
         None if was_recovering => {}
         None => return Reply::Error { message: "no share is running".into() },
     }
+    // S50: only once the capture has stopped does the receive here become
+    // capturable again.
+    sync_local_share(inner);
     let state = {
         let mut g = inner.lock();
         g.state.sharing = crate::types::ShareState::Off;
@@ -2878,13 +2935,13 @@ impl IpcHandler {
                 drop(g);
                 kill_receive(&self.inner, &self.events)
             }
-            Method::HostReceive { mode, owner } => {
+            Method::HostReceive { mode, owner, feed } => {
                 drop(g);
-                info!(?mode, owner, "host command for the receiver");
+                info!(?mode, owner, ?feed, "host command for the receiver");
                 if owner != 0 {
                     self.inner.lock().recv_host = Some(owner);
                 }
-                receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner })
+                receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner, feed })
             }
             Method::DiscoverReceivers => {
                 drop(g);
