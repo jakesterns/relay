@@ -126,6 +126,9 @@ pub enum Method {
     },
     /// Stop receiving.
     StopReceive,
+    /// Stop sending the call app's audio back to the sender, live, while
+    /// receiving (r54). No restart; turning it on again is Stop and Start.
+    StopCallReturn,
     /// Move the receiver's stream window between the app window (`owner`,
     /// the shell's HWND) and a window of its own (S29).
     HostReceive {

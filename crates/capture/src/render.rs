@@ -57,6 +57,9 @@ pub struct RenderOpts {
     /// The output endpoint received audio plays on (S40), changed live by a
     /// `device` command. Empty = the System default, followed if it moves.
     pub output: Arc<crate::devices::DeviceSlot>,
+    /// Stops the call-audio return (S19) when set; a `return` command with
+    /// `on: false` sets it live (r54). Shared with the return capture thread.
+    pub return_stop: Arc<AtomicBool>,
 }
 
 /// Apply a `device` command on the receiver. Only `Output` means anything
@@ -197,6 +200,7 @@ pub async fn run(
     // the render thread follows it through `VcamSwitch`.
     let vcam = Arc::new(AtomicBool::new(opts.vcam));
     let vcam_cmd = vcam.clone();
+    let opts_return_stop = opts.return_stop.clone();
     let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let failure2 = failure.clone();
     let quit = Arc::new(AtomicBool::new(false));
@@ -307,6 +311,11 @@ pub async fn run(
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received; Relay Camera follows live");
                             vcam_cmd.store(on, Ordering::Release);
+                        }
+                        Some(EngineCmd::Return { on: false }) => {
+                            info!("return command: the call app's audio is no longer sent back");
+                            opts_return_stop.store(true, Ordering::Release);
+                            println!("{}", serde_json::json!({ "event": "return_off", "reason": "user" }));
                         }
                         Some(EngineCmd::Mixer { faders: set }) => {
                             faders.apply(&set);

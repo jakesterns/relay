@@ -46,6 +46,11 @@ pub struct ShareRequest {
     /// Capture just this process's audio (game-only) instead of the desktop mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_pid: Option<u32>,
+    /// Which process `audio_pid` meant (r54): set by the service when the
+    /// share starts, checked against the live process before every spawn and
+    /// again in the engine, so a resumed share never captures a recycled PID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_app: Option<crate::proc_identity::ProcIdentity>,
     /// Also send the default microphone, as a second Opus track alongside
     /// the desktop/game mix rather than instead of it. Mic-only is `audio:
     /// false` with `mic: true`.
@@ -189,6 +194,12 @@ pub enum EngineCmd {
     Vcam {
         on: bool,
     },
+    /// Receiver only (r54): stop sending the call app's audio back, live,
+    /// with no restart. Only `false` is acted on: turning a return route on
+    /// needs a new track, which needs a new connection.
+    Return {
+        on: bool,
+    },
     /// Retune the in-app preview: thumbnails per second, 0 = off.
     Preview {
         fps: u32,
@@ -247,7 +258,7 @@ fn default_true() -> bool {
 }
 
 /// How to run the receiver side.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReceiveRequest {
     /// mDNS instance name; empty = hostname.
     #[serde(default)]
@@ -273,6 +284,11 @@ pub struct ReceiveRequest {
     /// pre-S19 record reads as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_pid: Option<u32>,
+    /// Which process `return_pid` meant (r54): image path and creation time,
+    /// pinned by the service when the user starts receiving and re-checked on
+    /// every spawn and resume. Never trusted from a client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_app: Option<crate::proc_identity::ProcIdentity>,
     /// Where received audio plays (S40), from the saved mixer choice; `None`
     /// = the System default. `mic_route` wins when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -330,6 +346,86 @@ pub enum ShareEvent {
     Refused { message: String },
     /// Receiver: a PC tried the wrong code; the wait goes on under a new one.
     WrongCode { name: String },
+    /// Receiver (r54): the call app's audio is not (or no longer) sent back.
+    /// `reason` is `user` for a live Off, else why the engine refused it.
+    ReturnOff { reason: String },
+    /// Sender (r54): the shared app's audio is not captured, because its PID
+    /// no longer names the process the core pinned.
+    AudioOff { reason: String },
+}
+
+/// What the user is told when a call app picked earlier is gone (r54).
+pub const RETURN_GONE_TEXT: &str =
+    "The call app you picked has closed, so its audio is not sent back. Pick it again on Receive.";
+/// What the user is told when the app whose sound was shared is gone (r54).
+pub const AUDIO_GONE_TEXT: &str =
+    "The app whose sound you were sharing has closed. The share goes on without its sound.";
+
+impl ReceiveRequest {
+    /// r54: pin the call app to the live process (a fresh Start), or check
+    /// the pinned one still is that process (a resume, a restart, a replay).
+    /// Anything that does not check out is dropped here, before an engine
+    /// could capture it. `Some` = it was dropped, and why.
+    pub fn settle_return(
+        &mut self,
+        fresh: bool,
+        probe: &dyn crate::proc_identity::ProcessProbe,
+    ) -> Option<crate::proc_identity::Stale> {
+        use crate::proc_identity::{settle, Settled};
+        match settle(self.return_pid, self.return_app.as_ref(), fresh, probe) {
+            Settled::None => {
+                self.return_pid = None;
+                self.return_app = None;
+                None
+            }
+            Settled::Keep(id) => {
+                self.return_pid = Some(id.pid);
+                self.return_app = Some(id);
+                None
+            }
+            Settled::Drop(why) => {
+                self.return_pid = None;
+                self.return_app = None;
+                Some(why)
+            }
+        }
+    }
+}
+
+impl ShareRequest {
+    /// r54: the same check for the app whose audio a share captures. A stale
+    /// one leaves the share without program audio -- never the whole
+    /// desktop mix instead, which could carry a call nobody chose to send.
+    pub fn settle_audio_app(
+        &mut self,
+        fresh: bool,
+        probe: &dyn crate::proc_identity::ProcessProbe,
+    ) -> Option<crate::proc_identity::Stale> {
+        use crate::proc_identity::{settle, Settled};
+        if !self.audio {
+            self.audio_app = None;
+            return None;
+        }
+        match settle(self.audio_pid, self.audio_app.as_ref(), fresh, probe) {
+            Settled::None => {
+                self.audio_pid = None;
+                self.audio_app = None;
+                None
+            }
+            Settled::Keep(id) => {
+                self.audio_pid = Some(id.pid);
+                self.audio_app = Some(id);
+                None
+            }
+            Settled::Drop(why) => {
+                self.audio_pid = None;
+                self.audio_app = None;
+                self.audio = false;
+                self.rest = false;
+                Some(why)
+            }
+        }
+    }
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -579,6 +675,13 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     } else if let Some(pid) = req.audio_pid {
         args.push("--audio-pid".into());
         args.push(pid.to_string());
+        // The engine re-checks the process right before it captures it.
+        if let Some(app) = req.audio_app.as_ref().filter(|a| a.pid == pid) {
+            args.push("--audio-pid-image".into());
+            args.push(app.image.clone());
+            args.push("--audio-pid-created".into());
+            args.push(app.created.to_string());
+        }
     }
     // Independent of the program source: `--audio-mic` adds a track.
     if req.mic {
@@ -661,6 +764,12 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     if let Some(pid) = req.return_pid.filter(|p| *p != 0) {
         args.push("--return-pid".into());
         args.push(pid.to_string());
+        if let Some(app) = req.return_app.as_ref().filter(|a| a.pid == pid) {
+            args.push("--return-image".into());
+            args.push(app.image.clone());
+            args.push("--return-created".into());
+            args.push(app.created.to_string());
+        }
     }
     if let Some(id) = req.output_device.as_deref().filter(|d| !d.is_empty()) {
         args.push("--output-device".into());
@@ -744,6 +853,12 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         Some("wrong_code") => Some(ShareEvent::WrongCode {
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
         }),
+        Some("return_off") => Some(ShareEvent::ReturnOff {
+            reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        }),
+        Some("audio_off") => Some(ShareEvent::AudioOff {
+            reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        }),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");
@@ -790,6 +905,90 @@ mod tests {
     }
 
     use super::*;
+
+    mod r54 {
+        use super::*;
+        use crate::proc_identity::{ProcIdentity, ProcessProbe, Stale};
+
+        struct One(Option<ProcIdentity>);
+        impl ProcessProbe for One {
+            fn identity(&self, pid: u32) -> Option<ProcIdentity> {
+                self.0.clone().filter(|i| i.pid == pid)
+            }
+        }
+        fn app(pid: u32, image: &str, created: u64) -> ProcIdentity {
+            ProcIdentity { pid, image: image.into(), created }
+        }
+        fn recv(pid: Option<u32>, stored: Option<ProcIdentity>) -> ReceiveRequest {
+            ReceiveRequest { return_pid: pid, return_app: stored, ..Default::default() }
+        }
+
+        #[test]
+        fn a_resumed_receive_with_a_reused_pid_drops_the_route() {
+            // PC2: 2772 was a test process; now it is someone else.
+            let mut req = recv(Some(2772), Some(app(2772, r"C:\t\tone.exe", 1)));
+            let probe = One(Some(app(2772, r"C:\d\Discord.exe", 2)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Reused));
+            assert_eq!((req.return_pid, req.return_app.clone()), (None, None));
+            assert!(!recv_args(&req).iter().any(|a| a.starts_with("--return")));
+        }
+
+        #[test]
+        fn the_same_exe_with_a_new_start_time_is_refused() {
+            let mut req = recv(Some(10), Some(app(10, r"C:\d\Discord.exe", 1)));
+            let probe = One(Some(app(10, r"C:\d\Discord.exe", 5)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Reused));
+            assert_eq!(req.return_pid, None);
+        }
+
+        #[test]
+        fn a_pre_fix_record_with_a_bare_pid_is_dropped() {
+            let mut req = recv(Some(2772), None);
+            let probe = One(Some(app(2772, r"C:\d\Discord.exe", 2)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Gone));
+            assert_eq!(req.return_pid, None);
+        }
+
+        #[test]
+        fn a_valid_call_app_is_kept_and_a_fresh_pick_is_pinned() {
+            let live = app(4242, r"C:\d\Discord.exe", 7);
+            let probe = One(Some(live.clone()));
+            let mut req = recv(Some(4242), None);
+            assert_eq!(req.settle_return(true, &probe), None);
+            assert_eq!(req.return_app.as_ref(), Some(&live));
+            // The pinned request resumes fine while the process lives.
+            assert_eq!(req.settle_return(false, &probe), None);
+            assert_eq!(req.return_pid, Some(4242));
+            // A dead pick is dropped even when fresh.
+            let mut dead = recv(Some(4243), None);
+            assert_eq!(dead.settle_return(true, &probe), Some(Stale::Gone));
+        }
+
+        #[test]
+        fn a_stale_shared_app_turns_program_audio_off_not_to_the_desktop_mix() {
+            let mut req: ShareRequest =
+                serde_json::from_str(r#"{"code":"1","audio_pid":4321,"rest":true}"#).unwrap();
+            req.audio_app = Some(app(4321, r"C:\g\game.exe", 1));
+            let probe = One(Some(app(4321, r"C:\other.exe", 9)));
+            assert_eq!(req.settle_audio_app(false, &probe), Some(Stale::Reused));
+            assert!(!req.audio && !req.rest && req.audio_pid.is_none());
+            let args = send_args(&req);
+            assert!(args.contains(&"--no-audio".to_string()));
+            assert!(!args.iter().any(|a| a == "--audio-pid" || a == "--audio-rest"));
+        }
+
+        #[test]
+        fn a_valid_shared_app_is_pinned_and_passed_on() {
+            let live = app(4321, r"C:\g\game.exe", 3);
+            let probe = One(Some(live.clone()));
+            let mut req: ShareRequest =
+                serde_json::from_str(r#"{"code":"1","audio_pid":4321}"#).unwrap();
+            assert_eq!(req.settle_audio_app(true, &probe), None);
+            let args = send_args(&req);
+            let i = args.iter().position(|a| a == "--audio-pid-created").expect("identity passed");
+            assert_eq!(args[i + 1], "3");
+        }
+    }
 
     #[test]
     fn share_request_minimal_json_gets_defaults() {
@@ -1134,6 +1333,23 @@ mod tests {
         // S19: the return route only when a call app was picked; 0 is "none".
         let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":4242}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv", "--return-pid", "4242"]);
+        // r54: the pinned identity goes to the engine, which re-checks it.
+        let req: ReceiveRequest = serde_json::from_str(
+            r#"{"return_pid":4242,"return_app":{"pid":4242,"image":"C:\\d\\Discord.exe","created":99}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            recv_args(&req),
+            [
+                "recv",
+                "--return-pid",
+                "4242",
+                "--return-image",
+                r"C:\d\Discord.exe",
+                "--return-created",
+                "99"
+            ]
+        );
         let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":0}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
         // S40: a pinned output goes on the line; the default is no flag.

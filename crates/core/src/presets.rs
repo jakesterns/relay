@@ -346,6 +346,8 @@ pub fn to_share_request(
         size: preset.size,
         audio,
         audio_pid,
+        // Pinned to the live process by the service at spawn (r54).
+        audio_app: None,
         mic,
         rest,
         cursor: preset.cursor,

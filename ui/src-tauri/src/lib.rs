@@ -487,6 +487,15 @@ async fn stop_receive() -> CmdResult<()> {
     }
 }
 
+/// r54: stop sending the call app's audio back, live, while receiving.
+#[tauri::command]
+async fn stop_call_return() -> CmdResult<()> {
+    match call(Method::StopCallReturn).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// Mirrors `Reply::Hardware`; the frontend gets one object.
 #[derive(Debug, serde::Serialize)]
 struct HardwareReply {
@@ -1200,6 +1209,7 @@ pub fn run() {
             set_recording_settings,
             start_receive,
             stop_receive,
+            stop_call_return,
             set_video_area,
             set_stream_mode,
             stream_status,

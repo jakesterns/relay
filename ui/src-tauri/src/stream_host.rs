@@ -130,7 +130,10 @@ pub fn on_receive_status(
     if let Some(c) = codec {
         g.codec = Some(c.to_string());
     }
-    if return_pid.is_some() {
+    // Every receiving line from the core says which call app the receiver
+    // returns from *now* (r54): absent means none, after a live Off or a
+    // call app that had closed. So it is taken as it is, not merged.
+    if receiving {
         g.return_pid = return_pid;
         g.return_exe = return_exe.map(str::to_string);
     }
