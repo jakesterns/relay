@@ -221,7 +221,7 @@ function VirtualDeviceCard() {
 
   const mic = vd.mic_targets.length > 0
     ? vd.mic_targets[0].name
-    : "No route yet — the signed driver ships later; VB-Cable works meanwhile";
+    : "Use the call app's screen share with audio";
 
   return (
     <Card title="In calls">

@@ -21,6 +21,34 @@
 ; ASCII only: makensis reads this file as ANSI, so a stray em dash would reach
 ; the progress log as mojibake.
 
+; The publisher rename ("Relay" -> "Relay contributors") moved Tauri's
+; install bookkeeping key from HKCU\Software\Relay\Relay to
+; ${MANUPRODUCTKEY}. A PC that installed before the rename and then updated
+; kept both (PC2, r54). Carry the old key's two values (the install folder in
+; the default value, and "Installer Language") into the new key where it has
+; none yet, then delete the old key, and its parent only if nothing else is
+; in it. Nothing else lives under HKCU\Software\Relay.
+!macro RELAY_DROP_OLD_PUBLISHER_KEY
+  !if "${MANUPRODUCTKEY}" != "Software\Relay\Relay"
+    ReadRegStr $R8 HKCU "Software\Relay\Relay" ""
+    ${If} $R8 != ""
+      ReadRegStr $R9 HKCU "${MANUPRODUCTKEY}" ""
+      ${If} $R9 == ""
+        WriteRegStr HKCU "${MANUPRODUCTKEY}" "" $R8
+      ${EndIf}
+    ${EndIf}
+    ReadRegStr $R8 HKCU "Software\Relay\Relay" "Installer Language"
+    ${If} $R8 != ""
+      ReadRegStr $R9 HKCU "${MANUPRODUCTKEY}" "Installer Language"
+      ${If} $R9 == ""
+        WriteRegStr HKCU "${MANUPRODUCTKEY}" "Installer Language" $R8
+      ${EndIf}
+    ${EndIf}
+    DeleteRegKey HKCU "Software\Relay\Relay"
+    DeleteRegKey /ifempty HKCU "Software\Relay"
+  !endif
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ; A running core holds relay-core.exe and the share engine open, so an
   ; upgrade over a live install would fail to replace them. Shutting it down
@@ -51,6 +79,9 @@
   ; registered -- nothing loads the DLL then.
   nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\relay_vdevice.dll" /grant *S-1-5-19:(RX)'
   Pop $0
+
+  ; One bookkeeping key, under the current publisher only (see the macro).
+  !insertmacro RELAY_DROP_OLD_PUBLISHER_KEY
 
   ; Autostart is opt-in and off by default: this is the one Run-key value
   ; Relay is allowed to create, and only when asked for. The interactive
@@ -164,8 +195,8 @@
 
 !macro NSIS_HOOK_POSTUNINSTALL
   ; Tauri's template records the install location under
-  ; HKCU\Software\Relay\Relay (publisher\product; before S26 set the publisher
-  ; it was relay\Relay, the same key to the case-insensitive registry) so a
+  ; ${MANUPRODUCTKEY} (publisher\product: Software\Relay contributors\Relay
+  ; since the publisher rename; Software\Relay\Relay before it) so a
   ; reinstall can offer the same folder, and
   ; only deletes it when "Delete the application data" is ticked. That is
   ; install bookkeeping, not the user's profiles, and Relay's promise is that
@@ -179,4 +210,10 @@
   DeleteRegKey /ifempty HKCU "${MANUKEY}"
   DeleteRegKey SHCTX "${MANUPRODUCTKEY}"
   DeleteRegKey /ifempty SHCTX "${MANUKEY}"
+  ; And the pre-rename key an older install may have left (r54). Its values
+  ; are only ever copied into the key just deleted, so nothing is kept.
+  !if "${MANUPRODUCTKEY}" != "Software\Relay\Relay"
+    DeleteRegKey HKCU "Software\Relay\Relay"
+    DeleteRegKey /ifempty HKCU "Software\Relay"
+  !endif
 !macroend

@@ -357,9 +357,9 @@ describe("whether a call will see the stream", () => {
     core.vdevice = { ...core.vdevice, mic_targets: [] };
     tauri.useFakeCore(core.handler);
     const h = await mount();
-    expect(kv("Microphone", card("In calls"))).toBe(
-      "No route yet — the signed driver ships later; VB-Cable works meanwhile",
-    );
+    expect(kv("Microphone", card("In calls"))).toBe("Use the call app's screen share with audio");
+    // r54: never tell the user to install a third-party driver.
+    expect(card("In calls")).not.toHaveTextContent(/VB-Cable|VoiceMeeter|install/i);
     h.expectClean();
   });
 });
