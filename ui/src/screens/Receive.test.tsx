@@ -177,7 +177,7 @@ describe("pairing", () => {
  *  The page's job is to say where that area is, offer the pop-out, and keep
  *  the box empty while the picture covers it. */
 describe("the stream inside the app", () => {
-  const live = (mode: "embedded" | "popout", excluded = true) => ({
+  const live = (mode: "embedded" | "popout" | "clean", excluded = false) => ({
     live: true, mode, width: 2560, height: 1440, excluded_from_capture: excluded,
   });
 
@@ -239,12 +239,65 @@ describe("the stream inside the app", () => {
     expect(screen.getByText("Waiting for a sender to pair…")).toBeInTheDocument();
   });
 
-  it("says so when Windows could not hide the stream from capture", async () => {
+  /** S50: capturable is normal now, so it says nothing; hidden happens only
+   *  while this PC is also sharing its screen, and then it says why. */
+  it("notes when the stream is hidden from capture because this PC is sharing too", async () => {
     const h = await mount();
     await push(() => tauri.emit("core://stream", live("embedded", false)));
-    expect(screen.getByText(/could not hide the stream from screen capture/)).toBeInTheDocument();
+    expect(screen.queryByTestId("capture-note")).not.toBeInTheDocument();
+    // A local share started: the engine re-sends the host event, excluded.
     await push(() => tauri.emit("core://stream", live("embedded", true)));
-    expect(screen.queryByText(/could not hide the stream/)).not.toBeInTheDocument();
+    expect(screen.getByTestId("capture-note").textContent)
+      .toMatch(/Hidden from screen capture while this PC is\s+also sharing its screen\./);
+    // ...and stopped.
+    await push(() => tauri.emit("core://stream", live("embedded", false)));
+    expect(screen.queryByTestId("capture-note")).not.toBeInTheDocument();
+    h.expectClean();
+  });
+
+  it("never shows the note without a stream window", async () => {
+    await mount();
+    await push(() => tauri.emit("core://stream",
+      { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true }));
+    expect(screen.queryByTestId("capture-note")).not.toBeInTheDocument();
+  });
+
+  /** S50: "Share to a call" opens a 1920x1080 clean feed; the size can be
+   *  changed live; and it goes back into Relay like a popped-out window. */
+  it("shares to a call as a 1080p clean feed, resizable, and comes back", async () => {
+    const h = await mount();
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "JAKE" }));
+    await push(() => tauri.emit("core://stream", live("embedded")));
+
+    await h.user.click(screen.getByRole("button", { name: "Share to a call" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "clean", feed: "1920x1080" });
+    const area = screen.getByTestId("video-area");
+    expect(area.dataset.stream).toBe("embedded");
+
+    await push(() => tauri.emit("core://stream", live("clean")));
+    expect(area.dataset.stream).toBe("clean");
+    expect(screen.getByText(/In its own window for calls · 1920×1080/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Share to a call" })).not.toBeInTheDocument();
+
+    await h.user.click(screen.getByRole("button", { name: "2560×1440" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "clean", feed: "2560x1440" });
+    expect(screen.getByText(/In its own window for calls · 2560×1440/)).toBeInTheDocument();
+
+    await h.user.click(screen.getByRole("button", { name: "Bring back into Relay" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "embedded" });
+    h.expectClean();
+  });
+
+  it("offers Share to a call from a popped-out window too, at 1080p again", async () => {
+    const h = await mount();
+    await push(() => tauri.emit("core://stream", live("popout")));
+    await h.user.click(screen.getByRole("button", { name: "Share to a call" }));
+    await settle();
+    expect(tauri.lastCall("set_stream_mode")?.args).toEqual({ mode: "clean", feed: "1920x1080" });
     h.expectClean();
   });
 

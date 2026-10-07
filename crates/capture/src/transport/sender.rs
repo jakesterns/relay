@@ -1047,7 +1047,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             let changed = device_slots.apply(track, device.clone());
                             info!(?track, device = device.as_deref().unwrap_or("System default"), changed, "audio device set");
                         }
-                        Some(EngineCmd::Host { .. }) => {
+                        Some(EngineCmd::Host { .. } | EngineCmd::LocalShare { .. }) => {
                             debug!("host is a receiver command; ignored by the sender");
                         }
                         // S36's "Relay Camera here" stays decided at spawn:

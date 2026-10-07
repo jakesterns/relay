@@ -142,6 +142,8 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
       { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
       { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+      { id: "discord", name: "Discord", bitrate_mbps: 20, fps: 60, size: [1920, 1080], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+      { id: "discord-720", name: "Discord 720p30", bitrate_mbps: 8, fps: 30, size: [1280, 720], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
     ],
     recording: { cap_gb: 50, free_floor_gb: 10 },
     processes: [
@@ -185,7 +187,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
       unknown: false,
     },
-    stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
+    stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: false, receiving: false },
     peers: [],
     autostart: false,
     prefs: {

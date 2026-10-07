@@ -194,11 +194,20 @@ pub enum EngineCmd {
         fps: u32,
     },
     /// Receiver only: embed the stream window in the app window `owner`, or
-    /// pop it out into a window of its own (S29).
+    /// pop it out into a window of its own (S29), or make it a clean feed of
+    /// a fixed size for call apps (S50).
     Host {
         mode: HostMode,
         #[serde(default)]
         owner: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<CleanFeed>,
+    },
+    /// Receiver only (S50): what this PC is sharing now, `None` = nothing.
+    /// The stream window is hidden from capture only while it is covered.
+    LocalShare {
+        #[serde(default)]
+        target: Option<SourceTarget>,
     },
 }
 
@@ -234,6 +243,19 @@ pub struct AudioDevices {
 pub enum HostMode {
     Embedded,
     Popout,
+    /// A borderless window of a fixed size for call apps and OBS (S50).
+    Clean,
+}
+
+/// Mirror of `relay_capture::command::CleanFeed`: a clean feed's fixed
+/// client size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CleanFeed {
+    #[default]
+    #[serde(rename = "1920x1080")]
+    Fhd,
+    #[serde(rename = "2560x1440")]
+    Qhd,
 }
 
 fn default_bitrate() -> u32 {
@@ -277,6 +299,11 @@ pub struct ReceiveRequest {
     /// = the System default. `mic_route` wins when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    /// What this PC is sharing as the receiver starts (S50), passed as
+    /// `--local-share`. Service-set from the running share, never from a
+    /// client, and never persisted: a resumed receive is told afresh.
+    #[serde(skip)]
+    pub local_share: Option<SourceTarget>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -636,6 +663,27 @@ pub fn receive_vcam_sync(receiving: bool, camera_ok: bool) -> Option<EngineCmd> 
     receiving.then_some(EngineCmd::Vcam { on: camera_ok })
 }
 
+/// S50: the `local_share` command that brings a running receiver in line
+/// with what this PC is sharing now, or `None` when nothing needs saying —
+/// not receiving, or the receiver was already told exactly this. `told` is
+/// what it was last given (at spawn or by an earlier command).
+pub fn local_share_sync(
+    receiving: bool,
+    told: Option<Option<SourceTarget>>,
+    now: Option<SourceTarget>,
+) -> Option<EngineCmd> {
+    (receiving && told != Some(now)).then_some(EngineCmd::LocalShare { target: now })
+}
+
+/// The capture target a sender's `source` line reports, if it carries one.
+pub fn source_target_of(data: &serde_json::Value) -> Option<SourceTarget> {
+    data.get("target").and_then(|t| serde_json::from_value(t.clone()).ok())
+}
+
+/// What a sender captures before its first `source` line: the primary
+/// display, as `relay_capture::transport::sender` starts on.
+pub const INITIAL_SHARE_TARGET: SourceTarget = SourceTarget::Display { index: 0 };
+
 /// The `relay-share recv` command line for a request.
 fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     let mut args = vec!["recv".to_string()];
@@ -666,7 +714,17 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--output-device".into());
         args.push(id.into());
     }
+    push_local_share(&mut args, req);
     args
+}
+
+fn push_local_share(args: &mut Vec<String>, req: &ReceiveRequest) {
+    if let Some(t) = req.local_share {
+        if let Ok(json) = serde_json::to_string(&t) {
+            args.push("--local-share".into());
+            args.push(json);
+        }
+    }
 }
 
 /// The `relay-share host-stub` command line: the same flags as `recv`, on the
@@ -677,6 +735,7 @@ fn stub_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--host".into());
         args.push(h.to_string());
     }
+    push_local_share(&mut args, req);
     args
 }
 
@@ -1141,6 +1200,16 @@ mod tests {
         assert_eq!(recv_args(&req), ["recv", "--output-device", "{spk}"]);
         let req: ReceiveRequest = serde_json::from_str(r#"{"output_device":""}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
+        // S50: what this PC is sharing, service-set; a client cannot send it.
+        let mut req: ReceiveRequest =
+            serde_json::from_str(r#"{"local_share":{"kind":"display","index":3}}"#).unwrap();
+        assert_eq!(req.local_share, None, "not settable by a client");
+        req.local_share = Some(SourceTarget::Display { index: 1 });
+        assert_eq!(recv_args(&req), ["recv", "--local-share", r#"{"kind":"display","index":1}"#]);
+        assert_eq!(
+            stub_args(&req),
+            ["host-stub", "--local-share", r#"{"kind":"display","index":1}"#]
+        );
     }
 
     #[test]
@@ -1262,5 +1331,70 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s, r#"{"event":"waiting","code":"123456","name":"studio"}"#);
+    }
+
+    /// The same strings `relay_capture::command` locks on the engine side.
+    #[test]
+    fn s50_wire_shapes_match_the_engine() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Clean,
+                owner: 0,
+                feed: Some(CleanFeed::Qhd)
+            })
+            .unwrap(),
+            r#"{"cmd":"host","mode":"clean","owner":0,"feed":"2560x1440"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Embedded,
+                owner: 7,
+                feed: None
+            })
+            .unwrap(),
+            r#"{"cmd":"host","mode":"embedded","owner":7}"#,
+            "an embed line is what it was before S50"
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare {
+                target: Some(SourceTarget::Display { index: 0 })
+            })
+            .unwrap(),
+            r#"{"cmd":"local_share","target":{"kind":"display","index":0}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare { target: None }).unwrap(),
+            r#"{"cmd":"local_share","target":null}"#
+        );
+    }
+
+    /// A running receiver is told when this PC starts, switches or stops
+    /// sharing, once per change, and never when nothing is receiving.
+    #[test]
+    fn local_share_is_told_once_per_change() {
+        let d0 = Some(SourceTarget::Display { index: 0 });
+        let d1 = Some(SourceTarget::Display { index: 1 });
+        let say = |t| Some(EngineCmd::LocalShare { target: t });
+        assert_eq!(local_share_sync(false, None, d0), None, "nothing receiving");
+        // Spawned while not sharing: told `None` by the absence of the flag.
+        assert_eq!(local_share_sync(true, Some(None), None), None);
+        assert_eq!(local_share_sync(true, Some(None), d0), say(d0), "a local share starts");
+        assert_eq!(local_share_sync(true, Some(d0), d0), None, "same again: quiet");
+        assert_eq!(local_share_sync(true, Some(d0), d1), say(d1), "the share switches monitor");
+        assert_eq!(local_share_sync(true, Some(d1), None), say(None), "the share stops");
+        // Never told anything yet (should not happen, but say it rather than guess).
+        assert_eq!(local_share_sync(true, None, None), say(None));
+    }
+
+    #[test]
+    fn a_source_line_names_its_target() {
+        let v = serde_json::json!({
+            "event": "source", "target": {"kind": "display", "index": 2}, "width": 1, "height": 1
+        });
+        assert_eq!(source_target_of(&v), Some(SourceTarget::Display { index: 2 }));
+        let v = serde_json::json!({ "event": "source", "target": {"kind": "window", "hwnd": 9} });
+        assert_eq!(source_target_of(&v), Some(SourceTarget::Window { hwnd: 9 }));
+        assert_eq!(source_target_of(&serde_json::json!({ "event": "source" })), None);
+        assert_eq!(INITIAL_SHARE_TARGET, SourceTarget::Display { index: 0 });
     }
 }

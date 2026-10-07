@@ -458,15 +458,17 @@ fn set_video_area(window: tauri::Window, area: Option<stream_host::Area>) {
     stream_host::apply(&window);
 }
 
-/// Embed the stream in this window or pop it out into one of its own. The
-/// engine confirms with a `host` event; until then nothing here changes.
+/// Embed the stream in this window, pop it out into one of its own, or make
+/// it a clean feed of `feed`'s fixed size for call apps (S50). The engine
+/// confirms with a `host` event; until then nothing here changes.
 #[tauri::command]
 async fn set_stream_mode(
     window: tauri::Window,
     mode: relay_core::share::HostMode,
+    feed: Option<relay_core::share::CleanFeed>,
 ) -> CmdResult<()> {
     let owner = host_hwnd(&window).unwrap_or(0);
-    match call(Method::HostReceive { mode, owner }).await? {
+    match call(Method::HostReceive { mode, owner, feed }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
@@ -903,6 +905,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                                     let _ = call(Method::HostReceive {
                                                         mode: relay_core::share::HostMode::Embedded,
                                                         owner,
+                                                        feed: None,
                                                     })
                                                     .await;
                                                 });

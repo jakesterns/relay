@@ -599,12 +599,17 @@ export interface ReceiveStatus {
 
 /** How the received stream's native window is hosted (S29). `embedded` =
  *  inside this window over the Receive screen's video area; `popout` = a
- *  window of its own; `none` = no stream window right now. */
-export type StreamMode = "embedded" | "popout" | "none";
+ *  window of its own; `clean` = a borderless window of a fixed size for call
+ *  apps and OBS to capture (S50); `none` = no stream window right now. */
+export type StreamMode = "embedded" | "popout" | "clean" | "none";
+/** A clean feed's fixed client size. Mirror of `share::CleanFeed`. */
+export type CleanFeed = "1920x1080" | "2560x1440";
 /** Mirror of the shell's `stream_host::StreamStatus`. */
 export interface StreamStatus {
   live: boolean; mode: StreamMode; width: number; height: number;
-  /** Windows confirmed the window is hidden from screen capture (B9). */
+  /** Windows confirmed the window is hidden from screen capture (B9). Since
+   *  S50 that is only while this PC is also sharing a screen it is on;
+   *  otherwise the window is capturable, so call apps can pick it. */
   excluded_from_capture: boolean;
   /** The receive state the core last pushed, for a screen that mounts
    *  mid-receive. Absent from a shell that predates it. */
@@ -615,7 +620,7 @@ export interface StreamStatus {
 /** The video area in CSS px, relative to the viewport. */
 export interface VideoArea { x: number; y: number; w: number; h: number }
 
-const noStream: StreamStatus = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true };
+const noStream: StreamStatus = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: false };
 
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -792,6 +797,8 @@ const mockPresets: SharePresetDef[] = [
   { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
   { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
   { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "discord", name: "Discord", bitrate_mbps: 20, fps: 60, size: [1920, 1080], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "discord-720", name: "Discord 720p30", bitrate_mbps: 8, fps: 30, size: [1280, 720], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 
@@ -990,9 +997,11 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("set_video_area", { area });
   },
-  async setStreamMode(mode: "embedded" | "popout"): Promise<void> {
+  /** `feed` only means something with `clean` (S50): the clean feed's
+   *  fixed size; absent = 1920x1080. */
+  async setStreamMode(mode: "embedded" | "popout" | "clean", feed?: CleanFeed): Promise<void> {
     if (!isTauri()) return;
-    return invoke<void>("set_stream_mode", { mode });
+    return invoke<void>("set_stream_mode", feed ? { mode, feed } : { mode });
   },
   async streamStatus(): Promise<StreamStatus> {
     if (!isTauri()) return { ...noStream };
