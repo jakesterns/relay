@@ -1412,6 +1412,18 @@ fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) 
 
 /// S47: start, keep or stop the look sampler so it runs exactly while a
 /// learning-enabled game whose profile is applied has focus.
+/// A profile the learner may keep running for: it exists, is Ready (Draft
+/// never applies), and has learning on with a goal.
+fn learner_profile_still_learns(p: Option<&Profile>) -> bool {
+    p.is_some_and(|p| p.status == crate::types::ProfileStatus::Ready && p.audio.learning_active())
+}
+
+/// The sampler's game is still the foreground app (so a "not wanted" means
+/// its profile changed, not that focus moved away).
+fn look_game_still_focused(sampler_exe: &str, focused_exe: Option<&str>) -> bool {
+    focused_exe.is_some_and(|f| crate::learned_display::key(f) == sampler_exe)
+}
+
 fn sync_look(g: &mut Inner) {
     use crate::learned_display::{build_fingerprint, key, Sampler};
     let want = g
@@ -1423,6 +1435,16 @@ fn sync_look(g: &mut Inner) {
         })
         .filter(|fg| g.learn.is_enabled(&fg.exe))
         .and_then(|fg| resolve_target(g, fg.hmonitor).map(|t| (fg, t)));
+    // May a paused sampler wait out the grace? Only when its game merely lost
+    // focus: still learning, still a Ready profile, and not still in front.
+    let grace_ok = g.look.as_ref().is_some_and(|s| {
+        g.learn.is_enabled(&s.exe)
+            && g.store.all().iter().any(|p| {
+                p.status == crate::types::ProfileStatus::Ready
+                    && crate::learned_display::key(&p.game.exe) == s.exe
+            })
+            && !look_game_still_focused(&s.exe, g.state.foreground.as_ref().map(|f| f.exe.as_str()))
+    });
     match (g.look.as_mut(), &want) {
         (Some(s), Some((fg, t))) if s.exe == key(&fg.exe) && s.monitor == t.id => {
             s.resume();
@@ -1430,7 +1452,9 @@ fn sync_look(g: &mut Inner) {
         }
         // Out of focus: pause and keep it for the grace period (Alt-Tab
         // must not restart the helper); learn_tick drops it after that.
-        (Some(s), None) => {
+        // With its game still in front (profile set to Draft, deleted,
+        // disabled, learning off) there is no grace: stop it now.
+        (Some(s), None) if grace_ok => {
             s.pause();
             return;
         }
@@ -1559,9 +1583,21 @@ fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
     if g.learner.as_mut().is_some_and(|l| !l.running()) {
         g.learner = None;
     }
+    // Wherever focus is, a learner whose profile no longer learns (Draft,
+    // deleted, learning off) stops now: the grace is for focus loss only.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
     let current = g.learner.as_ref().map(|l| (l.profile, l.pid, l.paused_since.is_some()));
-    match crate::game_eq::learner_step(current, want.map(|p| (p.id, fg.pid))) {
+    match crate::game_eq::learner_step(current, want.map(|p| (p.id, fg.pid)), fg.pid) {
         LearnerStep::Nothing | LearnerStep::Keep => {}
+        LearnerStep::Stop => {
+            info!("the focused game's profile no longer learns; stopping the learner now");
+            stop_learner(g);
+        }
         LearnerStep::Pause => {
             if let Some(l) = g.learner.as_mut() {
                 l.pause();
@@ -1647,6 +1683,15 @@ fn needs_reselect(active: Option<uuid::Uuid>, edited: uuid::Uuid, now: Option<uu
 /// deleted, exe changed) and stops its learners; re-applies when the active
 /// profile's own settings changed. Returns true when state may have changed.
 fn after_profile_edit(g: &mut Inner, edited: uuid::Uuid, deleted: bool) -> bool {
+    // A paused learner or sampler whose profile stopped learning (Draft,
+    // deleted, learning off) goes now, even with Relay's window in front.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
+    sync_look(g);
     let active = g.state.active_profile.as_ref().map(|p| p.id);
     if g.pinned {
         if active != Some(edited) {
@@ -3350,6 +3395,37 @@ fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Sta
         }
     }
     crate::audiodg::status(&Absent, &crate::audiodg::record_file(apo_backup_dir))
+}
+
+#[cfg(test)]
+mod learner_stop_tests {
+    use super::*;
+    use crate::types::{GameMatch, ProfileStatus};
+
+    /// r54: Draft, delete or learning off stops the learner at once; only a
+    /// focus change gets the grace period.
+    #[test]
+    fn a_profile_that_stops_learning_stops_the_learner_without_grace() {
+        let mut p = Profile::new("G", GameMatch::exe("g.exe"));
+        p.status = ProfileStatus::Ready;
+        p.audio.learn_game_eq = Some(true);
+        p.audio.game_eq_goal = Some(relay_audio::learn::Goal::Awareness);
+        assert!(learner_profile_still_learns(Some(&p)));
+        let mut draft = p.clone();
+        draft.status = ProfileStatus::Draft;
+        assert!(!learner_profile_still_learns(Some(&draft)));
+        let mut off = p.clone();
+        off.audio.learn_game_eq = Some(false);
+        assert!(!learner_profile_still_learns(Some(&off)));
+        assert!(!learner_profile_still_learns(None), "deleted");
+    }
+
+    #[test]
+    fn the_look_sampler_stops_when_its_game_is_still_in_front() {
+        assert!(look_game_still_focused("g.exe", Some("G.EXE")));
+        assert!(!look_game_still_focused("g.exe", Some("relay-ui.exe")));
+        assert!(!look_game_still_focused("g.exe", None));
+    }
 }
 
 #[cfg(test)]

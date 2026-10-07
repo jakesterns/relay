@@ -542,12 +542,22 @@ pub enum LearnerStep {
     Resume,
     /// A different game or process: stop the old one, start a new one.
     Restart,
+    /// The game is still in front but its profile no longer learns (set to
+    /// Draft, deleted, disabled, learning turned off): stop now, no grace.
+    Stop,
 }
 
 /// The learner state machine. `current` is the running helper (profile, pid,
-/// paused); `want` the one the focused window calls for, if any.
-pub fn learner_step(current: Option<(Uuid, u32, bool)>, want: Option<(Uuid, u32)>) -> LearnerStep {
+/// paused); `want` the one the focused window calls for, if any;
+/// `focused_pid` the process in front. The blur grace is for focus loss
+/// only: with the game still in front and nothing wanted, it stops at once.
+pub fn learner_step(
+    current: Option<(Uuid, u32, bool)>,
+    want: Option<(Uuid, u32)>,
+    focused_pid: u32,
+) -> LearnerStep {
     match (current, want) {
+        (Some((_, pid, _)), None) if pid != 0 && pid == focused_pid => LearnerStep::Stop,
         (None, None) => LearnerStep::Nothing,
         (None, Some(_)) => LearnerStep::Start,
         (Some((p, pid, paused)), Some((wp, wpid))) if p == wp && pid == wpid => {
@@ -1009,17 +1019,21 @@ mod tests {
     fn alt_tab_pauses_and_resumes_without_a_restart() {
         use LearnerStep::*;
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
-        assert_eq!(learner_step(None, None), Nothing);
-        assert_eq!(learner_step(None, Some((a, 10))), Start);
-        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 10))), Keep);
+        assert_eq!(learner_step(None, None, 99), Nothing);
+        assert_eq!(learner_step(None, Some((a, 10)), 10), Start);
+        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 10)), 10), Keep);
         // Alt-Tab away: pause, and stay paused (no restart) while out.
-        assert_eq!(learner_step(Some((a, 10, false)), None), Pause);
-        assert_eq!(learner_step(Some((a, 10, true)), None), Keep);
+        assert_eq!(learner_step(Some((a, 10, false)), None, 99), Pause);
+        assert_eq!(learner_step(Some((a, 10, true)), None, 99), Keep);
         // Back within the grace: resume the same helper.
-        assert_eq!(learner_step(Some((a, 10, true)), Some((a, 10))), Resume);
+        assert_eq!(learner_step(Some((a, 10, true)), Some((a, 10)), 10), Resume);
         // Another game, or the game relaunched (new pid): a new helper.
-        assert_eq!(learner_step(Some((a, 10, true)), Some((b, 11))), Restart);
-        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 12))), Restart);
+        assert_eq!(learner_step(Some((a, 10, true)), Some((b, 11)), 11), Restart);
+        assert_eq!(learner_step(Some((a, 10, false)), Some((a, 12)), 12), Restart);
+        // r54: the game is still in front but its profile went to Draft, was
+        // deleted or disabled, or learning was turned off: stop, no grace.
+        assert_eq!(learner_step(Some((a, 10, false)), None, 10), Stop);
+        assert_eq!(learner_step(Some((a, 10, true)), None, 10), Stop);
         // The grace runs out only after LEARNER_BLUR_GRACE.
         let t = Instant::now();
         assert!(!grace_expired(None, t + LEARNER_BLUR_GRACE * 2));
