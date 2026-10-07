@@ -334,6 +334,22 @@ cycle gave the zero-registry-difference results above. This is exactly what
 the harness is for and it is worth keeping in mind that it was found by the
 diff, not by reading the template.
 
+### The publisher rename left a second key (r54)
+`bundle.publisher` changed from "Relay" to "Relay contributors", which moves
+`MANUPRODUCTKEY` from `HKCU\Software\Relay\Relay` to
+`HKCU\Software\Relay contributors\Relay`. PC2 had installed before the
+rename and updated after it, and so had both. `NSIS_HOOK_POSTINSTALL` now runs
+`RELAY_DROP_OLD_PUBLISHER_KEY`: the old key's default value (the install
+folder) and `Installer Language` are copied into the new key where it has none,
+then the old key is deleted, and `HKCU\Software\Relay` too if it is empty.
+`NSIS_HOOK_POSTUNINSTALL` deletes the old key as well, so an uninstall on a PC
+that never updated after the rename also leaves nothing. Both are guarded at
+compile time (`!if`), so a later publisher change back to "Relay" cannot
+delete the live key. Owed live: on PC2, install over the current build; then
+`reg query "HKCU\Software\Relay"` finds nothing and
+`reg query "HKCU\Software\Relay contributors\Relay"` shows the install folder.
+Uninstall, and neither exists.
+
 ### The windowless launcher
 Measured directly from the PE headers and the process list:
 

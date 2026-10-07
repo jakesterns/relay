@@ -35,6 +35,23 @@ use relay_core::share::RecordingContainer;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
+/// r54: before a share captures one process's audio, check the PID is still
+/// the process the core pinned. A recycled PID would send another app's
+/// sound to the receiver, unasked; then the share goes on without program
+/// audio (never the whole desktop mix instead, which could carry a call) and
+/// the core is told why.
+pub fn guard_audio_pid(opts: &mut SendOpts) {
+    let Some(crate::audio::AudioSource::Process { pid }) = opts.audio else { return };
+    if let Err(why) =
+        relay_core::proc_identity::target_ok(pid, opts.audio_image.as_deref(), opts.audio_created)
+    {
+        warn!(pid, why, "the shared app's audio is not captured");
+        println!("{}", serde_json::json!({ "event": "audio_off", "reason": why }));
+        opts.audio = None;
+        opts.rest = false;
+    }
+}
+
 #[derive(Debug)]
 pub struct SendOpts {
     /// Receiver instance name (mDNS) or `ip:port`; `None` = first discovered.
@@ -85,6 +102,10 @@ pub struct SendOpts {
     pub mic_device: Option<String>,
     /// Where the call coming back plays (S40); `None` = the System default.
     pub output_device: Option<String>,
+    /// Which process an `AudioSource::Process` PID must be (r54): image path
+    /// and creation time from the core. See [`guard_audio_pid`].
+    pub audio_image: Option<String>,
+    pub audio_created: Option<u64>,
 }
 
 /// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
@@ -1056,6 +1077,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         // only (S43b; docs/plans/S43-vcam-win10.md).
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam is a receiver command; ignored by the sender");
+                        }
+                        Some(EngineCmd::Return { .. }) => {
+                            debug!("return is a receiver command; ignored by the sender");
                         }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");

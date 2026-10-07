@@ -41,6 +41,12 @@ pub struct RecvOpts {
     /// other participants — back to the sender as one more Opus track
     /// (S19). The service sets it from the user's pick; never inferred.
     pub return_pid: Option<u32>,
+    /// Which process `return_pid` must be (r54): its image path and
+    /// creation time, as pinned by the core. Checked against the live
+    /// process right before the capture starts; a PID without them, or one
+    /// that no longer matches, is never captured.
+    pub return_image: Option<String>,
+    pub return_created: Option<u64>,
     /// Play received audio on this endpoint (S40); `None` = the System
     /// default, followed if it changes. `mic_route` wins when both are set.
     pub output_device: Option<String>,
@@ -121,6 +127,20 @@ impl Drop for StopOnDrop {
 /// Capture the call app's output and encode it for the return track (S19).
 /// The program profile, not voice: it carries other people's voices as the
 /// call app rendered them, and a second voice-grade pass would only cost.
+/// r54: may the return route capture `pid` right now? Process-loopback
+/// activation accepts a dead or recycled PID without failing, so this is the
+/// check: the process exists and is the one the core pinned (same image,
+/// same creation time). `Err` is the reason, for the log and the core.
+pub fn return_target_ok(opts: &RecvOpts, pid: u32) -> std::result::Result<(), &'static str> {
+    relay_core::proc_identity::target_ok(pid, opts.return_image.as_deref(), opts.return_created)
+}
+
+/// Tell the core the return route is off, and why.
+fn report_return_off(pid: u32, reason: &str) {
+    warn!(pid, reason, "the call app's audio is not sent back");
+    println!("{}", serde_json::json!({ "event": "return_off", "reason": reason }));
+}
+
 fn return_pipeline(
     pid: u32,
     tx: mpsc::Sender<(Vec<u8>, Duration)>,
@@ -200,6 +220,9 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Relay Camera can be switched on or off while waiting (S43b): the
     // choice is carried into the render thread when a sender connects.
     let mut vcam = opts.vcam;
+    // The call app to return audio from (S19); a `return` command while
+    // waiting turns it off before any track exists (r54).
+    let mut return_pid = opts.return_pid;
     // Where received audio plays (S40). Made here so a pick while waiting
     // for a sender is kept; the virtual-mic route, when set, is the output.
     let output = crate::devices::DeviceSlot::shared(
@@ -227,6 +250,12 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         Some(crate::command::EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received while waiting for a sender");
                             vcam = on;
+                        }
+                        Some(crate::command::EngineCmd::Return { on: false }) => {
+                            info!("return command while waiting: no call audio will be sent back");
+                            if return_pid.take().is_some() {
+                                println!("{}", serde_json::json!({ "event": "return_off", "reason": "user" }));
+                            }
                         }
                         _ => {}
                     },
@@ -325,7 +354,18 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // then the track is not added at all, because an answer with an extra
     // m-line fails the whole share, not just the return.
     let mut return_track = None;
-    if let Some(pid) = opts.return_pid {
+    // Checked here and again right before the capture starts.
+    let return_pid = match return_pid {
+        Some(pid) => match return_target_ok(&opts, pid) {
+            Ok(()) => Some(pid),
+            Err(why) => {
+                report_return_off(pid, why);
+                None
+            }
+        },
+        None => None,
+    };
+    if let Some(pid) = return_pid {
         if super::sdp_offers_return(&offer_json) {
             let track = Arc::new(TrackLocalStaticSample::new(super::audio_stream_track(
                 "relay-return-stream",
@@ -476,6 +516,13 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // delivers no blocks and so no packets, which the stats show as 0.
     let stats = Arc::new(RecvStats::default());
     let return_stop = Arc::new(AtomicBool::new(false));
+    let return_track = return_track.filter(|(_, _, pid)| match return_target_ok(&opts, *pid) {
+        Ok(()) => true,
+        Err(why) => {
+            report_return_off(*pid, why);
+            false
+        }
+    });
     if let Some((track, sender, pid)) = return_track {
         let (tx, mut rx) = mpsc::channel::<(Vec<u8>, Duration)>(64);
         let stop = return_stop.clone();
@@ -507,7 +554,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
             }
         }));
     }
-    let _return_guard = StopOnDrop(return_stop);
+    let _return_guard = StopOnDrop(return_stop.clone());
 
     // Track fan-out: video AUs and audio packets land on channels.
     // Deep enough to ride out decoder start-up (a few hundred ms) without
@@ -646,6 +693,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         mic_route: opts.mic_route.clone(),
         host,
         output: output.clone(),
+        return_stop: return_stop.clone(),
     };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.
@@ -967,6 +1015,40 @@ async fn video_track_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn recv_opts(pid: Option<u32>, image: Option<String>, created: Option<u64>) -> RecvOpts {
+        RecvOpts {
+            name: None,
+            headless: true,
+            code: None,
+            vcam: false,
+            mic_route: None,
+            host: None,
+            return_pid: pid,
+            return_image: image,
+            return_created: created,
+            output_device: None,
+        }
+    }
+
+    /// r54: the engine never activates process loopback on a PID that is
+    /// not the process the core pinned. This test process stands in for the
+    /// call app.
+    #[test]
+    fn return_capture_needs_the_pinned_process() {
+        let me = relay_core::proc_identity::live(std::process::id()).expect("own identity");
+        let ok = recv_opts(Some(me.pid), Some(me.image.clone()), Some(me.created));
+        assert_eq!(return_target_ok(&ok, me.pid), Ok(()));
+        // Same exe, another start time: a restarted app, not the pick.
+        let restarted = recv_opts(Some(me.pid), Some(me.image.clone()), Some(me.created + 1));
+        assert!(return_target_ok(&restarted, me.pid).is_err());
+        // Another image under the same PID: a reused PID.
+        let reused = recv_opts(Some(me.pid), Some(r"C:\x\other.exe".into()), Some(me.created));
+        assert!(return_target_ok(&reused, me.pid).is_err());
+        // A PID nobody holds (PIDs are multiples of 4; 3 is never one).
+        let gone = recv_opts(Some(3), Some(me.image.clone()), Some(me.created));
+        assert_eq!(return_target_ok(&gone, 3), Err("the app has closed"));
+    }
 
     /// One single-NAL H.264 packet: type 5 is an IDR slice, type 1 is not.
     fn nal(idr: bool) -> [u8; 4] {

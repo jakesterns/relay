@@ -18,9 +18,14 @@
 //!
 //! Formats: NV12 (the ring's own), YUY2 and RGB24 for apps that insist, at
 //! the size the producer announced in the ring header (fallback 720p) plus
-//! 1080p / 720p / 360p. A stream of another size is scaled to what was
-//! negotiated. Timestamps are stream time from the run's start, strictly
-//! increasing.
+//! 1080p / 720p / 360p; a stream larger than 1080p offers 1080p first (r54).
+//! The pin asks the producer for frames of the negotiated size (the ring's
+//! size request), which the share engine scales on the GPU; anything else
+//! that arrives is area-scaled here (`picture::Scaler`), aspect kept.
+//! Orientation per spec: NV12 and YUY2 top-down, RGB24 a bottom-up DIB
+//! (positive `biHeight`). Timestamps are stream time from the run's start,
+//! strictly increasing. The negotiated type and every live/still switch go
+//! to the camera log (`camera::diag`).
 //!
 //! Ring: `Local\Relay.Cam` (see `frames::dshow_section_name_from_env`): the
 //! filter runs in the user's session like the receiver, so no global
@@ -68,7 +73,7 @@ use windows::Win32::System::Com::{
 };
 
 use super::picture::{self, PixFmt};
-use super::CLSID_RELAY_DSHOW;
+use super::{diag, CLSID_RELAY_DSHOW};
 use crate::frames::{dshow_section_name_from_env, SharedFrames, MAX_HEIGHT, MAX_WIDTH, SLOT_BYTES};
 
 /// `KSPROPERTY_SUPPORT_GET`.
@@ -125,10 +130,16 @@ fn fourcc(fmt: PixFmt) -> u32 {
 
 /// Everything the pin offers, preferred first: for each size, NV12 then
 /// YUY2 then RGB24. `hint` is the producer's announced geometry.
+///
+/// A stream larger than 1080p (PC2's r54 ring was 2560x1440) puts 1080p
+/// first: an app that takes the first type gets a size every call service
+/// sends, scaled once on the producer's GPU, instead of a 1440p frame it
+/// then shrinks badly itself. The stream's own size stays offered second.
 pub fn offered_formats(hint: Option<(u32, u32, u32)>) -> Vec<Format> {
     let (w, h, fps) = hint.unwrap_or(FALLBACK);
     let fps = fps.clamp(5, 60);
-    let mut sizes = vec![(w, h)];
+    let larger_than_1080p = u64::from(w) * u64::from(h) > 1920 * 1080;
+    let mut sizes = if larger_than_1080p { vec![(1920, 1080), (w, h)] } else { vec![(w, h)] };
     for s in [(1920, 1080), (1280, 720), (640, 360)] {
         if !sizes.contains(&s) {
             sizes.push(s);
@@ -257,10 +268,16 @@ unsafe fn parse_media_type(mt: *const AM_MEDIA_TYPE) -> Result<Wanted, ()> {
         // SAFETY: size checked; VIDEOINFOHEADER may be unaligned in the
         // caller's buffer, so read it unaligned.
         let vih = unsafe { std::ptr::read_unaligned(mt.pbFormat as *const VIDEOINFOHEADER) };
-        let (w, h) = (vih.bmiHeader.biWidth, vih.bmiHeader.biHeight);
+        let (w, mut h) = (vih.bmiHeader.biWidth, vih.bmiHeader.biHeight);
+        // YUV is top-down whatever the sign of biHeight, and the DirectShow
+        // docs ask filters to accept either sign for it. For RGB a negative
+        // height is a top-down DIB, which this pin does not write: refuse it
+        // rather than deliver an upside-down call (and a wildcard subtype
+        // with a negative height could resolve to RGB24, so refuse that too).
+        if h < 0 && matches!(want.fmt, Some(PixFmt::Nv12 | PixFmt::Yuy2)) {
+            h = -h;
+        }
         if w != 0 || h != 0 {
-            // Top-down (negative height) RGB would need a flipped writer;
-            // refuse it rather than deliver an upside-down call.
             if w < 2 || h < 2 || w % 2 != 0 || h % 2 != 0 {
                 return Err(());
             }
@@ -304,7 +321,16 @@ pub struct FrameSource {
     last_change: Instant,
     scratch: Vec<u8>,
     scaled: Vec<u8>,
+    scaler: picture::Scaler,
     waiting: Vec<u8>,
+    /// Whether the last frame was live (`Some(true)`) or the still, for the
+    /// one log line per switch.
+    was_live: Option<bool>,
+    /// Size of the last ring frame, so a change (the producer starting to
+    /// honour the size request) is logged once.
+    last_ring_size: (u32, u32),
+    /// This source asked the producer for its negotiated size.
+    requested: bool,
 }
 
 impl FrameSource {
@@ -321,18 +347,38 @@ impl FrameSource {
             last_change: Instant::now(),
             scratch: Vec::new(),
             scaled: Vec::new(),
+            scaler: picture::Scaler::new(),
             waiting,
+            was_live: None,
+            last_ring_size: (0, 0),
+            requested: false,
         }
     }
 
     /// Write one frame into `out` (exactly `f.bytes()` long). `true` = a
     /// live ring frame, `false` = the waiting still. Never blocks.
     pub fn render(&mut self, out: &mut [u8]) -> bool {
-        if self.live_frame(out) {
-            return true;
+        let live = self.live_frame(out);
+        if !live {
+            out.copy_from_slice(&self.waiting);
         }
-        out.copy_from_slice(&self.waiting);
-        false
+        if self.was_live != Some(live) {
+            let f = self.f;
+            diag::line(&match (self.was_live, live) {
+                (_, true) => format!(
+                    "ring up: {}x{} frames → {} {}x{}",
+                    self.last_ring_size.0,
+                    self.last_ring_size.1,
+                    f.fmt.name(),
+                    f.width,
+                    f.height
+                ),
+                (Some(true), false) => "vcam ring down → showing the waiting still".to_string(),
+                (_, false) => "no stream yet → showing the waiting still".to_string(),
+            });
+            self.was_live = Some(live);
+        }
+        live
     }
 
     fn live_frame(&mut self, out: &mut [u8]) -> bool {
@@ -347,6 +393,12 @@ impl FrameSource {
         }
         let Some(ring) = self.ring.as_ref() else { return false };
         let block = ring.block();
+        if !self.requested {
+            // Ask the producer for frames of the negotiated size: it scales
+            // on the GPU, once, and this thread just copies.
+            block.request_size(self.f.width, self.f.height);
+            self.requested = true;
+        }
         let count = block.frame_count();
         if count != self.last_count {
             self.last_count = count;
@@ -359,11 +411,26 @@ impl FrameSource {
         }
         let Some(info) = block.read_latest(&mut self.scratch) else { return false };
         let f = self.f;
+        if (info.width, info.height) != self.last_ring_size {
+            if self.was_live == Some(true) {
+                diag::line(&format!(
+                    "ring frames now {}x{} (was {}x{}) → {} {}x{}",
+                    info.width,
+                    info.height,
+                    self.last_ring_size.0,
+                    self.last_ring_size.1,
+                    f.fmt.name(),
+                    f.width,
+                    f.height
+                ));
+            }
+            self.last_ring_size = (info.width, info.height);
+        }
         let nv12: &[u8] = if (info.width, info.height) == (f.width, f.height) {
             &self.scratch
         } else {
             self.scaled.resize(picture::nv12_bytes(f.width, f.height), 0);
-            picture::scale_nv12(
+            self.scaler.scale(
                 &self.scratch,
                 info.width,
                 info.height,
@@ -375,6 +442,16 @@ impl FrameSource {
         };
         picture::convert_nv12(f.fmt, nv12, f.width, f.height, out);
         true
+    }
+}
+
+impl Drop for FrameSource {
+    fn drop(&mut self) {
+        // Hand the producer back its own size, unless another camera has
+        // asked for something else since.
+        if let (true, Some(ring)) = (self.requested, self.ring.as_ref()) {
+            ring.block().withdraw_request(self.f.width, self.f.height);
+        }
     }
 }
 
@@ -752,6 +829,19 @@ impl Pin_Impl {
                 let mut st = self.shared.st.lock().unwrap();
                 st.format = *f;
                 st.conn = Some(conn);
+                drop(st);
+                // Once per connection: what the app picked, for testers.
+                let first = self.shared.offered[0];
+                diag::line(&format!(
+                    "connected: {} {}x{} @ {} fps (first offered {} {}x{})",
+                    f.fmt.name(),
+                    f.width,
+                    f.height,
+                    f.fps,
+                    first.fmt.name(),
+                    first.width,
+                    first.height
+                ));
                 Ok(())
             }
             Err(e) => {
@@ -1229,9 +1319,16 @@ mod tests {
     fn offers_three_formats_per_size_hint_first() {
         let offers = offered_formats(Some((2560, 1440, 60)));
         assert_eq!(offers.len(), 12, "4 sizes x 3 formats");
-        assert_eq!(offers[0], Format { fmt: PixFmt::Nv12, width: 2560, height: 1440, fps: 60 });
+        // r54: larger than 1080p → 1080p first, the stream's size second,
+        // 720p still offered.
+        assert_eq!(offers[0], Format { fmt: PixFmt::Nv12, width: 1920, height: 1080, fps: 60 });
         assert_eq!(offers[1].fmt, PixFmt::Yuy2);
         assert_eq!(offers[2].fmt, PixFmt::Rgb24);
+        assert_eq!(offers[3], Format { fmt: PixFmt::Nv12, width: 2560, height: 1440, fps: 60 });
+        assert!(offers.iter().any(|f| (f.width, f.height) == (1280, 720)));
+        // 1080p or smaller: the stream's own size stays first.
+        assert_eq!(offered_formats(Some((1920, 1080, 60)))[0].width, 1920);
+        assert_eq!(offered_formats(Some((1600, 900, 60)))[0].width, 1600);
         // Hint equal to a standard size is not listed twice.
         assert_eq!(offered_formats(Some((1280, 720, 30))).len(), 9);
         // No producer yet: 720p30, then 1080p and 360p.
@@ -1265,6 +1362,15 @@ mod tests {
             let vih = &mut *(mt.pbFormat as *mut VIDEOINFOHEADER);
             vih.bmiHeader.biHeight = -360;
             assert!(parse_media_type(&mt).is_err(), "top-down RGB refused");
+            // YUV is top-down whatever the sign: accepted either way.
+            mt.subtype = MEDIASUBTYPE_YUY2;
+            let w = parse_media_type(&mt).expect("negative-height YUY2 accepted");
+            assert_eq!((w.fmt, w.size), (Some(PixFmt::Yuy2), Some((640, 360))));
+            mt.subtype = MEDIASUBTYPE_NV12;
+            assert!(parse_media_type(&mt).is_ok());
+            mt.subtype = GUID::zeroed();
+            assert!(parse_media_type(&mt).is_err(), "wildcard + negative could be RGB: refused");
+            mt.subtype = MEDIASUBTYPE_RGB24;
             vih.bmiHeader.biHeight = 360;
             mt.subtype = GUID::from_u128(0x30323449_0000_0010_8000_00aa00389b71); // I420
             assert!(parse_media_type(&mt).is_err(), "I420 not offered");

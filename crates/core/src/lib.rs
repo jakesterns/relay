@@ -33,6 +33,7 @@ pub mod learned_display;
 pub mod logging;
 pub mod peers;
 pub mod presets;
+pub mod proc_identity;
 pub mod processes;
 pub mod profiles;
 pub mod resilience;

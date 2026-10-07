@@ -531,7 +531,7 @@ function VdeviceConsentRow() {
   const perUser = status?.camera_path === "direct_show";
   const micNote = status && status.mic_targets.length > 0
     ? `Mic route: ${status.mic_targets[0].name}.`
-    : "Mic: waiting on the signed driver; install VB-Cable for the interim route.";
+    : "Call audio: share your screen in the call app with its audio option on, and the other PC's sound goes with it.";
   const sub = status === null
     ? (offline && !mock ? "Relay is not running — status unknown." : "Show incoming shares as a webcam in calls.")
     : !status.camera_supported
