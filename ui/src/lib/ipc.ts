@@ -441,6 +441,9 @@ export interface NdiRuntime {
   present: boolean;
   /** Absent when not found. */
   path?: string;
+  /** The copy Relay's installer bundled, not a separately installed runtime.
+   *  Absent from cores older than RC2. */
+  bundled?: boolean;
   searched: string[];
   download_url: string;
   ndi_url: string;

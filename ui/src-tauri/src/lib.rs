@@ -792,7 +792,7 @@ async fn uninstall_apo(endpoint: Option<String>) -> CmdResult<()> {
     }
 }
 
-/// S51: is the user-installed NDI® runtime there (a file check in the core).
+/// S51: is the NDI® runtime there, bundled or user-installed (a file check in the core).
 #[tauri::command]
 async fn ndi_status() -> CmdResult<relay_core::ndi::NdiRuntime> {
     match call(Method::NdiStatus).await? {

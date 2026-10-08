@@ -19,12 +19,13 @@ Full reading, sources and verdict: `docs/dev/ndi-licensing.md`.
   seven named exports with `GetProcAddress`. The C declarations are written by
   hand (`crates/capture/src/ndi/ffi.rs`, layouts pinned by tests). No SDK
   header, library or binary is in the repo or needed to build.
-- **Not bundled (v1).** The user installs the free NDI 6 Runtime from NDI
-  (http://ndi.link/NDIRedistV6). Bundling is allowed by NDI's docs but needs
-  an NDI end-user licence page in the installer, keeping the copy current with
-  every SDK release, and a release-time download — the owner's call, written
-  up as option B in the licensing doc. `scripts/stage-bundle.ps1` refuses to
-  stage an NDI binary until then.
+- **Bundled (RC2, owner's decision 2026-10-07: option B).** Release
+  installers carry NDI's runtime DLL and notice file in Relay's folder,
+  fetched from NDI's redistributable at build time and hash-pinned
+  (`scripts/ndi-runtime.psd1`, `scripts/fetch-ndi-runtime.ps1`), with NDI's
+  terms as an installer licence page. Relay loads the bundled copy first, then
+  a runtime installed from NDI (http://ndi.link/NDIRedistV6). Dev builds
+  without it still build.
 - **Notices.** "NDI®" on first use, the trademark line and an ndi.video link
   in the NDI card on Receive and Share, the trademark line in Settings' About
   card, `THIRD_PARTY_NOTICES.md` §4, the README. No NDI in Relay's name or the

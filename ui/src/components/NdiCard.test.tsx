@@ -84,6 +84,22 @@ describe("Receive", () => {
     const c = card("NDI® output");
     expect(kv("Source", c)).toBe("Relay (from studio-pc)");
     expect(kv("NDI receivers", c)).toBe("2");
+    expect(kv("NDI runtime", c)).toBe("Installed from NDI");
+    h.expectClean();
+  });
+
+  it("says when the runtime is the one bundled with Relay", async () => {
+    core.ndi = { ...core.ndi, present: true, bundled: true,
+      path: "C:\\Users\\u\\AppData\\Local\\Relay\\Processing.NDI.Lib.x64.dll" };
+    core.prefs.ndi_receive = true;
+    const h = await mount(<Receive />);
+    await h.user.click(screen.getByRole("button", { name: "Start receiving" }));
+    await push(() => tauri.emit("core://receive-status", { receiving: true, sender: "studio-pc" }));
+    await push(() => tauri.emit("core://share-stats", {
+      event: "stats", aus: 1, presented: 1,
+      ndi: { on: true, name: "Relay (from studio-pc)", connections: 0 },
+    }));
+    expect(kv("NDI runtime", card("NDI® output"))).toBe("Included with Relay");
     h.expectClean();
   });
 

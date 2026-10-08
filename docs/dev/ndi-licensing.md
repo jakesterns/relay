@@ -1,38 +1,55 @@
-# NDI® licensing for Relay (S51)
+# NDI® licensing for Relay (S51, bundled in RC2)
 
 NDI® is a registered trademark of Vizrt NDI AB. More about NDI: https://ndi.video/
 
-Read 2026-10-07. This is an engineering reading of the published terms, not
-legal advice. Anything marked **owner's call** is a decision for Jake, and
-bundling (option B below) is one to put past a lawyer first.
+First read 2026-10-07 (S51); re-verified 2026-10-07 for RC2, when the owner
+chose **option B: bundle the NDI runtime** so NDI output works with nothing
+else to install. This is an engineering reading of the published terms, not
+legal advice; bundling is still worth putting past a lawyer.
 
 ## Verdict
 
-1. **Relay can load the NDI runtime dynamically, and does.** `relay-share`
-   calls `LoadLibraryExW` on the full path of `Processing.NDI.Lib.x64.dll`
-   and `GetProcAddress` on each of the C functions it uses. The FFI
-   declarations are written by hand in `crates/capture/src/ndi/ffi.rs`. No NDI
-   SDK header, library, import lib or binary is committed to the repository,
-   and none is needed to build Relay.
-2. **Relay does not ship the NDI runtime DLL or installer (v1).** The user
-   installs the free *NDI 6 Runtime* from NDI (http://ndi.link/NDIRedistV6, or
-   NDI Tools from https://ndi.video/tools/, which includes it). Relay finds it
-   through the `NDI_RUNTIME_DIR_V6` environment variable that installer sets,
-   or in its default folder (`%ProgramFiles%\NDI\NDI 6 Runtime\v6`) when Relay
-   was already running at install time and so has no such variable yet.
-   Without it, the NDI output toggle says "NDI output needs the NDI runtime"
-   and links the download; nothing crashes and nothing else changes.
-3. **Bundling is allowed by NDI's documentation but carries obligations Relay
-   does not meet today** (an end-user licence carrying NDI's terms, keeping the
-   bundled copy current, and a release build that fetches the binary without
-   it ever entering the public repository). Whether to take that on is the
-   **owner's call**; see option B.
-4. **Notices:** trademark line and an https://ndi.video/ link next to every
-   NDI toggle, the trademark line in the About card (Settings), a section in
-   `THIRD_PARTY_NOTICES.md`, and the same in the docs. No "NDI" in the product
-   name. Details under "What goes where".
+1. **Relay loads the NDI runtime dynamically.** `relay-share` calls
+   `LoadLibraryExW` on the full path of `Processing.NDI.Lib.x64.dll` and
+   `GetProcAddress` on each C function it uses. The FFI declarations are
+   written by hand in `crates/capture/src/ndi/ffi.rs`. No NDI SDK header,
+   library, import lib or binary is committed to the repository, and none is
+   needed to build Relay.
+2. **Release installers bundle the runtime (option B).** The installer puts
+   NDI's own `Processing.NDI.Lib.x64.dll` (6.3.2.0) and NDI's notice file
+   `Processing.NDI.Lib.Licenses.txt` in Relay's install folder
+   (`%LOCALAPPDATA%\Relay`, next to `relay-share.exe`), never a system path
+   (S2). Both are taken, byte for byte, out of NDI's public redistributable
+   (S3, S7) at release-build time and checked against pinned SHA-256s and
+   Vizrt's Authenticode signature. They never enter the repository (S1 §2d).
+3. **Search order:** `RELAY_NDI_RUNTIME` (tests; replaces the rest), then
+   Relay's own folder (the bundled copy), then `NDI_RUNTIME_DIR_V6`, then the
+   NDI 6 runtime's default folder (`%ProgramFiles%\NDI\NDI 6 Runtime\v6`).
+   `NdiRuntime.bundled` says which one was found; the NDI card shows
+   "Included with Relay" or "Installed from NDI". Without either, the card
+   still says "NDI output needs the NDI runtime" and links NDI's download.
+4. **Dev builds still build without it.** `stage-bundle.ps1` defaults to
+   `-Ndi Auto`: it bundles a verified copy if `fetch-ndi-runtime.ps1` already
+   left one in `target\ndi-runtime\<version>`, otherwise it leaves
+   `binaries\ndi` empty and warns, and NDI output falls back to an installed
+   runtime (the same pattern as the `licenses.html` placeholder). The
+   release workflow runs `stage-bundle.ps1 -Ndi Require`, which fetches,
+   verifies, and fails the build if anything is missing or does not match.
+5. **Licence terms:** the installer's licence page
+   (`ui/src-tauri/installer/license.txt`, Tauri `bundle.licenseFile`) is
+   Relay's MIT licence (Part 1) plus the NDI terms S1 §3d requires (Part 2).
+   Notices: trademark line and https://ndi.video/ link next to every NDI
+   toggle and in the About card, `THIRD_PARTY_NOTICES.md` §4 (which
+   `licenses.html` includes), and the README. No "NDI" in the product name.
 
 ## Sources
+
+Re-read 2026-10-07. S1 is the PDF dated 2025-08-21 (unchanged since S51;
+text extracted and checked against the quotes below). S2–S4 re-fetched; the
+*Software Distribution* page still reads "You may distribute these files
+within your application if your EULA terms cover the specific requirements
+of the NDI SDK EULA" and, for the redistributable, "you must make all
+reasonable efforts to keep the versions you distribute up to date".
 
 | # | Source | What it says (quoted or closely paraphrased) |
 |---|---|---|
@@ -42,83 +59,73 @@ bundling (option B below) is one to put past a lawyer first.
 | S4 | NDI docs, *Dynamic Loading of NDI Libraries*, https://docs.ndi.video/all/developing-with-ndi/sdk/dynamic-loading-of-ndi-libraries | Dynamic loading is a supported way to use NDI. The runtime may sit in the application folder, or "on Windows, you can install the NDI runtime and use an environment variable to locate it on disk"; `NDILIB_REDIST_URL` is the download location, e.g. http://ndi.link/NDIRedistV6. |
 | S5 | NDI SDK header `Processing.NDI.Lib.h` (as published in open-source projects, e.g. https://github.com/DistroAV/DistroAV/blob/master/lib/ndi/Processing.NDI.Lib.h) | MIT licence text in the header; defines `NDILIB_REDIST_FOLDER` as the `NDI_RUNTIME_DIR_V6` environment variable and `NDILIB_LIBRARY_NAME` as `Processing.NDI.Lib.x64.dll` on 64-bit Windows. |
 | S6 | DistroAV (the OBS NDI plugin), https://github.com/DistroAV/DistroAV | Prior art for an open-source app: it requires the user to install the NDI runtime rather than shipping it, and loads it dynamically. OBS users who want NDI already have the runtime for this reason. |
+| S7 | NDI 6 Runtime redistributable, http://ndi.link/NDIRedistV6 → https://downloads.ndi.tv/SDK/NDI_SDK/NDI%206%20Runtime.exe (fetched 2026-10-07: 9,648,232 bytes, Last-Modified 2026-04-16, Inno Setup, Authenticode "Vizrt AG", FileVersion 6.3.2.0) | Contains `app\Processing.NDI.Lib.x64.dll` (6.3.2.0, signed "Vizrt AG", "Copyright (C) 2023-2026 Vizrt NDI AB. All rights reserved."), `app\Processing.NDI.Lib.Licenses.txt`, the licence PDF, and x86/UWP/DirectShow variants Relay does not ship. The notice file says: "This file should be included with all distribution of the binary files included with the NDI SDK." |
+| S8 | innoextract 1.9, https://constexpr.org/innoextract/ (zlib licence; release zip from GitHub, SHA-256 pinned) | Unpacks Inno Setup installers without running them. Build-time tool only; not shipped. |
 
-## Reasoning
+## How each obligation is met
 
-**Dynamic loading with hand-written declarations (allowed).** S4 documents
-dynamic loading as a supported integration. Relay vendors nothing: the struct
-layouts and function signatures in `ffi.rs` are written by hand from the
-documented C API (S3, S5). Those headers are MIT-licensed, so even a
-declaration that mirrors them closely is redistributable in an MIT project;
-`THIRD_PARTY_NOTICES.md` §4 credits them anyway. Nothing from the SDK's
-"Confidential Information" (S1 §3a: the SDK package, its tools, samples and
-documentation beyond the public pages) is copied. Relay only loads the DLL
-from a full path (the runtime folder named by `NDI_RUNTIME_DIR_V6`, the
-runtime's default folder, or an explicit `RELAY_NDI_RUNTIME` override for
-tests); it never searches `PATH`,
-so a stray copy cannot be planted in its way.
-
-**Not bundling (v1).** Bundling the DLL or the redistributable installer is
-permitted by S2/S3, but each of these is a real obligation:
-
-- *An end-user licence with NDI's terms (S1 §3d, S3).* Relay is distributed
-  under MIT with no EULA. MIT permits modification and reverse engineering of
-  *Relay*; that is fine, but the installer would also have to present terms
-  that forbid modifying or reverse-engineering the *NDI* component, disclaim
-  NDI's warranties and liability, and carry NDI's copyright notice. That means
-  adding an NDI licence page to the NSIS installer and to `licenses.html`, and
-  telling users the bundle is not entirely MIT.
-- *Keep it current (S1 §2b, S3).* Each NDI SDK release would oblige a Relay
-  release with the new runtime.
-- *Getting the file into a release without the public repo.* The DLL cannot be
-  committed (S1 §2d covers "files within the SDK"; the SDK package is not
-  public). CI would have to download the redistributable from NDI at release
-  time and verify it, which is a new outbound dependency for every release
-  build.
-- *DLL placement (S2).* It would have to live in Relay's own folder
-  (`%LOCALAPPDATA%\Relay`), never in a system path.
-
-None of that is impossible, but it trades a one-time runtime install, which
-most people who use NDI already have (OBS's DistroAV needs the same runtime,
-S6), for permanent licence and release duties. Relay's "zero setup" rule is
-about Relay's own features; NDI output is an opt-in bridge to other NDI
-software that already requires the runtime. So v1 links the runtime and
-does not ship it.
-
-**LAN only.** NDI discovers sources with mDNS on the local network by
-default, which matches Relay's LAN-only rule. Relay creates its sender with no
-groups and does not configure an NDI Discovery Server or NDI Bridge. If a user
-has set up a discovery server in NDI Access Manager, that is their NDI
-configuration, applied by the runtime they installed; Relay neither changes
-nor overrides it (`NDI_CONFIG_DIR` is left alone, per "never touch global
-config"). The two-PC plan checks with a capture that nothing leaves the LAN.
-
-## What goes where
-
-| Place | Text |
+| Obligation | Where |
 |---|---|
-| Receive screen, NDI output card (and the Share screen's) | "NDI® output" as the first use; a footnote "NDI® is a registered trademark of Vizrt NDI AB" and a link to https://ndi.video/ in the same card. When the runtime is missing: "NDI output needs the NDI runtime" + link to http://ndi.link/NDIRedistV6. |
-| Settings, About card | "NDI® is a registered trademark of Vizrt NDI AB" with the https://ndi.video/ link. |
-| `THIRD_PARTY_NOTICES.md` §4 | What Relay uses (dynamic loading, the user-installed runtime), the trademark line, the link, that no NDI file is shipped, and the MIT credit for the header-derived declarations. |
-| `README.md`, `docs/plans/S51-ndi-output.md` | Trademark line and link where NDI is first mentioned. |
-| Product name | Relay never puts "NDI" in its name. "NDI output" labels a compatibility feature, which S1 §3f allows. The published source name is "Relay (from <sender>)" — no NDI in it. |
+| Distribute only object code the documentation allows (S1 §2a, §2d; S3) | Only the runtime DLL from NDI's redistributable, plus the notice file NDI asks to accompany it (S7). No header, import lib, SDK file or other variant. |
+| EULA carrying S1 §3d's terms (S1 §3d; S3) | Installer licence page, Part 2: no modification, no reverse engineering/disassembly/recompilation (protocols included), no circumvention, no removal of notices, warranty and liability disclaimers for NDI and its licensors, US export compliance, NDI's copyright notice, and the pass-through for developers building on Relay. Part 2 is scoped to the NDI files, so Relay's own code stays MIT. |
+| Copyright notices (S1 §3d(vii), §3g) | Installer licence page, `THIRD_PARTY_NOTICES.md` §4, About card, and NDI's notice file installed beside the DLL. |
+| Keep it current (S1 §2b; S3) | The pins (`scripts/ndi-runtime.psd1`) match NDI's unversioned redistributable URL, so when NDI ships a new runtime the release build fails until the pins are bumped. See "Updating the bundled runtime". |
+| DLL in the app's folder, not a system path (S2) | Tauri resource `binaries/ndi` → the install folder. The Tauri uninstaller removes both files. |
+| Trademark use and links (S1 §3f; S2) | Unchanged from S51: "NDI®" on first use, the trademark line and an ndi.video link next to every NDI toggle and in the About card; not endorsed by Vizrt NDI AB; no NDI in the product name. |
+| Interoperability (S1 §3h) | The runtime is NDI's own, unmodified. |
+| Product type (S1 §1b) | Relay is desktop software on a general-purpose OS. |
+| Codecs (S2) | Relay hands the runtime uncompressed frames and audio; it sends no AAC, H.264 or H.265 over NDI. |
 
-The `licenses.html` page (`scripts/licenses.ps1`, cargo-about) is untouched: it
-lists the Rust and npm dependencies Relay actually ships, and no NDI code is
-among them. `scripts/stage-bundle.ps1` refuses to stage an NDI binary, so one
-cannot reach an installer by accident before option B is chosen.
+## The fetch, step by step (`scripts/fetch-ndi-runtime.ps1`)
 
-## Option B: bundle later (owner's call)
+1. Download the redistributable from the pinned URL (the target of
+   http://ndi.link/NDIRedistV6), check its SHA-256 and that it is
+   Authenticode-valid and signed by `CN=Vizrt AG, O=Vizrt AG`.
+2. Download innoextract 1.9 (pinned SHA-256) and unpack the installer. The
+   installer is never run, so the build machine gets no NDI install and no
+   `NDI_RUNTIME_DIR_V6`.
+3. Check each shipped file's SHA-256, the DLL's signature, and its
+   FileVersion against the pin.
+4. Copy to `target\ndi-runtime\<version>`. `stage-bundle.ps1` copies from
+   there into `ui\src-tauri\binaries\ndi`, re-checks hashes and signature,
+   and refuses any `Processing.NDI.*` file anywhere else in the staging folder.
 
-If Jake wants NDI output to work with no runtime install:
+SignPath does not re-sign the DLL: it keeps Vizrt's signature, and the
+release workflow only sends Relay's own binaries for signing.
 
-1. Add an NDI component licence (the NDI end-user terms, or Relay terms
-   carrying S1 §3d) as a license page in `ui/src-tauri/installer/hooks.nsh`
-   and as a section of `licenses.html`.
-2. Release CI downloads the NDI 6 redistributable from NDI, checks its
-   signature (Vizrt NDI AB Authenticode), and either installs it silently from
-   the Relay installer or stages the DLL next to `relay-share.exe`.
-3. `ndi::locate_runtime` already checks for a DLL next to the engine *after*
-   the user-installed runtime (step 2 would make that path real; today it is
-   only reached by a developer who drops a DLL there by hand).
-4. Track NDI SDK releases (S1 §2b) as part of the release checklist.
+## Updating the bundled runtime
+
+Part of the release checklist (S1 §2b). When the release build fails with
+"NDI 6 Runtime installer SHA-256 mismatch":
+
+1. Download http://ndi.link/NDIRedistV6 by hand; confirm the signature
+   (`Get-AuthenticodeSignature`) is Valid and from Vizrt.
+2. Read NDI's licensing and distribution pages (S1–S3) again for changes.
+3. Unpack it with innoextract; record the installer's and the two files'
+   SHA-256s and the DLL's FileVersion in `scripts/ndi-runtime.psd1`.
+4. Update the version in this file, `THIRD_PARTY_NOTICES.md` §4, and the
+   installer licence page if the copyright years changed.
+5. Run the NDI tests on two PCs (`docs/plans/S51-ndi-output.md`) before
+   tagging.
+
+A runtime that moves to a new major version (NDI 7) also needs the FFI
+layouts re-checked and the `NDI_RUNTIME_DIR_V6` fallback renamed.
+
+## LAN only
+
+NDI discovers sources with mDNS on the local network by default, which
+matches Relay's LAN-only rule. Relay creates its sender with no groups and
+does not configure an NDI Discovery Server or NDI Bridge. If a user has set
+up a discovery server in NDI Access Manager, that is their NDI
+configuration; Relay neither changes nor overrides it (`NDI_CONFIG_DIR` is
+left alone, per "never touch global config"). Bundling changes nothing here:
+the bundled runtime reads the same per-user NDI configuration an installed
+one would.
+
+## History
+
+- S51 (v1): not bundled; the user installed the runtime from NDI. The
+  reasoning then was that bundling adds permanent licence and release
+  duties (EULA page, keeping current, a release-time download).
+- RC2 (2026-10-07): owner chose to take those duties on so NDI output needs
+  no extra install. This document records how each is met.

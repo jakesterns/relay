@@ -70,8 +70,9 @@ pub struct UiPrefs {
     #[serde(default)]
     pub prerelease_updates: bool,
     /// Publish what this PC receives as an NDI® source, "Relay (from
-    /// <sender>)" (S51). Off by default; needs the user-installed NDI
-    /// runtime. Follows live: a running receiver turns it on or off at once.
+    /// <sender>)" (S51). Off by default; needs the NDI runtime (bundled with
+    /// release installers). Follows live: a running receiver turns it on or
+    /// off at once.
     #[serde(default)]
     pub ndi_receive: bool,
     /// Publish this PC's own share as an NDI source too (S51). Off by default.

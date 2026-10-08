@@ -1,0 +1,90 @@
+RELAY - LICENCE TERMS
+
+Relay is two things with two sets of terms. Please read both.
+
+======================================================================
+PART 1. RELAY (MIT License)
+======================================================================
+
+Relay's own code is free, open-source software under the MIT License.
+
+Copyright (c) 2026 Jake Sterns
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-party components Relay's own code uses are listed, with their licences,
+in licenses.html in the install folder.
+
+======================================================================
+PART 2. THE NDI(R) RUNTIME (not MIT)
+======================================================================
+
+NDI(R) is a registered trademark of Vizrt NDI AB. More about NDI:
+https://ndi.video/
+
+This installer also installs the NDI 6 Runtime library
+(Processing.NDI.Lib.x64.dll) and its notice file
+(Processing.NDI.Lib.Licenses.txt) into Relay's install folder. Relay uses
+them only for its optional "NDI output", which is off unless you turn it on.
+These two files are NOT covered by the MIT License in Part 1. They are
+proprietary software of Vizrt NDI AB ("NDI"), distributed with Relay under the
+NDI SDK License Agreement (http://ndi.link/ndisdk_license), and by installing
+Relay you agree to the following terms for them:
+
+NDI runtime: Copyright (C) 2023-2026 Vizrt NDI AB. All rights reserved.
+NDI is the copyright owner of the NDI runtime.
+
+1. You may not modify the NDI runtime, the NDI SDK or any NDI product, or any
+   part of them.
+
+2. You may not reverse engineer, disassemble or recompile the NDI runtime,
+   the NDI SDK or any NDI product, or any part of them, or any protocol they
+   use, whether sent or received over a network or used inside or outside
+   the machine (physical or virtual) they run on, and you may not attempt to
+   do so.
+
+3. You may not circumvent any technical limitation in the NDI runtime, the
+   NDI SDK or any NDI product.
+
+4. You may not remove, obscure or alter any proprietary notice or label in or
+   on the NDI runtime, the NDI SDK or any NDI product, including the notice
+   file Processing.NDI.Lib.Licenses.txt.
+
+5. NO WARRANTY. NDI AND ITS LICENSORS PROVIDE THE NDI RUNTIME "AS IS" AND
+   DISCLAIM ALL WARRANTIES, EXPRESS OR IMPLIED, INCLUDING ANY WARRANTY OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE OR NON-INFRINGEMENT.
+
+6. NO LIABILITY. TO THE EXTENT PERMITTED BY APPLICABLE LAW, NEITHER NDI NOR
+   ITS LICENSORS ARE LIABLE FOR ANY DAMAGES, WHETHER DIRECT, INDIRECT,
+   INCIDENTAL OR CONSEQUENTIAL, ARISING FROM THE USE OF RELAY OR OF THE NDI
+   RUNTIME DISTRIBUTED WITH IT.
+
+7. You must comply fully with all relevant export laws and regulations of the
+   United States, so that the NDI runtime or any part of it is not exported,
+   directly or indirectly, in violation of United States law.
+
+8. If you use Relay to develop your own products that use NDI, you must
+   comply with the NDI SDK License Agreement, including keeping those
+   products currently and completely NDI-compatible, and you must include
+   the terms of this Part 2 (section 3d of that agreement) in your own end
+   user licence.
+
+Relay is not a product of, and is not sponsored or endorsed by, Vizrt NDI AB.
+The terms in this Part 2 apply only to the NDI files named above; they do not
+restrict what the MIT License in Part 1 lets you do with Relay's own code.

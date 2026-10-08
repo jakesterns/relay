@@ -4,7 +4,7 @@
   bundler expects to find it.
 
 .DESCRIPTION
-  Relay installs eight files into one folder:
+  Relay installs these files into one folder:
 
     relay-ui.exe        the Tauri shell (the bundle's main binary)
     relay-core.exe      the always-on service
@@ -14,6 +14,9 @@
     relay-preview.exe   the offline A/B renderer, spawned on demand
     relay_apo.dll       the endpoint APO (only registered if opted in)
     relay_vdevice.dll   the camera media source (only registered if opted in)
+    Processing.NDI.Lib.x64.dll, Processing.NDI.Lib.Licenses.txt
+                        NDI's own runtime and its notice, release builds
+                        (NDI(R) is a registered trademark of Vizrt NDI AB)
     uninstall.exe       written by NSIS
 
   The five helper exes ride along as Tauri "externalBin" sidecars, which is
@@ -37,9 +40,19 @@
 
 .PARAMETER SkipBuild
   Stage from whatever is already in target\release.
+
+.PARAMETER Ndi
+  The bundled NDI(R) runtime (docs/dev/ndi-licensing.md, option B).
+  Require: fetch it from NDI, verify the pins in scripts/ndi-runtime.psd1 and
+  fail without it (the release workflow). Auto (default): bundle a verified
+  copy if fetch-ndi-runtime.ps1 already left one in target\ndi-runtime, else
+  build without it. Skip: never bundle it.
 #>
 [CmdletBinding()]
-param([switch]$SkipBuild)
+param(
+    [switch]$SkipBuild,
+    [ValidateSet('Auto', 'Require', 'Skip')][string]$Ndi = 'Auto'
+)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -139,11 +152,54 @@ if ($env:CI -or (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
     Write-Warning 'cargo-about not installed: licenses.html is a placeholder (CI builds the real one)'
 }
 
-# S51: Relay does not ship the NDI runtime (docs/dev/ndi-licensing.md). A copy
-# left in the staging folder by hand must not reach an installer by accident.
-$ndi = @(Get-ChildItem -Path $staging -Recurse -File -Filter 'Processing.NDI.*' -ErrorAction SilentlyContinue)
-if ($ndi.Count -gt 0) {
-    throw "NDI runtime files are in $staging ($($ndi.Name -join ', ')); Relay must not bundle them - see docs/dev/ndi-licensing.md"
+# NDI(R) runtime (option B, docs/dev/ndi-licensing.md): the release installer
+# bundles NDI's own runtime DLL and its licences file, fetched from NDI and
+# checked against scripts/ndi-runtime.psd1 -- never from the repository.
+# tauri.bundle.conf.json maps the whole binaries\ndi folder into the install
+# folder, so the folder always exists; a dev build without the runtime leaves
+# it empty and NDI output says the runtime is not found (the same pattern as
+# the licenses.html placeholder above).
+#   -Ndi Require  fetch and verify, fail without it (release.yml)
+#   -Ndi Auto     bundle a verified copy fetch-ndi-runtime.ps1 already left
+#   -Ndi Skip     never bundle it
+$pins = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'ndi-runtime.psd1')
+$ndiStage = Join-Path $staging 'ndi'
+if (Test-Path $ndiStage) { Remove-Item -LiteralPath $ndiStage -Recurse -Force }
+# Nothing NDI anywhere else in the staging folder (a copy dropped by hand).
+$stray = @(Get-ChildItem -Path $staging -Recurse -File -Filter 'Processing.NDI.*' -ErrorAction SilentlyContinue)
+if ($stray.Count -gt 0) {
+    throw "NDI runtime files outside the verified bundle: $($stray.FullName -join ', ') - remove them; see docs/dev/ndi-licensing.md"
+}
+New-Item -ItemType Directory -Force -Path $ndiStage | Out-Null
+$ndiCache = Join-Path $repo ('target\ndi-runtime\' + $pins.Version)
+if ($Ndi -eq 'Require') {
+    & (Join-Path $PSScriptRoot 'fetch-ndi-runtime.ps1') -Out $ndiCache
+}
+$haveNdi = $false
+if ($Ndi -ne 'Skip') {
+    $haveNdi = $true
+    foreach ($f in $pins.Files) {
+        $p = Join-Path $ndiCache $f.Name
+        if (-not (Test-Path -LiteralPath $p)) { $haveNdi = $false; continue }
+        if ((Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $f.Sha256) { $haveNdi = $false }
+    }
+}
+if ($haveNdi) {
+    foreach ($f in $pins.Files) {
+        $dst = Join-Path $ndiStage $f.Name
+        Copy-Item -LiteralPath (Join-Path $ndiCache $f.Name) -Destination $dst -Force
+        if ($f.Signed) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $dst
+            if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate.Subject.StartsWith($pins.Signer)) {
+                throw "$($f.Name): signature $($sig.Status), expected $($pins.Signer)"
+            }
+        }
+        Write-Host "  resource ndi\$($f.Name) (NDI runtime $($pins.Version))"
+    }
+} elseif ($Ndi -eq 'Require') {
+    throw "NDI runtime $($pins.Version) is required for this build and was not staged"
+} else {
+    Write-Warning "NDI runtime not bundled (-Ndi $Ndi): NDI output will say the runtime is not found unless the user installed one. scripts/fetch-ndi-runtime.ps1 fetches it."
 }
 
 Write-Host ''

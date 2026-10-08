@@ -11,10 +11,11 @@ const TRADEMARK = "NDI® is a registered trademark of Vizrt NDI AB.";
  * NDI® output (S51), on Receive and on Share.
  *
  * One saved switch per side, off by default. The running engine follows it
- * live, so turning it on mid-share publishes at once. Relay does not ship the
- * NDI runtime (docs/dev/ndi-licensing.md): when it is not installed the card
- * says so and links NDI's own download, and the switch still saves — the next
- * share picks it up once the runtime is there.
+ * live, so turning it on mid-share publishes at once. Release installers
+ * bundle NDI's runtime next to Relay (docs/dev/ndi-licensing.md, option B);
+ * a build without it falls back to a runtime installed from NDI. When neither
+ * is there the card says so and links NDI's own download, and the switch
+ * still saves — the next share picks it up once the runtime is there.
  *
  * NDI's licence asks for an ndi.video link and the trademark line near every
  * place NDI is turned on; both sit at the foot of this card.
@@ -72,6 +73,9 @@ export function NdiCard({ side, live, sourceName }: {
         <>
           <Kv k="Source" v={live.name} />
           <Kv k="NDI receivers" v={String(live.connections ?? 0)} mono />
+          {rt?.present && (
+            <Kv k="NDI runtime" v={rt.bundled ? "Included with Relay" : "Installed from NDI"} />
+          )}
           {(live.video?.dropped ?? 0) > 0 && (
             <Kv k="Frames skipped" v={String(live.video?.dropped ?? 0)} mono />
           )}
@@ -82,7 +86,7 @@ export function NdiCard({ side, live, sourceName }: {
       )}
       {missing && (
         <p className="note" data-testid="ndi-runtime-missing">
-          NDI output needs the NDI runtime, a free install from NDI that Relay does not include.{" "}
+          NDI output needs the NDI runtime, which is missing from this copy of Relay. It is a free install from NDI.{" "}
           <button type="button" className="linkbtn" onClick={() => open("runtime")}>Get the NDI runtime</button>
           {" "}— then start the share again.
         </p>

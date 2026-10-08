@@ -51,12 +51,24 @@ https://ndi.video/
 
 - Relay's NDI output (S51) publishes a received stream, or this PC's own
   share, as an NDI source. It is off unless the user turns it on.
-- **Relay does not include any NDI software.** No NDI SDK file, header,
-  library or runtime is in this repository or in the Relay installer. NDI
-  output uses the *NDI 6 Runtime* that the user installs from NDI
-  (http://ndi.link/NDIRedistV6, or NDI Tools from https://ndi.video/tools/),
-  under NDI's own licence, which the user accepts in NDI's installer.
-  Relay loads that runtime by its full path only while NDI output is on.
+- **The Relay installer includes the NDI 6 runtime** (version 6.3.2.0,
+  pinned in `scripts/ndi-runtime.psd1`): `Processing.NDI.Lib.x64.dll` and
+  NDI's notice file `Processing.NDI.Lib.Licenses.txt`, installed in Relay's
+  own folder. NDI runtime: Copyright (C) 2023-2026 Vizrt NDI AB. All rights
+  reserved. These two files are proprietary software of Vizrt NDI AB, not
+  MIT. They are distributed under the NDI SDK License Agreement
+  (http://ndi.link/ndisdk_license); the terms that apply to them are shown
+  as a licence page in the Relay installer (`ui/src-tauri/installer/license.txt`,
+  Part 2): no modification, reverse engineering or circumvention of the NDI
+  runtime, no removal of its notices, no warranty or liability on NDI's
+  behalf, and US export compliance. NDI's notice file lists the third-party
+  libraries inside the runtime and their licences.
+- **No NDI file is in this repository.** The release build downloads NDI's
+  own redistributable from NDI (http://ndi.link/NDIRedistV6), checks its
+  SHA-256 and Vizrt's signature, and takes the two files out of it
+  (`scripts/fetch-ndi-runtime.ps1`). A build without them still works; NDI
+  output then uses an NDI runtime installed from NDI, if there is one.
+  Relay loads the runtime by its full path only while NDI output is on.
 - The C declarations Relay uses to call the runtime
   (`crates/capture/src/ndi/ffi.rs`) are written by hand from the documented
   NDI C API. The NDI SDK's header files are published by Vizrt NDI AB under

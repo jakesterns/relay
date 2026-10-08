@@ -1,12 +1,14 @@
 //! NDI® output (S51): where the NDI runtime lives, and the names and notices
 //! that go with it. NDI® is a registered trademark of Vizrt NDI AB.
 //!
-//! Relay never ships the NDI runtime and vendors no NDI SDK file
-//! (`docs/dev/ndi-licensing.md`). The share engine loads the runtime the user
-//! installed, by full path, only while NDI output is on. This module is the
-//! shared, pure half: the core uses it to tell the UI whether the runtime is
-//! there (a file-exists check, nothing loaded), the engine uses it to find the
-//! DLL it then loads.
+//! Relay vendors no NDI SDK file in its repository. Release installers bundle
+//! NDI's own runtime DLL in Relay's install folder, fetched from NDI and
+//! hash-pinned at build time (option B, `docs/dev/ndi-licensing.md`); a
+//! runtime the user installed is the fallback. The share engine loads it by
+//! full path, only while NDI output is on. This module is the shared, pure
+//! half: the core uses it to tell the UI whether the runtime is there (a
+//! file-exists check, nothing loaded), the engine uses it to find the DLL it
+//! then loads.
 
 use std::path::{Path, PathBuf};
 
@@ -41,6 +43,10 @@ pub struct NdiRuntime {
     /// Full path of the DLL that would be loaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The DLL is the copy Relay's installer bundled (in Relay's own folder),
+    /// not a separately installed NDI runtime.
+    #[serde(default)]
+    pub bundled: bool,
     /// Folders looked in, in order, for the "needs the runtime" note.
     #[serde(default)]
     pub searched: Vec<String>,
@@ -59,19 +65,28 @@ pub fn locate_runtime() -> NdiRuntime {
 
 /// The search, with the environment and file system injected for tests.
 ///
-/// Order: [`OVERRIDE_ENV`] (and only it, when set), then the NDI 6 runtime
-/// folder its installer names, then that installer's default folder, then
-/// the engine's own folder. Only full paths are produced; the
-/// engine never asks the loader to search `PATH`.
+/// Order: [`OVERRIDE_ENV`] (and only it, when set), then the engine's own
+/// folder (Relay's install folder, where the installer bundles the runtime
+/// it was built and tested with), then the NDI 6 runtime folder its
+/// installer names, then that installer's default folder. Only full paths
+/// are produced; the engine never asks the loader to search `PATH`.
 pub fn locate_with(
     env: impl Fn(&str) -> Option<PathBuf>,
     exe_dir: Option<PathBuf>,
     exists: impl Fn(&Path) -> bool,
 ) -> NdiRuntime {
     let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut own: Option<PathBuf> = None;
     match env(OVERRIDE_ENV).filter(|d| !d.as_os_str().is_empty()) {
         Some(d) => dirs.push(d),
         None => {
+            // The bundled copy first: NDI's guidance is to keep the DLL in
+            // the application's own folder, and it is the version this
+            // release was built against.
+            if let Some(d) = exe_dir {
+                own = Some(d.clone());
+                dirs.push(d);
+            }
             if let Some(d) = env(RUNTIME_ENV).filter(|d| !d.as_os_str().is_empty()) {
                 dirs.push(d);
             }
@@ -86,15 +101,15 @@ pub fn locate_with(
                     dirs.push(d);
                 }
             }
-            if let Some(d) = exe_dir {
-                dirs.push(d);
-            }
         }
     }
-    let found = dirs.iter().map(|d| d.join(RUNTIME_DLL)).find(|p| exists(p));
+    let found = dirs.iter().find(|d| exists(&d.join(RUNTIME_DLL)));
+    let bundled = found.is_some() && found == own.as_ref();
+    let found = found.map(|d| d.join(RUNTIME_DLL));
     NdiRuntime {
         present: found.is_some(),
         path: found.map(|p| p.display().to_string()),
+        bundled,
         searched: dirs.iter().map(|d| d.display().to_string()).collect(),
         download_url: RUNTIME_DOWNLOAD_URL.into(),
         ndi_url: NDI_URL.into(),
@@ -150,8 +165,39 @@ mod tests {
             |p| p == want,
         );
         assert!(r.present);
+        assert!(!r.bundled);
         assert_eq!(r.path.as_deref(), Some(want.display().to_string().as_str()));
         assert_eq!(r.searched.len(), 2);
+    }
+
+    #[test]
+    fn bundled_runtime_is_preferred_over_the_installed_one() {
+        // Option B: the installer puts the DLL next to the engine. With an
+        // NDI runtime installed as well, the bundled copy wins.
+        let own = PathBuf::from(r"C:\Users\u\AppData\Local\Relay");
+        let want = own.join(RUNTIME_DLL);
+        let r = locate_with(
+            env_of(&[
+                (RUNTIME_ENV, r"C:\Program Files\NDI\NDI 6 Runtime\v6"),
+                ("ProgramFiles", r"C:\Program Files"),
+            ]),
+            Some(own.clone()),
+            |_| true,
+        );
+        assert!(r.present);
+        assert!(r.bundled);
+        assert_eq!(r.path.as_deref(), Some(want.display().to_string().as_str()));
+        assert_eq!(r.searched[0], own.display().to_string());
+        // No bundled copy (a dev build): the installed runtime is used.
+        let sys = PathBuf::from(r"C:\Program Files\NDI\NDI 6 Runtime\v6").join(RUNTIME_DLL);
+        let r = locate_with(
+            env_of(&[(RUNTIME_ENV, r"C:\Program Files\NDI\NDI 6 Runtime\v6")]),
+            Some(own),
+            |p| p == sys,
+        );
+        assert!(r.present);
+        assert!(!r.bundled);
+        assert_eq!(r.path.as_deref(), Some(sys.display().to_string().as_str()));
     }
 
     #[test]

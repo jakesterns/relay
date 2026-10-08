@@ -108,7 +108,7 @@ impl NdiOutput {
         })
     }
 
-    /// With the user-installed runtime.
+    /// With the real runtime (bundled or user-installed).
     pub fn with_runtime(name: impl Into<String>) -> Arc<Self> {
         Self::new(name, Box::new(RuntimeBackend))
     }
@@ -279,7 +279,7 @@ impl AudioProducer {
     }
 }
 
-/// The real backend: the user-installed NDI runtime.
+/// The real backend: the NDI runtime (bundled, or user-installed).
 pub struct RuntimeBackend;
 
 #[cfg(windows)]

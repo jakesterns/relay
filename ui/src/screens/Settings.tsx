@@ -218,7 +218,9 @@ export function Settings() {
           <Kv k="Version" v={state.build?.version ?? "—"} mono />
           {/* S51: the attribution NDI's licence asks for in the About box. */}
           <p className="note" data-testid="ndi-attribution">
-            NDI® is a registered trademark of Vizrt NDI AB.{" "}
+            NDI® is a registered trademark of Vizrt NDI AB. Relay's installer
+            includes the NDI® 6 runtime, © Vizrt NDI AB, under NDI's licence terms
+            (shown at install, and in Processing.NDI.Lib.Licenses.txt in the Relay folder).{" "}
             <button type="button" className="linkbtn"
               onClick={() => { api.openNdiLink("ndi").catch(() => {}); }}>ndi.video</button>
           </p>

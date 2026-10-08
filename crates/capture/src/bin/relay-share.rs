@@ -193,7 +193,7 @@ fn run() -> Result<()> {
             let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
             relay_capture::learn::run(opts)
         }
-        // S51: can this PC publish NDI? Loads the user-installed runtime the
+        // S51: can this PC publish NDI? Loads the NDI runtime (bundled or user-installed) the
         // way NDI output would and reports what happened, as JSON. Never an
         // error exit: a missing runtime is an answer, not a failure.
         #[cfg(windows)]
@@ -872,7 +872,7 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
                  (--vcam mirrors into the Relay virtual camera;
                   --mic-route <endpoint-id> renders audio to that endpoint;
                   --ndi publishes it as an NDI source; send takes --ndi too)
-  ndi-probe      load the user-installed NDI runtime and report, as JSON
+  ndi-probe      load the NDI runtime (bundled, or user-installed) and report, as JSON
 ";
 
 #[cfg(all(test, windows))]

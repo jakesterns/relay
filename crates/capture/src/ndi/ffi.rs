@@ -1,5 +1,5 @@
 //! The slice of the NDI® C API Relay uses, declared by hand, and the loader
-//! that resolves it from the user-installed runtime. No SDK file is vendored
+//! that resolves it from the runtime (bundled, or user-installed). No SDK file is in the repo
 //! (`docs/dev/ndi-licensing.md`): the layouts below follow the documented C
 //! API (the SDK's MIT-licensed `Processing.NDI.*.h` headers), and the tests at
 //! the bottom pin every size and offset so a mistake fails here, not inside

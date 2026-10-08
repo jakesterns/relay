@@ -66,9 +66,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Build and stage helper binaries
+      # -Ndi Require: fetch the NDI(R) 6 runtime from NDI, verify the pinned
+      # SHA-256s and Vizrt's signature (scripts/ndi-runtime.psd1), and fail
+      # the release without it. It is never in the repository. NDI(R) is a
+      # registered trademark of Vizrt NDI AB; see docs/dev/ndi-licensing.md.
+      - name: Build and stage helper binaries (+ bundled NDI runtime)
         shell: pwsh
-        run: ./scripts/stage-bundle.ps1
+        run: ./scripts/stage-bundle.ps1 -Ndi Require
 
       # relay-ui.exe only; the installer is built after signing.
       - name: Build relay-ui (no bundle)
@@ -88,6 +92,8 @@ jobs:
           }
           Copy-Item ui/src-tauri/binaries/relay_apo.dll $out
           Copy-Item ui/src-tauri/binaries/relay_vdevice.dll $out
+          # The NDI runtime is not ours to sign: it ships with Vizrt's own
+          # signature, which stage-bundle.ps1 has already checked.
           Get-ChildItem $out
 
       - name: Upload unsigned binaries
@@ -127,6 +133,19 @@ jobs:
           }
           Copy-Item "$in/relay_apo.dll" ui/src-tauri/binaries/ -Force
           Copy-Item "$in/relay_vdevice.dll" ui/src-tauri/binaries/ -Force
+
+      - name: Check the bundled NDI runtime is still staged
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pins = Import-PowerShellDataFile scripts/ndi-runtime.psd1
+          foreach ($f in $pins.Files) {
+            $p = "ui/src-tauri/binaries/ndi/$($f.Name)"
+            if (-not (Test-Path $p)) { throw "missing $p" }
+            $h = (Get-FileHash $p -Algorithm SHA256).Hash.ToLower()
+            if ($h -ne $f.Sha256) { throw "$p SHA-256 $h, pinned $($f.Sha256)" }
+          }
+          Write-Host "NDI runtime $($pins.Version) staged"
 
       # Packages the already-built (now signed) binaries without recompiling.
       - name: Build NSIS installer

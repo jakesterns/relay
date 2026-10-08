@@ -238,7 +238,7 @@ pub enum Method {
     /// Virtual-device state: Windows support, registration, consent, OBS /
     /// VB-Cable detection. Read-only.
     VdeviceStatus,
-    /// S51: is the user-installed NDI® runtime there? A file-exists check:
+    /// S51: is the NDI® runtime there (bundled, or user-installed)? A file-exists check:
     /// nothing is loaded into the core.
     NdiStatus,
     /// Record the first-run consent decision (camera / microphone opt-ins).
