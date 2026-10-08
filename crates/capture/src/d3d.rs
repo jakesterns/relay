@@ -99,6 +99,18 @@ pub fn device_for_monitor(hmonitor: HMONITOR) -> Result<Gpu> {
     Ok(Gpu { device, context, adapter_name, adapter_luid })
 }
 
+/// A monitor's size in pixels.
+pub fn monitor_size(hmonitor: HMONITOR) -> Option<(u32, u32)> {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+    let mut mi =
+        MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    // SAFETY: a sized out-structure for a monitor handle.
+    unsafe { GetMonitorInfoW(hmonitor, &mut mi) }.as_bool().then(|| {
+        let r = mi.rcMonitor;
+        ((r.right - r.left) as u32, (r.bottom - r.top) as u32)
+    })
+}
+
 /// Primary monitor handle.
 pub fn primary_monitor() -> HMONITOR {
     use windows::Win32::Foundation::POINT;

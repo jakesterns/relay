@@ -87,10 +87,24 @@ impl AnyMuxer {
 
 /// Everything the writer thread receives.
 pub enum RecordMsg {
-    Video { data: Vec<u8>, pts_100ns: i64, keyframe: bool },
-    Audio { track: usize, data: Vec<u8>, pts_100ns: i64, dur_100ns: i64 },
+    Video {
+        data: Vec<u8>,
+        pts_100ns: i64,
+        keyframe: bool,
+    },
+    Audio {
+        track: usize,
+        data: Vec<u8>,
+        pts_100ns: i64,
+        dur_100ns: i64,
+    },
     SetRecording(bool),
     SaveReplay,
+    /// The encoder now produces this size (S49's ladder).
+    Resize {
+        width: u32,
+        height: u32,
+    },
 }
 
 /// Live counters for the instrument strip, sampled by the sender's stats tick.
@@ -192,6 +206,11 @@ impl Recorder {
     pub fn save_replay(&self) {
         let _ = self.tx.send(RecordMsg::SaveReplay);
     }
+
+    /// The picture size changes from the next keyframe on (control path).
+    pub fn resize(&self, width: u32, height: u32) {
+        let _ = self.tx.send(RecordMsg::Resize { width, height });
+    }
 }
 
 impl Drop for Recorder {
@@ -214,7 +233,7 @@ struct ActiveFile {
 }
 
 fn writer_thread(
-    cfg: RecordConfig,
+    mut cfg: RecordConfig,
     rx: Receiver<RecordMsg>,
     stats: Arc<RecordStats>,
 ) -> Result<()> {
@@ -225,6 +244,21 @@ fn writer_thread(
 
     while let Ok(msg) = rx.recv() {
         match msg {
+            RecordMsg::Resize { width, height } => {
+                if (width, height) != (cfg.width, cfg.height) {
+                    // A file describes one picture size, so the recording
+                    // rolls (reopening at the next keyframe, which the new
+                    // encoder starts with) and the replay ring starts over.
+                    info!(width, height, "picture size changed; recording rolls to a new file");
+                    close(&mut active, &stats);
+                    cfg.width = width;
+                    cfg.height = height;
+                    if let Some(r) = ring.as_mut() {
+                        *r = ReplayRing::new(cfg.replay_secs, cfg.ring_max_bytes.max(1));
+                        stats.ring_fill_milli.store(0, Ordering::Relaxed);
+                    }
+                }
+            }
             RecordMsg::SetRecording(on) => {
                 want_recording = on;
                 if !on {
@@ -549,6 +583,42 @@ mod tests {
                 RecordingContainer::Mkv => assert_eq!(&data[..4], &[0x1A, 0x45, 0xDF, 0xA3]),
             }
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S49: a resolution step mid-recording closes the file at the old size
+    /// and opens a new one at the next keyframe; no file mixes two sizes.
+    #[test]
+    fn a_resize_rolls_the_recording_to_a_new_file() {
+        let dir = std::env::temp_dir().join(format!("relay-rec-resize-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cfg = RecordConfig {
+            codec: crate::codec::VideoCodec::Hevc,
+            dir: dir.clone(),
+            width: 640,
+            height: 480,
+            audio: false,
+            mic: false,
+            replay_secs: 60,
+            ring_max_bytes: 10 << 20,
+            budget: DiskBudget { cap_bytes: 0, free_floor_bytes: 0 },
+            roll_secs: 3600,
+            record_on_start: true,
+            container: RecordingContainer::Mkv,
+        };
+        let rec = Recorder::start(cfg).unwrap();
+        let f = 166_667i64;
+        for i in 0..60i64 {
+            rec.push_video(&mux::tests::key_or_p(i % 30 == 0, i as u8), i * f, i % 30 == 0);
+        }
+        rec.resize(320, 240);
+        for i in 60..120i64 {
+            rec.push_video(&mux::tests::key_or_p(i == 60, i as u8), i * f, i == 60);
+        }
+        rec.resize(320, 240); // the same size again: nothing happens
+        drop(rec);
+        let n = std::fs::read_dir(&dir).unwrap().flatten().count();
+        assert_eq!(n, 2, "one file per size");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

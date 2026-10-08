@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, ErrorNote, Kv, Live } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
+import { LinkNote, linkView } from "../components/LinkNote";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
@@ -318,6 +319,7 @@ function StreamHealthCard(
   const audioMs = n(s.audio?.buffered_ms);
   const lost = n(s.rtp_lost) ?? 0;
   const recovered = n(s.rtp_recovered) ?? 0;
+  const link = linkView(s);
 
   return (
     <Card title="Stream health">
@@ -329,6 +331,10 @@ function StreamHealthCard(
       {audioMs !== null && <Kv k="Audio buffer" v={`${audioMs.toFixed(0)} ms`} mono />}
       <Kv k="Repaired" v={recovered.toLocaleString()} mono />
       <Kv k="Lost" v={lost.toLocaleString()} mono />
+      {/* S49: only when either PC is on Wi-Fi; a wired share shows nothing new. */}
+      {link && <Kv k="Link" v={link.label} mono />}
+      {link && <Kv k="Other PC" v={link.hint.replace(/^Other PC: /, "")} mono />}
+      <LinkNote s={s} live={on} />
       {state === "coping" && d.recovered > 0 && (
         <p className="note" data-testid="health-coping">
           {/* Not "dropping": on a clean wired LAN a keyframe burst arrives slightly out of

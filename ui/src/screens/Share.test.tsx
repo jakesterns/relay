@@ -144,6 +144,39 @@ describe("while sharing", () => {
     h.expectClean();
   });
 
+  it("S49: on Wi-Fi the strip names the link and a calm note says what Relay is doing", async () => {
+    const h = await sharing();
+    await push(() =>
+      tauri.emit("core://share-stats", {
+        event: "stats", bitrate_mbps: 18,
+        link: { kind: "wi_fi", label: "Wi-Fi (5 GHz, 866 Mb/s)", wifi: true, band: "5", mbps: 866 },
+        peer_link: { kind: "wired", label: "Wired (1 Gb/s)", wifi: false, band: null, mbps: 1000 },
+        adapt: {
+          rung: "1440p60", top: "2160p60", width: 2560, height: 1440, fps: 60,
+          target_mbps: 18, cause: "queue", note: "Lowered to 1440p60 to stay smooth",
+        },
+      }),
+    );
+    expect(readout("Link")).toEqual({ value: "Wi-Fi (5 GHz, 866 Mb/s)", hint: "Other PC: Wired (1 Gb/s)" });
+    expect(screen.getByTestId("link-note")).toHaveTextContent(
+      "This PC is on Wi-Fi. For steady 4K60, Ethernet or Wi-Fi 6E holds up best. Lowered to 1440p60 to stay smooth.",
+    );
+    h.expectClean();
+  });
+
+  it("S49: on a wired share nothing about the link appears", async () => {
+    await sharing();
+    await push(() =>
+      tauri.emit("core://share-stats", {
+        event: "stats", bitrate_mbps: 40,
+        link: { kind: "wired", label: "Wired (1 Gb/s)", wifi: false, band: null, mbps: 1000 },
+        peer_link: { kind: "wired", label: "Wired (2.5 Gb/s)", wifi: false, band: null, mbps: 2500 },
+      }),
+    );
+    expect(screen.queryByTestId("link-cell")).toBeNull();
+    expect(screen.queryByTestId("link-note")).toBeNull();
+  });
+
   it("reads em-dashes, not zeroes, before the first stats line arrives", async () => {
     await mount();
     expect(readout("Bitrate").value).toBe("—Mb/s");
