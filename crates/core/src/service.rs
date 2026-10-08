@@ -307,14 +307,24 @@ fn resume_send_request(
     Ok(req)
 }
 
+/// See `Service::last_recv`.
+#[derive(Default)]
+struct LastSeen {
+    recv: Option<Event>,
+    stream: Option<Event>,
+}
+
 pub struct Service {
     inner: Arc<Mutex<Inner>>,
     events: broadcast::Sender<Event>,
-    /// The newest receive status that went past. Events are not replayed, so
-    /// a window opened while a receive is already running -- after a resume
-    /// from `active-stream.json`, or just reopening the app -- would show Idle
-    /// and offer Start receiving over a live receiver. Re-sent on Subscribe.
-    last_recv: Arc<std::sync::Mutex<Option<Event>>>,
+    /// The newest receive status and stream window that went past. Events
+    /// are not replayed, so a window opened while a receive is already
+    /// running -- after a resume from `active-stream.json`, an update that
+    /// restarted the shell, or just reopening the app -- would show Idle and
+    /// offer Start receiving over a live receiver, and never learn the
+    /// stream window exists (r58: no "Share to a call", "waiting for the
+    /// first frame" over a playing picture). Re-sent on Subscribe.
+    last_recv: Arc<std::sync::Mutex<LastSeen>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
 }
 
@@ -395,7 +405,7 @@ impl Service {
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
-        let last_recv = Arc::new(std::sync::Mutex::new(None));
+        let last_recv = Arc::new(std::sync::Mutex::new(LastSeen::default()));
         {
             let mut rx = events.subscribe();
             let last = last_recv.clone();
@@ -404,8 +414,16 @@ impl Service {
                 .stack_size(64 * 1024)
                 .spawn(move || loop {
                     match rx.blocking_recv() {
-                        Ok(ev @ Event::ReceiveStatus { .. }) => {
-                            *last.lock().unwrap() = Some(ev);
+                        Ok(ev @ Event::ReceiveStatus { receiving, .. }) => {
+                            let mut last = last.lock().unwrap();
+                            if !receiving {
+                                // The receiver (and so its window) is gone.
+                                last.stream = None;
+                            }
+                            last.recv = Some(ev);
+                        }
+                        Ok(ev @ Event::StreamWindow { .. }) => {
+                            last.lock().unwrap().stream = Some(ev);
                         }
                         Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -1452,7 +1470,7 @@ struct IpcHandler {
     inner: Arc<Mutex<Inner>>,
     shutdown: mpsc::UnboundedSender<CoreEvent>,
     events: broadcast::Sender<Event>,
-    last_recv: Arc<std::sync::Mutex<Option<Event>>>,
+    last_recv: Arc<std::sync::Mutex<LastSeen>>,
 }
 
 /// The monitor hosting `hmonitor`, falling back to the primary (monitors are
@@ -3606,8 +3624,12 @@ impl IpcHandler {
             },
             Method::Subscribe => {
                 drop(g);
-                let last = self.last_recv.lock().unwrap().clone();
-                if let Some(ev) = last {
+                let (recv, stream) = {
+                    let last = self.last_recv.lock().unwrap();
+                    (last.recv.clone(), last.stream.clone())
+                };
+                // Receive status first: the shell's stream state hangs off it.
+                for ev in [recv, stream].into_iter().flatten() {
                     let _ = self.events.send(ev);
                 }
                 Reply::Ok
