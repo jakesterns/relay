@@ -176,6 +176,15 @@ the dev box. The owner saw the Relay window in the stream but not the surface
 inside it; everything else on the desktop came through. The exclusion holds
 on a real capture, in the embedded (owned popup) state, at 60 fps.
 
+*Changed 2026-10-07 (S50):* the exclusion is now conditional. It made the
+stream impossible to pick in Discord, Zoom, Teams, Meet or OBS on the receiving
+PC, which is the main thing a receiving PC in a call wants. The window is now
+excluded only while this same PC is sending a share whose area the window is
+on (`render::placement::should_exclude`), re-decided on local share start,
+switch and stop, on every move, and on display changes. The recursion this
+bug describes needs exactly that case, so it stays covered. See
+`docs/plans/S50-share-and-go.md`.
+
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody
 established whether a window appeared first and vanished, or never appeared at

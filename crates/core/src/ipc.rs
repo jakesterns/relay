@@ -130,11 +130,14 @@ pub enum Method {
     /// receiving (r54). No restart; turning it on again is Stop and Start.
     StopCallReturn,
     /// Move the receiver's stream window between the app window (`owner`,
-    /// the shell's HWND) and a window of its own (S29).
+    /// the shell's HWND) and a window of its own (S29), or make it a clean
+    /// feed of `feed`'s fixed size for call apps (S50; absent = 1920x1080).
     HostReceive {
         mode: crate::share::HostMode,
         #[serde(default)]
         owner: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<crate::share::CleanFeed>,
     },
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
@@ -537,8 +540,11 @@ pub enum Event {
         data: serde_json::Value,
     },
     /// The receiver's stream window (S29): it exists, or changed hosting
-    /// mode. `mode` is `embedded`, `popout` or `none`; `excluded_from_capture`
-    /// is what Windows reports back for the B9 guard, not what was asked.
+    /// mode. `mode` is `embedded`, `popout`, `clean` or `none`;
+    /// `excluded_from_capture` is what Windows reports back for the B9 guard,
+    /// not what was asked. Since S50 it is true only while this PC is also
+    /// sharing a screen the window is on, and the event repeats when that
+    /// changes.
     /// The shell positions the window from this; the webview only reads the
     /// stream size and mode.
     StreamWindow {

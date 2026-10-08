@@ -51,6 +51,20 @@ The engine reasserts the affinity after every style change and reports what
 event as `excluded_from_capture`. The core logs a warning when it is false,
 the shell passes it to the page, and the Receive screen says so.
 
+### Since S50: capturable by default, and a clean feed
+
+The affinity is no longer always on. The engine excludes the window only
+while this PC is also sharing an area the window is on (the core sends
+`{"cmd":"local_share","target":...}` on share start, source switch and stop,
+and `--local-share` at spawn); otherwise the window is capturable so call
+apps and OBS can pick it as "Relay — from <sender>". A change re-sends the
+`host` event with the new `excluded_from_capture`. A fourth mode, **clean**
+(`{"cmd":"host","mode":"clean","feed":"1920x1080"|"2560x1440"}`), is a
+borderless unowned window of exactly that client size with the stream
+letterboxed into a back buffer of the same size; Esc or close re-embeds it
+like a popped-out window. Details and the two-PC plan:
+`docs/plans/S50-share-and-go.md`.
+
 ### Why the shell positions and the engine styles
 
 Position changes are continuous (every mouse move of a drag); style changes

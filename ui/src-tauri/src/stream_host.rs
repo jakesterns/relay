@@ -61,7 +61,8 @@ struct Host {
     hwnd: u64,
     width: u32,
     height: u32,
-    /// Engine-confirmed hosting mode: `embedded`, `popout`, or `none`.
+    /// Engine-confirmed hosting mode: `embedded`, `popout`, `clean` (a clean
+    /// feed for call apps, S50) or `none`.
     mode: String,
     /// Where the webview last said the video area is; `None` while the
     /// Receive screen is not showing.
@@ -84,7 +85,8 @@ static HOST: Mutex<Host> = Mutex::new(Host {
     height: 0,
     mode: String::new(),
     area: None,
-    excluded_from_capture: true,
+    // S50: capturable unless the engine says otherwise.
+    excluded_from_capture: false,
     receiving: false,
     code: None,
     sender: None,
@@ -160,7 +162,7 @@ pub fn on_window(hwnd: u64, width: u32, height: u32, mode: &str, excluded: bool)
         }
         let was = std::mem::replace(&mut g.mode, mode.to_string());
         g.excluded_from_capture = excluded;
-        mode == "popout" && was != "popout"
+        own_window_now(mode, &was)
     };
     // The engine cannot bring its own window to the front: Windows refuses
     // SetForegroundWindow to a process that did not get the last input. This
@@ -171,6 +173,14 @@ pub fn on_window(hwnd: u64, width: u32, height: u32, mode: &str, excluded: bool)
         #[cfg(windows)]
         win::bring_to_front(hwnd);
     }
+}
+
+/// Did the stream just become a window of its own (popped out or a clean
+/// feed)? Then this process, which has the user's last input, hands it the
+/// foreground. A `host` event that only repeats the mode (the capture guard
+/// changed, S50) must not steal the foreground again.
+pub fn own_window_now(mode: &str, was: &str) -> bool {
+    matches!(mode, "popout" | "clean") && was != mode
 }
 
 /// The webview measured the video area, or left the Receive screen (`None`).
@@ -299,7 +309,17 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::fit;
+    use super::{fit, own_window_now};
+
+    #[test]
+    fn the_foreground_goes_to_a_new_own_window_once() {
+        assert!(own_window_now("popout", "embedded"));
+        assert!(own_window_now("clean", "embedded"));
+        assert!(own_window_now("clean", "popout"), "popout to clean feed");
+        assert!(!own_window_now("clean", "clean"), "a repeated host event (guard change)");
+        assert!(!own_window_now("embedded", "clean"));
+        assert!(!own_window_now("none", ""));
+    }
 
     #[test]
     fn a_wider_box_letterboxes_left_and_right() {

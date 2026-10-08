@@ -1,16 +1,24 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, ErrorNote, Kv, Live } from "../components/Controls";
+import { Card, Chips, ErrorNote, Kv, Live } from "../components/Controls";
+import { CallGuide } from "../components/CallGuide";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
-import type { ProcessInfo } from "../lib/ipc";
+import type { CleanFeed, ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
   type ShareStats, type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
+
+/** S50: the clean feed's two fixed sizes. 1080p is the default: it is the
+ *  most any call app sends, so a bigger window only makes them downscale. */
+const FEED_SIZES: { key: CleanFeed; label: string }[] = [
+  { key: "1920x1080", label: "1920×1080" },
+  { key: "2560x1440", label: "2560×1440" },
+];
 
 /** S40: where the received audio plays, as a row of its own. */
 const RECEIVE_DEVICES: MixerDevice[] = [{ track: "output", label: "Output" }];
@@ -612,13 +620,23 @@ export function Receive() {
     try { await api.stopReceive(); } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
-  const setMode = async (mode: "embedded" | "popout") => {
+  // S50: the clean feed's size; "Share to a call" opens it at 1080p.
+  const [feed, setFeed] = useState<CleanFeed>("1920x1080");
+  const setMode = async (mode: "embedded" | "popout" | "clean", size?: CleanFeed) => {
     setError(null);
-    try { await api.setStreamMode(mode); } catch (e) { setError(errText(e)); }
+    try { await api.setStreamMode(mode, mode === "clean" ? size ?? feed : undefined); }
+    catch (e) { setError(errText(e)); }
+  };
+  const pickFeed = (size: CleanFeed) => {
+    setFeed(size);
+    // A clean feed already up changes size at once; the window is still
+    // the one the call app is capturing.
+    void setMode("clean", size);
   };
 
   const embedded = !!stream?.live && stream.mode === "embedded";
   const popped = !!stream?.live && stream.mode === "popout";
+  const clean = !!stream?.live && stream.mode === "clean";
   // Re-measure whenever what is around the video area can change.
   const sceneRef = useVideoArea([receiving, sender, error, embedded]);
 
@@ -634,7 +652,9 @@ export function Receive() {
       ]
     : [];
 
-  const areaText = popped
+  const areaText = clean
+    ? `In its own window for calls · ${FEED_SIZES.find((f) => f.key === feed)?.label ?? feed}`
+    : popped
     ? `Playing in its own window · ${sender ?? ""}`.trim()
     : embedded
       ? null
@@ -669,7 +689,7 @@ export function Receive() {
         <OfflineBanner />
         <CodecBanner need="receive" />
         <FirewallBanner />
-        <div className="preview" data-testid="video-area" data-stream={embedded ? "embedded" : popped ? "popout" : "none"}>
+        <div className="preview" data-testid="video-area" data-stream={embedded ? "embedded" : popped ? "popout" : clean ? "clean" : "none"}>
           {/* The stream is a native window the shell keeps over this box, so
               the box itself stays empty: anything painted here would sit
               under the picture. */}
@@ -707,17 +727,24 @@ export function Receive() {
           {stream?.live && stream.width > 0 && (
             <Kv k="Stream" v={`${stream.width}×${stream.height}`} mono />
           )}
+          {(embedded || popped) && (
+            <button className="btn q" onClick={() => { setFeed("1920x1080"); void setMode("clean", "1920x1080"); }}>Share to a call</button>
+          )}
           {embedded && (
             <button className="btn q" onClick={() => void setMode("popout")}>Pop out into its own window</button>
           )}
-          {popped && (
+          {clean && (
+            <Chips label="Call window size" value={feed} options={FEED_SIZES} onChange={pickFeed} />
+          )}
+          {(popped || clean) && (
             <button className="btn q" onClick={() => void setMode("embedded")}>Bring back into Relay</button>
           )}
-          {stream?.live && !stream.excluded_from_capture && (
-            <p className="note">Windows could not hide the stream from screen capture on this PC, so
-              sharing this PC's screen while receiving would show the stream inside itself.</p>
+          {stream?.live && stream.excluded_from_capture && (
+            <p className="note" data-testid="capture-note">Hidden from screen capture while this PC is
+              also sharing its screen.</p>
           )}
         </Card>
+        <CallGuide sender={sender} />
         <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
         <TrustedSendersCard tick={peersTick} />
         <CallReturnCard value={callApp} locked={receiving} live={liveReturn}
