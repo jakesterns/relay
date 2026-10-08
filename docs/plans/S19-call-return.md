@@ -150,3 +150,40 @@ transceiver last, and the receiver adds its track as a send-only
 transceiver *before* `set_remote_description`. Either the other way round
 puts the return track on the program line as `sendrecv` against a
 `sendonly` offer.
+
+## r54 fix: a stored PID is never trusted on its own
+
+Found on PC2 (Win10, r54): the receive request kept in `active-stream.json`
+carried `return_pid` 2772 across days and restarts. The test process behind it
+had exited; after the PID was reused the receiver captured another app's audio
+(very likely Discord, so a friend's voice) and sent it to the sender, unasked.
+Process-loopback activation accepted the dead PID without failing ("return
+audio pipeline up pid=2772" was logged) and the card read "Call app: an app
+that has closed".
+
+Now (`crates/core/src/proc_identity.rs`):
+- The call app is stored as `{pid, image, created}` (`return_app`): image path
+  from `QueryFullProcessImageNameW`, creation time from `GetProcessTimes`,
+  both through `PROCESS_QUERY_LIMITED_INFORMATION` only.
+- Every spawn checks it (`ReceiveRequest::settle_return`): a fresh Start pins
+  the PID the user just picked; a resume, restart or replay keeps it only if
+  the live process has the same image (case-insensitive) and the same creation
+  time. A gone or reused PID, or a pre-fix record with a bare PID, is dropped
+  from the request **and** from the record, and the user is told "The call app
+  you picked has closed".
+- The engine checks again right before activating process loopback
+  (`--return-image`, `--return-created`; `receiver::return_target_ok`), both
+  when the track is added and when the capture thread starts. A mismatch logs
+  why, captures nothing, and emits `return_off`.
+- The card shows what the running receiver does, from the core's status lines
+  (which only name a checked, running app), never "an app that has closed".
+  **Off** works while receiving: `Method::StopCallReturn` sends the engine
+  `{"cmd":"return","on":false}`; the capture stops with no restart. Picking a
+  different app still needs Stop and Start (a new track needs a new
+  connection).
+- The sender's per-app audio (`audio_pid`, kept in the send record) gets the
+  same check (`audio_app`, `--audio-pid-image`, `--audio-pid-created`). A
+  stale one leaves the share **without program audio**, never the whole
+  desktop mix instead.
+- Re-finding the same exe by name on resume was not added: it would need an
+  explicit opt-in from the user, and nothing asks for it yet.

@@ -221,7 +221,7 @@ function VirtualDeviceCard() {
 
   const mic = vd.mic_targets.length > 0
     ? vd.mic_targets[0].name
-    : "No route yet — the signed driver ships later; VB-Cable works meanwhile";
+    : "Use the call app's screen share with audio";
 
   return (
     <Card title="In calls">
@@ -398,12 +398,18 @@ function TrustedSendersCard({ tick }: { tick: number }) {
  *  not the PID: a PID is new every launch, the program is not. */
 const CALL_APP_KEY = "relay.callApp.exe";
 
+/** What the running receiver is returning audio from, as the core reports
+ *  it on every status line (r54). */
+interface LiveReturn { pid: number; exe: string }
+
 /** The return route (S19): pick the call app on this PC and its audio —
  *  the other participants, never this PC's own mic — goes back to the
- *  sending PC as one more track. Locked while receiving: the engine read
- *  the choice when it started. */
-function CallReturnCard({ value, locked, onChange }: {
-  value: ProcessInfo | null; locked: boolean; onChange: (p: ProcessInfo | null) => void;
+ *  sending PC as one more track. While receiving the card shows what the
+ *  receiver is actually doing, and the route can be turned off live (r54);
+ *  picking another app needs a new connection, so that waits for Stop. */
+function CallReturnCard({ value, locked, live, onChange, onStopLive }: {
+  value: ProcessInfo | null; locked: boolean; live: LiveReturn | null;
+  onChange: (p: ProcessInfo | null) => void; onStopLive: () => void;
 }) {
   const [picking, setPicking] = useState(false);
   const [procs, setProcs] = useState<ProcessInfo[]>([]);
@@ -411,6 +417,23 @@ function CallReturnCard({ value, locked, onChange }: {
     setPicking(true);
     void api.listProcesses().then(setProcs).catch(() => setProcs([]));
   };
+  if (locked) {
+    return (
+      <Card title="Send the call back">
+        <Kv k="Call app" v={live ? live.exe : "None"} />
+        {live && (
+          <div className="row">
+            <button className="btn q" onClick={onStopLive}>Off</button>
+          </div>
+        )}
+        <p className="note">
+          {live
+            ? "The other people on the call are heard on the sending PC. Only the call app's own output goes back, never this PC's microphone."
+            : "Not sending the call back. To pick a call app, stop receiving first."}
+        </p>
+      </Card>
+    );
+  }
   return (
     <Card title="Send the call back">
       <Kv k="Call app" v={value ? value.exe : "None"} />
@@ -460,6 +483,9 @@ export function Receive() {
     }).catch(() => {});
     return () => { live = false; };
   }, []);
+  // What the running receiver returns audio from (r54), from the core's
+  // status lines; separate from the pick above, which is for the next Start.
+  const [liveReturn, setLiveReturn] = useState<LiveReturn | null>(null);
   const pickCallApp = (p: ProcessInfo | null) => {
     setCallApp(p);
     if (p) localStorage.setItem(CALL_APP_KEY, p.exe);
@@ -500,12 +526,18 @@ export function Receive() {
     // The running receiver's call app, named by its exe. A window opened
     // mid-receive only learns it from the shell's stream status: the core's
     // replayed ReceiveStatus goes past before this page is listening.
+    // Every receiving line names the receiver's call app *now*; none means
+    // it is not returning anything (turned off, or the app had closed).
+    // The core only reports an app it checked is running, so this never
+    // says "closed" about an app whose audio is being captured.
     const showReturnApp = (pid?: number | null, exe?: string | null) => {
-      if (!pid) return;
+      if (!pid) { setLiveReturn(null); return; }
+      if (exe) { setLiveReturn({ pid, exe }); return; }
+      setLiveReturn({ pid, exe: "the call app" });
       api.listProcesses().then((ps) => {
         if (!live) return;
-        setCallApp(ps.find((x) => x.pid === pid)
-          ?? { pid, exe: exe || "an app that has closed", title: "", hwnd: 0 });
+        const p = ps.find((x) => x.pid === pid);
+        if (p) setLiveReturn({ pid, exe: p.exe });
       }).catch(() => {});
     };
     api.streamStatus().then((s) => {
@@ -539,6 +571,7 @@ export function Receive() {
         if (s.message) setError(s.message);
         if (s.codec) setCodec(s.codec);
         if (!s.receiving) {
+          if (!s.restarting) setLiveReturn(null);
           setSender((was) => { if (was) setEnded(was); return null; });
           setEndedClean(!!s.ended_by_sender);
           setCode(null); setCodec(null);
@@ -687,7 +720,11 @@ export function Receive() {
         </Card>
         <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
         <TrustedSendersCard tick={peersTick} />
-        <CallReturnCard value={callApp} locked={receiving} onChange={pickCallApp} />
+        <CallReturnCard value={callApp} locked={receiving} live={liveReturn}
+          onChange={pickCallApp}
+          onStopLive={() => {
+            api.stopCallReturn().then(() => setLiveReturn(null)).catch((e) => setError(errText(e)));
+          }} />
         <VirtualDeviceCard />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving

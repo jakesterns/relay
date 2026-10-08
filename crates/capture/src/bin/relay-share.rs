@@ -159,7 +159,8 @@ fn run() -> Result<()> {
         }
         #[cfg(windows)]
         "send" => {
-            let opts = parse_send_args(&args[1..])?;
+            let mut opts = parse_send_args(&args[1..])?;
+            relay_capture::transport::sender::guard_audio_pid(&mut opts);
             run_async(relay_capture::transport::sender::run(opts))
         }
         #[cfg(windows)]
@@ -284,6 +285,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         vcam: false,
         mic_device: None,
         output_device: None,
+        audio_image: None,
+        audio_created: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -305,6 +308,11 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             // Additive since S2: this adds a second Opus track rather than
             // replacing the program mix. Mic-only is `--no-audio --audio-mic`,
             // which is what the core emits for a legacy `mic` preset.
+            // r54: which process --audio-pid must be, pinned by the core.
+            "--audio-pid-image" => opts.audio_image = it.next().cloned(),
+            "--audio-pid-created" => {
+                opts.audio_created = Some(it.next().context("--audio-pid-created N")?.parse()?)
+            }
             "--audio-mic" => opts.mic = true,
             // S37: everything except the --audio-pid app, as a third track.
             "--audio-rest" => opts.rest = true,
@@ -352,6 +360,8 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         mic_route: None,
         host: None,
         return_pid: None,
+        return_image: None,
+        return_created: None,
         output_device: None,
     };
     let mut it = args.iter();
@@ -368,6 +378,16 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--return-pid" => {
                 opts.return_pid =
                     Some(it.next().context("--return-pid <pid>")?.parse().context("--return-pid")?)
+            }
+            // r54: which process that PID must be, pinned by the core.
+            "--return-image" => opts.return_image = it.next().cloned(),
+            "--return-created" => {
+                opts.return_created = Some(
+                    it.next()
+                        .context("--return-created <filetime>")?
+                        .parse()
+                        .context("--return-created")?,
+                )
             }
             "--host" => {
                 opts.host = Some(it.next().context("--host <hwnd>")?.parse().context("--host")?)
@@ -965,6 +985,19 @@ mod tests {
         let o = parse_recv_args(&s(&["--return-pid", "4242"])).unwrap();
         assert_eq!(o.return_pid, Some(4242));
         assert!(parse_recv_args(&s(&["--return-pid", "discord"])).is_err());
+        // r54: the pinned identity the engine re-checks before capturing.
+        let o = parse_recv_args(&s(&[
+            "--return-pid",
+            "4242",
+            "--return-image",
+            r"C:\d\Discord.exe",
+            "--return-created",
+            "1337",
+        ]))
+        .unwrap();
+        assert_eq!(o.return_image.as_deref(), Some(r"C:\d\Discord.exe"));
+        assert_eq!(o.return_created, Some(1337));
+        assert!(parse_recv_args(&s(&["--return-created", "soon"])).is_err());
         // S40: the output pick; absent = System default.
         assert_eq!(o.output_device, None);
         let o = parse_recv_args(&s(&["--output-device", "{spk}"])).unwrap();

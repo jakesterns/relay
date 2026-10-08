@@ -129,6 +129,40 @@ describe("pairing", () => {
       receiving: true, code: "418254", return_pid: 99999 };
     await mount();
     expect(kv("Call app")).not.toMatch(/process|99999/);
+    // r54: the core only names an app it checked is running, so the card
+    // never claims the app it is capturing has closed.
+    expect(kv("Call app")).not.toMatch(/closed/);
+  });
+
+  /** r54 (PC2): a stale call app showed "an app that has closed" with no
+   *  way to turn it off until Stop receiving. Now Off works live. */
+  it("turns the call return off live while receiving", async () => {
+    localStorage.clear();
+    core.stream = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true,
+      receiving: true, code: "418254", return_pid: 1004, return_exe: "discord.exe" };
+    const h = await mount();
+    expect(kv("Call app")).toBe("discord.exe");
+    await h.user.click(screen.getByRole("button", { name: "Off" }));
+    await settle();
+    expect(tauri.lastCall("stop_call_return")).toBeTruthy();
+    expect(kv("Call app")).toBe("None");
+    // Picking another app needs a new connection: not offered mid-receive.
+    expect(screen.queryByRole("button", { name: "Change…" })).not.toBeInTheDocument();
+  });
+
+  /** r54: the core dropped a stale call app at spawn or resume; its status
+   *  lines carry none, and the card follows them rather than the pick. */
+  it("follows the receiver when it reports no call app", async () => {
+    localStorage.clear();
+    await mount();
+    await push(() => tauri.emit("core://receive-status",
+      { receiving: true, code: "418254", return_pid: 1004, return_exe: "discord.exe" }));
+    await settle();
+    expect(kv("Call app")).toBe("discord.exe");
+    await push(() => tauri.emit("core://receive-status", { receiving: true }));
+    await settle();
+    expect(kv("Call app")).toBe("None");
+    expect(screen.queryByRole("button", { name: "Off" })).not.toBeInTheDocument();
   });
 
   /** S19: the return route. Off until a call app is picked; then its PID
@@ -323,9 +357,9 @@ describe("whether a call will see the stream", () => {
     core.vdevice = { ...core.vdevice, mic_targets: [] };
     tauri.useFakeCore(core.handler);
     const h = await mount();
-    expect(kv("Microphone", card("In calls"))).toBe(
-      "No route yet — the signed driver ships later; VB-Cable works meanwhile",
-    );
+    expect(kv("Microphone", card("In calls"))).toBe("Use the call app's screen share with audio");
+    // r54: never tell the user to install a third-party driver.
+    expect(card("In calls")).not.toHaveTextContent(/VB-Cable|VoiceMeeter|install/i);
     h.expectClean();
   });
 });

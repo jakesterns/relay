@@ -138,6 +138,11 @@ struct Inner {
     /// intent says it should not be.
     send_episode: Option<crate::resilience::Episode>,
     recv_episode: Option<crate::resilience::Episode>,
+    /// The call app the running receiver is returning audio from right now
+    /// (pid, exe name), as every receive status line reports it. Set at
+    /// spawn from the checked identity; cleared by a live Off or by the
+    /// engine refusing the route (r54).
+    recv_return: Option<(u32, String)>,
     /// The app window the receiver's stream is hosted in. Kept in memory
     /// only (the record on disk drops it: a window handle is meaningless to
     /// a fresh core), so a receiver brought back after a share ends is
@@ -366,6 +371,7 @@ impl Service {
             recv_intent: None,
             send_episode: None,
             recv_episode: None,
+            recv_return: None,
             recv_host: None,
             recv_vcam: None,
             fg_mismatch: 0,
@@ -1931,6 +1937,19 @@ fn spawn_share(
         req.mic_device = saved.get(MixerSide::Send, DeviceTrack::Mic).map(str::to_string);
         req.output_device = saved.get(MixerSide::Send, DeviceTrack::Output).map(str::to_string);
     }
+    // r54: the app whose audio this share captures must still be the
+    // process that was picked. A resume or a hotkey replay hours later must
+    // not capture whatever now holds the PID.
+    if let Some(why) = req.settle_audio_app(by_user, &crate::proc_identity::LiveProbe) {
+        warn!(?why, "the shared app is gone; the share goes on without its sound");
+        let _ = events.send(Event::Notice { text: crate::share::AUDIO_GONE_TEXT.into() });
+        if let Some(r) = g.send_intent.as_mut().and_then(|r| r.share.as_mut()) {
+            let _ = r.settle_audio_app(false, &crate::proc_identity::LiveProbe);
+        }
+        if g.send_intent.is_some() {
+            persist_intent(&g);
+        }
+    }
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
@@ -2016,9 +2035,15 @@ fn spawn_share(
                 | ShareEvent::RenderUp { .. }
                 | ShareEvent::Host { .. }
                 | ShareEvent::HostClose
+                | ShareEvent::ReturnOff { .. }
                 | ShareEvent::SenderStopped
                 | ShareEvent::WrongCode { .. } => {}
                 ShareEvent::Refused { message } => refused = Some(message),
+                ShareEvent::AudioOff { reason } => {
+                    warn!(%reason, "the engine did not capture the shared app's audio");
+                    let _ =
+                        events2.send(Event::Notice { text: crate::share::AUDIO_GONE_TEXT.into() });
+                }
                 ShareEvent::Exited { ok, code } => {
                     on_share_exit(&inner2, &events2, ok, code, refused.take())
                 }
@@ -2203,6 +2228,22 @@ fn spawn_receive(
         });
     }
     g.recv_vcam = Some(req.vcam);
+    // r54: the call app must still be the process that was picked, on every
+    // spawn: a fresh Start pins it, a resume or restart re-checks it. A PID
+    // that is gone or reused is dropped here, before any engine sees it, and
+    // the record forgets it too so no later resume can try it again.
+    if let Some(why) = req.settle_return(by_user, &crate::proc_identity::LiveProbe) {
+        warn!(?why, "the call app is gone; receiving without the return route");
+        let _ = events.send(Event::Notice { text: crate::share::RETURN_GONE_TEXT.into() });
+        if let Some(r) = g.recv_intent.as_mut().and_then(|r| r.receive.as_mut()) {
+            r.return_pid = None;
+            r.return_app = None;
+        }
+        if g.recv_intent.is_some() {
+            persist_intent(&g);
+        }
+    }
+    g.recv_return = req.return_app.as_ref().map(|a| (a.pid, a.exe()));
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,
@@ -2221,15 +2262,14 @@ fn spawn_receive(
     }
     drop(g);
 
-    // Every status line says which call app this receiver returns from.
-    let ret_pid = req.return_pid.filter(|p| *p != 0);
-    #[cfg(windows)]
-    let ret_exe = ret_pid
-        .and_then(crate::winloop::process_image_path)
-        .map(|p| crate::winloop::exe_name(&p))
-        .filter(|e| !e.is_empty());
-    #[cfg(not(windows))]
-    let ret_exe: Option<String> = None;
+    // Every status line says which call app this receiver returns from right
+    // now: the checked identity, until a live Off or the engine drops it.
+    let current_return = |inner: &Arc<Mutex<Inner>>| -> (Option<u32>, Option<String>) {
+        match inner.lock().recv_return.clone() {
+            Some((pid, exe)) => (Some(pid), Some(exe).filter(|e| !e.is_empty())),
+            None => (None, None),
+        }
+    };
     let events2 = events.clone();
     let inner2 = inner.clone();
     std::thread::Builder::new()
@@ -2269,13 +2309,7 @@ fn spawn_receive(
                             persist_intent(&ig);
                         }
                     }
-                    let return_pid = inner2
-                        .lock()
-                        .recv_intent
-                        .as_ref()
-                        .and_then(|r| r.receive.as_ref())
-                        .and_then(|q| q.return_pid)
-                        .filter(|p| *p != 0);
+                    let (return_pid, return_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: Some(code),
@@ -2286,10 +2320,11 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe,
                     });
                 }
                 ShareEvent::Codec { codec } => {
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -2300,12 +2335,13 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
                     last_sender = Some(sender.clone());
                     last_trusted = trusted;
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -2316,7 +2352,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -2347,6 +2383,7 @@ fn spawn_receive(
                             persist_intent(&ig);
                         }
                     }
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -2357,7 +2394,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -2406,6 +2443,19 @@ fn spawn_receive(
                 ShareEvent::SenderStopped => ended_by_sender = true,
                 // Only a sender is refused; a receiver never emits it.
                 ShareEvent::Refused { .. } => {}
+                // r54: the engine is not (or no longer) sending the call
+                // back. Forget the route everywhere, and say so unless the
+                // user just turned it off themselves.
+                ShareEvent::ReturnOff { reason } => {
+                    clear_return(&inner2);
+                    if reason != "user" {
+                        warn!(%reason, "the receiver refused the call app");
+                        let _ = events2
+                            .send(Event::Notice { text: crate::share::RETURN_GONE_TEXT.into() });
+                    }
+                    let _ = events2.send(return_status_line());
+                }
+                ShareEvent::AudioOff { .. } => {}
                 ShareEvent::WrongCode { name } => {
                     let who = if name.is_empty() { "A PC".to_string() } else { name.clone() };
                     let text = format!(
@@ -2471,6 +2521,59 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
         return_pid: None,
         return_exe: None,
     });
+    Reply::Ok
+}
+
+/// r54: forget the receiver's return route: the live state the status lines
+/// read, and the intent record, so a resume cannot bring it back.
+fn clear_return(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    g.recv_return = None;
+    let had = g.recv_intent.as_mut().and_then(|r| r.receive.as_mut()).is_some_and(|q| {
+        let had = q.return_pid.is_some() || q.return_app.is_some();
+        q.return_pid = None;
+        q.return_app = None;
+        had
+    });
+    if had {
+        persist_intent(&g);
+    }
+}
+
+/// A receiving status line that only says "no call app now": every other
+/// field is absent, so the page and the shell keep what they have.
+fn return_status_line() -> Event {
+    Event::ReceiveStatus {
+        receiving: true,
+        code: None,
+        sender: None,
+        message: None,
+        codec: None,
+        trusted: false,
+        ended_by_sender: false,
+        restarting: false,
+        return_pid: None,
+        return_exe: None,
+    }
+}
+
+/// r54: turn the call-audio return off on the running receiver, live, with
+/// no restart. Turning it on again needs a new connection, so that is a
+/// Stop and Start.
+fn stop_call_return(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
+    let sent = {
+        let mut g = inner.lock();
+        match g.receive.as_mut() {
+            Some(engine) => engine.command(&crate::share::EngineCmd::Return { on: false }),
+            None => return Reply::Error { message: "not receiving".into() },
+        }
+    };
+    if let Err(e) = sent {
+        return Reply::Error { message: e.to_string() };
+    }
+    info!("call return turned off on the running receiver");
+    clear_return(inner);
+    let _ = events.send(return_status_line());
     Reply::Ok
 }
 
@@ -2877,6 +2980,10 @@ impl IpcHandler {
             Method::StopReceive => {
                 drop(g);
                 kill_receive(&self.inner, &self.events)
+            }
+            Method::StopCallReturn => {
+                drop(g);
+                stop_call_return(&self.inner, &self.events)
             }
             Method::HostReceive { mode, owner } => {
                 drop(g);

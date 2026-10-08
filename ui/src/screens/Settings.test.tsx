@@ -414,6 +414,14 @@ describe("the virtual camera opt-in", () => {
     await mount();
     expect(within(installRow(VDEV)).getByText(/Mic route: CABLE Input \(VB-Audio Virtual Cable\)/)).toBeInTheDocument();
   });
+
+  it("points to the call app's own screen share with audio, never to installing VB-Cable", async () => {
+    core.vdevice = { ...core.vdevice, mic_targets: [] };
+    tauri.useFakeCore(core.handler);
+    await mount();
+    expect(within(installRow(VDEV)).getByText(/share your screen in the call app with its audio option on/)).toBeInTheDocument();
+    expect(installRow(VDEV)).not.toHaveTextContent(/install VB-Cable/i);
+  });
 });
 
 describe("startup, recording and restore", () => {

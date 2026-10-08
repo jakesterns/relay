@@ -75,6 +75,12 @@ pub enum EngineCmd {
     Vcam {
         on: bool,
     },
+    /// Receiver only (r54): stop sending the call app's audio back, live,
+    /// with no restart. `on: true` is ignored: a return track can only be
+    /// added when the connection is made.
+    Return {
+        on: bool,
+    },
     /// Toggle continuous recording.
     Record {
         on: bool,
@@ -124,6 +130,18 @@ pub fn parse_line(line: &str) -> Option<EngineCmd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Return { on: false }).unwrap(),
+            r#"{"cmd":"return","on":false}"#
+        );
+        assert_eq!(
+            parse_line(r#"{"cmd":"return","on":false}"#),
+            Some(EngineCmd::Return { on: false })
+        );
+    }
 
     #[test]
     fn bare_stop_still_works() {

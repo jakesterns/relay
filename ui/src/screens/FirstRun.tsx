@@ -62,9 +62,9 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
           <p className="p"><b>What the camera installs</b> (every key, exactly):</p>
           {dryRun.map((l) => <div className="mono" key={l} style={{ fontSize: 12 }}>{l}</div>)}
           <p className="p" style={{ marginTop: 8 }}><b>Microphone:</b> the signed Relay driver is
-            not included yet (it ships once driver signing completes). Until then Relay can route
-            call audio through an already-installed VB-Cable or VoiceMeeter device — that installs
-            nothing.</p>
+            not included yet (it ships once driver signing completes). Until then, call apps can
+            take the other PC's sound through their own screen share with audio — Relay installs
+            nothing for it.</p>
           <p className="p"><b>How to remove:</b> Settings → "What Relay installs", or the
             uninstaller. Everything registered is recorded in
             <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span> and removal deletes

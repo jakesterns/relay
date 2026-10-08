@@ -984,6 +984,12 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("stop_receive");
   },
+  /** Stop sending the call app's audio back, live, while receiving (r54).
+   *  Turning it on again is Stop and Start receiving. */
+  async stopCallReturn(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("stop_call_return");
+  },
   /** Where the Receive screen's video area is, so the shell can put the
    *  stream window over it; `null` when the screen is not showing. */
   async setVideoArea(area: VideoArea | null): Promise<void> {
