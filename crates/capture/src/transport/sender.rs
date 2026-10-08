@@ -80,6 +80,9 @@ pub struct SendOpts {
     /// program captures the game's audio itself. The core decides this from
     /// the preset, consent and registration; the engine never chooses it.
     pub vcam: bool,
+    /// Also publish the share as an NDI® source, "Relay share" (S51). A
+    /// `ndi` command changes it live.
+    pub ndi: bool,
     /// The microphone endpoint id (S40); `None` = the System default, which
     /// the track then follows if it changes mid-share.
     pub mic_device: Option<String>,
@@ -575,6 +578,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             output_slot2,
                             play_stats2,
                             faders2,
+                            // The call coming back is not part of the share.
+                            None,
                         ) {
                             warn!(error = %e, "return audio playback stopped");
                         }
@@ -715,6 +720,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
+    // NDI output (S51): made here, the runtime loaded only when it is turned
+    // on. The video and program-audio pipelines tee into it.
+    let ndi = crate::ndi::NdiOutput::with_runtime(relay_core::ndi::share_source_name());
+    if opts.ndi {
+        let n = ndi.clone();
+        tokio::task::spawn_blocking(move || n.apply(true));
+    }
+
     // Source-switch mailbox: stdin queues, the pipeline applies at a frame
     // boundary. The share always starts on the primary display.
     let switcher = Arc::new(StdMutex::new(Switcher::new(SourceTarget::Display { index: 0 })));
@@ -749,6 +762,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let rec = recorder.clone();
         let sw = switcher.clone();
         let vcam = opts.vcam;
+        let ndi = ndi.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
             if let Err(e) = video_pipeline(
                 codec,
@@ -766,6 +780,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 record_setup,
                 sw,
                 vcam,
+                ndi,
             ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
@@ -784,11 +799,20 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let stop = stop.clone();
         let rec = recorder.clone();
         let faders = faders.clone();
+        let ndi = Some(ndi.clone());
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
             // The program mix follows the default output (S40); no pick.
-            if let Err(e) =
-                audio_pipeline(source, AudioTrack::Program, None, atx, stats, stop, rec, faders)
-            {
+            if let Err(e) = audio_pipeline(
+                source,
+                AudioTrack::Program,
+                None,
+                atx,
+                stats,
+                stop,
+                rec,
+                faders,
+                ndi,
+            ) {
                 warn!(error = %e, "audio pipeline stopped");
             }
         })?)
@@ -803,6 +827,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let rec = recorder.clone();
         let faders = faders.clone();
         let mic_slot = device_slots.mic.clone();
+        // A mic-only share publishes the mic; otherwise NDI carries the
+        // program mix, as the one stream a production would want.
+        let mic_ndi = opts.audio.is_none().then(|| ndi.clone());
         Some(std::thread::Builder::new().name("relay-mic-pipeline".into()).spawn(move || {
             // A missing or exclusively-held microphone must not take the
             // share down with it: video and the program mix carry on.
@@ -815,6 +842,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 stop,
                 rec,
                 faders,
+                mic_ndi,
             ) {
                 warn!(error = %e, "microphone pipeline stopped");
                 println!(
@@ -846,6 +874,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 stop,
                 rec,
                 faders,
+                None,
             ) {
                 warn!(error = %e, "rest-of-PC audio pipeline stopped");
                 println!(
@@ -989,6 +1018,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "rest_peak": stats.rest_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "vcam_frames": stats.vcam_frames.load(Ordering::Relaxed),
+                    "ndi": ndi.status_json(),
                     "return_packets": stats.return_packets.load(Ordering::Relaxed),
                     "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
@@ -1056,6 +1086,11 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         // only (S43b; docs/plans/S43-vcam-win10.md).
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam is a receiver command; ignored by the sender");
+                        }
+                        Some(EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received");
+                            let n = ndi.clone();
+                            tokio::task::spawn_blocking(move || n.apply(on));
                         }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");
@@ -1158,6 +1193,7 @@ fn video_pipeline(
     record_setup: Option<RecordSetup>,
     switcher: Arc<StdMutex<Switcher>>,
     vcam: bool,
+    ndi: Arc<crate::ndi::NdiOutput>,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -1235,6 +1271,9 @@ fn video_pipeline(
     // into it -- so the camera never has to change format. Best-effort like
     // the receiver's: a failure is reported once and the share goes on.
     let mut vcam_sink = if vcam { start_vcam_sink(size, fps) } else { None };
+    // S51: and as an NDI source, when that is on. The same NV12, read back
+    // a frame later so the encoder never waits for it.
+    let mut ndi_video = crate::ndi::video::VideoProducer::new(ndi, fps);
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
@@ -1377,6 +1416,18 @@ fn video_pipeline(
                         }
                     }
                 }
+                let tee = crate::decode::mf::DecodedFrame {
+                    texture: nv12.clone(),
+                    subresource: 0,
+                    pts_100ns: frame.qpc_100ns,
+                    width: size.0,
+                    height: size.1,
+                };
+                if let Err(e) = ndi_video.push(&gpu.device, &gpu.context, &tee) {
+                    warn!(error = %e, "NDI video stopped; the share carries on");
+                    ndi_video.output().fail(format!("NDI video stopped: {e}"));
+                    ndi_video.reset();
+                }
                 enc.submit(&nv12, frame.qpc_100ns)?;
                 last_nv12 = Some(nv12);
                 inflight.insert(frame.qpc_100ns, time::qpc_now_100ns());
@@ -1467,6 +1518,7 @@ fn audio_pipeline(
     stop: Arc<AtomicBool>,
     recorder: Arc<OnceLock<Recorder>>,
     faders: Arc<crate::mixer::Faders>,
+    ndi: Option<Arc<crate::ndi::NdiOutput>>,
 ) -> Result<()> {
     let profile = match which {
         AudioTrack::Program | AudioTrack::Rest => OpusProfile::program(),
@@ -1481,6 +1533,9 @@ fn audio_pipeline(
             AudioTrack::Rest => crate::mixer::Track::Rest,
         },
     );
+    if let Some(n) = ndi {
+        stream.set_ndi(n);
+    }
     // Per track, not per share: the program mix and the microphone are
     // different endpoints and can run at different rates, so each one reports
     // its own conversion.

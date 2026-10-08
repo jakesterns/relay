@@ -674,6 +674,42 @@ async fn uninstall_apo(endpoint: Option<String>) -> CmdResult<()> {
     }
 }
 
+/// S51: is the user-installed NDI® runtime there (a file check in the core).
+#[tauri::command]
+async fn ndi_status() -> CmdResult<relay_core::ndi::NdiRuntime> {
+    match call(Method::NdiStatus).await? {
+        Reply::Ndi { runtime } => Ok(runtime),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// S51: open one of the two links NDI's licence asks Relay to show, in the
+/// default browser. The client names which; the URL itself is fixed here, so
+/// this cannot be used to open anything else.
+#[tauri::command]
+fn open_ndi_link(which: String) -> CmdResult<()> {
+    let url = match which.as_str() {
+        "ndi" => relay_core::ndi::NDI_URL,
+        "runtime" => relay_core::ndi::RUNTIME_DOWNLOAD_URL,
+        other => return Err(anyhow::anyhow!("unknown NDI link `{other}`").into()),
+    };
+    #[cfg(windows)]
+    {
+        use windows::core::{w, HSTRING};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        // SAFETY: constant verb and a fixed https/http URL; no window owner.
+        let r = unsafe {
+            ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL)
+        };
+        // ShellExecute reports success as a value above 32.
+        if r.0 as isize <= 32 {
+            return Err(anyhow::anyhow!("could not open {url}").into());
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn vdevice_status() -> CmdResult<relay_core::vdevice::VdeviceStatus> {
     match call(Method::VdeviceStatus).await? {
@@ -1237,6 +1273,8 @@ pub fn run() {
             install_apo,
             uninstall_apo,
             vdevice_status,
+            ndi_status,
+            open_ndi_link,
             set_vdevice_consent,
             vdevice_dry_run,
             install_vcam,

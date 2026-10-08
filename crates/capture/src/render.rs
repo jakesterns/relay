@@ -57,6 +57,11 @@ pub struct RenderOpts {
     /// The output endpoint received audio plays on (S40), changed live by a
     /// `device` command. Empty = the System default, followed if it moves.
     pub output: Arc<crate::devices::DeviceSlot>,
+    /// Publish the stream as an NDI® source from the start (S51); a `ndi`
+    /// command flips it live.
+    pub ndi: bool,
+    /// The sending PC's name, for the NDI source name.
+    pub sender_name: String,
 }
 
 /// Apply a `device` command on the receiver. Only `Output` means anything
@@ -175,6 +180,16 @@ pub async fn run(
     // Per-track gain and mute (S37): set from stdin here, read by playback.
     let faders = crate::mixer::Faders::shared();
     let faders2 = faders.clone();
+    // NDI output (S51): made here, loaded only when turned on. The render
+    // and playback threads tee into it; off costs them one atomic load.
+    let ndi = crate::ndi::NdiOutput::with_runtime(relay_core::ndi::receive_source_name(
+        &opts.sender_name,
+    ));
+    if opts.ndi {
+        let n = ndi.clone();
+        tokio::task::spawn_blocking(move || n.apply(true));
+    }
+    let ndi_audio = ndi.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
             use crate::mixer::Track;
@@ -184,6 +199,7 @@ pub async fn run(
                 output2,
                 audio_stats2,
                 faders2,
+                Some(ndi_audio),
             ) {
                 warn!(error = %e, "audio playback stopped");
             }
@@ -204,8 +220,9 @@ pub async fn run(
     let link = HostLink::new();
     let link2 = link.clone();
     let host_owner = opts.host;
+    let ndi_video = ndi.clone();
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner) {
+        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner, ndi_video) {
             // ERROR, and in share.log: the one line someone reads when a
             // receive dies (the dead-host fatal used to reach core.log only).
             tracing::error!(error = %e, "receiver failed; telling the sender why");
@@ -264,6 +281,7 @@ pub async fn run(
                     "keyframe_requests": keyframe_requests,
                     "frames_withheld": withheld,
                     "audio": audio_stats.json(),
+                    "ndi": ndi.status_json(),
                 }));
 
                 // Also to the log. A receiver that freezes mid-share leaves
@@ -307,6 +325,11 @@ pub async fn run(
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received; Relay Camera follows live");
                             vcam_cmd.store(on, Ordering::Release);
+                        }
+                        Some(EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received");
+                            let n = ndi.clone();
+                            tokio::task::spawn_blocking(move || n.apply(on));
                         }
                         Some(EngineCmd::Mixer { faders: set }) => {
                             faders.apply(&set);
@@ -555,6 +578,7 @@ fn follow_vcam(
 }
 
 /// Decode + present. Owns the D3D objects; the window is on its own thread.
+#[allow(clippy::too_many_arguments)]
 fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
@@ -563,6 +587,7 @@ fn video_thread(
     quit: Arc<AtomicBool>,
     link: Arc<HostLink>,
     host_owner: Option<u64>,
+    ndi: Arc<crate::ndi::NdiOutput>,
 ) -> Result<()> {
     // SAFETY: COM MTA for MF + free-threaded D3D; balanced on return.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
@@ -620,6 +645,10 @@ fn video_thread(
     let mut vcam_switch = VcamSwitch::default();
     let mut vcam_sink: Option<crate::vcam_sink::VcamSink> = None;
     follow_vcam(&mut vcam_switch, &vcam, &mut vcam_sink, w, h);
+    // NDI output (S51): a tee like the camera's, but it never waits on the
+    // GPU or the NDI worker. A D3D failure turns NDI output off (reported in
+    // the stats line) and the stream carries on.
+    let mut ndi_video = crate::ndi::video::VideoProducer::new(ndi, 60);
 
     let mut pending: Option<AccessUnit> = Some(first);
     // Nothing is decoded until the first keyframe: see the gate in the loop.
@@ -758,6 +787,11 @@ fn video_thread(
                     vcam_sink = None;
                 }
             }
+            if let Err(e) = ndi_video.push(&surface.device, &surface.context, &frame) {
+                warn!(error = %e, "NDI video stopped; the stream carries on");
+                ndi_video.output().fail(format!("NDI video stopped: {e}"));
+                ndi_video.reset();
+            }
             // The first second of frames after a connect carries decoder
             // start-up and the wait for the first keyframe: the two-PC matrix
             // saw 100-290 ms there, then single digits. Reporting it put a
@@ -778,6 +812,7 @@ fn video_thread(
     // may need the window's thread to answer a message during release, so
     // that thread has to still be pumping here.
     drop(vcam_sink);
+    drop(ndi_video);
     drop(vp);
     drop(decoder);
     drop(surface);

@@ -31,6 +31,7 @@ pub mod ipc;
 pub mod launcher;
 pub mod learned_display;
 pub mod logging;
+pub mod ndi;
 pub mod peers;
 pub mod presets;
 pub mod processes;
