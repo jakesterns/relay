@@ -311,7 +311,7 @@ pub async fn run(
                 let recovered = stats.video_recovered.load(Ordering::Relaxed);
                 let keyframe_requests = stats.keyframe_requests.load(Ordering::Relaxed);
                 let withheld = stats.video_aus_dropped.load(Ordering::Relaxed);
-                println!("{}", serde_json::json!({
+                let mut line = serde_json::json!({
                     "event": "stats",
                     "aus": aus,
                     "presented": presented,
@@ -328,7 +328,9 @@ pub async fn run(
                     "frames_withheld": withheld,
                     "audio": audio_stats.json(),
                     "ndi": ndi.status_json(),
-                }));
+                });
+                stats.s49_fields(&mut line);
+                println!("{line}");
 
                 // Also to the log. A receiver that freezes mid-share leaves
                 // nothing behind otherwise: on a real machine the picture
@@ -731,6 +733,15 @@ fn video_thread(
         warn!(after = ?d, "TEST: the render thread will fail after the first keyframe");
     }
     let mut decoding_since: Option<std::time::Instant> = None;
+    // S49: the sender can step the stream's size mid-share. The decoder is
+    // rebuilt at the new size on the keyframe that starts it, and frames are
+    // scaled back to the size the window, swapchain and Relay Camera were
+    // made for — so nothing downstream ever sees the change, and a call app
+    // reading Relay Camera never sees its format move.
+    let mut dec_size = (w, h);
+    let mut scaler: Option<crate::encode::convert::Converter> = None;
+    // S49: hold each frame by the link's measured jitter (off on wired).
+    let mut playout = crate::transport::playout::Playout::new();
 
     let result: Result<()> = 'outer: loop {
         if let (Some(d), Some(t)) = (fail_after, decoding_since) {
@@ -821,11 +832,71 @@ fn video_thread(
             }
         }
 
+        if au.codec.is_keyframe(&au.data) {
+            let size = crate::decode::probe_dimensions(au.codec, &au.data);
+            if let Some(d) = size.filter(|d| *d != dec_size) {
+                info!(from = ?dec_size, to = ?d, window = ?(w, h), "stream size changed; decoder rebuilt");
+                decoder = match MfDecoder::new(&surface.device, au.codec, d.0, d.1) {
+                    Ok(dec) => dec,
+                    Err(e) => break Err(e),
+                };
+                dec_size = d;
+                scaler = if d == (w, h) {
+                    None
+                } else {
+                    match crate::encode::convert::Converter::new_on(
+                        &surface.device,
+                        &surface.context,
+                        d,
+                        (w, h),
+                    ) {
+                        Ok(mut c) => {
+                            // Only the picture, never the decoder's padding rows.
+                            c.set_source_rect(Some((0, 0, d.0, d.1)));
+                            Some(c)
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "stream_size", "width": d.0, "height": d.1 })
+                );
+            }
+        }
+
+        if let Some(cap) = au.capture_local_ns {
+            let release = playout.on_frame(au.arrival_local_ns as f64 / 1e6, cap as f64 / 1e6);
+            stats.playout_target_us.store((playout.target_ms() * 1e3) as u64, Ordering::Relaxed);
+            stats.playout_late.store(playout.stats.late, Ordering::Relaxed);
+            // Wait in short steps so a stop is never held up by the buffer.
+            loop {
+                let wait = release - signal_now_ns() as f64 / 1e6;
+                if wait < 0.5 || quit.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(5.0) / 1e3));
+            }
+        }
+
         let frames = match decoder.decode(&au.data, au.pts_or_zero()) {
             Ok(f) => f,
             Err(e) => break Err(e),
         };
         for frame in frames {
+            let frame = match scaler.as_mut() {
+                None => frame,
+                Some(s) => match s.convert_slice(&frame.texture, frame.subresource) {
+                    Ok(texture) => crate::decode::mf::DecodedFrame {
+                        texture,
+                        subresource: 0,
+                        pts_100ns: frame.pts_100ns,
+                        width: w,
+                        height: h,
+                    },
+                    Err(e) => break 'outer Err(e),
+                },
+            };
             // Diagnostics for B10, the freeze that logs no stall: `presented`
             // kept climbing at 30/s while the user watched a still picture, so
             // Present() is being called on something that is not changing.

@@ -39,8 +39,19 @@ impl Converter {
     /// reverted: the processor accepts the output view, reports success and
     /// writes solid black.
     pub fn new(gpu: &Gpu, in_size: (u32, u32), out_size: (u32, u32)) -> Result<Self> {
-        let video_device: ID3D11VideoDevice = gpu.device.cast().context("ID3D11VideoDevice")?;
-        let video_context: ID3D11VideoContext = gpu.context.cast()?;
+        Self::new_on(&gpu.device, &gpu.context, in_size, out_size)
+    }
+
+    /// As [`Converter::new`] on any device: the receiver scales decoded NV12
+    /// with it after a resolution step (S49).
+    pub fn new_on(
+        device: &windows::Win32::Graphics::Direct3D11::ID3D11Device,
+        context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        in_size: (u32, u32),
+        out_size: (u32, u32),
+    ) -> Result<Self> {
+        let video_device: ID3D11VideoDevice = device.cast().context("ID3D11VideoDevice")?;
+        let video_context: ID3D11VideoContext = context.cast()?;
 
         let desc = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -75,7 +86,7 @@ impl Converter {
         for _ in 0..RING {
             let mut tex = None;
             // SAFETY: valid descriptor, out pointer is ours.
-            unsafe { gpu.device.CreateTexture2D(&tex_desc, None, Some(&mut tex)) }
+            unsafe { device.CreateTexture2D(&tex_desc, None, Some(&mut tex)) }
                 .context("creating the video-processor output texture")?;
             ring.push(tex.unwrap());
         }
@@ -157,13 +168,25 @@ impl Converter {
     /// Convert (and scale) `src` into the next NV12 ring texture and return it.
     /// The returned texture stays valid until `RING - 1` further calls.
     pub fn convert(&mut self, src: &ID3D11Texture2D) -> Result<ID3D11Texture2D> {
+        self.convert_slice(src, 0)
+    }
+
+    /// [`Converter::convert`] from one slice of a texture array: a decoder's
+    /// output (S49, the receiver's scaler).
+    pub fn convert_slice(&mut self, src: &ID3D11Texture2D, slice: u32) -> Result<ID3D11Texture2D> {
         let dst = self.ring[self.next].clone();
         self.next = (self.next + 1) % self.ring.len();
 
         let in_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
             FourCC: 0,
             ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
-            Anonymous: Default::default(),
+            Anonymous:
+                windows::Win32::Graphics::Direct3D11::D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: windows::Win32::Graphics::Direct3D11::D3D11_TEX2D_VPIV {
+                        MipSlice: 0,
+                        ArraySlice: slice,
+                    },
+                },
         };
         let out_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
             ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,

@@ -68,6 +68,9 @@ pub struct AccessUnit {
     /// in-band SEI was present.
     pub capture_local_ns: Option<i64>,
     pub rtp_timestamp: u32,
+    /// When its last packet arrived (unix ns, this PC's clock): the earliest
+    /// it can be decoded, and the playout buffer's input (S49).
+    pub arrival_local_ns: i64,
 }
 
 impl AccessUnit {
@@ -119,6 +122,43 @@ pub struct RecvStats {
     /// decoder while waiting for one or because it fell behind.
     pub keyframe_requests: AtomicU64,
     pub video_aus_dropped: AtomicU64,
+    /// S49: the playout buffer's current hold (µs) and frames it could not
+    /// hold for because they arrived later than it allows.
+    pub playout_target_us: AtomicU64,
+    pub playout_late: AtomicU64,
+    /// The reorder buffer's hold, ms (40 unless the link needs longer).
+    pub reorder_hold_ms: AtomicU64,
+    /// S49: both ends' links and what the sender is doing about them, merged
+    /// into every `stats` line as `link`, `peer_link` and `adapt`.
+    pub link: std::sync::Mutex<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl RecvStats {
+    /// The S49 fields for a `stats` line.
+    pub fn s49_fields(&self, line: &mut serde_json::Value) {
+        let link = self.link.lock().unwrap_or_else(|e| e.into_inner());
+        for (k, v) in link.iter() {
+            line[k] = v.clone();
+        }
+        line["playout_ms"] = (self.playout_target_us.load(Ordering::Relaxed) as f64 / 1e3).into();
+        line["playout_late"] = self.playout_late.load(Ordering::Relaxed).into();
+        line["reorder_hold_ms"] = self.reorder_hold_ms.load(Ordering::Relaxed).into();
+    }
+
+    pub fn set_link(&self, key: &str, v: serde_json::Value) {
+        self.link.lock().unwrap_or_else(|e| e.into_inner()).insert(key.into(), v);
+    }
+}
+
+/// A [`netcheck::LinkInfo`](super::netcheck::LinkInfo) as the screens want it.
+pub fn link_json(l: &super::netcheck::LinkInfo) -> serde_json::Value {
+    serde_json::json!({
+        "kind": l.kind,
+        "label": l.label(),
+        "wifi": l.is_wifi(),
+        "band": l.band,
+        "mbps": l.mbps,
+    })
 }
 
 /// Raises the flag when the receive ends, whichever way it ends, so the
@@ -240,7 +280,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let output = crate::devices::DeviceSlot::shared(
         opts.mic_route.clone().or_else(|| opts.output_device.clone()),
     );
-    let (mut sig, local_ip, offer_json, sender_name, trusted) = loop {
+    let (mut sig, local_ip, offer_json, sender_name, trusted, sender_link) = loop {
         let (tcp, from) = loop {
             tokio::select! {
                 r = listener.accept() => break r?,
@@ -287,8 +327,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         let local_ip = tcp.local_addr()?.ip();
         info!(%from, "sender connected");
         let mut sig = signal::SigStream::new(tcp);
-        let (offer_json, sender_name, trusted) = match sig.recv().await? {
-            signal::SigMsg::Offer { name, sdp, trusted: true, .. } => {
+        let (offer_json, sender_name, trusted, sender_link) = match sig.recv().await? {
+            signal::SigMsg::Offer { name, sdp, trusted: true, link, .. } => {
                 // No code: the sender says we remember it. Its claim is the
                 // fingerprint in its SDP, which anyone could have copied from an
                 // earlier exchange — so this decides only whether to *proceed*.
@@ -302,7 +342,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 match known {
                     Some(peer) => {
                         info!(sender = %name, remembered_as = %peer.name, "remembered PC connecting without a code");
-                        (sdp, name, true)
+                        (sdp, name, true, link)
                     }
                     None => {
                         let _ = sig.send(&signal::SigMsg::Bye).await;
@@ -318,7 +358,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                     }
                 }
             }
-            signal::SigMsg::Offer { name, sdp, mac, trusted: false } => {
+            signal::SigMsg::Offer { name, sdp, mac, trusted: false, link } => {
                 if !signal::verify_mac(&code, &sdp, &mac) {
                     let _ = sig.send(&signal::SigMsg::Bye).await;
                     // Not fatal: one mistyped digit on the other PC used to
@@ -356,11 +396,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 } else {
                     warn!(sender = %name, "offer carries no DTLS fingerprint; nothing to remember");
                 }
-                (sdp, name, false)
+                (sdp, name, false, link)
             }
             other => bail!("expected offer, got {other:?}"),
         };
-        break (sig, local_ip, offer_json, sender_name, trusted);
+        break (sig, local_ip, offer_json, sender_name, trusted, sender_link);
     };
     let offer_fp = signal::sdp_fingerprint(&offer_json);
 
@@ -421,26 +461,58 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let _ = events.gather_done.recv().await;
     let local = pc.local_description().await.context("no local description")?;
     let answer_json = serde_json::to_string(&local)?;
+    // S49: this end's link, for the sender and for our own screen. The
+    // sender's came in its offer; an older sender sent none.
+    let local_link = super::netcheck::link_info_for(local_ip)
+        .unwrap_or_else(|_| super::netcheck::LinkInfo::unknown());
+    let sender_s49 = sender_link.is_some();
+    info!(
+        local = %local_link.label(),
+        sender = %sender_link.as_ref().map_or("not reported".into(), |l| l.label()),
+        "links"
+    );
     sig.send(&signal::SigMsg::Answer {
         name: discovery::hostname(),
         sdp: answer_json.clone(),
         mac: signal::mac(&code, &answer_json),
+        link: Some(local_link.clone()),
     })
     .await?;
 
+    let stats = Arc::new(RecvStats::default());
+    stats.set_link("link", link_json(&local_link));
+    if let Some(l) = &sender_link {
+        stats.set_link("peer_link", link_json(l));
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "link",
+            "kind": local_link.kind,
+            "label": local_link.label(),
+            "peer": sender_link.as_ref().map(link_json),
+            "recommendation": super::netcheck::wifi_note(&local_link, sender_link.as_ref()),
+        })
+    );
+
     // Serve clock pings; the sender pushes its offset estimate when done.
     let clock_offset_ns = Arc::new(AtomicI64::new(0));
-    // Loss fractions computed by the video loop, forwarded to the sender.
-    let (loss_tx, mut loss_rx) = mpsc::channel::<f32>(4);
+    // Loss reports computed by the video loop, forwarded to the sender.
+    let (loss_tx, mut loss_rx) = mpsc::channel::<Report>(8);
     // A fatal render error, forwarded to the sender before we close (B3).
     let (abort_tx, mut abort_rx) = mpsc::channel::<(String, tokio::sync::oneshot::Sender<()>)>(1);
     // The sender said goodbye, or its end of the signalling socket closed
     // (B8). Either is the end of the share, known at once; ICE takes about
     // four seconds to reach the same conclusion from silence.
     let (gone_tx, mut gone_rx) = mpsc::channel::<()>(1);
+    // The first `Adapt` names the share's top rung, so later ones can say
+    // "lowered to ..." relative to it.
+    let sender_top: Arc<std::sync::OnceLock<super::ladder::Rung>> = Default::default();
     {
         let offset = clock_offset_ns.clone();
         let mut sig = sig;
+        let stats_sig = stats.clone();
+        let sender_top = sender_top.clone();
         tokio::spawn(async move {
             let mut clock_updates = 0u64;
             loop {
@@ -485,10 +557,25 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                             let _ = gone_tx.try_send(());
                             break;
                         }
+                        Ok(signal::SigMsg::Adapt { width, height, fps, target_bps, cause }) => {
+                            let rung = super::ladder::Rung { width, height, fps };
+                            info!(rung = %rung.label(), target_mbps = target_bps as f64 / 1e6, %cause, "sender adapted");
+                            // The sender's first `Adapt` is its top rung.
+                            let top = *sender_top.get_or_init(|| rung);
+                            let cause = super::control::Cause::parse(&cause);
+                            stats_sig.set_link(
+                                "adapt",
+                                super::control::adapt_json(rung, top, target_bps, cause),
+                            );
+                        }
                         Ok(_) => {}
                     },
-                    Some(fraction) = loss_rx.recv() => {
-                        if sig.send(&signal::SigMsg::Loss { fraction }).await.is_err() {
+                    Some(report) = loss_rx.recv() => {
+                        let msg = match report {
+                            Report::Loss(fraction) => signal::SigMsg::Loss { fraction },
+                            Report::Feedback(report) => signal::SigMsg::Feedback { report },
+                        };
+                        if sig.send(&msg).await.is_err() {
                             break;
                         }
                     }
@@ -534,7 +621,6 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Feed the return track (S19): process loopback of the call app, Opus,
     // straight onto the track. Best effort — a call app that is not playing
     // delivers no blocks and so no packets, which the stats show as 0.
-    let stats = Arc::new(RecvStats::default());
     let return_stop = Arc::new(AtomicBool::new(false));
     let return_track = return_track.filter(|(_, _, pid)| match return_target_ok(&opts, *pid) {
         Ok(()) => true,
@@ -603,7 +689,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         let au_tx = au_tx.clone();
                         let loss_tx = loss_tx.clone();
                         runtime2.spawn(Box::pin(video_track_loop(
-                            track, stats, offset, au_tx, loss_tx,
+                            track, stats, offset, au_tx, loss_tx, sender_s49,
                         )));
                     }
                     _ => {
@@ -650,11 +736,26 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     let mut lat = crate::Percentiles::default();
     let mut last_aus = 0u64;
     if opts.headless {
+        // S49: the playout buffer run on paper. Nothing is shown, but when
+        // each frame *would* be shown is what smoothness is judged by: the
+        // gaps between them (stalls, judder) and the latency to them.
+        let mut playout = super::playout::Playout::new();
+        let mut cadence = super::playout::Cadence::default();
+        let mut shown_lat = crate::Percentiles::default();
         loop {
             tokio::select! {
                 Some(au) = au_rx.recv() => {
                     if let Some(ts) = au.capture_local_ns {
                         lat.push_ms((signal::unix_now_ns() - ts) as f64 / 1e6);
+                        let shown = playout.on_frame(au.arrival_local_ns as f64 / 1e6, ts as f64 / 1e6);
+                        let stalls_before = cadence.stalls();
+                        cadence.push(shown);
+                        if cadence.stalls() > stalls_before {
+                            info!(gap_ms = cadence.last_gap_ms(), withheld = stats2.video_aus_dropped.load(Ordering::Relaxed), gaps = stats2.video_gaps.load(Ordering::Relaxed), "stall: no frame for over 100 ms");
+                        }
+                        shown_lat.push_ms(shown - ts as f64 / 1e6);
+                        stats2.playout_target_us.store((playout.target_ms() * 1e3) as u64, Ordering::Relaxed);
+                        stats2.playout_late.store(playout.stats.late, Ordering::Relaxed);
                     }
                 }
                 Some(_pkt) = opus_rx.recv() => {}
@@ -663,7 +764,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 _ = ticker.tick() => {
                     let aus = stats2.video_aus.load(Ordering::Relaxed);
                     let (p50, p99, max) = lat.summary().unwrap_or((0.0, 0.0, 0.0));
-                    println!("{}", serde_json::json!({
+                    let mut line = serde_json::json!({
                         "event": "stats",
                         "aus": aus,
                         "fps": (aus - last_aus) as f64 / 0.5,
@@ -683,7 +784,11 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         // drift (B14); this is the newest access unit alone.
                         "capture_to_arrival_last_ms":
                             stats2.arrival_latency_us_last.load(Ordering::Relaxed) as f64 / 1e3,
-                    }));
+                        "stalls": cadence.stalls(),
+                        "max_gap_ms": cadence.max_gap_ms(),
+                    });
+                    stats2.s49_fields(&mut line);
+                    println!("{line}");
                     last_aus = aus;
                 }
                 _ = events.closed.recv() => {
@@ -702,6 +807,7 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                 "event": "summary",
                 "aus": stats2.video_aus.load(Ordering::Relaxed),
                 "capture_to_arrival_ms": { "p50": p50, "p99": p99, "max": max, "samples": lat.len() },
+                "playout": playout_summary(&cadence, &shown_lat, &playout, &stats2),
             })
         );
         return Ok(());
@@ -871,6 +977,41 @@ const KEYFRAME_RETRY: Duration = Duration::from_millis(500);
 /// hide, so frames are shown again while the requests continue.
 const MAX_WITHHOLD: Duration = Duration::from_secs(1);
 
+/// How smooth the share was, for the headless receiver's `summary` line and
+/// the S49 measurements: stalls (gaps over 100 ms between frames as shown),
+/// the longest gap, judder (spread of the other gaps), latency to shown.
+pub(crate) fn playout_summary(
+    cadence: &super::playout::Cadence,
+    shown: &crate::Percentiles,
+    playout: &super::playout::Playout,
+    stats: &RecvStats,
+) -> serde_json::Value {
+    let (p50, p99, max) = shown.summary().unwrap_or((0.0, 0.0, 0.0));
+    serde_json::json!({
+        "frames": cadence.frames(),
+        "stalls": cadence.stalls(),
+        "max_gap_ms": cadence.max_gap_ms(),
+        "judder_ms": cadence.judder_ms(),
+        "late": playout.stats.late,
+        "target_ms": playout.target_ms(),
+        "capture_to_shown_ms": { "p50": p50, "p99": p99, "max": max },
+        "rtp_lost": stats.video_lost_packets.load(Ordering::Relaxed),
+        "rtp_gaps": stats.video_gaps.load(Ordering::Relaxed),
+        "rtp_recovered": stats.video_recovered.load(Ordering::Relaxed),
+        "keyframe_requests": stats.keyframe_requests.load(Ordering::Relaxed),
+        "frames_withheld": stats.video_aus_dropped.load(Ordering::Relaxed),
+        "reorder_hold_ms": stats.reorder_hold_ms.load(Ordering::Relaxed),
+    })
+}
+
+/// What the video loop sends the sender: the 1 s loss fraction an older
+/// sender understands, or the S49 report every 250 ms.
+#[derive(Debug, Clone, Copy)]
+pub enum Report {
+    Loss(f32),
+    Feedback(super::control::Feedback),
+}
+
 /// Reorder, depacketize into access units (marker bit = AU boundary), and ask
 /// for a keyframe when a loss could not be repaired (B15).
 ///
@@ -880,18 +1021,74 @@ const MAX_WITHHOLD: Duration = Duration::from_secs(1);
 /// run that was the actual source of loss, with zero packets lost on the
 /// wire. Units go out with `try_send`; a full channel drops the unit and
 /// costs a keyframe, which is cheaper than losing half a keyframe of packets.
-async fn video_track_loop(
+///
+/// `s49`: the sender understands [`Report::Feedback`]; otherwise it gets the
+/// 1 s [`Report::Loss`] it always had.
+/// Packets waiting between the track and the video loop. A burst released
+/// by Wi-Fi after a stall is 1,000+ packets at once; this holds 16k, about
+/// 2 s at the 80 Mb/s ceiling.
+const ARRIVALS: usize = 16_384;
+
+/// Empty webrtc-rs's 256-slot track queue as fast as packets arrive.
+///
+/// The driver hands packets to a track with `try_send` into a queue of 256
+/// and drops the rest (S30). The video loop does real work per packet —
+/// reorder, depacketize, timers, keyframe requests — and on the Wi-Fi model
+/// (S49) a burst released after a 150 ms stall outran it: 400 packets
+/// dropped at the queue in one burst, on a link that had lost none, and each
+/// drop cost a keyframe. This task does nothing but move packets into a deep
+/// queue, so it keeps up with any burst the driver can produce.
+///
+/// On a thread of its own, not a task. As a task it did not help: the
+/// driver dispatches a whole burst in one poll without yielding, and the
+/// task its first packet woke sat in that worker's run-next slot until the
+/// burst was over — 539 packets dropped in one burst on the model. A thread
+/// is woken by the first `try_send` and runs alongside the driver.
+fn drain_track(track: Arc<dyn TrackRemote>) -> mpsc::Receiver<TrackRemoteEvent> {
+    let (tx, rx) = mpsc::channel(ARRIVALS);
+    let spawned = std::thread::Builder::new().name("relay-video-drain".into()).spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread().build() else { return };
+        rt.block_on(async move {
+            let mut dropped = 0u64;
+            while let Some(ev) = track.poll().await {
+                match tx.try_send(ev) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        dropped += 1;
+                        if dropped.is_power_of_two() {
+                            warn!(
+                                dropped,
+                                "video loop is behind; packets dropped before reordering"
+                            );
+                        }
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        });
+    });
+    if let Err(e) = spawned {
+        warn!(error = %e, "could not start the packet drain thread");
+    }
+    rx
+}
+
+pub(crate) async fn video_track_loop(
     track: Arc<dyn TrackRemote>,
     stats: Arc<RecvStats>,
     clock_offset_ns: Arc<AtomicI64>,
     au_tx: mpsc::Sender<AccessUnit>,
-    loss_tx: mpsc::Sender<f32>,
+    loss_tx: mpsc::Sender<Report>,
+    s49: bool,
 ) {
-    use super::reorder::{Reorder, Step};
+    use super::reorder::{HoldTuner, Reorder, Step};
     use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
     use std::time::Instant;
 
     let mut reorder = Reorder::new();
+    let mut tuner = HoldTuner::new();
+    let mut arrivals = drain_track(track.clone());
+    stats.reorder_hold_ms.store(reorder.hold().as_millis() as u64, Ordering::Relaxed);
     let mut steps = Vec::new();
     let mut asm = Assembler::new();
     let mut unknown_pt_logged = false;
@@ -900,25 +1097,54 @@ async fn video_track_loop(
     // When the current wait for a keyframe began, to log how long it took.
     let mut key_wait_since: Option<Instant> = None;
     let mut withholding_since: Option<Instant> = None;
-    // Unrepaired loss over ~1 s windows, for the sender's bitrate control.
+    // Unrepaired loss over ~1 s windows, for an older sender's bitrate control.
     let mut window_start = Instant::now();
     let (mut window_lost, mut window_delivered) = (0u64, 0u64);
+    // S49: the 250 ms reports; the RTP timestamp of the newest frame head
+    // seen, and a scratch buffer to read its capture stamp from.
+
+    let mut meter = super::control::FeedbackMeter::new(signal::unix_now_ns());
+    let mut report_start = Instant::now();
+    let mut last_head_ts: Option<u32> = None;
+    let mut head = Vec::with_capacity(2048);
 
     loop {
         let deadline = reorder.deadline();
+        // Report on time even when nothing arrives (a stall is news too).
+        let report_due = report_start + super::control::FEEDBACK_INTERVAL;
+        let wake = deadline.map_or(report_due, |d| d.min(report_due));
         let ev = tokio::select! {
-            ev = track.poll() => match ev {
+            ev = arrivals.recv() => match ev {
                 Some(ev) => Some(ev),
                 None => break,
             },
-            _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now).into()),
-                if deadline.is_some() => None,
+            _ = tokio::time::sleep_until(wake.into()) => None,
         };
         let now = Instant::now();
+        let now_ns = signal::unix_now_ns();
         match ev {
             Some(TrackRemoteEvent::OnRtpPacket(pkt)) => {
                 media_ssrc = pkt.header.ssrc;
+                // The head of each new frame, on arrival and before any
+                // reordering: its SEI capture stamp against now is the
+                // queueing delay, measured even when the rest of the frame is
+                // lost -- which, in a queue overflowing, is most frames.
+                let ts = pkt.header.timestamp;
+                if last_head_ts.is_none_or(|l| (ts.wrapping_sub(l) as i32) > 0) {
+                    last_head_ts = Some(ts);
+                    if let Some(codec) = VideoCodec::from_payload_type(pkt.header.payload_type) {
+                        head.clear();
+                        super::depay::VideoDepay::new(codec).push(&pkt.payload, &mut head);
+                        let capture = sei::extract_timestamp(codec, &head)
+                            .map(|s| s + clock_offset_ns.load(Ordering::Relaxed));
+                        meter.on_unit(now_ns, capture);
+                    }
+                }
                 reorder.push(pkt.header.sequence_number, pkt, now, &mut steps);
+
+                if let Some(took) = reorder.last_repair.take() {
+                    tuner.on_repair(took);
+                }
             }
             Some(_) => continue,
             None => reorder.poll(now, &mut steps),
@@ -929,6 +1155,7 @@ async fn video_track_loop(
                 Step::Packet(pkt) => pkt,
                 Step::Lost(lost) => {
                     window_lost += u64::from(lost);
+                    meter.on_lost(lost);
                     stats.video_gaps.fetch_add(1, Ordering::Relaxed);
                     stats.video_lost_packets.fetch_add(u64::from(lost), Ordering::Relaxed);
                     warn!(lost, "video packets not recovered in time; waiting for a keyframe");
@@ -947,6 +1174,7 @@ async fn video_track_loop(
                 }
             };
             window_delivered += 1;
+            meter.on_packet(pkt.payload.len());
             let Some(codec) = VideoCodec::from_payload_type(pkt.header.payload_type) else {
                 if !unknown_pt_logged {
                     warn!(
@@ -973,7 +1201,7 @@ async fn video_track_loop(
                     let local = sender_ns + clock_offset_ns.load(Ordering::Relaxed);
                     stats
                         .arrival_latency_us_last
-                        .store((signal::unix_now_ns() - local) / 1_000, Ordering::Relaxed);
+                        .store((now_ns - local) / 1_000, Ordering::Relaxed);
                     local
                 });
             let unit = AccessUnit {
@@ -981,6 +1209,7 @@ async fn video_track_loop(
                 data: unit.data,
                 capture_local_ns,
                 rtp_timestamp: unit.rtp_timestamp,
+                arrival_local_ns: now_ns,
             };
             match au_tx.try_send(unit) {
                 Ok(()) => {}
@@ -1026,10 +1255,26 @@ async fn video_track_loop(
             }
         }
 
-        if window_start.elapsed() >= Duration::from_secs(1) {
+        if now >= report_due {
+            let dt = now.duration_since(report_start);
+            report_start = now;
+            let report = meter.take(now_ns);
+            if s49 {
+                let _ = loss_tx.try_send(Report::Feedback(report));
+            }
+            if let Some(hold) = tuner.tick(dt, reorder.stats.late_or_duplicate) {
+                info!(
+                    hold_ms = hold.as_millis() as u64,
+                    "retransmissions need longer on this link; reorder hold changed"
+                );
+                reorder.set_hold(hold);
+                stats.reorder_hold_ms.store(hold.as_millis() as u64, Ordering::Relaxed);
+            }
+        }
+        if !s49 && window_start.elapsed() >= Duration::from_secs(1) {
             let total = window_lost + window_delivered;
             let fraction = if total > 0 { window_lost as f32 / total as f32 } else { 0.0 };
-            let _ = loss_tx.try_send(fraction);
+            let _ = loss_tx.try_send(Report::Loss(fraction));
             (window_lost, window_delivered) = (0, 0);
             window_start = Instant::now();
         }
@@ -1145,6 +1390,37 @@ mod tests {
         assert!(!a.need_keyframe);
     }
 
+    /// S49 measures queueing delay from the first packet of each frame, so
+    /// that a frame whose tail is lost still counts. That needs the capture
+    /// stamp to travel in the first packet, whatever the payloader does.
+    #[test]
+    fn the_capture_stamp_is_readable_from_a_frames_first_packet() {
+        use rtc::rtp::packetizer::Packetizer as _;
+        for codec in [VideoCodec::H264, VideoCodec::Hevc] {
+            let mut au = sei::timestamp_sei(codec, 1_234_567_890_123);
+            let slice: &[u8] = match codec {
+                VideoCodec::H264 => &[0, 0, 0, 1, 0x41],
+                VideoCodec::Hevc => &[0, 0, 0, 1, 0x02, 0x01],
+            };
+            au.extend_from_slice(slice);
+            au.extend((0..20_000u32).map(|i| (i * 7 + 3) as u8 | 1));
+            let payloader = super::super::video_codec(codec).rtp_codec.payloader().unwrap();
+            let mut p = rtc::rtp::packetizer::new_packetizer(
+                1200,
+                codec.payload_type(),
+                1,
+                payloader,
+                Box::new(rtc::rtp::sequence::new_random_sequencer()),
+                90_000,
+            );
+            let packets = p.packetize(&bytes::Bytes::from(au), 1500).unwrap();
+            assert!(packets.len() > 10);
+            let mut head = Vec::new();
+            super::super::depay::VideoDepay::new(codec).push(&packets[0].payload, &mut head);
+            assert_eq!(sei::extract_timestamp(codec, &head), Some(1_234_567_890_123), "{codec:?}");
+        }
+    }
+
     #[test]
     fn pts_converts_90khz_to_100ns_ticks() {
         // One second of 90 kHz clock = 10^7 100-ns ticks.
@@ -1152,6 +1428,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             data: vec![],
             capture_local_ns: None,
+            arrival_local_ns: 0,
             rtp_timestamp: 90_000,
         };
         assert_eq!(au.pts_or_zero(), 10_000_000);
@@ -1160,6 +1437,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             data: vec![],
             capture_local_ns: None,
+            arrival_local_ns: 0,
             rtp_timestamp: 1_500,
         };
         assert_eq!(au.pts_or_zero(), 166_666);
@@ -1167,6 +1445,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             data: vec![],
             capture_local_ns: None,
+            arrival_local_ns: 0,
             rtp_timestamp: 0,
         };
         assert_eq!(au.pts_or_zero(), 0);
@@ -1175,6 +1454,7 @@ mod tests {
             codec: VideoCodec::Hevc,
             data: vec![],
             capture_local_ns: None,
+            arrival_local_ns: 0,
             rtp_timestamp: u32::MAX,
         };
         assert_eq!(au.pts_or_zero(), u32::MAX as i64 * 1000 / 9);
