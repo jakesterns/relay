@@ -191,7 +191,16 @@ pub fn fit_curve_with(curve: &[(f32, f32)], max_bands: usize, emphasis: Option<E
     let mut peak_centres: Vec<f64> = Vec::new();
     while bands.len() < budget {
         let Some((idx, residual)) =
-            best_peak_candidate(&grid, &target, &current, &peak_centres, &shelves, emphasis)
+            // The shelf/peak rule belongs to the game-layer fit only; headset
+            // correction keeps fitting the measurement exactly as before.
+            best_peak_candidate(
+                &grid,
+                &target,
+                &current,
+                &peak_centres,
+                if emphasis.is_some() { &shelves } else { &[] },
+                emphasis,
+            )
         else {
             break;
         };
@@ -513,7 +522,7 @@ mod tests {
 
     #[test]
     fn no_peak_fights_a_shelf_near_its_corner() {
-        // The live export: a low cut easing back to flat by ~250 Hz.
+        // The live export (a game layer): a low cut easing back to flat by ~250 Hz.
         let curve = [
             (20.0, -2.2),
             (80.0, -2.2),
@@ -523,7 +532,11 @@ mod tests {
             (16000.0, 0.0),
         ];
         for budget in 1..=4 {
-            let f = fit_curve(&curve, budget);
+            let f = fit_curve_with(
+                &curve,
+                budget,
+                Some(Emphasis { lo_hz: 1600.0, hi_hz: 5000.0, weight: 2.0 }),
+            );
             let shelves: Vec<_> =
                 f.bands.iter().filter(|b| b.kind != FilterKind::Peaking).collect();
             for p in f.bands.iter().filter(|b| b.kind == FilterKind::Peaking) {

@@ -348,6 +348,9 @@ pub enum AudioChainState {
     /// The profile has audio processing but Relay's audio effect is not
     /// registered on the output: nothing is audible. Never claim "active".
     NotInstalled,
+    /// The effect is registered on the output but Windows has not loaded it
+    /// (no parameter section): nothing is audible yet.
+    NotLoaded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

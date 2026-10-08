@@ -168,6 +168,13 @@ describe("learning, applying and files", () => {
     expect(eq().getByTestId("game-eq-overlay")).toBeInTheDocument();
   });
 
+  it("says an installed but unloaded effect is not audible yet", async () => {
+    profile1().audio.game_eq = { curve, source: "learned" };
+    core.state.audio_chain = "notloaded";
+    const { eq } = await mount();
+    expect(eq().getByTestId("game-eq-inaudible")).toHaveTextContent(/installed on this output but\s+Windows has not loaded it/);
+  });
+
   it("a file for another game is refused in plain words", async () => {
     const { h, eq } = await mount();
     await h.user.click(eq().getByRole("button", { name: "Import…" }));

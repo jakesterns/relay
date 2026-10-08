@@ -560,14 +560,15 @@ impl AudioControl for ApoAudioControl {
             return Ok(AudioChainState::Bypass);
         }
         let Some(guid) = target_endpoint() else { return Ok(AudioChainState::Bypass) };
-        // The parameter block can outlive an uninstall; only a registered
-        // effect is heard. Say so instead of "active".
-        if !fx_has_relay(&guid) {
-            return Ok(AudioChainState::NotInstalled);
-        }
+        // Reachability is the truth: the APO's parameter section exists only
+        // while the effect is loaded on this endpoint. Without it, say why.
         let Some(s) = open_endpoint(&guid) else {
-            // Registered but not loaded yet: nothing applied, nothing to restore.
-            return Ok(AudioChainState::NotInstalled);
+            return Ok(if fx_has_relay(&guid) {
+                // Registered, but audiodg has not loaded it (the S42 case).
+                AudioChainState::NotLoaded
+            } else {
+                AudioChainState::NotInstalled
+            });
         };
         s.block().write_params(&params);
         s.block().set_bypass(false);

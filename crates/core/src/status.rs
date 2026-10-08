@@ -36,6 +36,9 @@ pub fn summary(state: &CoreState, autostart: bool) -> String {
         AudioChainState::Active => "active",
         AudioChainState::ExclusiveBypassed => "bypassed by game (WASAPI exclusive)",
         AudioChainState::NotInstalled => "not audible: audio effects not installed",
+        AudioChainState::NotLoaded => {
+            "not audible: audio effect installed but not loaded by Windows"
+        }
     };
     let _ = writeln!(s, "  audio chain  {audio}");
     let display = match state.display_state {

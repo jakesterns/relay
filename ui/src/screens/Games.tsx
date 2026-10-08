@@ -358,6 +358,12 @@ function GameEqCard({ profileId, onChanged }: {
               Learned, not audible: audio effects are not installed on this output.
             </p>
           )}
+          {status.applied && core.audio_chain === "notloaded" && (
+            <p className="note" data-testid="game-eq-inaudible">
+              Learned, not audible yet: Relay's audio effect is installed on this output but
+              Windows has not loaded it. Restarting the audio device or the PC usually does.
+            </p>
+          )}
           {(status.state === "learning" || status.state === "needs_relearn") && !status.needs_goal && (
             <div className="meter" role="progressbar" aria-label="Learning progress"
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={status.progress}>
@@ -476,7 +482,8 @@ function ChainReadout({ chain, hrtf, tamer }: { chain: string; hrtf: boolean; ta
     <Card>
       <Kv k="Processing" v={chain === "active" ? `${ms.toFixed(1)} ms` : "0 ms"} mono />
       <Kv k="Chain" v={chain === "bypass" ? "Bypass" : chain === "active" ? "Active"
-        : chain === "notinstalled" ? "Not audible · audio effects not installed" : "Bypassed by game (exclusive)"} />
+        : chain === "notinstalled" ? "Not audible · audio effects not installed"
+        : chain === "notloaded" ? "Not audible · installed, not loaded by Windows" : "Bypassed by game (exclusive)"} />
       <Kv k="Route" v={route} />
     </Card>
   );

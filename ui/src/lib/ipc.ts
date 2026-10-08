@@ -239,7 +239,7 @@ export type ShareState =
   | { kind: "sharing"; peer: string }
   /** The share dropped and Relay is bringing it back (S38). */
   | { kind: "reconnecting"; peer: string; attempt: number };
-export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled";
+export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled" | "notloaded";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
 export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
