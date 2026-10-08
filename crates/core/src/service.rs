@@ -175,6 +175,9 @@ struct Inner {
     /// S47: the look sampler child, only while a learning-enabled game with
     /// an active profile has focus. Dropping it kills it (by handle).
     look: Option<crate::learned_display::Sampler>,
+    /// S48: the "learn from a video file" helper, while one runs (and its
+    /// final status after, for the UI).
+    file_job: Option<crate::learn_file::FileJob>,
 }
 
 /// S45: why an update must wait right now, if anything is in the way.
@@ -388,6 +391,7 @@ impl Service {
             learner: None,
             learn: crate::learned_display::LearnStore::load(paths.learned_display_file()),
             look: None,
+            file_job: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -425,6 +429,8 @@ impl Service {
         // Stop any share/receive child so it never outlives the core.
         let (share, receive, learner) = {
             let mut g = service.inner.lock();
+            // Dropping the video job kills its helper (by handle).
+            g.file_job = None;
             (g.share.take(), g.receive.take(), g.learner.take())
         };
         if let Some(l) = learner {
@@ -549,6 +555,7 @@ impl Service {
                     self.update_tick();
                     self.learner_tick();
                     self.learn_tick();
+                    self.file_tick();
                 }
             }
         }
@@ -650,6 +657,63 @@ impl Service {
             drop(g);
             let _ = self.events.send(Event::StateChanged { state });
         }
+    }
+
+    /// S48, on the 1 s tick: read the video learner's progress; when it is
+    /// done, fold its look into the game's monitor records, keep learning on
+    /// for both halves (so live play refines the start), and take offers
+    /// that auto-apply allows. Idle cores never get past the first line.
+    fn file_tick(&self) {
+        let mut g = self.inner.lock();
+        let Some(job) = g.file_job.as_mut() else { return };
+        if !job.poll() {
+            return;
+        }
+        let state = job.status.state;
+        let (id, exe) = (job.status.profile, job.status.exe.clone());
+        let look = job.look.take();
+        info!(exe = %exe, ?state, "the video learner finished");
+        if state != crate::learn_file::FileJobState::Done {
+            return;
+        }
+        let monitors: Vec<crate::types::MonitorId> =
+            g.last_report.monitors.iter().map(|m| m.id.clone()).collect();
+        if let Some(look) = look {
+            let n = crate::learn_file::merge_look(&mut g.learn, &exe, &monitors, &look);
+            if n == 0 && look.agg.frames > 0 {
+                if let Some(j) = g.file_job.as_mut() {
+                    j.status.notes.push("No monitor was found to keep the look for.".into());
+                }
+            }
+            if look.agg.frames > 0 {
+                g.learn.game_mut(&exe).enabled = true;
+            }
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+        }
+        if let Some(mut profile) = g.store.get(id).cloned() {
+            let mut changed = false;
+            if profile.audio.learn_game_eq != Some(true) {
+                profile.audio.learn_game_eq = Some(true);
+                changed = true;
+            }
+            if profile.audio.game_eq_auto_apply {
+                if let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) {
+                    changed |= crate::game_eq::take_offer(&mut profile, &rec);
+                }
+            }
+            if changed {
+                g.store.upsert(profile);
+                if let Err(e) = g.store.save() {
+                    warn!(error = %e, "saving the profile after learning from a video failed");
+                }
+            }
+        }
+        reapply_learned(&mut g);
+        let state = Box::new(g.state.clone());
+        drop(g);
+        let _ = self.events.send(Event::StateChanged { state });
     }
 
     /// S45, on the 1 s tick: start the daily check when it is due, and run a
@@ -1677,6 +1741,15 @@ fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
         }
         LearnerStep::Start | LearnerStep::Restart => {
             stop_learner(g);
+            // A video job is writing this game's record: live learning
+            // waits for it (both would fight over the record lock).
+            let busy = g.file_job.as_ref().is_some_and(|j| {
+                j.running() && want.is_some_and(|p| j.status.exe.eq_ignore_ascii_case(&p.game.exe))
+            });
+            if busy {
+                info!("learning from a video for this game; live learning waits");
+                return;
+            }
             if let Some(p) = want {
                 match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
                     Ok(l) => g.learner = Some(l),
@@ -2933,6 +3006,62 @@ impl IpcHandler {
                 sync_look(&mut g);
                 reapply_learned(&mut g);
                 learn_reply(&g, &exe)
+            }
+            Method::ListLearnVideos => {
+                let dir = g.presets.recording.resolved_dir();
+                Reply::LearnVideos {
+                    videos: crate::learn_file::list_videos(&crate::learn_file::video_folders(&dir)),
+                    recording_dir: dir,
+                    privacy: crate::learn_file::PRIVACY_NOTICE.into(),
+                    local_only: crate::learn_file::LOCAL_ONLY_NOTICE.into(),
+                }
+            }
+            Method::LearnFromFile { id, path } => {
+                let Some(profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                let file = match crate::learn_file::validate_video_path(&path) {
+                    Ok(f) => f,
+                    Err(e) => return Reply::Error { message: format!("{e:#}") },
+                };
+                if g.file_job.as_ref().is_some_and(|j| j.running()) {
+                    return Reply::Error {
+                        message: "Relay is already learning from a video; cancel it first".into(),
+                    };
+                }
+                // The live learner holds this game's record; it stops (and
+                // saves) first, and the helper waits on the record lock.
+                if g.learner.as_ref().is_some_and(|l| l.profile == id) {
+                    stop_learner(&mut g);
+                }
+                match crate::learn_file::FileJob::spawn(&g.paths, &profile, &file) {
+                    Ok(job) => {
+                        let st = job.status.clone();
+                        g.file_job = Some(job);
+                        Reply::LearnFile { status: Some(Box::new(st)) }
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::LearnFileStatus { id } => Reply::LearnFile {
+                status: g
+                    .file_job
+                    .as_ref()
+                    .filter(|j| j.status.profile == id)
+                    .map(|j| Box::new(j.status.clone())),
+            },
+            Method::LearnFileCancel { id } => {
+                if let Some(j) = g.file_job.as_mut().filter(|j| j.status.profile == id) {
+                    j.cancel();
+                    j.poll();
+                }
+                Reply::LearnFile {
+                    status: g
+                        .file_job
+                        .as_ref()
+                        .filter(|j| j.status.profile == id)
+                        .map(|j| Box::new(j.status.clone())),
+                }
             }
             Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
             Method::SetUiPrefs { prefs } => {

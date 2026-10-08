@@ -57,7 +57,32 @@ export interface GameEqStatus {
   };
   /** What the last step to ready waits on. */
   convergence?: { agreeing: number; needed: number; max_delta_db: number } | null;
+  /** S48: seconds of active play still needed (null = not known yet; 0 = ready). */
+  eta_secs?: number | null;
 }
+
+/* ---- S48: learn from a video file. Mirror of crates/core/src/learn_file.rs. ---- */
+export interface VideoFile {
+  name: string; path: string; size_bytes: number; modified_unix: number;
+  /** In Relay's recording folder (listed first). */
+  relay: boolean;
+}
+export interface LearnVideos { videos: VideoFile[]; recording_dir: string; privacy: string; local_only: string }
+export type FileJobState = "running" | "done" | "cancelled" | "failed";
+export interface LearnFileStatus {
+  profile: string; exe: string; file_name: string; state: FileJobState;
+  /** 0..1; null when the file does not say how long it is. */
+  progress: number | null;
+  position_secs: number; duration_secs: number | null;
+  /** Content seconds per wall-clock second. */
+  speed: number | null;
+  audio_secs: number; look_frames: number; look_gameplay_frames?: number;
+  cpu_secs?: number | null;
+  notes?: string[]; message?: string | null;
+  privacy: string; local_only: string;
+}
+export const VIDEO_PRIVACY = "Relay reads the file on this PC to learn the game's sound and look. It keeps statistics only; the file is never copied, uploaded or changed.";
+export const VIDEO_LOCAL_ONLY = "Local files only. Relay does not download videos from YouTube or other sites; their terms do not allow it.";
 export interface ClassCount { class: string; events: number; frames: number }
 export type GameEqAction =
   | { kind: "status" }
@@ -209,6 +234,10 @@ export interface LookReadiness {
   delta?: { gamma: number; shadow_lift: number; vibrance: number } | null;
   /** The newest checkpoint's look, shown while still learning. */
   candidate?: LookTargets | null;
+  /** S48: seconds of gameplay still needed (null = a kind of scene is missing). */
+  eta_secs?: number | null;
+  /** S48: a one-scene game whose statistics are tight takes the shorter budget. */
+  confident?: boolean;
 }
 export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
 export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
@@ -1316,6 +1345,34 @@ export const api = {
     if (!isTauri()) return mockGameEq(id, action);
     return invoke<GameEqReply>("game_eq", { id, action });
   },
+  // S48 learn from a video file. Browser mode runs a pretend job.
+  async listLearnVideos(): Promise<LearnVideos> {
+    if (!isTauri()) return {
+      videos: [
+        { name: "Relay 2026-10-01 21-04.mp4", path: "C:\\Users\\you\\Videos\\Relay\\Relay 2026-10-01 21-04.mp4", size_bytes: 1_800_000_000, modified_unix: 1_790_000_000, relay: true },
+        { name: "match.mkv", path: "C:\\Users\\you\\Videos\\match.mkv", size_bytes: 900_000_000, modified_unix: 1_789_000_000, relay: false },
+      ],
+      recording_dir: "C:\\Users\\you\\Videos\\Relay", privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+    };
+    return invoke<LearnVideos>("list_learn_videos");
+  },
+  /** The native "choose a video" dialog (mp4/mkv/mov/webm). null = closed. */
+  async pickVideoFile(): Promise<string | null> {
+    if (!isTauri()) return "C:\\Users\\you\\Videos\\match.mkv";
+    return invoke<string | null>("pick_video_file");
+  },
+  async learnFromFile(id: string, path: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) return mockLearnFile(id, path);
+    return invoke<LearnFileStatus | null>("learn_from_file", { id, path });
+  },
+  async learnFileStatus(id: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) return mockLearnFileTick(id);
+    return invoke<LearnFileStatus | null>("learn_file_status", { id });
+  },
+  async learnFileCancel(id: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) { const j = mockFileJobs.get(id); if (j && j.state === "running") j.state = "cancelled"; return j ? structuredClone(j) : null; }
+    return invoke<LearnFileStatus | null>("learn_file_cancel", { id });
+  },
   // S47 learned game display. Browser mode keeps an in-memory record.
   async learnDisplayStatus(exe: string): Promise<LearnView> {
     if (!isTauri()) return structuredClone(mockLearn(exe));
@@ -1399,6 +1456,37 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
       exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
     },
   };
+}
+
+/** Browser-mode stand-in for a video job (S48): advances a pretend 10 min
+ *  file by 75 s per status read, at "15x". */
+const mockFileJobs = new Map<string, LearnFileStatus>();
+function mockLearnFile(id: string, path: string): LearnFileStatus {
+  const p = mockStore.get(id);
+  if (!p) throw new Error("no such profile");
+  if (/:\/\/|youtube/i.test(path)) throw new Error("Relay learns from video files on this PC only; it does not download from websites");
+  const running = mockFileJobs.get(id);
+  if (running?.state === "running") throw new Error("Relay is already learning from a video; cancel it first");
+  const job: LearnFileStatus = {
+    profile: id, exe: p.game.exe.toLowerCase(), file_name: path.split(/[\\/]/).pop() ?? path,
+    state: "running", progress: 0, position_secs: 0, duration_secs: 600, speed: null,
+    audio_secs: 0, look_frames: 0, notes: [], message: null, privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+  };
+  mockFileJobs.set(id, job);
+  return structuredClone(job);
+}
+function mockLearnFileTick(id: string): LearnFileStatus | null {
+  const j = mockFileJobs.get(id);
+  if (!j) return null;
+  if (j.state === "running") {
+    j.position_secs = Math.min(600, j.position_secs + 75);
+    j.progress = j.position_secs / 600;
+    j.speed = 15;
+    if (j.position_secs >= 600) {
+      j.state = "done"; j.audio_secs = 600; j.look_frames = 1200; j.look_gameplay_frames = 980; j.cpu_secs = 31;
+    }
+  }
+  return structuredClone(j);
 }
 
 const mockLearnStore = new Map<string, LearnView>();

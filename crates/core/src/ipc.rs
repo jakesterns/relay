@@ -350,6 +350,23 @@ pub enum Method {
         exe: String,
         json: String,
     },
+    /// S48: local videos to learn from, Relay's own recordings first.
+    ListLearnVideos,
+    /// S48: learn this profile's game sound and look from a local video
+    /// file (decoded faster than real time by an on-demand helper). The
+    /// evidence merges into the same per-game records as live play.
+    LearnFromFile {
+        id: Uuid,
+        path: String,
+    },
+    /// S48: the current (or last) video job for this profile, if any.
+    LearnFileStatus {
+        id: Uuid,
+    },
+    /// S48: stop the video job. Nothing from the file is kept.
+    LearnFileCancel {
+        id: Uuid,
+    },
     Subscribe,
     Shutdown,
 }
@@ -493,6 +510,18 @@ pub enum Reply {
     Presets {
         presets: Vec<SharePresetDef>,
         recording: RecordingSettings,
+    },
+    /// Reply to `ListLearnVideos` (S48).
+    LearnVideos {
+        videos: Vec<crate::learn_file::VideoFile>,
+        recording_dir: String,
+        privacy: String,
+        local_only: String,
+    },
+    /// Reply to the S48 file-learning methods. `None` = no job for this
+    /// profile.
+    LearnFile {
+        status: Option<Box<crate::learn_file::LearnFileStatus>>,
     },
     /// Reply to `GameEq` (S46). `export` is set for an Export.
     GameEq {
@@ -1196,6 +1225,44 @@ mod tests {
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(v["type"], "audio_devices");
         assert!(v["devices"]["render"].is_array() && v["devices"]["capture"].is_array());
+    }
+
+    #[test]
+    fn learn_file_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (listLearnVideos / learnFromFile /
+        // learnFileStatus / learnFileCancel).
+        let id = Uuid::nil();
+        let m = Method::LearnFromFile { id, path: "C:\\v\\a.mp4".into() };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "learn_from_file");
+        assert_eq!(v["params"]["path"], "C:\\v\\a.mp4");
+        for (name, json) in [
+            ("learn_file_status", format!(r#"{{"id":"{id}"}}"#)),
+            ("learn_file_cancel", format!(r#"{{"id":"{id}"}}"#)),
+        ] {
+            let line = format!(r#"{{"id":2,"method":"{name}","params":{json}}}"#);
+            assert!(serde_json::from_str::<Request>(&line).is_ok(), "{name}");
+        }
+        let r: Request = serde_json::from_str(r#"{"id":3,"method":"list_learn_videos"}"#).unwrap();
+        assert!(matches!(r.method, Method::ListLearnVideos));
+        let st =
+            crate::learn_file::LearnFileStatus::new(id, "g.exe", std::path::Path::new("a.mp4"));
+        let v = serde_json::to_value(Reply::LearnFile { status: Some(Box::new(st)) }).unwrap();
+        assert_eq!(v["type"], "learn_file");
+        assert_eq!(v["status"]["state"], "running");
+        assert_eq!(v["status"]["file_name"], "a.mp4");
+        assert!(v["status"]["local_only"].as_str().unwrap().contains("YouTube"));
+        let v = serde_json::to_value(Reply::LearnFile { status: None }).unwrap();
+        assert!(v["status"].is_null());
+        let v = serde_json::to_value(Reply::LearnVideos {
+            videos: vec![],
+            recording_dir: "C:\\Rec".into(),
+            privacy: crate::learn_file::PRIVACY_NOTICE.into(),
+            local_only: crate::learn_file::LOCAL_ONLY_NOTICE.into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "learn_videos");
+        assert!(v["videos"].is_array());
     }
 
     #[test]
