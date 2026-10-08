@@ -541,6 +541,113 @@ async fn game_eq(id: Uuid, action: relay_core::game_eq::GameEqAction) -> CmdResu
     }
 }
 
+/// S48: `ListLearnVideos` as the frontend reads it (`LearnVideos` in ipc.ts).
+#[derive(serde::Serialize)]
+struct LearnVideosOut {
+    videos: Vec<relay_core::learn_file::VideoFile>,
+    recording_dir: String,
+    privacy: String,
+    local_only: String,
+}
+
+#[tauri::command]
+async fn list_learn_videos() -> CmdResult<LearnVideosOut> {
+    match call(Method::ListLearnVideos).await? {
+        Reply::LearnVideos { videos, recording_dir, privacy, local_only } => {
+            Ok(LearnVideosOut { videos, recording_dir, privacy, local_only })
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
+async fn learn_file_call(
+    method: Method,
+) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    match call(method).await? {
+        Reply::LearnFile { status } => Ok(status.map(|s| *s)),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_from_file(
+    id: Uuid,
+    path: String,
+) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFromFile { id, path }).await
+}
+
+#[tauri::command]
+async fn learn_file_status(id: Uuid) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFileStatus { id }).await
+}
+
+#[tauri::command]
+async fn learn_file_cancel(id: Uuid) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFileCancel { id }).await
+}
+
+/// S48: the Windows "Open" dialog for one video file (mp4 / mkv / mov /
+/// webm). Runs on its own STA thread; `None` when the user closes it. The
+/// shell only returns the path — the core checks it and opens the file.
+#[tauri::command]
+async fn pick_video_file(window: tauri::WebviewWindow) -> CmdResult<Option<String>> {
+    #[cfg(windows)]
+    {
+        let owner = window.hwnd().ok().map(|h| h.0 as isize);
+        let r = tokio::task::spawn_blocking(move || pick_video_blocking(owner))
+            .await
+            .map_err(|e| anyhow::anyhow!("the file dialog failed: {e}"))?;
+        Ok(r?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(None)
+    }
+}
+
+#[cfg(windows)]
+fn pick_video_blocking(owner: Option<isize>) -> anyhow::Result<Option<String>> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+    };
+    // SAFETY: the standard IFileOpenDialog sequence on an STA thread of our
+    // own; the returned string is copied before it is freed.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let result = (|| -> anyhow::Result<Option<String>> {
+            let dlg: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: w!("Videos"),
+                pszSpec: w!("*.mp4;*.mkv;*.mov;*.webm"),
+            }];
+            dlg.SetFileTypes(&filters)?;
+            dlg.SetOptions(dlg.GetOptions()? | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)?;
+            dlg.SetTitle(&HSTRING::from("Choose a gameplay video on this PC"))?;
+            let parent = owner.map(|h| HWND(h as *mut _));
+            if dlg.Show(parent).is_err() {
+                return Ok(None); // closed or cancelled
+            }
+            let item = dlg.GetResult()?;
+            let p = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let s = p.to_string()?;
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
+            Ok(Some(s))
+        })();
+        CoUninitialize();
+        result
+    }
+}
+
 #[tauri::command]
 async fn render_preview(id: Uuid, wav: Option<String>) -> CmdResult<PreviewOut> {
     match call(Method::RenderPreview { id, wav }).await? {
@@ -1230,6 +1337,11 @@ pub fn run() {
             import_curve,
             render_preview,
             game_eq,
+            list_learn_videos,
+            learn_from_file,
+            learn_file_status,
+            learn_file_cancel,
+            pick_video_file,
             share_capabilities,
             firewall_status,
             apo_status,

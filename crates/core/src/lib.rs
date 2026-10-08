@@ -29,6 +29,7 @@ pub mod hotkeys;
 pub mod instance;
 pub mod ipc;
 pub mod launcher;
+pub mod learn_file;
 pub mod learned_display;
 pub mod logging;
 pub mod peers;

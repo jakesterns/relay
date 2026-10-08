@@ -76,6 +76,16 @@ describe("the learn-this-game's-look card", () => {
     expect(screen.getByTestId("look-skipped")).toHaveTextContent("12 skipped: static/menu 3 · loading 7 · idle 1 · warm-up 1");
     expect(screen.getByTestId("look-scenes")).toHaveTextContent("Scenes (dark → bright): 120 / 180 / 0 / 0 / 0");
     expect(screen.getByText(/checkpoints 1 stable of 2/)).toBeInTheDocument();
+    // S48: a scene is missing, so no ETA is made up.
+    expect(screen.getByTestId("look-eta")).toHaveTextContent(/Time left not known yet/);
+  });
+
+  it("shows an honest ETA once every kind of scene has been seen (S48)", async () => {
+    const m = monitor();
+    m.readiness = { ...m.readiness, scenes: 3, eta_secs: 150, confident: true };
+    seed({ monitors: [m] });
+    await mount();
+    expect(screen.getByTestId("look-eta")).toHaveTextContent("about 3 min left of gameplay · steady picture, so fewer frames are needed");
   });
 
   it("shows the candidate look while still learning", async () => {

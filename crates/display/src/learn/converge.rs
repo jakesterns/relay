@@ -50,7 +50,10 @@ impl CheckpointDelta {
     }
 }
 
-/// Gameplay frames needed before a result can count (10 min at 1 fps).
+/// The sampler's rate, live and from a video file (S48: 2 fps, was 1). Every
+/// frame budget below is in samples at this rate.
+pub const SAMPLE_FPS: u32 = 2;
+/// Gameplay frames needed before a result can count (5 min at 2 fps).
 pub const MIN_GAMEPLAY_FRAMES: u64 = 600;
 /// Frames a scene (APL bucket) needs to count as visited.
 pub const MIN_FRAMES_PER_SCENE: f64 = 30.0;
@@ -60,13 +63,23 @@ pub const MIN_SCENES: usize = 3;
 /// raid) is legitimately one-scene: it may converge without `MIN_SCENES`
 /// once this share of its weight is in one bucket ...
 pub const DOMINANT_SCENE_SHARE: f64 = 0.9;
-/// ... and it has this many gameplay frames (15 min at 1 fps: more than the
-/// varied case, since one scene is less evidence per frame).
+/// ... and it has this many gameplay frames (7.5 min at 2 fps: more than the
+/// varied case, since one scene is less evidence per frame) ...
 pub const MIN_FRAMES_ONE_SCENE: u64 = 900;
-/// Gameplay frames between checkpoints (2 min at 1 fps).
-pub const CHECKPOINT_FRAMES: u32 = 120;
-/// Consecutive checkpoints that must agree for convergence.
-pub const CONVERGE_CHECKPOINTS: usize = 3;
+/// ... or only this many (4 min) when its statistics are already tight: the
+/// standard error of every look axis is under [`CONFIDENT_SE`] (S48).
+pub const MIN_FRAMES_ONE_SCENE_CONFIDENT: u64 = 480;
+/// A look axis is known when its standard error is under a quarter of the
+/// rounding step (`LOOK_STEP` = 0.05): more frames could not move the
+/// rounded value.
+pub const CONFIDENT_SE: f32 = 0.0125;
+/// Samples this far apart count as independent for the standard error (2 s
+/// at 2 fps): neighbouring frames of one scene say nearly the same thing.
+pub const DECORRELATION_FRAMES: f64 = 4.0;
+/// Gameplay frames between checkpoints (30 s at 2 fps).
+pub const CHECKPOINT_FRAMES: u32 = 60;
+/// Consecutive checkpoints that must agree for convergence (S48: 2, was 3).
+pub const CONVERGE_CHECKPOINTS: usize = 2;
 /// Kept for the look-space distance used by the freeze rule's tests; the
 /// convergence test itself is on realized adjustments (below).
 pub const CONVERGE_TOLERANCE: f32 = 0.05;
@@ -83,8 +96,8 @@ pub const AGREE_VIBRANCE: i32 = 2;
 /// equalizer uses every learned control at its full range.
 pub const REFERENCE_PANEL: PanelCaps =
     PanelCaps { kind: PanelKind::Ips, black_equalizer_max: None };
-/// Rolling window after convergence (~1 h of gameplay at 1 fps).
-pub const ROLLING_WINDOW_FRAMES: f64 = 3600.0;
+/// Rolling window after convergence (~1 h of gameplay at 2 fps).
+pub const ROLLING_WINDOW_FRAMES: f64 = 7200.0;
 /// The applied look only moves when a new converged result is at least this
 /// far from it on some axis.
 pub const MEANINGFUL_CHANGE: f32 = 0.15;
@@ -115,6 +128,15 @@ pub struct Excluded {
 impl Excluded {
     pub fn total(&self) -> u64 {
         self.static_frames + self.loading + self.cutscene + self.outlier + self.idle + self.warmup
+    }
+
+    pub fn add(&mut self, o: &Excluded) {
+        self.static_frames += o.static_frames;
+        self.loading += o.loading;
+        self.cutscene += o.cutscene;
+        self.outlier += o.outlier;
+        self.idle += o.idle;
+        self.warmup += o.warmup;
     }
 }
 
@@ -166,6 +188,14 @@ pub struct Readiness {
     pub candidate: Option<LookTargets>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
+    /// Seconds of gameplay still needed at [`SAMPLE_FPS`] (S48). `Some(0)`
+    /// once settled; `None` while a scene is missing, which no amount of the
+    /// same scene can supply.
+    #[serde(default)]
+    pub eta_secs: Option<u32>,
+    /// The one-scene budget was cut short because the statistics are tight.
+    #[serde(default)]
+    pub confident: bool,
 }
 
 impl Learner {
@@ -200,12 +230,66 @@ impl Learner {
         }
     }
 
+    /// Every look axis is known within [`CONFIDENT_SE`]. Unknown (an older
+    /// record without the squared sums, or too little weight) is not
+    /// confident.
+    pub fn confident(&self) -> bool {
+        let Some(se) = self.agg.standard_errors(DECORRELATION_FRAMES) else { return false };
+        se.iter().all(|s| *s <= CONFIDENT_SE)
+    }
+
     fn frames_needed(&self) -> u64 {
         if self.single_scene() {
-            MIN_FRAMES_ONE_SCENE
+            if self.confident() {
+                MIN_FRAMES_ONE_SCENE_CONFIDENT
+            } else {
+                MIN_FRAMES_ONE_SCENE
+            }
         } else {
             MIN_GAMEPLAY_FRAMES
         }
+    }
+
+    /// Seconds of gameplay left, see [`Readiness::eta_secs`].
+    pub fn eta_secs(&self) -> Option<u32> {
+        if self.converged.is_some() {
+            return Some(0);
+        }
+        if self.scenes() < self.scenes_needed() {
+            return None;
+        }
+        let frames_left = self.frames_needed().saturating_sub(self.agg.frames);
+        let stable = if self.has_evidence() { self.stable_checkpoints() } else { 0 };
+        // The checkpoint under way, plus one per agreeing checkpoint still
+        // missing after it.
+        let checks = CONVERGE_CHECKPOINTS.saturating_sub(stable).max(1) as u64;
+        let settle = checks * CHECKPOINT_FRAMES as u64
+            - (self.since_checkpoint as u64).min(CHECKPOINT_FRAMES as u64);
+        let frames = frames_left.max(settle);
+        Some(frames.div_ceil(SAMPLE_FPS as u64) as u32)
+    }
+
+    /// S48: fold `other` (a learner fed from a video file of the same game)
+    /// into this one. The aggregates add, weighted by their frames, inside
+    /// the rolling window; exclusions add. With no evidence of its own this
+    /// learner takes the other's checkpoints, so a file that settled is
+    /// settled here too. Otherwise one checkpoint of the merged aggregate is
+    /// taken now and must agree with the ones before it, under the same
+    /// rules: live play refines a file-learned start, and a file never
+    /// overrides live evidence without agreeing with it. What is applied
+    /// follows the freeze rule as always.
+    pub fn merge(&mut self, other: &Learner) {
+        if other.agg.frames == 0 {
+            self.excluded.add(&other.excluded);
+            return;
+        }
+        if self.agg.frames == 0 {
+            self.checkpoints = other.checkpoints.clone();
+            self.since_checkpoint = other.since_checkpoint;
+        }
+        self.agg.merge(&other.agg, ROLLING_WINDOW_FRAMES);
+        self.excluded.add(&other.excluded);
+        self.checkpoint();
     }
 
     /// Varied content needs `MIN_SCENES`; content that really is one scene
@@ -260,6 +344,8 @@ impl Learner {
             scene_frames: self.agg.apl_buckets.iter().map(|w| w.round() as u64).collect(),
             delta: self.checkpoint_delta(),
             progress: (ev + conv).min(1.0),
+            eta_secs: self.eta_secs(),
+            confident: self.single_scene() && self.confident(),
         }
     }
 

@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Toggle } from "./Controls";
 import { errText } from "../lib/err";
+import { etaText } from "../lib/eta";
 import { api, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
 
 /**
  * Display → "Learn this game's look" (S47).
  *
- * Relay watches the game's own frames (1 per second, 480×270, in memory) and
+ * Relay watches the game's own frames (2 per second, 480×270, in memory) and
  * works out how much shadow recovery and saturation help it wants. The look
  * belongs to the game; each monitor gets it fitted to what that panel can do.
  * No presets: a new game or a game update is learned the same way.
@@ -184,6 +185,14 @@ function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: stri
             {r.frames} / {r.frames_needed} gameplay frames · {r.scenes} / {r.scenes_needed} kinds of scene
             {` · checkpoints ${r.stable_checkpoints} stable of ${r.checkpoints ?? 0}`}
           </p>
+          {!m.converged && (
+            <p className="p small" data-testid="look-eta">
+              {r.eta_secs === null || r.eta_secs === undefined
+                ? "Time left not known yet: Relay still needs to see a different kind of scene."
+                : `${etaText(r.eta_secs)} of gameplay`}
+              {r.confident ? " · steady picture, so fewer frames are needed" : ""}
+            </p>
+          )}
           {r.delta && (
             <p className="p small mono" data-testid="look-delta">
               Checkpoint spread: gamma {r.delta.gamma.toFixed(3)} · lift {r.delta.shadow_lift} · vibrance {r.delta.vibrance}

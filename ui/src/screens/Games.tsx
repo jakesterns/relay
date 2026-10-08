@@ -13,6 +13,8 @@ import {
 import { buildRamp, cascadeDb } from "../lib/honest";
 import { colorSummary } from "./Profiles";
 import { LearnLookCard } from "../components/LearnLookCard";
+import { LearnFromVideoCard } from "../components/LearnFromVideoCard";
+import { etaText } from "../lib/eta";
 
 export type Section = "audio" | "display" | "sharing";
 
@@ -206,6 +208,7 @@ function AudioSection({ draft, update, onGameEq }: {
         </Card>
         <GameEqCard profileId={draft?.id ?? null} onChanged={onGameEq} />
       </div>
+      <LearnFromVideoCard profileId={draft?.id ?? null} />
       <HeadsetCorrectionCard draft={draft} update={update} />
       <AbListeningCard profileId={draft?.id ?? null} />
     </>
@@ -220,7 +223,9 @@ function gameEqStateText(s: GameEqStatus): string {
     case "off": return "Off";
     case "learning":
       if (s.needs_goal) return "Waiting for a goal";
-      return s.learning_now ? `Learning · ${s.progress}%` : `Learning · ${s.progress}% · resumes when the game is in focus`;
+      return s.learning_now
+        ? `Learning · ${s.progress}% · ${etaText(s.eta_secs)}`
+        : `Learning · ${s.progress}% · ${etaText(s.eta_secs, "time left not known yet")} of play · resumes when the game is in focus`;
     case "ready": return "Ready · a learned curve is waiting";
     case "applied":
       return s.source === "imported" ? "Applied (imported)"
@@ -794,6 +799,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
         </Card>
       </div>
       <LearnLookCard exe={draft?.game.exe ?? null} />
+      <LearnFromVideoCard profileId={draft?.id ?? null} />
     </>
   );
 }

@@ -112,6 +112,10 @@ pub struct GameEqStatus {
     /// What the 90 % → ready step is waiting on.
     #[serde(default)]
     pub convergence: Option<relay_audio::learn::state::Convergence>,
+    /// S48: seconds of active play still needed, from the event rate so far
+    /// (`None` while unknown; 0 once a curve is ready).
+    #[serde(default)]
+    pub eta_secs: Option<u64>,
 }
 
 /// Frames the learner did not learn from, by reason. Music is not here: it
@@ -297,6 +301,16 @@ pub fn status_with(
             }
         })
         .unwrap_or_default();
+    // S48: what readiness needs now, scaled to the game's own spread.
+    let (min_targets, min_maskers) = match rec {
+        Some(r) => {
+            let mut r = r.clone();
+            r.goal = goal.unwrap_or_default();
+            r.required(&th)
+        }
+        None => (th.min_cues, th.min_maskers),
+    };
+    let eta_secs = rec.and_then(|r| r.eta_secs(&th));
     let (targets, maskers, minutes, voices, classes) = match rec {
         Some(r) => {
             let w = r.window();
@@ -326,8 +340,8 @@ pub fn status_with(
         active_minutes: (minutes * 10.0).round() / 10.0,
         targets,
         maskers,
-        min_targets: th.min_cues,
-        min_maskers: th.min_maskers,
+        min_targets,
+        min_maskers,
         distinct_voices: voices,
         exe_version: rec.and_then(|r| r.exe_version.clone()),
         applied,
@@ -338,6 +352,7 @@ pub fn status_with(
         classes,
         excluded,
         convergence,
+        eta_secs,
     }
 }
 
@@ -995,8 +1010,9 @@ mod tests {
         assert_eq!(s.excluded.player_chat, 12);
         assert_eq!(s.excluded.cutscene_or_idle, 40);
         let c = s.convergence.unwrap();
-        assert_eq!((c.agreeing, c.needed), (1, 3));
-        assert!((c.max_delta_db - 0.9).abs() < 1e-6);
+        assert_eq!((c.agreeing, c.needed), (1, 2));
+        assert!((c.max_delta_db - 0.8).abs() < 1e-6);
+        assert_eq!(s.eta_secs, Some(0), "a curve is ready");
         std::fs::remove_dir_all(dir).ok();
     }
 

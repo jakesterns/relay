@@ -192,6 +192,13 @@ fn run() -> Result<()> {
             let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
             relay_capture::learn::run(opts)
         }
+        // S48: learn a game's sound and look from a local video file,
+        // faster than real time. Spawned by the core on the user's request.
+        #[cfg(windows)]
+        "learn-file" => {
+            let opts = relay_capture::learn_file::LearnFileArgs::parse(&args[1..])?;
+            relay_capture::learn_file::run(opts)
+        }
         #[cfg(windows)]
         "recv" => {
             let opts = parse_recv_args(&args[1..])?;

@@ -256,8 +256,9 @@ fn sampler_wire_lines_decode() {
     );
     assert_eq!(decode_line("garbage"), None);
     assert_eq!(decode_line(r#"{"event":"stats"}"#), None);
-    assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "1"]);
-    assert_eq!(SAMPLE_FPS, 1);
+    assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "2"]);
+    assert_eq!(SAMPLE_FPS, 2);
+    const { assert!(SAMPLE_FPS <= 2, "relay-share look caps at MAX_FPS = 2") };
 }
 
 #[test]
