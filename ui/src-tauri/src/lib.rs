@@ -192,6 +192,70 @@ async fn skip_update(version: String) -> CmdResult<relay_core::update::UpdateSta
     update_call(Method::SkipUpdate { version }).await
 }
 
+/// S47: every learn method but export answers with the game's learn view.
+async fn learn_call(method: Method) -> CmdResult<relay_core::learned_display::LearnView> {
+    match call(method).await? {
+        Reply::LearnDisplay { view } => Ok(*view),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_display_status(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayStatus { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_set(
+    exe: String,
+    enabled: bool,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplaySet { exe, enabled }).await
+}
+
+#[tauri::command]
+async fn learn_display_apply(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayApply { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_auto_apply(
+    exe: String,
+    enabled: bool,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayAutoApply { exe, enabled }).await
+}
+
+#[tauri::command]
+async fn learn_display_relearn(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayRelearn { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_reset(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayReset { exe }).await
+}
+
+#[tauri::command]
+async fn learn_display_export(
+    exe: String,
+    name: Option<String>,
+    note: String,
+) -> CmdResult<String> {
+    match call(Method::LearnDisplayExport { exe, name, note }).await? {
+        Reply::GameDisplayFile { json } => Ok(json),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_display_import(
+    exe: String,
+    json: String,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayImport { exe, json }).await
+}
+
 #[tauri::command]
 async fn get_ui_prefs() -> CmdResult<relay_core::uiprefs::UiPrefs> {
     match call(Method::GetUiPrefs).await? {
@@ -394,15 +458,17 @@ fn set_video_area(window: tauri::Window, area: Option<stream_host::Area>) {
     stream_host::apply(&window);
 }
 
-/// Embed the stream in this window or pop it out into one of its own. The
-/// engine confirms with a `host` event; until then nothing here changes.
+/// Embed the stream in this window, pop it out into one of its own, or make
+/// it a clean feed of `feed`'s fixed size for call apps (S50). The engine
+/// confirms with a `host` event; until then nothing here changes.
 #[tauri::command]
 async fn set_stream_mode(
     window: tauri::Window,
     mode: relay_core::share::HostMode,
+    feed: Option<relay_core::share::CleanFeed>,
 ) -> CmdResult<()> {
     let owner = host_hwnd(&window).unwrap_or(0);
-    match call(Method::HostReceive { mode, owner }).await? {
+    match call(Method::HostReceive { mode, owner, feed }).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
@@ -418,6 +484,15 @@ fn stream_status() -> stream_host::StreamStatus {
 #[tauri::command]
 async fn stop_receive() -> CmdResult<()> {
     match call(Method::StopReceive).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// r54: stop sending the call app's audio back, live, while receiving.
+#[tauri::command]
+async fn stop_call_return() -> CmdResult<()> {
+    match call(Method::StopCallReturn).await? {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
@@ -459,6 +534,129 @@ struct PreviewOut {
     processed: String,
     sample_rate: u32,
     hrtf_applied: bool,
+}
+
+/// S46: `GameEq` reply as the frontend reads it (`GameEqReply` in ipc.ts).
+#[derive(serde::Serialize)]
+struct GameEqOut {
+    status: relay_core::game_eq::GameEqStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    export: Option<relay_core::game_eq::GameEqExport>,
+}
+
+#[tauri::command]
+async fn game_eq(id: Uuid, action: relay_core::game_eq::GameEqAction) -> CmdResult<GameEqOut> {
+    match call(Method::GameEq { id, action }).await? {
+        Reply::GameEq { status, export } => Ok(GameEqOut { status: *status, export }),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// S48: `ListLearnVideos` as the frontend reads it (`LearnVideos` in ipc.ts).
+#[derive(serde::Serialize)]
+struct LearnVideosOut {
+    videos: Vec<relay_core::learn_file::VideoFile>,
+    recording_dir: String,
+    privacy: String,
+    local_only: String,
+}
+
+#[tauri::command]
+async fn list_learn_videos() -> CmdResult<LearnVideosOut> {
+    match call(Method::ListLearnVideos).await? {
+        Reply::LearnVideos { videos, recording_dir, privacy, local_only } => {
+            Ok(LearnVideosOut { videos, recording_dir, privacy, local_only })
+        }
+        other => Err(unexpected(other).into()),
+    }
+}
+
+async fn learn_file_call(
+    method: Method,
+) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    match call(method).await? {
+        Reply::LearnFile { status } => Ok(status.map(|s| *s)),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn learn_from_file(
+    id: Uuid,
+    path: String,
+) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFromFile { id, path }).await
+}
+
+#[tauri::command]
+async fn learn_file_status(id: Uuid) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFileStatus { id }).await
+}
+
+#[tauri::command]
+async fn learn_file_cancel(id: Uuid) -> CmdResult<Option<relay_core::learn_file::LearnFileStatus>> {
+    learn_file_call(Method::LearnFileCancel { id }).await
+}
+
+/// S48: the Windows "Open" dialog for one video file (mp4 / mkv / mov /
+/// webm). Runs on its own STA thread; `None` when the user closes it. The
+/// shell only returns the path — the core checks it and opens the file.
+#[tauri::command]
+async fn pick_video_file(window: tauri::WebviewWindow) -> CmdResult<Option<String>> {
+    #[cfg(windows)]
+    {
+        let owner = window.hwnd().ok().map(|h| h.0 as isize);
+        let r = tokio::task::spawn_blocking(move || pick_video_blocking(owner))
+            .await
+            .map_err(|e| anyhow::anyhow!("the file dialog failed: {e}"))?;
+        Ok(r?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        Ok(None)
+    }
+}
+
+#[cfg(windows)]
+fn pick_video_blocking(owner: Option<isize>) -> anyhow::Result<Option<String>> {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM, SIGDN_FILESYSPATH,
+    };
+    // SAFETY: the standard IFileOpenDialog sequence on an STA thread of our
+    // own; the returned string is copied before it is freed.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let result = (|| -> anyhow::Result<Option<String>> {
+            let dlg: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            let filters = [COMDLG_FILTERSPEC {
+                pszName: w!("Videos"),
+                pszSpec: w!("*.mp4;*.mkv;*.mov;*.webm"),
+            }];
+            dlg.SetFileTypes(&filters)?;
+            dlg.SetOptions(dlg.GetOptions()? | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM)?;
+            dlg.SetTitle(&HSTRING::from("Choose a gameplay video on this PC"))?;
+            let parent = owner.map(|h| HWND(h as *mut _));
+            if dlg.Show(parent).is_err() {
+                return Ok(None); // closed or cancelled
+            }
+            let item = dlg.GetResult()?;
+            let p = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let s = p.to_string()?;
+            windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as _));
+            Ok(Some(s))
+        })();
+        CoUninitialize();
+        result
+    }
 }
 
 #[tauri::command]
@@ -592,6 +790,42 @@ async fn uninstall_apo(endpoint: Option<String>) -> CmdResult<()> {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }
+}
+
+/// S51: is the NDI® runtime there, bundled or user-installed (a file check in the core).
+#[tauri::command]
+async fn ndi_status() -> CmdResult<relay_core::ndi::NdiRuntime> {
+    match call(Method::NdiStatus).await? {
+        Reply::Ndi { runtime } => Ok(runtime),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+/// S51: open one of the two links NDI's licence asks Relay to show, in the
+/// default browser. The client names which; the URL itself is fixed here, so
+/// this cannot be used to open anything else.
+#[tauri::command]
+fn open_ndi_link(which: String) -> CmdResult<()> {
+    let url = match which.as_str() {
+        "ndi" => relay_core::ndi::NDI_URL,
+        "runtime" => relay_core::ndi::RUNTIME_DOWNLOAD_URL,
+        other => return Err(anyhow::anyhow!("unknown NDI link `{other}`").into()),
+    };
+    #[cfg(windows)]
+    {
+        use windows::core::{w, HSTRING};
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        // SAFETY: constant verb and a fixed https/http URL; no window owner.
+        let r = unsafe {
+            ShellExecuteW(None, w!("open"), &HSTRING::from(url), None, None, SW_SHOWNORMAL)
+        };
+        // ShellExecute reports success as a value above 32.
+        if r.0 as isize <= 32 {
+            return Err(anyhow::anyhow!("could not open {url}").into());
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -823,6 +1057,7 @@ fn spawn_event_bridge(app: AppHandle) {
                                                     let _ = call(Method::HostReceive {
                                                         mode: relay_core::share::HostMode::Embedded,
                                                         owner,
+                                                        feed: None,
                                                     })
                                                     .await;
                                                 });
@@ -1120,6 +1355,7 @@ pub fn run() {
             set_recording_settings,
             start_receive,
             stop_receive,
+            stop_call_return,
             set_video_area,
             set_stream_mode,
             stream_status,
@@ -1133,6 +1369,14 @@ pub fn run() {
             install_update,
             update_later,
             skip_update,
+            learn_display_status,
+            learn_display_set,
+            learn_display_apply,
+            learn_display_relearn,
+            learn_display_auto_apply,
+            learn_display_reset,
+            learn_display_export,
+            learn_display_import,
             list_hardware,
             save_hardware,
             delete_hardware,
@@ -1141,6 +1385,12 @@ pub fn run() {
             probe_hardware,
             import_curve,
             render_preview,
+            game_eq,
+            list_learn_videos,
+            learn_from_file,
+            learn_file_status,
+            learn_file_cancel,
+            pick_video_file,
             share_capabilities,
             firewall_status,
             apo_status,
@@ -1148,6 +1398,8 @@ pub fn run() {
             install_apo,
             uninstall_apo,
             vdevice_status,
+            ndi_status,
+            open_ndi_link,
             set_vdevice_consent,
             vdevice_dry_run,
             install_vcam,

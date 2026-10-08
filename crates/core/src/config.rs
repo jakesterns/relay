@@ -141,6 +141,11 @@ impl Paths {
         self.data_dir().join("original-state.json")
     }
 
+    /// S47: what Relay learned about each game's look, per monitor.
+    pub fn learned_display_file(&self) -> PathBuf {
+        self.data_dir().join("learned-display.json")
+    }
+
     /// Share presets and recording settings.
     pub fn presets_file(&self) -> PathBuf {
         self.data_dir().join("presets.json")
@@ -168,6 +173,12 @@ impl Paths {
     /// and install (S45). Emptied before each download.
     pub fn updates_dir(&self) -> PathBuf {
         self.data_dir().join("updates")
+    }
+
+    /// S46: one learning record per game exe (aggregate statistics only,
+    /// never audio).
+    pub fn game_eq_dir(&self) -> PathBuf {
+        self.data_dir().join("game-eq")
     }
 
     /// Downloaded headphone measurements, one CSV per model. Cached so a

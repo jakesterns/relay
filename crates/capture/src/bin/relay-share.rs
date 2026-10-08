@@ -9,6 +9,7 @@
 //!                                  encode a raw clip, for codec quality comparisons
 //! relay-share send                 share the primary monitor to a paired peer
 //! relay-share recv                 receive and render to a window
+//! relay-share learn --pid N ...    S46: learn a game's sound (aggregates only)
 //! ```
 //!
 //! Stats and lifecycle messages go to stdout as NDJSON; the core relays them
@@ -146,9 +147,20 @@ fn run() -> Result<()> {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(10);
             bench_capture(secs)
         }
+        // S47: sample the game's monitor at 1-2 fps and print frame
+        // statistics (never pixels). Spawned by the core while learning.
+        #[cfg(windows)]
+        "look" => {
+            let (hmonitor, fps) = parse_look_args(&args[1..])?;
+            relay_capture::look::run(
+                windows::Win32::Graphics::Gdi::HMONITOR(hmonitor as *mut _),
+                fps,
+            )
+        }
         #[cfg(windows)]
         "send" => {
-            let opts = parse_send_args(&args[1..])?;
+            let mut opts = parse_send_args(&args[1..])?;
+            relay_capture::transport::sender::guard_audio_pid(&mut opts);
             run_async(relay_capture::transport::sender::run(opts))
         }
         #[cfg(windows)]
@@ -174,7 +186,38 @@ fn run() -> Result<()> {
         #[cfg(windows)]
         "host-stub" => {
             let opts = parse_recv_args(&args[1..])?;
-            run_async(relay_capture::render::run_stub(opts.host))
+            run_async(relay_capture::render::run_stub(opts.host, opts.local_share))
+        }
+        #[cfg(windows)]
+        "learn" => {
+            let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
+            relay_capture::learn::run(opts)
+        }
+        // S51: can this PC publish NDI? Loads the NDI runtime (bundled or user-installed) the
+        // way NDI output would and reports what happened, as JSON. Never an
+        // error exit: a missing runtime is an answer, not a failure.
+        #[cfg(windows)]
+        "ndi-probe" => {
+            let found = relay_core::ndi::locate_runtime();
+            let report = match relay_capture::ndi::ffi::Runtime::get() {
+                Ok(rt) => serde_json::json!({
+                    "present": true, "loaded": true, "path": rt.path, "version": rt.version,
+                }),
+                Err(e) => serde_json::json!({
+                    "present": found.present, "loaded": false, "path": found.path,
+                    "searched": found.searched, "runtime_missing": e.runtime_missing(),
+                    "error": e.to_string(), "download_url": found.download_url,
+                }),
+            };
+            println!("{report}");
+            Ok(())
+        }
+        // S48: learn a game's sound and look from a local video file,
+        // faster than real time. Spawned by the core on the user's request.
+        #[cfg(windows)]
+        "learn-file" => {
+            let opts = relay_capture::learn_file::LearnFileArgs::parse(&args[1..])?;
+            relay_capture::learn_file::run(opts)
         }
         #[cfg(windows)]
         "recv" => {
@@ -231,6 +274,21 @@ fn parse_codec(s: &str) -> Result<relay_capture::codec::VideoCodec> {
     }
 }
 
+/// `look --hmonitor N [--fps 1|2]`.
+#[cfg(windows)]
+fn parse_look_args(args: &[String]) -> Result<(isize, u32)> {
+    let (mut hmonitor, mut fps) = (None, 1u32);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--hmonitor" => hmonitor = Some(it.next().context("--hmonitor N")?.parse()?),
+            "--fps" => fps = it.next().context("--fps N")?.parse()?,
+            other => bail!("unknown look argument `{other}`"),
+        }
+    }
+    Ok((hmonitor.context("look needs --hmonitor")?, fps))
+}
+
 /// Parse `relay-share send` flags into [`SendOpts`].
 #[cfg(windows)]
 fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::SendOpts> {
@@ -251,8 +309,11 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         preview_fps: 0,
         container: relay_core::share::RecordingContainer::Mp4,
         vcam: false,
+        ndi: false,
         mic_device: None,
         output_device: None,
+        audio_image: None,
+        audio_created: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -274,6 +335,11 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             // Additive since S2: this adds a second Opus track rather than
             // replacing the program mix. Mic-only is `--no-audio --audio-mic`,
             // which is what the core emits for a legacy `mic` preset.
+            // r54: which process --audio-pid must be, pinned by the core.
+            "--audio-pid-image" => opts.audio_image = it.next().cloned(),
+            "--audio-pid-created" => {
+                opts.audio_created = Some(it.next().context("--audio-pid-created N")?.parse()?)
+            }
             "--audio-mic" => opts.mic = true,
             // S37: everything except the --audio-pid app, as a third track.
             "--audio-rest" => opts.rest = true,
@@ -283,6 +349,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             "--no-cursor" => opts.cursor = false,
             // S36: also feed "Relay Camera" on this PC with the captured frames.
             "--vcam" => opts.vcam = true,
+            // S51: also publish the share as an NDI source on this PC's LAN.
+            "--ndi" => opts.ndi = true,
             "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
                 let s = it.next().context("--size WxH")?;
@@ -321,7 +389,11 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         mic_route: None,
         host: None,
         return_pid: None,
+        return_image: None,
+        return_created: None,
         output_device: None,
+        local_share: None,
+        ndi: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -330,6 +402,8 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--headless" => opts.headless = true,
             "--code" => opts.code = it.next().cloned(),
             "--vcam" => opts.vcam = true,
+            // S51: publish the received stream as an NDI source.
+            "--ndi" => opts.ndi = true,
             "--mic-route" => opts.mic_route = it.next().cloned(),
             // S40: play received audio on this endpoint instead of the default.
             "--output-device" => opts.output_device = it.next().cloned(),
@@ -338,8 +412,23 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
                 opts.return_pid =
                     Some(it.next().context("--return-pid <pid>")?.parse().context("--return-pid")?)
             }
+            // r54: which process that PID must be, pinned by the core.
+            "--return-image" => opts.return_image = it.next().cloned(),
+            "--return-created" => {
+                opts.return_created = Some(
+                    it.next()
+                        .context("--return-created <filetime>")?
+                        .parse()
+                        .context("--return-created")?,
+                )
+            }
             "--host" => {
                 opts.host = Some(it.next().context("--host <hwnd>")?.parse().context("--host")?)
+            }
+            // S50: what this PC is sharing at spawn, as `SourceTarget` JSON.
+            "--local-share" => {
+                let json = it.next().context("--local-share <target json>")?;
+                opts.local_share = Some(serde_json::from_str(json).context("--local-share")?)
             }
             other => bail!("unknown recv flag `{other}`"),
         }
@@ -770,13 +859,20 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
   bench-codec    encode a raw NV12 clip to an Annex B file (codec comparisons)
   bench-audio    measure Opus packetization latency for one source, or for
                  the program mix and the microphone together (`dual`)
+  look           sample the game's monitor at 1-2 fps and print frame statistics
+                 (--hmonitor N [--fps 1|2]; spawned by relay-core while learning)
   send           share to a paired peer (spawned by relay-core)
                  (--audio-pid <pid> narrows the program mix to one process;
                   --audio-mic *adds* a second microphone track;
                   --no-audio --audio-mic sends the microphone alone)
+  learn          S46: learn one game's sound by process loopback of its PID
+                 (--pid N --exe NAME --record FILE [--goal G] [--version V]);
+                 keeps aggregate statistics only, never audio
   recv           receive a share and render it to a window
                  (--vcam mirrors into the Relay virtual camera;
-                  --mic-route <endpoint-id> renders audio to that endpoint)
+                  --mic-route <endpoint-id> renders audio to that endpoint;
+                  --ndi publishes it as an NDI source; send takes --ndi too)
+  ndi-probe      load the NDI runtime (bundled, or user-installed) and report, as JSON
 ";
 
 #[cfg(all(test, windows))]
@@ -786,6 +882,22 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn look_args() {
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "65537"])).unwrap(), (65537, 1));
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--fps", "2"])).unwrap(), (1, 2));
+        assert!(parse_look_args(&s(&[])).is_err());
+        assert!(parse_look_args(&s(&["--hmonitor", "1", "--save-frames"])).is_err());
+    }
+
+    #[test]
+    fn ndi_flag_on_both_engines() {
+        assert!(!parse_send_args(&s(&["--code", "1"])).unwrap().ndi, "off by default");
+        assert!(parse_send_args(&s(&["--code", "1", "--ndi"])).unwrap().ndi);
+        assert!(!parse_recv_args(&s(&[])).unwrap().ndi);
+        assert!(parse_recv_args(&s(&["--ndi"])).unwrap().ndi);
     }
 
     #[test]
@@ -921,10 +1033,28 @@ mod tests {
         let o = parse_recv_args(&s(&["--return-pid", "4242"])).unwrap();
         assert_eq!(o.return_pid, Some(4242));
         assert!(parse_recv_args(&s(&["--return-pid", "discord"])).is_err());
+        // r54: the pinned identity the engine re-checks before capturing.
+        let o = parse_recv_args(&s(&[
+            "--return-pid",
+            "4242",
+            "--return-image",
+            r"C:\d\Discord.exe",
+            "--return-created",
+            "1337",
+        ]))
+        .unwrap();
+        assert_eq!(o.return_image.as_deref(), Some(r"C:\d\Discord.exe"));
+        assert_eq!(o.return_created, Some(1337));
+        assert!(parse_recv_args(&s(&["--return-created", "soon"])).is_err());
         // S40: the output pick; absent = System default.
         assert_eq!(o.output_device, None);
         let o = parse_recv_args(&s(&["--output-device", "{spk}"])).unwrap();
         assert_eq!(o.output_device.as_deref(), Some("{spk}"));
+        // S50: what this PC is sharing at spawn; absent = not sharing.
+        assert_eq!(o.local_share, None);
+        let o = parse_recv_args(&s(&["--local-share", r#"{"kind":"display","index":1}"#])).unwrap();
+        assert_eq!(o.local_share, Some(relay_capture::command::SourceTarget::Display { index: 1 }));
+        assert!(parse_recv_args(&s(&["--local-share", "screen"])).is_err());
 
         assert!(parse_recv_args(&s(&["--wat"])).is_err());
     }

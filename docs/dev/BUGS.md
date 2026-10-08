@@ -176,6 +176,15 @@ the dev box. The owner saw the Relay window in the stream but not the surface
 inside it; everything else on the desktop came through. The exclusion holds
 on a real capture, in the embedded (owned popup) state, at 60 fps.
 
+*Changed 2026-10-07 (S50):* the exclusion is now conditional. It made the
+stream impossible to pick in Discord, Zoom, Teams, Meet or OBS on the receiving
+PC, which is the main thing a receiving PC in a call wants. The window is now
+excluded only while this same PC is sending a share whose area the window is
+on (`render::placement::should_exclude`), re-decided on local share start,
+switch and stop, on every move, and on display changes. The recursion this
+bug describes needs exactly that case, so it stays covered. See
+`docs/plans/S50-share-and-go.md`.
+
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody
 established whether a window appeared first and vanished, or never appeared at
@@ -665,6 +674,35 @@ now the first thing to run.
   *Correction:* this was filed after a "Start receiving does nothing" report
   that turned out to be a missed click. The code path was genuinely wrong and
   the fix stands, but the symptom that prompted it was misattributed.
+
+### B19 — Under burst loss the picture froze for hold after hold  |  FIXED 2026-10-07 (S49), loopback model only
+Found by S49's Wi-Fi link model, not on hardware: no test PC has Wi-Fi.
+`reorder::Reorder` gave each hole its 40 ms hold starting from when the hole
+*before* it was given up, not from when it was seen. One lost packet costs one
+hold, as designed. A burst that leaves thirty holes cost thirty holds in a row:
+on the capacity-drop model the receiver showed nothing for 1.2 s, and the
+"queueing delay" it reported was its own reorder buffer. A hole is now held
+from the arrival of the first packet past it. Unit test
+`many_holes_expire_together_not_end_to_end`. On a wired LAN, where holes come
+one at a time, nothing changes.
+
+### B20 — On a link that lost capacity, retransmissions crowded out the video  |  FIXED 2026-10-07 (S49), loopback model only
+Also found by the link model. When the rate halves, the access point drops what
+does not fit, the receiver NACKs every hole (four times each, then twelve), and
+the sender's NACK responder answers every one. On the capacity-drop model that
+was 85 Mb/s arriving against a 2.5 Mb/s target: congestion collapse, the
+picture frozen for seconds. Retransmissions now have a budget while the
+bitrate controller is constrained (15 % of the target, at least 1 Mb/s;
+`feedback::RetransmitBudget`, an interceptor in front of the responder). A
+wired share is never constrained, so its retransmissions stay unlimited.
+
+### B21 — A Wi-Fi burst overflowed webrtc-rs's 256-packet track queue  |  FIXED 2026-10-07 (S49), loopback model only
+The S30 hazard again, by another route: after a 150 ms radio stall the backlog
+arrives at once, and the receiver's video loop (reorder, depacketize, timers,
+keyframe requests per packet) fell behind the driver's 256-slot `try_send`
+queue — 400 packets dropped in one burst on a link model that had lost none.
+A drain task now moves packets into a 16k queue as fast as they arrive
+(`receiver::drain_track`).
 
 ### B18 — Relay Camera never started for an installed user  |  FIXED 2026-09-29 (`fix/vcam-acl`)
 Found by the first live pass after registration (main PC, Windows 11 26200).

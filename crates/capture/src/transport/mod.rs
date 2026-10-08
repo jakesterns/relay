@@ -25,13 +25,22 @@ pub mod depay;
 pub mod discovery;
 pub mod feedback;
 pub mod identity;
+pub mod ladder;
 pub mod netcheck;
 pub mod netio;
+pub mod netsim;
+pub mod pacing;
+pub mod playout;
 pub mod receiver;
 pub mod reorder;
 pub mod sei;
 pub mod sender;
 pub mod signal;
+
+#[cfg(test)]
+mod loopback_tests;
+#[cfg(test)]
+mod sim_tests;
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -77,7 +86,16 @@ pub const NACK_INTERVAL: Duration = Duration::from_millis(10);
 /// NACKs per missing packet. After [`reorder::HOLD`] the receiver has moved
 /// on and asked for a keyframe; anything the sender retransmits past that is
 /// wasted bandwidth, and unlimited is the library default.
-const NACKS_PER_PACKET: u16 = 4;
+///
+/// S49 raised it from 4 to 12, on the loopback Wi-Fi model: four asks span
+/// only 40 ms, and over Wi-Fi a NACK or its answer can sit behind an 80 ms
+/// radio hold or be lost in the same burst as the packet, so most holes
+/// were given up while the reorder buffer (grown to 150 ms by its tuner)
+/// was still willing to wait. Twelve asks cover [`reorder::MAX_HOLD`]. On a
+/// wired LAN the first answer lands within a millisecond, so asks two to
+/// twelve are never sent; on a constrained link `feedback::RetransmitBudget`
+/// caps what the extra asks can cost.
+const NACKS_PER_PACKET: u16 = 12;
 
 /// SRTP anti-replay window, in packets. The library default is 64, which at
 /// 4,000 packets a second is 16 ms: every NACK retransmission of a video
@@ -206,6 +224,9 @@ pub struct PcEvents {
     pub connected: mpsc::Receiver<()>,
     pub closed: mpsc::Receiver<()>,
     pub tracks: mpsc::UnboundedReceiver<Arc<dyn TrackRemote>>,
+    /// Bits per second the NACK responder may spend on retransmissions; 0
+    /// is unlimited (S49: the sender sets it while constrained).
+    pub retransmit_budget: Arc<std::sync::atomic::AtomicU32>,
 }
 
 struct Handler {
@@ -251,6 +272,16 @@ pub async fn build_pc(
     local_ip: IpAddr,
     video: &[VideoCodec],
 ) -> Result<(impl PeerConnection, PcEvents, Arc<dyn Runtime>)> {
+    build_pc_with(local_ip, video, netio::sim_from_env()).await
+}
+
+/// [`build_pc`] with the link model given rather than read from
+/// `RELAY_TEST_NET`: the in-process loopback tests (S49) run several.
+pub async fn build_pc_with(
+    local_ip: IpAddr,
+    video: &[VideoCodec],
+    sim: Option<netsim::Profile>,
+) -> Result<(impl PeerConnection, PcEvents, Arc<dyn Runtime>)> {
     let mut media_engine = MediaEngine::default();
     for &c in video {
         media_engine.register_codec(video_codec(c), RtpCodecKind::Video)?;
@@ -265,6 +296,7 @@ pub async fn build_pc(
             RtpCodecKind::Video,
         );
     }
+    let retransmit_budget = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let registry = Registry::new()
         .with(feedback::keyframe_request_forwarder())
         .with(
@@ -274,7 +306,9 @@ pub async fn build_pc(
                 .with_max_nacks_per_packet(NACKS_PER_PACKET)
                 .build(),
         )
-        .with(NackResponderBuilder::new().with_size(NACK_HISTORY).build());
+        .with(NackResponderBuilder::new().with_size(NACK_HISTORY).build())
+        // Outside the responder, so it sees NACKs first (S49).
+        .with(feedback::retransmit_budget(retransmit_budget.clone()));
     let registry = configure_rtcp_reports(registry);
     configure_simulcast_extension_headers(&mut media_engine)?;
     let registry = configure_twcc_receiver_only(registry, &mut media_engine)?;
@@ -307,7 +341,8 @@ pub async fn build_pc(
         tracks: track_tx,
     });
 
-    let (runtime, net) = netio::TunedRuntime::wrap(default_runtime().context("webrtc runtime")?);
+    let (runtime, net) =
+        netio::TunedRuntime::wrap_with(default_runtime().context("webrtc runtime")?, sim);
     netio::log_every_second(&net);
     let mut setting_engine = SettingEngine::default();
     setting_engine.set_srtp_replay_protection_window(SRTP_REPLAY_WINDOW);
@@ -322,7 +357,7 @@ pub async fn build_pc(
         .build()
         .await?;
 
-    Ok((pc, PcEvents { gather_done, connected, closed, tracks }, runtime))
+    Ok((pc, PcEvents { gather_done, connected, closed, tracks, retransmit_budget }, runtime))
 }
 
 /// How long closing a peer connection may take before we stop waiting. It is

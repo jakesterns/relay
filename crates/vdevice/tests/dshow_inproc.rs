@@ -447,6 +447,154 @@ fn streams_ring_frames_in_every_format_with_monotonic_timestamps() {
     ring.block().set_geometry_hint(w, h, 30);
     let filter = filter_via_class_factory();
     assert_eq!(first_offer(&output_pin(&filter)), (MEDIASUBTYPE_NV12, w as i32, h as i32));
+    drop(filter);
+
+    // 7. r54 (PC2: Discord saw the picture mirrored and blurry from a
+    //    2560x1440 ring). A 1440p stream offers 1080p first. Every offered
+    //    type -- each size in NV12, YUY2 and RGB24 -- delivers the asymmetric
+    //    marker picture the right way round per its spec, and the pin asks
+    //    the producer for exactly the size it negotiated. The writer here
+    //    plays the share engine: it honours the size request, as the GPU
+    //    path does.
+    let (sw, sh) = (2560u32, 1440u32);
+    ring.block().set_geometry_hint(sw, sh, 60);
+    let log_path =
+        std::env::temp_dir().join(format!("relay-camera-log-{}.log", std::process::id()));
+    let _ = std::fs::remove_file(&log_path);
+    std::env::set_var("RELAY_CAMERA_LOG", &log_path);
+    let offers: Vec<(GUID, i32, i32)> = {
+        let filter = filter_via_class_factory();
+        let pin = output_pin(&filter);
+        assert_eq!(first_offer(&pin), (MEDIASUBTYPE_NV12, 1920, 1080), "1440p stream: 1080p first");
+        // SAFETY: standard IAMStreamConfig enumeration.
+        unsafe {
+            let sc: IAMStreamConfig = pin.cast().unwrap();
+            let (mut count, mut size) = (0i32, 0i32);
+            sc.GetNumberOfCapabilities(&mut count, &mut size).unwrap();
+            (0..count)
+                .map(|i| {
+                    let mut caps = VIDEO_STREAM_CONFIG_CAPS::default();
+                    let mut mt: *mut AM_MEDIA_TYPE = std::ptr::null_mut();
+                    sc.GetStreamCaps(i, &mut mt, &mut caps as *mut _ as *mut u8).unwrap();
+                    let vih = &*((*mt).pbFormat as *const VIDEOINFOHEADER);
+                    let got = ((*mt).subtype, vih.bmiHeader.biWidth, vih.bmiHeader.biHeight);
+                    free_media_type(mt);
+                    CoTaskMemFree(Some(mt as *const _));
+                    got
+                })
+                .collect()
+        }
+    };
+    assert_eq!(offers.len(), 12);
+    assert!(offers.iter().any(|o| (o.1, o.2) == (2560, 1440)), "native size still offered");
+    assert!(offers.iter().any(|o| (o.1, o.2) == (1280, 720)), "720p still offered");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let honouring = {
+        let (stop, name) = (stop.clone(), dshow_section_name_from_env());
+        std::thread::spawn(move || {
+            let ring = SharedFrames::create(&name).expect("producer ring");
+            let mut cached: Option<((u32, u32), Vec<u8>)> = None;
+            let mut pts = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let size = ring.block().requested_size().unwrap_or((sw, sh));
+                if cached.as_ref().map(|c| c.0) != Some(size) {
+                    cached = Some((size, picture::testpat::marker_nv12(size.0, size.1)));
+                }
+                let (_, f) = cached.as_ref().unwrap();
+                let (y, uv) = f.split_at((size.0 * size.1) as usize);
+                ring.block().write_frame(
+                    size.0,
+                    size.1,
+                    pts,
+                    y,
+                    size.0 as usize,
+                    uv,
+                    size.0 as usize,
+                );
+                pts += 166_666;
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        })
+    };
+    let fmt_of = |g: GUID| match g {
+        g if g == MEDIASUBTYPE_NV12 => PixFmt::Nv12,
+        g if g == MEDIASUBTYPE_YUY2 => PixFmt::Yuy2,
+        _ => PixFmt::Rgb24,
+    };
+    for &(sub, ow, oh) in &offers {
+        let (log, _) = run_with_sink(sub, 400, |pin| unsafe {
+            let sc: IAMStreamConfig = pin.cast().unwrap();
+            let mt = sc.GetFormat().unwrap();
+            (*mt).subtype = sub;
+            let vih = &mut *((*mt).pbFormat as *mut VIDEOINFOHEADER);
+            vih.bmiHeader.biWidth = ow;
+            vih.bmiHeader.biHeight = oh;
+            sc.SetFormat(mt).expect("SetFormat");
+            free_media_type(mt);
+            CoTaskMemFree(Some(mt as *const _));
+        });
+        assert_eq!(log.connected, Some((sub, ow, oh)));
+        let fmt = fmt_of(sub);
+        let (ow, oh) = (ow as u32, oh as u32);
+        let live = log
+            .samples
+            .iter()
+            .rev()
+            .find(|s| {
+                s.2.len() == fmt.frame_bytes(ow, oh)
+                    && picture::testpat::probe(fmt, &s.2, ow, oh, ow / 32, oh / 32).0 > 150
+            })
+            .unwrap_or_else(|| panic!("{fmt:?} {ow}x{oh}: a live sample arrived"));
+        picture::testpat::assert_oriented(fmt, &live.2, ow, oh, "DirectShow");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    honouring.join().unwrap();
+
+    // The CPU path: a producer that ignores the request (an older share
+    // engine, or a second camera) is area-scaled by the pin, still the
+    // right way round.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let native = {
+        let (stop, name) = (stop.clone(), dshow_section_name_from_env());
+        std::thread::spawn(move || {
+            let ring = SharedFrames::create(&name).expect("native ring");
+            let f = picture::testpat::marker_nv12(sw, sh);
+            let (y, uv) = f.split_at((sw * sh) as usize);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                ring.block().write_frame(sw, sh, 0, y, sw as usize, uv, sw as usize);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        })
+    };
+    let (log, _) = run_with_sink(MEDIASUBTYPE_RGB24, 2500, |pin| unsafe {
+        let sc: IAMStreamConfig = pin.cast().unwrap();
+        let mt = sc.GetFormat().unwrap();
+        (*mt).subtype = MEDIASUBTYPE_RGB24;
+        let vih = &mut *((*mt).pbFormat as *mut VIDEOINFOHEADER);
+        vih.bmiHeader.biWidth = 640;
+        vih.bmiHeader.biHeight = 360;
+        sc.SetFormat(mt).expect("SetFormat");
+        free_media_type(mt);
+        CoTaskMemFree(Some(mt as *const _));
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    native.join().unwrap();
+    let live = log
+        .samples
+        .iter()
+        .rev()
+        .find(|s| picture::testpat::probe(PixFmt::Rgb24, &s.2, 640, 360, 20, 11).0 > 150)
+        .expect("a CPU-scaled live RGB24 sample");
+    picture::testpat::assert_oriented(PixFmt::Rgb24, &live.2, 640, 360, "DirectShow CPU-scaled");
+
+    // 8. The camera log names what the app negotiated, once per connection,
+    //    and the gap when the producer stops.
+    let text = std::fs::read_to_string(&log_path).expect("camera log written");
+    assert!(text.contains("connected: NV12 1920x1080 @ 60 fps"), "{text}");
+    assert!(text.contains("connected: RGB24 640x360"), "{text}");
+    assert!(text.contains("ring up: "), "{text}");
+    std::env::remove_var("RELAY_CAMERA_LOG");
+    let _ = std::fs::remove_file(&log_path);
     drop(ring);
 }
 

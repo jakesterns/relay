@@ -19,6 +19,9 @@ embed-resource = "3"
 
 [dependencies]
 relay-core.workspace = true
+relay-audio.workspace = true
+# S47 frame analysis (pure; the look sampler).
+relay-display.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -73,6 +76,7 @@ windows = { workspace = true, features = [
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
     "Win32_Media_MediaFoundation",
+    "Win32_Media",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",

@@ -4,6 +4,8 @@
 //!   HRTF. Real-time safe: no allocations after `prepare()`, bypass is a straight
 //!   copy. Runs at the endpoint sample rate; never resamples.
 //! - [`offline`] renders a WAV through the chain for the A/B listening test.
+//! - [`learn`] learned game EQ (S46): analyzer, derivation, confidence gate,
+//!   import/export format. Pure Rust, no FFT, so the core can link it.
 //! - [`sessions`] WASAPI render-session enumeration and detection of
 //!   exclusive-mode streams that bypass the APO (Windows only).
 //! - `apo/` (M3b) will host [`dsp`] inside the Windows audio engine as a signed
@@ -22,6 +24,7 @@ pub mod coeffs;
 #[cfg(feature = "dsp")]
 pub mod dsp;
 pub mod fit;
+pub mod learn;
 #[cfg(feature = "dsp")]
 pub mod offline;
 pub mod params;

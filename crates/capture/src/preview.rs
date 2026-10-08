@@ -82,11 +82,18 @@ impl Preview {
 
     /// Scale `src`, read it back and JPEG-encode it.
     pub fn jpeg(&mut self, gpu: &Gpu, src: &ID3D11Texture2D) -> Result<Vec<u8>> {
+        let bgr = self.bgr(gpu, src)?;
+        encode_jpeg(&bgr, self.width, self.height)
+    }
+
+    /// Scale `src` on the GPU and read it back as packed BGR at thumbnail
+    /// size. The S47 look sampler analyses this and drops it.
+    pub fn bgr(&mut self, gpu: &Gpu, src: &ID3D11Texture2D) -> Result<Vec<u8>> {
         let small = self.conv.convert(src)?;
         let (w, h) = (self.width as usize, self.height as usize);
         // SAFETY: both textures are live, the same size and NV12; the map is
         // released before the borrowed slices go out of scope.
-        let bgr = unsafe {
+        unsafe {
             gpu.context.CopyResource(&self.staging, &small);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             gpu.context
@@ -100,9 +107,8 @@ impl Preview {
             let uv_plane = std::slice::from_raw_parts(base.add(pitch * h), pitch * h.div_ceil(2));
             let out = nv12_to_bgr(y_plane, uv_plane, pitch, w, h);
             gpu.context.Unmap(&self.staging, 0);
-            out
-        };
-        encode_jpeg(&bgr, self.width, self.height)
+            Ok(out)
+        }
     }
 }
 

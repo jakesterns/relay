@@ -35,6 +35,23 @@ use relay_core::share::RecordingContainer;
 use std::path::PathBuf;
 use std::sync::{Mutex as StdMutex, OnceLock};
 
+/// r54: before a share captures one process's audio, check the PID is still
+/// the process the core pinned. A recycled PID would send another app's
+/// sound to the receiver, unasked; then the share goes on without program
+/// audio (never the whole desktop mix instead, which could carry a call) and
+/// the core is told why.
+pub fn guard_audio_pid(opts: &mut SendOpts) {
+    let Some(crate::audio::AudioSource::Process { pid }) = opts.audio else { return };
+    if let Err(why) =
+        relay_core::proc_identity::target_ok(pid, opts.audio_image.as_deref(), opts.audio_created)
+    {
+        warn!(pid, why, "the shared app's audio is not captured");
+        println!("{}", serde_json::json!({ "event": "audio_off", "reason": why }));
+        opts.audio = None;
+        opts.rest = false;
+    }
+}
+
 #[derive(Debug)]
 pub struct SendOpts {
     /// Receiver instance name (mDNS) or `ip:port`; `None` = first discovered.
@@ -80,11 +97,18 @@ pub struct SendOpts {
     /// program captures the game's audio itself. The core decides this from
     /// the preset, consent and registration; the engine never chooses it.
     pub vcam: bool,
+    /// Also publish the share as an NDI® source, "Relay share" (S51). A
+    /// `ndi` command changes it live.
+    pub ndi: bool,
     /// The microphone endpoint id (S40); `None` = the System default, which
     /// the track then follows if it changes mid-share.
     pub mic_device: Option<String>,
     /// Where the call coming back plays (S40); `None` = the System default.
     pub output_device: Option<String>,
+    /// Which process an `AudioSource::Process` PID must be (r54): image path
+    /// and creation time from the core. See [`guard_audio_pid`].
+    pub audio_image: Option<String>,
+    pub audio_created: Option<u64>,
 }
 
 /// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
@@ -207,9 +231,54 @@ pub struct Stats {
     pub return_peak_milli: AtomicU32,
 }
 
+/// What adaptation decided, shared between the feedback task (writes), the
+/// pipeline (rung), the writer (pacing), the PLI handler and the stats line.
+#[derive(Default)]
+pub struct AdaptState {
+    /// The bitrate controller has backed off or saw congestion lately.
+    pub constrained: AtomicBool,
+    /// `control::Cause as u8`.
+    pub cause: std::sync::atomic::AtomicU8,
+    /// A rung the pipeline should switch the encoder to.
+    pub rung_wanted: StdMutex<Option<super::ladder::Rung>>,
+    /// The rung the encoder runs at now; the first one is the share's top.
+    pub rung_now: StdMutex<Option<super::ladder::Rung>>,
+    pub top: OnceLock<super::ladder::Rung>,
+    /// Encoder rebuilds for a rung change, and how long the last one took.
+    pub rung_changes: AtomicU64,
+    pub rebuild_ms_last: AtomicU64,
+    /// No forced keyframe before this: a queue is draining (S49).
+    keyframe_hold_until: StdMutex<Option<Instant>>,
+}
+
+impl AdaptState {
+    pub fn hold_keyframes_for(&self, d: Duration) {
+        *self.keyframe_hold_until.lock().unwrap() = Some(Instant::now() + d);
+    }
+
+    /// Take a pending keyframe request, unless a hold says not yet; a held
+    /// request stays pending and is taken once the hold ends.
+    pub fn take_keyframe(&self, wanted: &AtomicBool) -> bool {
+        let held = self.keyframe_hold_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
+        !held && wanted.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn cause(&self) -> super::control::Cause {
+        use super::control::Cause;
+        match self.cause.load(Ordering::Relaxed) {
+            x if x == Cause::Queue as u8 => Cause::Queue,
+            x if x == Cause::Loss as u8 => Cause::Loss,
+            x if x == Cause::Recovering as u8 => Cause::Recovering,
+            _ => Cause::Steady,
+        }
+    }
+}
+
 struct VideoAu {
     data: Vec<u8>,
     keyframe: bool,
+    /// RTP clock ticks this unit lasts: 90 kHz / the fps it was encoded at.
+    samples: u32,
 }
 
 /// RAII COM MTA membership for a worker thread.
@@ -319,7 +388,7 @@ fn offerable_codecs() -> Result<Vec<VideoCodec>> {
 /// *every* registered video codec on the offer's m-line. A track described
 /// with a codec narrows the offer to that one codec, and the receiver could
 /// then only take HEVC or reject video outright.
-fn video_stream_track(codec: Option<VideoCodec>, ssrc: u32) -> MediaStreamTrack {
+pub(crate) fn video_stream_track(codec: Option<VideoCodec>, ssrc: u32) -> MediaStreamTrack {
     MediaStreamTrack::new(
         "relay-video-stream".into(),
         "relay-video".into(),
@@ -345,6 +414,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     tcp.set_nodelay(true)?;
     let local_ip = tcp.local_addr()?.ip();
     let mut sig = signal::SigStream::new(tcp);
+    // S49: which link the share leaves over, sent in the offer.
+    let local_link = super::netcheck::link_info_for(local_ip)
+        .unwrap_or_else(|_| super::netcheck::LinkInfo::unknown());
 
     let (pc, mut events, runtime) = build_pc(local_ip, &offered).await?;
 
@@ -409,11 +481,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         sdp: offer_json.clone(),
         mac: if trusted { String::new() } else { signal::mac(&opts.code, &offer_json) },
         trusted,
+        link: Some(local_link.clone()),
     })
     .await?;
 
+    let peer_link;
     let answer_json = match (sig.recv().await?, opts.trusted.as_deref()) {
-        (signal::SigMsg::Answer { name, sdp, .. }, Some(expected)) => {
+        (signal::SigMsg::Answer { name, sdp, link, .. }, Some(expected)) => {
+            peer_link = link;
             // Mutual: the receiver checked us, we check it. A name is not an
             // identity — anything on the LAN can call itself `studio-pc` —
             // so the answer must carry the fingerprint we remembered, and
@@ -434,7 +509,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             ))
             .into());
         }
-        (signal::SigMsg::Answer { name, sdp, mac }, None) => {
+        (signal::SigMsg::Answer { name, sdp, mac, link }, None) => {
+            peer_link = link;
             if !signal::verify_mac(&opts.code, &sdp, &mac) {
                 bail!("pairing code mismatch - the receiver used a different code");
             }
@@ -513,22 +589,27 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         })
     );
 
-    // Warn if the route to the peer leaves over Wi-Fi.
-    match super::netcheck::link_kind_for(local_ip) {
-        Ok(kind) => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "event": "link",
-                    "kind": kind,
-                    "recommendation": kind.recommendation(),
-                })
-            );
-            if let Some(rec) = kind.recommendation() {
-                warn!("{rec}");
-            }
-        }
-        Err(e) => debug!(error = %e, "link check failed"),
+    // Which links the share runs over, both ends (S49). An older receiver
+    // reports none; then only this end is known.
+    let peer_s49 = peer_link.is_some();
+    let wifi_note = super::netcheck::wifi_note(&local_link, peer_link.as_ref());
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "link",
+            "kind": local_link.kind,
+            "label": local_link.label(),
+            "peer": peer_link.as_ref().map(super::receiver::link_json),
+            "recommendation": wifi_note,
+        })
+    );
+    info!(
+        local = %local_link.label(),
+        receiver = %peer_link.as_ref().map_or("not reported".into(), |l| l.label()),
+        "links"
+    );
+    if let Some(note) = &wifi_note {
+        warn!("{note}");
     }
 
     let stats = Arc::new(Stats::default());
@@ -575,6 +656,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             output_slot2,
                             play_stats2,
                             faders2,
+                            // The call coming back is not part of the share.
+                            None,
                         ) {
                             warn!(error = %e, "return audio playback stopped");
                         }
@@ -605,6 +688,17 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
     // Adaptive target bitrate, read by the pipeline each frame.
     let target_bps = Arc::new(AtomicU32::new(opts.bitrate_bps));
+    // S49: the rest of what adaptation decides, shared with the pipeline
+    // (rung), the writer (pacing) and the PLI handler (coalescing).
+    let adapt_state = Arc::new(AdaptState::default());
+    // The ladder needs a receiver that takes a mid-share size change (S49),
+    // and a sending PC whose own Relay Camera is off: that camera is fed the
+    // encoder's input, at a size fixed for the share.
+    let ladder_allowed =
+        peer_s49 && !opts.vcam && std::env::var("RELAY_LADDER").map_or(true, |v| v != "0");
+    if peer_s49 && !ladder_allowed {
+        info!(vcam = opts.vcam, "resolution ladder off for this share; bitrate still adapts");
+    }
 
     // Loss feedback from the receiver → the damped bitrate control; and the
     // receiver's reason, if it stops on a fatal error. The same task owns the
@@ -619,10 +713,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     let (bye_sent_tx, bye_sent_rx) = tokio::sync::oneshot::channel::<()>();
     {
         let target = target_bps.clone();
-        // S30's controller, not S33's `AimdBitrate`: the two sessions wrote a
-        // bitrate control each against the same task, and S30's is the one
-        // that survived into `control.rs` with the loss measurements behind it.
-        let mut control = super::control::BitrateControl::new(opts.bitrate_bps);
+        let retx = events.retransmit_budget.clone();
+        let state = adapt_state.clone();
+        // S30's loss controller, wrapped by S49's delay half and ladder
+        // (`control::SenderAdapt`). With an older receiver only the loss
+        // half runs, exactly as before.
+        let mut adapt = super::control::SenderAdapt::new(opts.bitrate_bps, None);
+        let mut announced: Option<(super::ladder::Rung, super::control::Cause, u32)> = None;
+        let mut last_report: Option<super::control::Feedback> = None;
         let mut clock = signal::ClockFilter::seeded(offset_ns, rtt_ns);
         let mut bye_rx = bye_rx;
         // Test hook: the pre-S33 behaviour, to measure the drift it leaves.
@@ -633,51 +731,112 @@ pub async fn run(opts: SendOpts) -> Result<()> {
             let mut seq = 1000u32;
             loop {
                 tokio::select! {
-                    incoming = sig.recv() => match incoming {
-                        Ok(signal::SigMsg::Loss { fraction }) => {
-                            let was = target.load(Ordering::Relaxed);
-                            let now = control.on_window(fraction);
-                            if now != was {
-                                target.store(now, Ordering::Relaxed);
-                                info!(
-                                    from_mbps = was as f64 / 1e6,
-                                    to_mbps = now as f64 / 1e6,
-                                    loss_percent = fraction as f64 * 100.0,
-                                    "bitrate target changed"
-                                );
-                            }
-                        }
-                        Ok(signal::SigMsg::Pong { seq: got, t1_ns, t2_ns, t3_ns })
-                            if got == seq =>
-                        {
-                            let (offset, rtt) =
-                                signal::clock_sample(t1_ns, t2_ns, t3_ns, signal::unix_now_ns());
-                            match clock.push(offset, rtt) {
-                                Some(offset_ns) => {
-                                    debug!(
-                                        offset_ms = offset_ns as f64 / 1e6,
-                                        sample_ms = offset as f64 / 1e6,
-                                        rtt_ms = rtt as f64 / 1e6,
-                                        "clock offset updated"
-                                    );
-                                    let msg = signal::SigMsg::Clock { offset_ns, rtt_ns: rtt };
-                                    if sig.send(&msg).await.is_err() {
-                                        break;
+                    incoming = sig.recv() => {
+                        let decision = match incoming {
+                            Ok(signal::SigMsg::Loss { fraction }) => Some(adapt.on_loss_window(fraction)),
+                            Ok(signal::SigMsg::Feedback { report }) => {
+                                if adapt.ladder.is_none() && ladder_allowed {
+                                    if let Some(top) = state.top.get() {
+                                        let l = super::ladder::Ladder::new(*top, codec);
+                                        info!(rungs = ?l.rungs().iter().map(|r| r.label()).collect::<Vec<_>>(), "resolution ladder ready");
+                                        adapt.ladder = Some(l);
                                     }
                                 }
-                                None => debug!(
-                                    rtt_ms = rtt as f64 / 1e6,
-                                    "clock sample ignored: slow round trip"
-                                ),
+                                debug!(
+                                    queue_ms = report.queue_ms,
+                                    queue_max_ms = report.queue_max_ms,
+                                    recv_mbps = report.recv_kbps as f64 / 1e3,
+                                    lost = report.lost,
+                                    "feedback"
+                                );
+                                last_report = Some(report);
+                                Some(adapt.on_feedback(&report))
+                            }
+                            Ok(signal::SigMsg::Pong { seq: got, t1_ns, t2_ns, t3_ns }) if got == seq => {
+                                let (offset, rtt) =
+                                    signal::clock_sample(t1_ns, t2_ns, t3_ns, signal::unix_now_ns());
+                                match clock.push(offset, rtt) {
+                                    Some(offset_ns) => {
+                                        debug!(
+                                            offset_ms = offset_ns as f64 / 1e6,
+                                            sample_ms = offset as f64 / 1e6,
+                                            rtt_ms = rtt as f64 / 1e6,
+                                            "clock offset updated"
+                                        );
+                                        let msg = signal::SigMsg::Clock { offset_ns, rtt_ns: rtt };
+                                        if sig.send(&msg).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    None => debug!(
+                                        rtt_ms = rtt as f64 / 1e6,
+                                        "clock sample ignored: slow round trip"
+                                    ),
+                                }
+                                None
+                            }
+                            Ok(signal::SigMsg::Abort { reason }) => {
+                                let _ = abort_tx.send(reason).await;
+                                break;
+                            }
+                            Ok(_) => None,
+                            Err(_) => break,
+                        };
+                        let Some(d) = decision else { continue };
+                        let was = target.swap(d.target_bps, Ordering::Relaxed);
+                        if d.target_bps < was && d.cause == super::control::Cause::Queue {
+                            // A keyframe asked for now would go into the queue that
+                            // is being drained, and be damaged by it: wait it out.
+                            let q = last_report.map_or(100.0, |r| r.queue_ms);
+                            state.hold_keyframes_for(Duration::from_millis(q.clamp(50.0, 300.0) as u64));
+                        }
+                        if d.target_bps != was {
+                            info!(
+                                from_mbps = was as f64 / 1e6,
+                                to_mbps = d.target_bps as f64 / 1e6,
+                                cause = d.cause.as_str(),
+                                queue_ms = last_report.map(|r| r.queue_ms),
+                                queue_max_ms = last_report.map(|r| r.queue_max_ms),
+                                recv_mbps = last_report.map(|r| r.recv_kbps as f64 / 1e3),
+                                "bitrate target changed"
+                            );
+                        }
+                        state.constrained.store(d.constrained, Ordering::Relaxed);
+                        retx.store(
+                            super::feedback::retransmit_budget_for(d.constrained, d.target_bps),
+                            Ordering::Relaxed,
+                        );
+                        state.cause.store(d.cause as u8, Ordering::Relaxed);
+                        if let Some(r) = d.rung {
+                            info!(rung = %r.label(), target_mbps = d.target_bps as f64 / 1e6, "resolution step");
+                            *state.rung_wanted.lock().unwrap() = Some(r);
+                        }
+                        // Tell an S49 receiver what we are doing, when it
+                        // changes enough to read differently on its screen.
+                        let Some(top) = state.top.get().copied() else { continue };
+                        if !peer_s49 {
+                            continue;
+                        }
+                        let rung = adapt.ladder.as_ref().map_or(top, |l| l.current());
+                        let news = announced.is_none_or(|(r, c, t)| {
+                            r != rung
+                                || c != d.cause
+                                || (f64::from(t) - f64::from(d.target_bps)).abs() > f64::from(t) * 0.1
+                        });
+                        if news {
+                            announced = Some((rung, d.cause, d.target_bps));
+                            let msg = signal::SigMsg::Adapt {
+                                width: rung.width,
+                                height: rung.height,
+                                fps: rung.fps,
+                                target_bps: d.target_bps,
+                                cause: d.cause.as_str().into(),
+                            };
+                            if sig.send(&msg).await.is_err() {
+                                break;
                             }
                         }
-                        Ok(signal::SigMsg::Abort { reason }) => {
-                            let _ = abort_tx.send(reason).await;
-                            break;
-                        }
-                        Ok(_) => {}
-                        Err(_) => break,
-                    },
+                    }
                     _ = &mut bye_rx => {
                         let _ = sig.send(&signal::SigMsg::Bye).await;
                         let _ = bye_sent_tx.send(());
@@ -695,11 +854,15 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         }));
     }
 
-    // PLI from the receiver → force an IDR.
+    // PLI from the receiver → force an IDR. On a constrained link a burst of
+    // requests (one per damaged frame) is answered with one keyframe, not one
+    // each (S49); wired answers every request at once, as before.
     {
         let kf = keyframe_wanted.clone();
         let vt = video_track.clone();
+        let state = adapt_state.clone();
         runtime.spawn(Box::pin(async move {
+            let mut gate = super::pacing::KeyframeGate::default();
             while let Some(ev) = vt.poll().await {
                 let TrackLocalEvent::OnRtcpPacket(packets) = ev;
                 for p in packets {
@@ -707,12 +870,25 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         .downcast_ref::<rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication>()
                         .is_some()
                     {
-                        info!("the receiver asked for a keyframe");
-                        kf.store(true, Ordering::Relaxed);
+                        let constrained = state.constrained.load(Ordering::Relaxed);
+                        if gate.request(std::time::Instant::now(), constrained) {
+                            info!("the receiver asked for a keyframe");
+                            kf.store(true, Ordering::Relaxed);
+                        } else {
+                            debug!(coalesced = gate.coalesced, "keyframe request coalesced with the last one");
+                        }
                     }
                 }
             }
         }));
+    }
+
+    // NDI output (S51): made here, the runtime loaded only when it is turned
+    // on. The video and program-audio pipelines tee into it.
+    let ndi = crate::ndi::NdiOutput::with_runtime(relay_core::ndi::share_source_name());
+    if opts.ndi {
+        let n = ndi.clone();
+        tokio::task::spawn_blocking(move || n.apply(true));
     }
 
     // Source-switch mailbox: stdin queues, the pipeline applies at a frame
@@ -749,6 +925,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let rec = recorder.clone();
         let sw = switcher.clone();
         let vcam = opts.vcam;
+        let ndi = ndi.clone();
+        let adapt = adapt_state.clone();
         std::thread::Builder::new().name("relay-video-pipeline".into()).spawn(move || {
             if let Err(e) = video_pipeline(
                 codec,
@@ -766,6 +944,8 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 record_setup,
                 sw,
                 vcam,
+                ndi,
+                adapt,
             ) {
                 warn!(error = %e, "video pipeline stopped");
                 println!(
@@ -784,11 +964,20 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let stop = stop.clone();
         let rec = recorder.clone();
         let faders = faders.clone();
+        let ndi = Some(ndi.clone());
         Some(std::thread::Builder::new().name("relay-audio-pipeline".into()).spawn(move || {
             // The program mix follows the default output (S40); no pick.
-            if let Err(e) =
-                audio_pipeline(source, AudioTrack::Program, None, atx, stats, stop, rec, faders)
-            {
+            if let Err(e) = audio_pipeline(
+                source,
+                AudioTrack::Program,
+                None,
+                atx,
+                stats,
+                stop,
+                rec,
+                faders,
+                ndi,
+            ) {
                 warn!(error = %e, "audio pipeline stopped");
             }
         })?)
@@ -803,6 +992,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let rec = recorder.clone();
         let faders = faders.clone();
         let mic_slot = device_slots.mic.clone();
+        // A mic-only share publishes the mic; otherwise NDI carries the
+        // program mix, as the one stream a production would want.
+        let mic_ndi = opts.audio.is_none().then(|| ndi.clone());
         Some(std::thread::Builder::new().name("relay-mic-pipeline".into()).spawn(move || {
             // A missing or exclusively-held microphone must not take the
             // share down with it: video and the program mix carry on.
@@ -815,6 +1007,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 stop,
                 rec,
                 faders,
+                mic_ndi,
             ) {
                 warn!(error = %e, "microphone pipeline stopped");
                 println!(
@@ -846,6 +1039,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 stop,
                 rec,
                 faders,
+                None,
             ) {
                 warn!(error = %e, "rest-of-PC audio pipeline stopped");
                 println!(
@@ -865,7 +1059,9 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let track = video_track.clone();
         let sender = video_sender.clone();
         let stats = stats.clone();
-        let samples_per_frame = 90_000 / opts.fps.max(1);
+        let state = adapt_state.clone();
+        let target = target_bps.clone();
+        let fps = opts.fps;
         let payloader = super::video_codec(codec).rtp_codec.payloader()?;
         runtime.spawn(Box::pin(async move {
             let Ok(params) = sender.get_parameters().await else { return };
@@ -886,10 +1082,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                 Box::new(rtc::rtp::sequence::new_random_sequencer()),
                 90_000,
             );
+            // S49: on a constrained link a frame much larger than the rest
+            // (a keyframe) leaves at a measured rate instead of as one burst.
+            let mut pacer = super::pacing::Pacer::new();
+            let mut hires: Option<super::pacing::HiResTimer> = None;
             'aus: while let Some(au) = vrx.recv().await {
                 let n = au.data.len() as u64;
                 let t0 = std::time::Instant::now();
-                let packets = match packetizer.packetize(&Bytes::from(au.data), samples_per_frame) {
+                let packets = match packetizer.packetize(&Bytes::from(au.data), au.samples) {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(error = %e, "packetize failed");
@@ -897,11 +1097,31 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     }
                 };
                 let burst = packets.len();
-                for p in packets {
-                    if let Err(e) = track.write_rtp(p).await {
-                        tracing::warn!(error = %e, "write_rtp failed");
-                        break 'aus;
-                    }
+                let constrained = state.constrained.load(Ordering::Relaxed);
+                let span = pacer.plan(
+                    n as usize,
+                    constrained.then(|| target.load(Ordering::Relaxed)),
+                    fps,
+                );
+                // Millisecond sleeps need millisecond timers; held only
+                // while the link is constrained (see `HiResTimer`).
+                if constrained && hires.is_none() {
+                    hires = super::pacing::HiResTimer::acquire();
+                } else if !constrained {
+                    hires = None;
+                }
+                if let Err(e) = send_paced(&track, packets, t0, span).await {
+                    tracing::warn!(error = %e, "write_rtp failed");
+                    break 'aus;
+                }
+                if !span.is_zero() {
+                    debug!(
+                        packets = burst,
+                        span_ms = span.as_millis() as u64,
+                        took_ms = t0.elapsed().as_millis() as u64,
+                        keyframe = au.keyframe,
+                        "large frame paced"
+                    );
                 }
                 // Nothing paces this: the whole access unit is queued at once
                 // and leaves at line rate. Record the big ones (S30).
@@ -914,9 +1134,19 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         "large video burst"
                     );
                 }
-                if t0.elapsed() > Duration::from_millis(30) {
-                    tracing::debug!(ms = t0.elapsed().as_millis() as u64, "slow video write");
+                let took = t0.elapsed();
+                if took > Duration::from_millis(100) {
+                    tracing::info!(
+                        ms = took.as_millis() as u64,
+                        packets = burst,
+                        bytes = n,
+                        queued = vrx.len(),
+                        "slow video write"
+                    );
+                } else if took > Duration::from_millis(30) {
+                    tracing::debug!(ms = took.as_millis() as u64, "slow video write");
                 }
+
                 stats.video_bytes.fetch_add(n, Ordering::Relaxed);
                 stats.video_frames.fetch_add(1, Ordering::Relaxed);
                 if au.keyframe {
@@ -989,6 +1219,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     "rest_packets": stats.rest_packets.load(Ordering::Relaxed),
                     "rest_peak": stats.rest_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "vcam_frames": stats.vcam_frames.load(Ordering::Relaxed),
+                    "ndi": ndi.status_json(),
                     "return_packets": stats.return_packets.load(Ordering::Relaxed),
                     "return_peak": stats.return_peak_milli.load(Ordering::Relaxed) as f64 / 1e3,
                     "cpu_percent": fp.cpu_percent,
@@ -1001,6 +1232,22 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                     line["replay_fill"] = (rs.ring_fill_milli.load(Ordering::Relaxed) as f64 / 1e3).into();
                     line["replays_saved"] = rs.replays_saved.load(Ordering::Relaxed).into();
                     line["rec_stopped_disk"] = rs.stopped_for_disk.load(Ordering::Relaxed).into();
+                }
+                // S49: the links and what Relay is doing about them.
+                line["link"] = super::receiver::link_json(&local_link);
+                if let Some(l) = &peer_link {
+                    line["peer_link"] = super::receiver::link_json(l);
+                }
+                if let Some(top) = adapt_state.top.get().copied() {
+                    let rung = adapt_state.rung_now.lock().unwrap().unwrap_or(top);
+                    line["adapt"] = super::control::adapt_json(
+                        rung,
+                        top,
+                        target_bps.load(Ordering::Relaxed),
+                        adapt_state.cause(),
+                    );
+                    line["adapt"]["rung_changes"] = adapt_state.rung_changes.load(Ordering::Relaxed).into();
+                    line["adapt"]["rebuild_ms_last"] = adapt_state.rebuild_ms_last.load(Ordering::Relaxed).into();
                 }
                 println!("{line}");
                 last_bytes = bytes;
@@ -1047,7 +1294,7 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                             let changed = device_slots.apply(track, device.clone());
                             info!(?track, device = device.as_deref().unwrap_or("System default"), changed, "audio device set");
                         }
-                        Some(EngineCmd::Host { .. }) => {
+                        Some(EngineCmd::Host { .. } | EngineCmd::LocalShare { .. }) => {
                             debug!("host is a receiver command; ignored by the sender");
                         }
                         // S36's "Relay Camera here" stays decided at spawn:
@@ -1056,6 +1303,14 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                         // only (S43b; docs/plans/S43-vcam-win10.md).
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam is a receiver command; ignored by the sender");
+                        }
+                        Some(EngineCmd::Return { .. }) => {
+                            debug!("return is a receiver command; ignored by the sender");
+                        }
+                        Some(EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received");
+                            let n = ndi.clone();
+                            tokio::task::spawn_blocking(move || n.apply(on));
                         }
                         None => {
                             debug!(line = %l, "unrecognised stdin line ignored");
@@ -1100,6 +1355,25 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     super::close_bounded(&pc, "sender").await;
     println!("{}", serde_json::json!({ "event": "stopped" }));
     result
+}
+
+/// Write one access unit's packets, spread evenly over `span` from `t0`
+/// (zero: one burst, as always on a wired link). See `pacing::Pacer`.
+pub(crate) async fn send_paced(
+    track: &TrackLocalStaticRTP,
+    packets: Vec<rtc::rtp::Packet>,
+    t0: Instant,
+    span: Duration,
+) -> Result<()> {
+    let n = packets.len();
+    for (i, p) in packets.into_iter().enumerate() {
+        let due = super::pacing::Pacer::due(t0, span, i, n);
+        if due > Instant::now() + Duration::from_millis(1) {
+            tokio::time::sleep_until(due.into()).await;
+        }
+        track.write_rtp(p).await?;
+    }
+    Ok(())
 }
 
 /// What `video_pipeline` needs to bring up the recorder once the capture
@@ -1158,6 +1432,8 @@ fn video_pipeline(
     record_setup: Option<RecordSetup>,
     switcher: Arc<StdMutex<Switcher>>,
     vcam: bool,
+    ndi: Arc<crate::ndi::NdiOutput>,
+    adapt: Arc<AdaptState>,
 ) -> Result<()> {
     // WGC's free-threaded FrameArrived callbacks are delivered on an MTA
     // threadpool thread; without a process MTA they stop after the first
@@ -1171,9 +1447,11 @@ fn video_pipeline(
     let in_size = src.size();
     // The encoder's output size is fixed for the life of the share; sources
     // of any size are GPU-scaled into it, so switching never renegotiates.
-    let size = out_size.unwrap_or(in_size);
+    let mut size = out_size.unwrap_or(in_size);
     let mut conv = crate::encode::convert::Converter::new(&gpu, in_size, size)?;
-    let enc = MfEncoder::new(
+    // Changed only by a resolution/frame-rate step (S49).
+    let mut cur_fps = fps;
+    let mut enc = MfEncoder::new(
         &gpu,
         &EncoderConfig { codec, width: size.0, height: size.1, fps, bitrate_bps },
     )?;
@@ -1235,6 +1513,15 @@ fn video_pipeline(
     // into it -- so the camera never has to change format. Best-effort like
     // the receiver's: a failure is reported once and the share goes on.
     let mut vcam_sink = if vcam { start_vcam_sink(size, fps) } else { None };
+    // S51: and as an NDI source, when that is on. The same NV12, read back
+    // a frame later so the encoder never waits for it.
+    let mut ndi_video = crate::ndi::video::VideoProducer::new(ndi, fps);
+
+    // S49: the share's top rung is what it starts at; the ladder never goes
+    // above it.
+    let top = super::ladder::Rung { width: size.0, height: size.1, fps };
+    let _ = adapt.top.set(top);
+    *adapt.rung_now.lock().unwrap() = Some(top);
 
     let mut inflight: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
     let mut applied_bps = bitrate_bps;
@@ -1258,6 +1545,70 @@ fn video_pipeline(
                 if want != applied_bps && enc.set_bitrate(want).is_ok() {
                     applied_bps = want;
                     tracing::debug!(bps = want, "bitrate adjusted");
+                }
+                // A resolution / frame-rate step from the ladder (S49): a new
+                // encoder at the new size, the converter scaling into it, and
+                // the recorder rolling to a file of that size. The new encoder
+                // starts with an IDR, which is what the receiver needs to
+                // switch its decoder over.
+                let step = adapt.rung_wanted.lock().unwrap().take();
+                if let Some(r) =
+                    step.filter(|r| (r.width, r.height, r.fps) != (size.0, size.1, cur_fps))
+                {
+                    let t0 = Instant::now();
+                    let cfg = EncoderConfig {
+                        codec,
+                        width: r.width,
+                        height: r.height,
+                        fps: r.fps,
+                        bitrate_bps: applied_bps,
+                    };
+                    match MfEncoder::new(&gpu, &cfg).and_then(|e| {
+                        Ok((
+                            e,
+                            crate::encode::convert::Converter::new(
+                                &gpu,
+                                conv_in,
+                                (r.width, r.height),
+                            )?,
+                        ))
+                    }) {
+                        Ok((new_enc, mut new_conv)) => {
+                            new_conv.set_source_rect(crop);
+                            enc = new_enc;
+                            conv = new_conv;
+                            size = (r.width, r.height);
+                            cur_fps = r.fps;
+                            pacer = crate::pace::FramePacer::new(r.fps);
+                            inflight.clear();
+                            last_nv12 = None;
+                            if let Some(rec) = recorder.get() {
+                                rec.resize(r.width, r.height);
+                            }
+                            let ms = t0.elapsed().as_millis() as u64;
+                            *adapt.rung_now.lock().unwrap() = Some(r);
+                            adapt.rung_changes.fetch_add(1, Ordering::Relaxed);
+                            adapt.rebuild_ms_last.store(ms, Ordering::Relaxed);
+                            info!(
+                                w = r.width,
+                                h = r.height,
+                                fps = r.fps,
+                                ms,
+                                "encoder rebuilt for a new rung"
+                            );
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "rung", "width": r.width, "height": r.height,
+                                    "fps": r.fps, "rebuild_ms": ms,
+                                })
+                            );
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(error = %e, rung = %r.label(), "could not switch rung; staying")
+                        }
+                    }
                 }
                 // Swap the capture source if a switch is queued. Encoder,
                 // track and peer connection stay as they are — the new
@@ -1315,7 +1666,7 @@ fn video_pipeline(
                         // A keyframe asked for on a still screen is owed now,
                         // not at the next screen change: the receiver sat
                         // paused through five requests for 2.3 s (r34, 2b).
-                        if keyframe_wanted.swap(false, Ordering::Relaxed) {
+                        if adapt.take_keyframe(&keyframe_wanted) {
                             let _ = enc.request_keyframe();
                         }
                         let pts = time::qpc_now_100ns();
@@ -1347,7 +1698,7 @@ fn video_pipeline(
                     }
                     continue;
                 }
-                if keyframe_wanted.swap(false, Ordering::Relaxed) {
+                if adapt.take_keyframe(&keyframe_wanted) {
                     let _ = enc.request_keyframe();
                 }
                 emit_preview(&mut preview, &gpu, &frame.texture, conv_in);
@@ -1377,6 +1728,18 @@ fn video_pipeline(
                         }
                     }
                 }
+                let tee = crate::decode::mf::DecodedFrame {
+                    texture: nv12.clone(),
+                    subresource: 0,
+                    pts_100ns: frame.qpc_100ns,
+                    width: size.0,
+                    height: size.1,
+                };
+                if let Err(e) = ndi_video.push(&gpu.device, &gpu.context, &tee) {
+                    warn!(error = %e, "NDI video stopped; the share carries on");
+                    ndi_video.output().fail(format!("NDI video stopped: {e}"));
+                    ndi_video.reset();
+                }
                 enc.submit(&nv12, frame.qpc_100ns)?;
                 last_nv12 = Some(nv12);
                 inflight.insert(frame.qpc_100ns, time::qpc_now_100ns());
@@ -1399,7 +1762,7 @@ fn video_pipeline(
                     .store(((now_qpc - out.pts_100ns) / 10).max(0) as u64, Ordering::Relaxed);
                 let mut data = sei::timestamp_sei(codec, capture_unix_ns);
                 data.extend_from_slice(&out.data);
-                let au = VideoAu { data, keyframe: out.keyframe };
+                let au = VideoAu { data, keyframe: out.keyframe, samples: 90_000 / cur_fps.max(1) };
                 if tx.blocking_send(au).is_err() {
                     break; // writer gone
                 }
@@ -1467,6 +1830,7 @@ fn audio_pipeline(
     stop: Arc<AtomicBool>,
     recorder: Arc<OnceLock<Recorder>>,
     faders: Arc<crate::mixer::Faders>,
+    ndi: Option<Arc<crate::ndi::NdiOutput>>,
 ) -> Result<()> {
     let profile = match which {
         AudioTrack::Program | AudioTrack::Rest => OpusProfile::program(),
@@ -1481,6 +1845,9 @@ fn audio_pipeline(
             AudioTrack::Rest => crate::mixer::Track::Rest,
         },
     );
+    if let Some(n) = ndi {
+        stream.set_ndi(n);
+    }
     // Per track, not per share: the program mix and the microphone are
     // different endpoints and can run at different rates, so each one reports
     // its own conversion.

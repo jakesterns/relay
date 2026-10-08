@@ -1816,6 +1816,10 @@ the other, means changing that last step and nothing upstream of it.
 Two separate integrations sharing one session only because both are outbound
 control/output surfaces. Split if either grows.
 
+**Split (2026-10-07):** NDI output is S51, `feat/s51-ndi-output` — plan,
+licence verdict and two-PC test plan in `docs/plans/S51-ndi-output.md` and
+`docs/dev/ndi-licensing.md`. S20 is the Stream Deck plugin only.
+
 ## S21 — AI tuning loop · `feat/ai-tuning`
 The `ai/` crate in the brief. User-supplied API key; headset measured curve plus
 measured footstep/explosion bands from live game audio plus a stated goal → a

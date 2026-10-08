@@ -25,7 +25,14 @@ pub mod decode;
 pub mod devices;
 #[cfg(windows)]
 pub mod encode;
+#[cfg(windows)]
+pub mod learn;
+#[cfg(windows)]
+pub mod learn_file;
+#[cfg(windows)]
+pub mod look;
 pub mod mixer;
+pub mod ndi;
 pub mod pace;
 #[cfg(windows)]
 pub mod playback;

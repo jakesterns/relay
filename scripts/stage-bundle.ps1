@@ -4,7 +4,7 @@
   bundler expects to find it.
 
 .DESCRIPTION
-  Relay installs eight files into one folder:
+  Relay installs these files into one folder:
 
     relay-ui.exe        the Tauri shell (the bundle's main binary)
     relay-core.exe      the always-on service
@@ -14,6 +14,9 @@
     relay-preview.exe   the offline A/B renderer, spawned on demand
     relay_apo.dll       the endpoint APO (only registered if opted in)
     relay_vdevice.dll   the camera media source (only registered if opted in)
+    Processing.NDI.Lib.x64.dll, Processing.NDI.Lib.Licenses.txt
+                        NDI's own runtime and its notice (every build
+                        but -NoNdi; NDI(R) is a registered trademark of Vizrt NDI AB)
     uninstall.exe       written by NSIS
 
   The five helper exes ride along as Tauri "externalBin" sidecars, which is
@@ -37,9 +40,22 @@
 
 .PARAMETER SkipBuild
   Stage from whatever is already in target\release.
+
+.PARAMETER NoNdi
+  Build without the bundled NDI(R) runtime (docs/dev/ndi-licensing.md,
+  option B). Offline development only: by default every build -- local,
+  test or release -- fetches the pinned runtime from NDI (once; it is cached
+  in %LOCALAPPDATA%\RelayBuildCache, or $env:RELAY_BUILD_CACHE), verifies
+  its SHA-256s and Vizrt's signature against scripts/ndi-runtime.psd1, and
+  fails if it cannot. An installer built with -NoNdi has no NDI runtime, so
+  NDI output then says the runtime is not found. RELAY_NO_NDI=1 does the
+  same for callers that pass no flags (install-local.ps1).
 #>
 [CmdletBinding()]
-param([switch]$SkipBuild)
+param(
+    [switch]$SkipBuild,
+    [switch]$NoNdi
+)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -137,6 +153,48 @@ if ($env:CI -or (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
 } else {
     Set-Content -Path $licOut -Encoding ascii -Value '<!doctype html><title>Licences</title><p>Development build: the licence list is generated in CI releases. See THIRD_PARTY_NOTICES.md.</p>'
     Write-Warning 'cargo-about not installed: licenses.html is a placeholder (CI builds the real one)'
+}
+
+# NDI(R) runtime (option B, docs/dev/ndi-licensing.md): every installer
+# bundles NDI's own runtime DLL and its licences file, fetched from NDI and
+# checked against scripts/ndi-runtime.psd1 -- never from the repository. A
+# test installer without it would not test what ships (PC2, r56: 4.7 MB, no
+# NDI), so fetching is the default and a failure stops the build; -NoNdi is
+# the explicit offline opt-out. tauri.bundle.conf.json maps the whole
+# binaries\ndi folder into the install folder, so the folder always exists.
+$pins = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'ndi-runtime.psd1')
+$ndiStage = Join-Path $staging 'ndi'
+if (Test-Path $ndiStage) { Remove-Item -LiteralPath $ndiStage -Recurse -Force }
+# Nothing NDI anywhere else in the staging folder (a copy dropped by hand).
+$stray = @(Get-ChildItem -Path $staging -Recurse -File -Filter 'Processing.NDI.*' -ErrorAction SilentlyContinue)
+if ($stray.Count -gt 0) {
+    throw "NDI runtime files outside the verified bundle: $($stray.FullName -join ', ') - remove them; see docs/dev/ndi-licensing.md"
+}
+New-Item -ItemType Directory -Force -Path $ndiStage | Out-Null
+# RELAY_NO_NDI=1 is the same opt-out for callers that pass no flags
+# (install-local.ps1, the post-commit hook).
+if ($env:RELAY_NO_NDI -eq '1') { $NoNdi = $true }
+if ($NoNdi) {
+    Write-Warning 'NDI runtime NOT bundled (-NoNdi): this installer is for offline development only; NDI output will say the runtime is not found.'
+} else {
+    # Cached outside the tree so every worktree shares one download; the
+    # fetch script re-verifies a cached copy before using it.
+    $ndiCache = & (Join-Path $PSScriptRoot 'fetch-ndi-runtime.ps1') -PrintCacheDir
+    & (Join-Path $PSScriptRoot 'fetch-ndi-runtime.ps1') -Out $ndiCache
+    foreach ($f in $pins.Files) {
+        $src = Join-Path $ndiCache $f.Name
+        $dst = Join-Path $ndiStage $f.Name
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+        $h = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($h -ne $f.Sha256) { throw "$($f.Name): staged SHA-256 $h, pinned $($f.Sha256)" }
+        if ($f.Signed) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $dst
+            if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate.Subject.StartsWith($pins.Signer)) {
+                throw "$($f.Name): signature $($sig.Status), expected $($pins.Signer)"
+            }
+        }
+        Write-Host ("  resource ndi\{0} (NDI runtime {1}, {2:N1} MB)" -f $f.Name, $pins.Version, ((Get-Item $dst).Length / 1MB))
+    }
 }
 
 Write-Host ''

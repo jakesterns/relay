@@ -37,11 +37,19 @@ pub enum SigMsg {
         /// the empty MAC and says `Bye` — which is the right fallback.
         #[serde(default)]
         trusted: bool,
+        /// S49: this end's link. Its presence also says "I understand
+        /// `Feedback`, `Adapt` and mid-share resolution changes"; an older
+        /// receiver ignores the field and is never sent them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<super::netcheck::LinkInfo>,
     },
     Answer {
         name: String,
         sdp: String,
         mac: String,
+        /// S49, as on `Offer`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        link: Option<super::netcheck::LinkInfo>,
     },
     /// Sender→receiver clock probe; `t1_ns` is the sender's send time.
     Ping {
@@ -75,6 +83,28 @@ pub enum SigMsg {
         reason: String,
     },
     Bye,
+    /// S49 receiver→sender, every 250 ms, in place of `Loss`: loss counts,
+    /// the standing queue and the arriving rate. Only sent to a sender whose
+    /// `Offer` carried `link`.
+    Feedback {
+        report: super::control::Feedback,
+    },
+    /// S49 sender→receiver: what the sender is doing about the link, for the
+    /// receiver's screen ("lowered to 1440p60 to stay smooth"). Only sent to
+    /// a receiver whose `Answer` carried `link`.
+    Adapt {
+        width: u32,
+        height: u32,
+        fps: u32,
+        target_bps: u32,
+        /// `steady`, `queue`, `loss` or `recovering`.
+        cause: String,
+    },
+    /// Any message type this build does not know. Before S49 an unknown
+    /// type was a parse error, which ended the signalling loop and, on the
+    /// receiver, the share; now it is skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 pub struct SigStream {
@@ -411,6 +441,63 @@ mod tests {
         assert!(matches!(m, SigMsg::Clock { offset_ns: -5, rtt_ns: 9 }));
     }
 
+    /// S49 across versions. An offer or answer without `link` is a pre-S49
+    /// peer (never sent `Feedback`/`Adapt`); one with it round-trips; and a
+    /// message type this build has never heard of is skipped, not fatal.
+    #[test]
+    fn s49_messages_are_compatible_both_ways() {
+        use super::super::netcheck::{Band, LinkInfo, LinkKind};
+        let m: SigMsg =
+            serde_json::from_str(r#"{"type":"answer","name":"pc","sdp":"v=0","mac":"ab"}"#)
+                .unwrap();
+        assert!(matches!(m, SigMsg::Answer { link: None, .. }));
+        let wifi =
+            LinkInfo { kind: LinkKind::WiFi, band: Some(Band::G5), phy: None, mbps: Some(866) };
+        let a = SigMsg::Answer {
+            name: "pc".into(),
+            sdp: "v=0".into(),
+            mac: "ab".into(),
+            link: Some(wifi.clone()),
+        };
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains(r#""link":{"kind":"wi_fi","band":"5","mbps":866}"#), "{json}");
+        assert!(
+            matches!(serde_json::from_str(&json).unwrap(), SigMsg::Answer { link: Some(l), .. } if l == wifi)
+        );
+        // A pre-S49 build sees an offer with `link` as an ordinary offer:
+        // serde ignores unknown fields, and the MAC covers only the SDP.
+        let o = SigMsg::Offer {
+            name: "pc".into(),
+            sdp: "v=0".into(),
+            mac: "ab".into(),
+            trusted: false,
+            link: None,
+        };
+        assert!(!serde_json::to_string(&o).unwrap().contains("link"), "absent, not null");
+
+        let f = SigMsg::Feedback {
+            report: super::super::control::Feedback {
+                lost: 1,
+                packets: 900,
+                queue_ms: 3.5,
+                queue_max_ms: 40.0,
+                queue_first_ms: 10.0,
+                queue_last_ms: 3.5,
+                recv_kbps: 25_000,
+                window_ms: 250,
+            },
+        };
+        let back: SigMsg = serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+        assert!(matches!(back, SigMsg::Feedback { report } if report.recv_kbps == 25_000));
+        let ad: SigMsg = serde_json::from_str(
+            r#"{"type":"adapt","width":2560,"height":1440,"fps":60,"target_bps":20000000,"cause":"queue"}"#,
+        )
+        .unwrap();
+        assert!(matches!(ad, SigMsg::Adapt { height: 1440, .. }));
+        let future: SigMsg = serde_json::from_str(r#"{"type":"hologram","depth":3}"#).unwrap();
+        assert!(matches!(future, SigMsg::Unknown));
+    }
+
     /// A connected localhost TCP pair wrapped in SigStreams.
     async fn sig_pair() -> (SigStream, SigStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -429,6 +516,7 @@ mod tests {
             sdp: "v=0".into(),
             mac: "ab".into(),
             trusted: false,
+            link: None,
         })
         .await
         .unwrap();
@@ -461,6 +549,7 @@ mod tests {
             sdp: "x".repeat(300 * 1024),
             mac: "ab".into(),
             trusted: false,
+            link: None,
         };
         let send = a.send(&big);
         let recv = b.recv();
