@@ -366,15 +366,15 @@ impl FrameSource {
             let f = self.f;
             diag::line(&match (self.was_live, live) {
                 (_, true) => format!(
-                    "ring up: {}x{} frames → {} {}x{}",
+                    "ring up: {}x{} frames -> {} {}x{}",
                     self.last_ring_size.0,
                     self.last_ring_size.1,
                     f.fmt.name(),
                     f.width,
                     f.height
                 ),
-                (Some(true), false) => "vcam ring down → showing the waiting still".to_string(),
-                (_, false) => "no stream yet → showing the waiting still".to_string(),
+                (Some(true), false) => "vcam ring down -> showing the waiting still".to_string(),
+                (_, false) => "no stream yet -> showing the waiting still".to_string(),
             });
             self.was_live = Some(live);
         }
@@ -414,7 +414,7 @@ impl FrameSource {
         if (info.width, info.height) != self.last_ring_size {
             if self.was_live == Some(true) {
                 diag::line(&format!(
-                    "ring frames now {}x{} (was {}x{}) → {} {}x{}",
+                    "ring frames now {}x{} (was {}x{}) -> {} {}x{}",
                     info.width,
                     info.height,
                     self.last_ring_size.0,
