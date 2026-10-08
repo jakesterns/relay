@@ -290,6 +290,13 @@ fn resume_send_request(
     paths: &Paths,
 ) -> Result<crate::share::ShareRequest, String> {
     let mut req = rec.share.clone().ok_or_else(|| "no share request was recorded".to_string())?;
+    // The window the share was on is gone: end it, never fall back to the
+    // desktop (the engine would refuse too; this says why).
+    if let Some(crate::share::SourceTarget::Window { hwnd }) = req.source {
+        if !crate::winloop::window_alive(hwnd) {
+            return Err("the window being shared has closed".into());
+        }
+    }
     req.trusted = None;
     req.peer_id = None;
     let peer = rec.peer.clone().unwrap_or_default();
@@ -2104,8 +2111,8 @@ fn spawn_share(
     }
     // S50: a receive on this PC hides its window from capture *before* the
     // first frame is captured, not a moment after.
-    g.share_target = None;
-    sync_local_share_locked(&mut g, Some(crate::share::INITIAL_SHARE_TARGET));
+    g.share_target = req.source;
+    sync_local_share_locked(&mut g, Some(req.source.unwrap_or(crate::share::INITIAL_SHARE_TARGET)));
     // S51: NDI output is a saved setting, never the client's say.
     req.ndi = g.prefs.prefs().ndi_share;
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
@@ -2188,7 +2195,22 @@ fn spawn_share(
                 }
                 ShareEvent::SourceChanged { data } => {
                     if let Some(t) = crate::share::source_target_of(&data) {
-                        inner2.lock().share_target = Some(t);
+                        {
+                            let mut ig = inner2.lock();
+                            ig.share_target = Some(t);
+                            // r59: a reconnect resumes this source, not the
+                            // desktop the share started on.
+                            if let Some(r) = ig.send_intent.as_mut().and_then(|r| r.share.as_mut())
+                            {
+                                r.source = Some(t);
+                            }
+                            if let Some(r) = ig.last_share.as_mut() {
+                                r.source = Some(t);
+                            }
+                            if ig.send_intent.is_some() {
+                                persist_intent(&ig);
+                            }
+                        }
                         sync_local_share(&inner2);
                     }
                     let _ = events2.send(Event::SourceChanged { data });
@@ -3773,6 +3795,31 @@ mod learner_stop_tests {
         assert!(look_game_still_focused("g.exe", Some("G.EXE")));
         assert!(!look_game_still_focused("g.exe", Some("relay-ui.exe")));
         assert!(!look_game_still_focused("g.exe", None));
+    }
+}
+
+#[cfg(test)]
+mod resume_source_tests {
+    use super::*;
+
+    /// r59: a resumed share whose window has closed ends, with a reason; it
+    /// never restarts on the desktop.
+    #[test]
+    fn a_closed_window_ends_the_resume() {
+        let dir = std::env::temp_dir().join(format!("relay-resume-src-{}", std::process::id()));
+        let paths = Paths::at(dir.clone());
+        let mut req: crate::share::ShareRequest =
+            serde_json::from_str(r#"{"code":"123456"}"#).unwrap();
+        req.source = Some(crate::share::SourceTarget::Window { hwnd: 0x7FFF_FFF0 });
+        let rec = crate::resilience::Record::for_send(&req, "pc2", 0);
+        let err = resume_send_request(&rec, &paths).unwrap_err();
+        assert!(err.contains("closed"), "{err}");
+        // A display source resumes as recorded.
+        req.source = Some(crate::share::SourceTarget::Display { index: 1 });
+        let rec = crate::resilience::Record::for_send(&req, "pc2", 0);
+        let back = resume_send_request(&rec, &paths).unwrap();
+        assert_eq!(back.source, req.source);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 

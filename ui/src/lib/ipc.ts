@@ -296,6 +296,8 @@ export interface ShareRequest {
   container?: RecordingContainer;
   /** Thumbnails per second for the in-app preview; 0 = off. */
   preview_fps?: number;
+  /** What to capture from the first frame; omitted = the primary display. */
+  source?: SourceTarget;
 }
 /** Mirror of `crates/core/src/share.rs` `SourceTarget` (serde-tagged on `kind`). */
 export type SourceTarget =

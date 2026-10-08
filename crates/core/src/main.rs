@@ -669,6 +669,7 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         ndi: false,
                         mic_device: None,
                         output_device: None,
+                        source: None,
                         cursor: true,
                         preset: None,
                         record: std::env::var("RELAY_RECORD").is_ok(),

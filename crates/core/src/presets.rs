@@ -425,6 +425,7 @@ pub fn to_share_request(
         // Filled by the service from the saved mixer picks (S40).
         mic_device: None,
         output_device: None,
+        source: None,
     }
 }
 
