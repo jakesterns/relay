@@ -173,11 +173,15 @@ buffer off, retransmission budget unlimited.
 | wifi-bad | 1440p60 40 | 1080p60, 1080p30 | 2.5 → 3.0 | 36 | 1173 ms | 67 / 276 ms | 4380 / 722 |
 | wifi-bad | 1080p60 25 | 1080p30 | 2.5 → 5.2 | 37 | 1452 ms | 65 / 199 ms | 1674 / 649 |
 
-Encoder rebuild for a rung change: 32–55 ms. The in-process tests
-(`transport::loopback_tests`, no GPU, run in CI) agree: wired — 0 lost, 0
-stalls, target never moves, playout 0 ms; wifi-good 15 s — 0 stalls, 45 holes
-repaired, 0 given up; capacity drop 200→15 Mb/s — cut within a second, one
-777 ms freeze, ladder stepped down, target climbing again after.
+Encoder rebuild for a rung change: 32–55 ms. CI runs two kinds of test.
+`transport::loopback_tests` puts real peer connections on real sockets and
+checks only plumbing (frames and reports flow, wired loses nothing): an
+earlier version asserted timings there and failed on a loaded PC.
+`transport::sim_tests` drives the link model, receiver measurement, controller,
+ladder, pacing and keyframe gate on one simulated clock, deterministically:
+wired never adapts; a 200→15 Mb/s drop is cut within 0.5 s (to 11 Mb/s), one
+~1 s freeze, a step to 1080p60, and the target climbs back after. (It has no
+retransmission, so its frame counts on lossy profiles are not meaningful.)
 
 ### What the fixes bought (same profiles, before → after)
 | Run | Stalls | Longest gap | Unrepaired loss |

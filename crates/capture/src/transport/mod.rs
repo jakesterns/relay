@@ -39,6 +39,8 @@ pub mod signal;
 
 #[cfg(test)]
 mod loopback_tests;
+#[cfg(test)]
+mod sim_tests;
 
 use std::net::IpAddr;
 use std::sync::Arc;
