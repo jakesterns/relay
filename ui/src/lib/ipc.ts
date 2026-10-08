@@ -17,7 +17,67 @@ export interface AudioSettings {
   bands: EqBand[]; hrtf: boolean; limiter?: Limiter; apply_to_share: boolean;
   /** Apply the headset's imported correction curve ahead of `bands`. */
   headset_correction: boolean;
+  /** S46: learn this game's EQ. Absent = the default (on with audio
+   *  processing unless the layer was imported). */
+  learn_game_eq?: boolean;
+  /** S46: the player's goal; asked before learning starts. */
+  game_eq_goal?: Goal;
+  /** S46: take a newly converged curve without asking. */
+  game_eq_auto_apply?: boolean;
+  /** S46: the applied game layer (learned, imported or tuned). */
+  game_eq?: GameEqLayer;
 }
+
+/* ---- S46: learned game EQ. Mirror of crates/core/src/game_eq.rs and
+ *      crates/audio/src/learn/{derive,file,state}.rs. ---- */
+export type Goal = "awareness" | "dialogue" | "immersion";
+export type LayerSource = "learned" | "imported" | "tuned";
+export type LearnStatus = "off" | "learning" | "ready" | "applied" | "needs_relearn";
+export interface GameEqLayer {
+  curve: [number, number][]; source: LayerSource; exe_version?: string; note?: string;
+  base?: [number, number][];
+}
+export interface GameEqStatus {
+  exe: string; state: LearnStatus;
+  learning_on: boolean; needs_goal: boolean; learning_now: boolean;
+  goal: Goal | null; auto_apply: boolean; source: LayerSource | null;
+  progress: number; active_minutes: number;
+  targets: number; maskers: number; min_targets: number; min_maskers: number;
+  distinct_voices: number; exe_version: string | null;
+  applied: [number, number][] | null; offer: [number, number][] | null;
+  note: string; last_error: string | null;
+  /** A one-off message about the action just taken (e.g. an import made safe). */
+  notice?: string;
+  /** Evidence per sound class, by name (the record's arrays are in this order). */
+  classes?: ClassCount[];
+  /** Frames left out of the statistics, by reason. */
+  excluded?: {
+    overlay_voice: number; player_chat: number; cutscene_or_idle: number;
+    silence: number; clipped: number; volume_change: number;
+  };
+  /** What the last step to ready waits on. */
+  convergence?: { agreeing: number; needed: number; max_delta_db: number } | null;
+}
+export interface ClassCount { class: string; events: number; frames: number }
+export type GameEqAction =
+  | { kind: "status" }
+  | { kind: "set_learning"; enabled: boolean }
+  | { kind: "set_goal"; goal: Goal }
+  | { kind: "set_auto_apply"; enabled: boolean }
+  | { kind: "apply" }
+  | { kind: "relearn" }
+  | { kind: "reset" }
+  | { kind: "import"; text: string }
+  | { kind: "export"; note: string };
+export interface GameEqExport { text: string; path: string }
+export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
+
+/** The three goals, each with the one line the prompt shows. */
+export const GOALS: { key: Goal; label: string; line: string }[] = [
+  { key: "awareness", label: "Awareness", line: "Hear footsteps, reloads and callouts; tame explosions, music and engines." },
+  { key: "dialogue", label: "Dialogue", line: "Keep voices clear over effects and music." },
+  { key: "immersion", label: "Immersion", line: "A gentle balance that stays close to the game's own mix." },
+];
 export interface GpuColor { vibrance: number; gamma: number; contrast: number; shadow_lift: number; hue_deg: number }
 export interface MonitorSettings { brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number }
 export interface DisplaySettings { gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean }
@@ -133,13 +193,53 @@ export type HardwareItem =
   | { kind: "monitor"; value: HardwareMonitor };
 
 export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
+
+// S47: learned game display. Mirrors crates/core/src/learned_display.rs.
+/** Panel-neutral look, each axis 0..1 (0 = leave the game alone). */
+export interface LookTargets { shadow: number; saturation: number; highlight: number }
+export type PanelKind = "oled" | "ips" | "va" | "tn" | "unknown";
+export type LookPhase = "learning" | "converged";
+export type LookStatus = "off" | "learning" | "ready" | "applied" | "applied_imported" | "hdr_skipped";
+export interface LookReadiness {
+  frames: number; frames_needed: number; scenes: number; scenes_needed: number;
+  stable_checkpoints: number; checkpoints_needed: number; progress: number;
+  /** Checkpoints taken so far; gameplay frames per scene bucket, dark → bright. */
+  checkpoints?: number; scene_frames?: number[];
+  /** Largest disagreement among kept checkpoints, in applied units. */
+  delta?: { gamma: number; shadow_lift: number; vibrance: number } | null;
+  /** The newest checkpoint's look, shown while still learning. */
+  candidate?: LookTargets | null;
+}
+export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
+export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
+export interface MonitorLearnView {
+  monitor: MonitorId; monitor_name: string; panel: PanelKind; panel_guessed?: boolean; phase: LookPhase;
+  readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
+  use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
+  adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;
+  /** What the newest checkpoint would apply on this panel. */
+  candidate_adjustments?: LookAdjustments | null;
+  /** A settled look waiting for Apply; `adjustments` is only what is applied. */
+  offer?: LookTargets | null; offer_adjustments?: LookAdjustments | null;
+}
+export interface ImportedLook { look: LookTargets; note: string }
+export interface LearnView {
+  exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
+  monitors: MonitorLearnView[]; imported: ImportedLook | null;
+  privacy: string; tournament: string;
+}
+/** The owner's exact wording (S47). A notice only. */
+export const TOURNAMENT_NOTICE =
+  "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.";
+export const LOOK_PRIVACY =
+  "Frames are analysed in memory at low resolution while the game has focus. No frames are recorded or saved, and nothing leaves this PC.";
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
 export type ShareState =
   | { kind: "off" }
   | { kind: "sharing"; peer: string }
   /** The share dropped and Relay is bringing it back (S38). */
   | { kind: "reconnecting"; peer: string; attempt: number };
-export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
+export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled" | "notloaded";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
 export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
@@ -1150,6 +1250,46 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
   },
+  /** S46: read or act on a profile's learned game EQ. */
+  async gameEq(id: string, action: GameEqAction): Promise<GameEqReply> {
+    if (!isTauri()) return mockGameEq(id, action);
+    return invoke<GameEqReply>("game_eq", { id, action });
+  },
+  // S47 learned game display. Browser mode keeps an in-memory record.
+  async learnDisplayStatus(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_status", { exe });
+  },
+  async learnDisplaySet(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_set", { exe, enabled });
+  },
+  async learnDisplayApply(exe: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("this game's look has not settled yet; keep playing");
+    return invoke<LearnView>("learn_display_apply", { exe });
+  },
+  async learnDisplayAutoApply(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.auto_apply = enabled; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_auto_apply", { exe, enabled });
+  },
+  async learnDisplayRelearn(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_relearn", { exe });
+  },
+  async learnDisplayReset(exe: string): Promise<LearnView> {
+    if (!isTauri()) { mockLearnStore.delete(exe.toLowerCase()); return structuredClone(mockLearn(exe)); }
+    return invoke<LearnView>("learn_display_reset", { exe });
+  },
+  /** The current game layer as the versioned JSON file's text. */
+  async learnDisplayExport(exe: string, note: string, name?: string): Promise<string> {
+    if (!isTauri()) throw new Error("nothing has been learned for this game yet");
+    return invoke<string>("learn_display_export", { exe, name: name ?? null, note });
+  },
+  async learnDisplayImport(exe: string, json: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("importing needs the Relay service");
+    return invoke<LearnView>("learn_display_import", { exe, json });
+  },
+
   // S45 updates. Browser mode has nothing to offer.
   async updateStatus(): Promise<UpdateStatus> {
     if (!isTauri()) return structuredClone(mockUpdate);
@@ -1172,6 +1312,46 @@ export const api = {
     return invoke<UpdateStatus>("skip_update", { version });
   },
 };
+
+/** Browser-mode stand-in for the learned game EQ (S46): nothing is learned
+ *  in a browser, so it only reflects the profile's own switches. */
+function mockGameEq(id: string, action: GameEqAction): GameEqReply {
+  const p = mockStore.get(id);
+  if (!p) throw new Error("no such profile");
+  const a = p.audio;
+  if (action.kind === "set_learning") a.learn_game_eq = action.enabled;
+  if (action.kind === "set_goal") a.game_eq_goal = action.goal;
+  if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
+  if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
+  if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
+    throw new Error("needs the Relay core");
+  }
+  const processing = a.bands.length > 0 || a.hrtf || !!a.limiter || !!a.game_eq;
+  const on = a.learn_game_eq ?? (processing && a.game_eq?.source !== "imported" && a.game_eq?.source !== "tuned");
+  return {
+    status: {
+      exe: p.game.exe, state: a.game_eq ? "applied" : on ? "learning" : "off",
+      learning_on: on, needs_goal: on && !a.game_eq_goal, learning_now: false,
+      goal: a.game_eq_goal ?? null, auto_apply: !!a.game_eq_auto_apply,
+      source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
+      targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
+      exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
+    },
+  };
+}
+
+const mockLearnStore = new Map<string, LearnView>();
+/** Browser-mode stand-in for the learn view (S47). */
+function mockLearn(exe: string): LearnView {
+  const key = exe.toLowerCase();
+  let v = mockLearnStore.get(key);
+  if (!v) {
+    v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
+      privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+    mockLearnStore.set(key, v);
+  }
+  return v;
+}
 
 /** Browser-mode stand-in for the updater (S45). */
 const mockUpdate: UpdateStatus = {

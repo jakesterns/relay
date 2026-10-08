@@ -9,6 +9,7 @@
 //!                                  encode a raw clip, for codec quality comparisons
 //! relay-share send                 share the primary monitor to a paired peer
 //! relay-share recv                 receive and render to a window
+//! relay-share learn --pid N ...    S46: learn a game's sound (aggregates only)
 //! ```
 //!
 //! Stats and lifecycle messages go to stdout as NDJSON; the core relays them
@@ -146,6 +147,16 @@ fn run() -> Result<()> {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(10);
             bench_capture(secs)
         }
+        // S47: sample the game's monitor at 1-2 fps and print frame
+        // statistics (never pixels). Spawned by the core while learning.
+        #[cfg(windows)]
+        "look" => {
+            let (hmonitor, fps) = parse_look_args(&args[1..])?;
+            relay_capture::look::run(
+                windows::Win32::Graphics::Gdi::HMONITOR(hmonitor as *mut _),
+                fps,
+            )
+        }
         #[cfg(windows)]
         "send" => {
             let opts = parse_send_args(&args[1..])?;
@@ -175,6 +186,11 @@ fn run() -> Result<()> {
         "host-stub" => {
             let opts = parse_recv_args(&args[1..])?;
             run_async(relay_capture::render::run_stub(opts.host))
+        }
+        #[cfg(windows)]
+        "learn" => {
+            let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
+            relay_capture::learn::run(opts)
         }
         #[cfg(windows)]
         "recv" => {
@@ -229,6 +245,21 @@ fn parse_codec(s: &str) -> Result<relay_capture::codec::VideoCodec> {
         "h264" | "avc" => Ok(VideoCodec::H264),
         other => bail!("unknown codec `{other}` (expected hevc or h264)"),
     }
+}
+
+/// `look --hmonitor N [--fps 1|2]`.
+#[cfg(windows)]
+fn parse_look_args(args: &[String]) -> Result<(isize, u32)> {
+    let (mut hmonitor, mut fps) = (None, 1u32);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--hmonitor" => hmonitor = Some(it.next().context("--hmonitor N")?.parse()?),
+            "--fps" => fps = it.next().context("--fps N")?.parse()?,
+            other => bail!("unknown look argument `{other}`"),
+        }
+    }
+    Ok((hmonitor.context("look needs --hmonitor")?, fps))
 }
 
 /// Parse `relay-share send` flags into [`SendOpts`].
@@ -770,10 +801,15 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
   bench-codec    encode a raw NV12 clip to an Annex B file (codec comparisons)
   bench-audio    measure Opus packetization latency for one source, or for
                  the program mix and the microphone together (`dual`)
+  look           sample the game's monitor at 1-2 fps and print frame statistics
+                 (--hmonitor N [--fps 1|2]; spawned by relay-core while learning)
   send           share to a paired peer (spawned by relay-core)
                  (--audio-pid <pid> narrows the program mix to one process;
                   --audio-mic *adds* a second microphone track;
                   --no-audio --audio-mic sends the microphone alone)
+  learn          S46: learn one game's sound by process loopback of its PID
+                 (--pid N --exe NAME --record FILE [--goal G] [--version V]);
+                 keeps aggregate statistics only, never audio
   recv           receive a share and render it to a window
                  (--vcam mirrors into the Relay virtual camera;
                   --mic-route <endpoint-id> renders audio to that endpoint)
@@ -786,6 +822,14 @@ mod tests {
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn look_args() {
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "65537"])).unwrap(), (65537, 1));
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--fps", "2"])).unwrap(), (1, 2));
+        assert!(parse_look_args(&s(&[])).is_err());
+        assert!(parse_look_args(&s(&["--hmonitor", "1", "--save-frames"])).is_err());
     }
 
     #[test]

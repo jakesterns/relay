@@ -157,6 +157,9 @@ pub struct Applied {
     pub via: DisplayVia,
 }
 
+/// Audio settings plus the headset correction they were applied with.
+type AudioInput = (AudioSettings, Option<Vec<(f32, f32)>>);
+
 pub struct Applier {
     audio: Arc<dyn AudioControl>,
     display: Arc<dyn DisplayControl>,
@@ -166,6 +169,12 @@ pub struct Applier {
     current_target: Option<MonitorProbe>,
     /// `via` of the current apply, replayed on the same-profile fast path.
     current_via: DisplayVia,
+    /// What the audio backend said on the last apply, replayed on the fast
+    /// path (it used to claim `Active` there, whatever the truth was).
+    current_audio: AudioChainState,
+    /// The audio settings and correction last applied: a re-apply of the
+    /// same profile with a new game layer (S46 Apply) must reach the chain.
+    current_audio_input: Option<AudioInput>,
 }
 
 impl Applier {
@@ -181,6 +190,8 @@ impl Applier {
             current: None,
             current_target: None,
             current_via: DisplayVia::default(),
+            current_audio: AudioChainState::Bypass,
+            current_audio_input: None,
         }
     }
 
@@ -219,8 +230,19 @@ impl Applier {
                 _ => false,
             };
             if cur.profile_id == Some(profile.id) && same_target {
+                let input = (profile.audio.clone(), correction.map(<[(f32, f32)]>::to_vec));
+                if self.current_audio_input.as_ref() != Some(&input) {
+                    // Same profile, new audio (an applied game layer, a
+                    // changed headset curve): the original is already saved,
+                    // so just push the new chain.
+                    self.current_audio = self
+                        .audio
+                        .apply(&profile.audio, correction)
+                        .context("re-applying audio")?;
+                    self.current_audio_input = Some(input);
+                }
                 return Ok(Applied {
-                    audio: AudioChainState::Active,
+                    audio: self.current_audio,
                     display: DisplayState::Applied,
                     via: self.current_via.clone(),
                 });
@@ -253,6 +275,9 @@ impl Applier {
         match result {
             Ok(applied) => {
                 self.current_via = applied.via.clone();
+                self.current_audio = applied.audio;
+                self.current_audio_input =
+                    Some((profile.audio.clone(), correction.map(<[(f32, f32)]>::to_vec)));
                 info!(profile = %profile.name, "profile applied");
                 Ok(applied)
             }
@@ -269,6 +294,8 @@ impl Applier {
         let Some(snap) = self.current.take() else { return Ok(()) };
         self.current_target = None;
         self.current_via = DisplayVia::default();
+        self.current_audio = AudioChainState::Bypass;
+        self.current_audio_input = None;
         let r = self.restore_snapshot(&snap);
         // Even if a backend failed, clear only on success so a retry / next
         // start can attempt again.
@@ -384,6 +411,49 @@ mod tests {
         let mut p = Profile::new("CoD", GameMatch::exe("cod.exe"));
         p.display.follow_focus = true;
         p
+    }
+
+    /// An audio backend whose effect is not installed (S46 r50).
+    #[derive(Default)]
+    struct NotInstalledAudio {
+        applies: Mutex<u32>,
+    }
+    impl AudioControl for NotInstalledAudio {
+        fn capture(&self) -> Result<AudioState> {
+            Ok(AudioState { bypass: true })
+        }
+        fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
+            *self.applies.lock() += 1;
+            Ok(AudioChainState::NotInstalled)
+        }
+        fn restore(&self, _: &AudioState) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_audio_state_is_the_backends_truth_even_on_the_fast_path() {
+        let dir = std::env::temp_dir().join(format!("relay-apply-{}", Uuid::new_v4()));
+        let audio = Arc::new(NotInstalledAudio::default());
+        let rec = Arc::new(Recorder::default());
+        let mut a = Applier::new(audio.clone(), rec, BackupFile::at(dir.join("o.json")));
+        let m = monitor("mon:A");
+        let mut p = profile();
+        assert_eq!(a.apply(&p, Some(&m), None).unwrap().audio, AudioChainState::NotInstalled);
+        // Same profile again (a reselect): still the truth, not "active",
+        // and nothing re-applied when nothing changed.
+        assert_eq!(a.apply(&p, Some(&m), None).unwrap().audio, AudioChainState::NotInstalled);
+        assert_eq!(*audio.applies.lock(), 1);
+        // Apply of a learned game layer changes the profile's audio: it
+        // reaches the chain without a restore.
+        p.audio.game_eq = Some(relay_audio::learn::GameEqLayer::learned(
+            vec![(20.0, -2.0), (16000.0, 0.0)],
+            None,
+        ));
+        a.apply(&p, Some(&m), None).unwrap();
+        assert_eq!(*audio.applies.lock(), 2);
+        a.restore().unwrap();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

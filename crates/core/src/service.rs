@@ -147,6 +147,9 @@ struct Inner {
     /// or by a toggle), so a toggle is sent only when it changes: install
     /// and uninstall each sent it twice (PC2, r47).
     recv_vcam: Option<bool>,
+    /// Consecutive 1 s ticks on which Windows' foreground window differed
+    /// from the one the hook last reported (see `reconcile_foreground`).
+    fg_mismatch: u8,
     /// When the current receive engine started. A restarted receiver that
     /// has stayed up for a while ends the episode even if no share arrived:
     /// otherwise the episode's clock ran on and the next unrelated failure,
@@ -154,6 +157,13 @@ struct Inner {
     recv_started: Option<std::time::Instant>,
     /// The update check and user-approved install (S45).
     update: crate::update::Updater,
+    /// S46: the learner helper for the focused game, while one runs.
+    learner: Option<crate::game_eq::Learner>,
+    /// S47: learned game looks (`learned-display.json`).
+    learn: crate::learned_display::LearnStore,
+    /// S47: the look sampler child, only while a learning-enabled game with
+    /// an active profile has focus. Dropping it kills it (by handle).
+    look: Option<crate::learned_display::Sampler>,
 }
 
 /// S45: why an update must wait right now, if anything is in the way.
@@ -358,8 +368,12 @@ impl Service {
             recv_episode: None,
             recv_host: None,
             recv_vcam: None,
+            fg_mismatch: 0,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
+            learner: None,
+            learn: crate::learned_display::LearnStore::load(paths.learned_display_file()),
+            look: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -395,10 +409,13 @@ impl Service {
         }
 
         // Stop any share/receive child so it never outlives the core.
-        let (share, receive) = {
+        let (share, receive, learner) = {
             let mut g = service.inner.lock();
-            (g.share.take(), g.receive.take())
+            (g.share.take(), g.receive.take(), g.learner.take())
         };
+        if let Some(l) = learner {
+            l.stop_blocking();
+        }
         if let Some(engine) = share {
             engine.stop();
         }
@@ -408,6 +425,11 @@ impl Service {
 
         // Belt and braces: whatever happened, put the machine back.
         let mut g = service.inner.lock();
+        if g.look.take().is_some() {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json on exit");
+            }
+        }
         if let Err(e) = g.applier.restore() {
             warn!(error = %e, "restore on exit failed; will retry on next start");
         }
@@ -474,9 +496,16 @@ impl Service {
         // is applied, so an idle core never wakes for it.
         let mut exit_watch = tokio::time::interval(Duration::from_millis(100));
         exit_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Foreground reconcile on its own cadence, first in the select: on
+        // the shared 1 s tick it ran behind the audio probe, the learners and
+        // the updater, and a missed switch took ~5 s on PC2.
+        let mut fg_watch = tokio::time::interval(FG_RECONCILE_INTERVAL);
+        fg_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let profiled = self.inner.lock().state.active_profile.is_some();
             tokio::select! {
+                biased;
+                _ = fg_watch.tick() => self.reconcile_foreground(),
                 _ = exit_watch.tick(), if profiled => self.recheck_focus(),
                 ev = rx.recv() => {
                     match ev {
@@ -504,11 +533,109 @@ impl Service {
                     self.recheck_monitor();
                     self.supervise();
                     self.update_tick();
+                    self.learner_tick();
+                    self.learn_tick();
                 }
             }
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// S46, on the 1 s tick: notice a learner that exited, and take a newly
+    /// offered curve when the profile allows auto-apply.
+    fn learner_tick(&self) {
+        let mut g = self.inner.lock();
+        let Some(l) = g.learner.as_mut() else { return };
+        if !l.running() {
+            info!("the learner helper exited");
+            g.learner = None;
+            return;
+        }
+        if crate::game_eq::grace_expired(l.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the learner");
+            stop_learner(&mut g);
+            return;
+        }
+        if !l.take_fresh() {
+            return;
+        }
+        let id = l.profile;
+        let Some(mut profile) = g.store.get(id).cloned() else { return };
+        if !profile.audio.game_eq_auto_apply {
+            return;
+        }
+        let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) else { return };
+        if crate::game_eq::take_offer(&mut profile, &rec) {
+            info!(exe = %profile.game.exe, "auto-applied the newly learned game EQ");
+            g.store.upsert(profile);
+            if let Err(e) = g.store.save() {
+                warn!(error = %e, "saving the auto-applied game EQ failed");
+            }
+            drop(g);
+            reselect(&self.inner, &self.events);
+        }
+    }
+
+    /// S47, on the 1 s tick: fold the sampler's frame reports into the
+    /// learner, persist at checkpoints, and re-apply when the look in use
+    /// changed (Apply happened elsewhere, or a meaningfully different result
+    /// settled). Idle cores never get past the first line.
+    fn learn_tick(&self) {
+        use crate::learned_display::SamplerLine;
+        let mut g = self.inner.lock();
+        let Some(s) = g.look.as_mut() else { return };
+        if crate::learned_display::grace_expired(s.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the look sampler");
+            g.look = None;
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+            return;
+        }
+        let exited = s.exited();
+        let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
+        let (exe, mon) = (s.exe.clone(), s.monitor.clone());
+        let before = g.learn.game(&exe).and_then(|r| r.effective(&mon));
+        let mut save = false;
+        for line in lines {
+            let rec = g.learn.game_mut(&exe).monitor_mut(&mon);
+            match line {
+                SamplerLine::Frame(r) => {
+                    rec.hdr_skipped = false;
+                    if rec.learner.observe(&r) {
+                        save = true;
+                        if g.learn.game_mut(&exe).take_offer_if_auto(&mon) {
+                            info!(exe = %exe, "auto-applied the newly settled look");
+                        }
+                    }
+                }
+                SamplerLine::Hdr => {
+                    info!(exe = %exe, "monitor is in HDR mode; not learning there");
+                    rec.hdr_skipped = true;
+                    save = true;
+                    stop = true;
+                }
+                SamplerLine::Error(e) => {
+                    warn!(error = %e, "look sampler stopped");
+                    stop = true;
+                }
+            }
+        }
+        if stop {
+            g.look = None;
+        }
+        if save {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+        }
+        if g.learn.game(&exe).and_then(|r| r.effective(&mon)) != before {
+            reapply_learned(&mut g);
+            let state = Box::new(g.state.clone());
+            drop(g);
+            let _ = self.events.send(Event::StateChanged { state });
+        }
     }
 
     /// S45, on the 1 s tick: start the daily check when it is due, and run a
@@ -868,6 +995,7 @@ impl Service {
             g.state.audio_chain = AudioChainState::Bypass;
             g.state.display_state = DisplayState::Default;
             g.state.display_via = DisplayVia::default();
+            stop_learner(&mut g);
             let state = Box::new(g.state.clone());
             drop(g);
             let _ = self.events.send(Event::StateChanged { state });
@@ -910,6 +1038,7 @@ impl Service {
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
         select_and_apply(&mut g, &fg);
+        sync_look(&mut g);
         let state = Box::new(g.state.clone());
         drop(g);
         let _ = self.events.send(Event::StateChanged { state });
@@ -923,6 +1052,40 @@ impl Service {
     /// no window at all, and then no foreground event ever fires: the live
     /// test closed Notepad and its profile stayed on the monitor until the
     /// guard undid it (2026-09-29). The brief says restore on exit too.
+    /// Safety net for the foreground hook. On the second PC a core started
+    /// from a test shell answered IPC for 8 minutes while its hook delivered
+    /// no foreground events at all (2026-10-01), so the game's profile never
+    /// applied. Once a second, ask Windows which window is in front (one
+    /// user32 call, nothing opened in the game) and, if it has differed from
+    /// the hook's view for two ticks in a row, act on it. Two ticks keeps the
+    /// hook in charge of fast switches and ignores Windows' own momentary
+    /// focus juggling. Same window: just refresh its title, which the hook
+    /// only reports on a switch.
+    fn reconcile_foreground(&self) {
+        let now = crate::winloop::foreground_hwnd();
+        let mut g = self.inner.lock();
+        let known = g.state.foreground.as_ref().map(|f| f.hwnd).unwrap_or(0);
+        let (count, step) = fg_reconcile_step(now, known, g.fg_mismatch);
+        g.fg_mismatch = count;
+        match step {
+            FgStep::Wait => return,
+            FgStep::Same => {
+                if let Some(t) = crate::winloop::window_title(now) {
+                    if let Some(f) = g.state.foreground.as_mut() {
+                        f.title = t;
+                    }
+                }
+                return;
+            }
+            FgStep::CatchUp => {}
+        }
+        drop(g);
+        if let Some(fg) = crate::winloop::current_foreground() {
+            warn!(exe = %fg.exe, pid = fg.pid, "missed a foreground change; catching up");
+            self.on_foreground(fg);
+        }
+    }
+
     fn recheck_focus(&self) {
         #[cfg(windows)]
         {
@@ -950,6 +1113,7 @@ impl Service {
                     title: String::new(),
                     hmonitor: 0,
                     hwnd: 0,
+                    image: String::new(),
                 });
                 info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
                 self.on_foreground(fg);
@@ -1010,6 +1174,7 @@ impl Service {
                         warn!(error = %e, "restore via hotkey failed");
                     }
                     g.pinned = true; // stay off until focus changes again
+                    stop_learner(&mut g);
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
@@ -1092,6 +1257,7 @@ impl Service {
 /// app performs, not a second, thinner one.
 fn restore_all(g: &mut Inner) -> anyhow::Result<()> {
     g.pinned = false;
+    stop_learner(g);
     g.applier.restore()?;
     g.state.active_profile = None;
     g.state.audio_chain = AudioChainState::Bypass;
@@ -1176,6 +1342,204 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
     Some(t)
 }
 
+/// What one reconcile tick should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FgStep {
+    /// Nothing yet (no window, or one mismatch so far).
+    Wait,
+    /// The known window is still in front.
+    Same,
+    /// Two mismatching ticks: the hook missed a change.
+    CatchUp,
+}
+
+/// How often the foreground reconcile runs.
+const FG_RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Mismatches needed before catching up.
+const FG_MISMATCH_TICKS: u8 = 2;
+
+/// Pure step of the foreground reconcile. A `0` window (a toast or the
+/// shell between windows) neither confirms nor resets: only a match resets
+/// the count. Resetting on 0 made a switch take ~8 s on PC2 instead of ~2.
+fn fg_reconcile_step(now: u64, known: u64, count: u8) -> (u8, FgStep) {
+    if now == 0 {
+        return (count, FgStep::Wait);
+    }
+    if now == known {
+        return (0, FgStep::Same);
+    }
+    let count = count.saturating_add(1);
+    if count < FG_MISMATCH_TICKS {
+        (count, FgStep::Wait)
+    } else {
+        (0, FgStep::CatchUp)
+    }
+}
+
+/// S47: the profile with this game's learned (or imported) look folded into
+/// its display settings, fitted to the target monitor's panel. The result
+/// goes through the ordinary capture → apply → restore path, so restore
+/// covers it exactly like a hand-set value.
+fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
+    use crate::learned_display::{caps_for, overlay};
+    let mut p = profile.clone();
+    let Some(t) = target else { return p };
+    if !p.display.follow_focus {
+        return p;
+    }
+    let Some(look) = g.learn.game(&p.game.exe).and_then(|r| r.effective(&t.id)) else {
+        return p;
+    };
+    let panel = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.panel.clone())
+        .unwrap_or_default();
+    let name = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| t.name.clone());
+    let adj = relay_display::learn::realize(&look, &caps_for(&panel, &name, &t.id.0));
+    overlay(&mut p.display, &adj);
+    p
+}
+
+/// S47: start, keep or stop the look sampler so it runs exactly while a
+/// learning-enabled game whose profile is applied has focus.
+/// A profile the learner may keep running for: it exists, is Ready (Draft
+/// never applies), and has learning on with a goal.
+fn learner_profile_still_learns(p: Option<&Profile>) -> bool {
+    p.is_some_and(|p| p.status == crate::types::ProfileStatus::Ready && p.audio.learning_active())
+}
+
+/// The sampler's game is still the foreground app (so a "not wanted" means
+/// its profile changed, not that focus moved away).
+fn look_game_still_focused(sampler_exe: &str, focused_exe: Option<&str>) -> bool {
+    focused_exe.is_some_and(|f| crate::learned_display::key(f) == sampler_exe)
+}
+
+fn sync_look(g: &mut Inner) {
+    use crate::learned_display::{build_fingerprint, key, Sampler};
+    let want = g
+        .state
+        .foreground
+        .clone()
+        .filter(|fg| {
+            g.state.active_profile.as_ref().is_some_and(|p| p.exe.eq_ignore_ascii_case(&fg.exe))
+        })
+        .filter(|fg| g.learn.is_enabled(&fg.exe))
+        .and_then(|fg| resolve_target(g, fg.hmonitor).map(|t| (fg, t)));
+    // May a paused sampler wait out the grace? Only when its game merely lost
+    // focus: still learning, still a Ready profile, and not still in front.
+    let grace_ok = g.look.as_ref().is_some_and(|s| {
+        g.learn.is_enabled(&s.exe)
+            && g.store.all().iter().any(|p| {
+                p.status == crate::types::ProfileStatus::Ready
+                    && crate::learned_display::key(&p.game.exe) == s.exe
+            })
+            && !look_game_still_focused(&s.exe, g.state.foreground.as_ref().map(|f| f.exe.as_str()))
+    });
+    match (g.look.as_mut(), &want) {
+        (Some(s), Some((fg, t))) if s.exe == key(&fg.exe) && s.monitor == t.id => {
+            s.resume();
+            return;
+        }
+        // Out of focus: pause and keep it for the grace period (Alt-Tab
+        // must not restart the helper); learn_tick drops it after that.
+        // With its game still in front (profile set to Draft, deleted,
+        // disabled, learning off) there is no grace: stop it now.
+        (Some(s), None) if grace_ok => {
+            s.pause();
+            return;
+        }
+        _ => {}
+    }
+    if g.look.take().is_some() {
+        // Keep the evidence gathered since the last checkpoint.
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    let Some((fg, t)) = want else { return };
+    let build = build_fingerprint(std::path::Path::new(&fg.image));
+    let rec = g.learn.game_mut(&fg.exe).monitor_mut(&t.id);
+    if !build.is_empty() && rec.learner.check_build(&build) {
+        info!(exe = %fg.exe, "game build is new to the learner; learning its look afresh");
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    match Sampler::start(&fg.exe, t.id.clone(), t.hmonitor) {
+        Ok(s) => g.look = Some(s),
+        Err(e) => warn!(error = %e, "could not start the look sampler"),
+    }
+}
+
+/// S47: the look in use changed while a profile is applied: put the
+/// original back and apply again with the new look.
+fn reapply_learned(g: &mut Inner) {
+    let Some(active) = g.state.active_profile.clone() else { return };
+    if g.pinned {
+        // A profile applied by hand stays applied regardless of focus:
+        // re-apply that same profile so the screen updates now.
+        let Some(profile) = g.store.get(active.id).cloned() else { return };
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-apply failed");
+            return;
+        }
+        let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
+        let target = resolve_target(g, hmon);
+        let correction = correction_for(g, &profile);
+        let to_apply = learned_profile(g, &profile, target.as_ref());
+        match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
+            Ok(applied) => {
+                g.state.display_state = applied.display;
+                g.state.display_via = applied.via;
+            }
+            Err(e) => {
+                warn!(error = %e, "re-applying the pinned profile failed");
+                g.pinned = false;
+                g.state.active_profile = None;
+                g.state.display_state = DisplayState::Default;
+                g.state.display_via = DisplayVia::default();
+            }
+        }
+        return;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return };
+    if let Err(e) = g.applier.restore() {
+        warn!(error = %e, "restore before re-apply failed");
+        return;
+    }
+    select_and_apply(g, &fg);
+}
+
+fn learn_reply(g: &Inner, exe: &str) -> Reply {
+    let names = |id: &crate::types::MonitorId| {
+        let lib = g.library.monitors.iter().find(|m| &m.id == id);
+        let probe = g.last_report.monitors.iter().find(|m| &m.id == id);
+        let name = lib
+            .map(|m| m.name.clone())
+            .or_else(|| probe.map(|m| m.name.clone()))
+            .unwrap_or_default();
+        (name, lib.map(|m| m.panel.clone()).unwrap_or_default())
+    };
+    let sampling = g.look.as_ref().is_some_and(|s| s.exe == crate::learned_display::key(exe));
+    Reply::LearnDisplay {
+        view: Box::new(crate::learned_display::view(&g.learn, exe, sampling, &names)),
+    }
+}
+
+fn save_learn(g: &Inner) -> Option<Reply> {
+    g.learn.save().err().map(|e| Reply::Error { message: format!("{e:#}") })
+}
+
 /// Pick and apply (or restore) for one foreground window, using the cached
 /// AutoEQ files live under `<source>/<rig> in-ear/...`, `over-ear`, `earbud`,
 /// so the catalogue path says what kind of thing this is without asking.
@@ -1203,16 +1567,74 @@ fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
         .map(<[(f32, f32)]>::to_vec)
 }
 
+/// S46: stop the learner helper, if one runs. Non-blocking: it saves and
+/// exits on its own, and is killed by handle if it does not.
+fn stop_learner(g: &mut Inner) {
+    if let Some(l) = g.learner.take() {
+        l.stop();
+    }
+}
+
+/// S46: run the learner for `profile` on the focused game when its learning
+/// is on and a goal is chosen; otherwise make sure none runs.
+fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
+    use crate::game_eq::LearnerStep;
+    let want = profile.filter(|p| p.audio.learning_active() && fg.pid != 0);
+    if g.learner.as_mut().is_some_and(|l| !l.running()) {
+        g.learner = None;
+    }
+    // Wherever focus is, a learner whose profile no longer learns (Draft,
+    // deleted, learning off) stops now: the grace is for focus loss only.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
+    let current = g.learner.as_ref().map(|l| (l.profile, l.pid, l.paused_since.is_some()));
+    match crate::game_eq::learner_step(current, want.map(|p| (p.id, fg.pid)), fg.pid) {
+        LearnerStep::Nothing | LearnerStep::Keep => {}
+        LearnerStep::Stop => {
+            info!("the focused game's profile no longer learns; stopping the learner now");
+            stop_learner(g);
+        }
+        LearnerStep::Pause => {
+            if let Some(l) = g.learner.as_mut() {
+                l.pause();
+            }
+        }
+        LearnerStep::Resume => {
+            if let Some(l) = g.learner.as_mut() {
+                l.resume();
+            }
+        }
+        LearnerStep::Start | LearnerStep::Restart => {
+            stop_learner(g);
+            if let Some(p) = want {
+                match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
+                    Ok(l) => g.learner = Some(l),
+                    Err(e) => warn!(error = %e, "could not start learning this game's sound"),
+                }
+            }
+        }
+    }
+}
+
 /// connected-hardware view. Mutates state only; the caller broadcasts.
+///
+/// (See also [`after_profile_edit`], which re-runs this when a save or
+/// delete changes what should be applied right now.)
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     let hw = g.connected.clone();
     let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
+    sync_learner(g, pick.as_ref(), fg);
     match pick {
         Some(profile) => {
             g.pinned = false;
             let target = resolve_target(g, fg.hmonitor);
             let correction = correction_for(g, &profile);
-            match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+            let to_apply = learned_profile(g, &profile, target.as_ref());
+            match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                 Ok(applied) => {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
@@ -1247,6 +1669,68 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.state.display_via = DisplayVia::default();
         }
     }
+}
+
+/// Does a profile edit change what should be applied now? Yes when the
+/// edited profile is the active one (its settings may have changed, or it
+/// went Draft / was deleted), or when selection now picks something else.
+fn needs_reselect(active: Option<uuid::Uuid>, edited: uuid::Uuid, now: Option<uuid::Uuid>) -> bool {
+    active == Some(edited) || now != active
+}
+
+/// After a profile save or delete: re-run selection at once instead of on
+/// the next focus change. Restores when nothing matches any more (Draft,
+/// deleted, exe changed) and stops its learners; re-applies when the active
+/// profile's own settings changed. Returns true when state may have changed.
+fn after_profile_edit(g: &mut Inner, edited: uuid::Uuid, deleted: bool) -> bool {
+    // A paused learner or sampler whose profile stopped learning (Draft,
+    // deleted, learning off) goes now, even with Relay's window in front.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
+    sync_look(g);
+    let active = g.state.active_profile.as_ref().map(|p| p.id);
+    if g.pinned {
+        if active != Some(edited) {
+            return false;
+        }
+        if deleted {
+            if let Err(e) = g.applier.restore() {
+                warn!(error = %e, "restore after deleting the applied profile failed");
+            }
+            g.pinned = false;
+            g.state.active_profile = None;
+            g.state.audio_chain = AudioChainState::Bypass;
+            g.state.display_state = DisplayState::Default;
+            g.applied_audio = AudioChainState::Bypass;
+            g.audio_watch = false;
+            g.state.display_via = DisplayVia::default();
+            stop_learner(g);
+            sync_look(g);
+        } else {
+            reapply_learned(g);
+        }
+        return true;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return false };
+    let now = g.store.select(&fg.exe, &fg.title, &g.connected).map(|p| p.id);
+    if !needs_reselect(active, edited, now) {
+        return false;
+    }
+    info!(profile = %edited, "profile edited while relevant to the focused app; re-selecting");
+    // Restore first so a changed profile re-applies (the applier treats the
+    // same profile on the same monitor as already applied).
+    if g.applier.is_applied() {
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-selecting failed");
+        }
+    }
+    select_and_apply(g, &fg);
+    sync_look(g);
+    true
 }
 
 /// Re-run selection for whatever is in the foreground (no focus change
@@ -2076,20 +2560,73 @@ impl IpcHandler {
                 None => Reply::Error { message: "no such profile".into() },
             },
             Method::SaveProfile { profile } => {
+                let id = profile.id;
                 g.store.upsert(*profile);
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, false) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
+            }
+            Method::GameEq { id, action } => {
+                let Some(mut profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                // Take a helper on this record out under the lock, then work
+                // without it: the record lock (held by the helper until it has
+                // made its final save and exited) orders the rest.
+                let stopping = if action.touches_record()
+                    && g.learner.as_ref().is_some_and(|l| l.profile == id)
+                {
+                    g.learner.take()
+                } else {
+                    None
+                };
+                let paths = g.paths.clone();
+                drop(g);
+                if let Some(l) = stopping {
+                    l.stop();
+                }
+                let result = crate::game_eq::apply_action(&paths, &mut profile, &action);
+                g = self.inner.lock();
+                let crate::game_eq::ActionResult { changed, export, notice } = match result {
+                    Ok(r) => r,
+                    Err(e) => return Reply::Error { message: e.to_string() },
+                };
+                if changed {
+                    g.store.upsert(profile.clone());
+                    if let Err(e) = g.store.save() {
+                        return Reply::Error { message: e.to_string() };
+                    }
+                }
+                let restart = changed || action.touches_record();
+                if restart {
+                    drop(g);
+                    reselect(&self.inner, &self.events);
+                    g = self.inner.lock();
+                }
+                let learning_now = g.learner.as_ref().is_some_and(|l| l.profile == id);
+                let mut status = crate::game_eq::status(&paths, &profile, learning_now);
+                status.notice = notice;
+                Reply::GameEq { status: Box::new(status), export }
             }
             Method::DeleteProfile { id } => {
                 if !g.store.remove(id) {
                     return Reply::Error { message: "no such profile".into() };
                 }
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, true) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
             }
             Method::ApplyProfile { id } => {
                 let Some(profile) = g.store.get(id).cloned() else {
@@ -2100,7 +2637,8 @@ impl IpcHandler {
                 let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
                 let target = resolve_target(&g, hmon);
                 let correction = correction_for(&g, &profile);
-                match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+                let to_apply = learned_profile(&g, &profile, target.as_ref());
+                match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                     Ok(applied) => {
                         g.pinned = true;
                         g.state.active_profile = Some(profile.summary());
@@ -2120,6 +2658,96 @@ impl IpcHandler {
             },
             Method::ListProcesses => {
                 Reply::Processes { processes: crate::processes::list_windowed_and_audible() }
+            }
+            Method::LearnDisplayStatus { ref exe }
+            | Method::LearnDisplaySet { ref exe, .. }
+            | Method::LearnDisplayApply { ref exe }
+            | Method::LearnDisplayRelearn { ref exe }
+            | Method::LearnDisplayAutoApply { ref exe, .. }
+            | Method::LearnDisplayReset { ref exe }
+            | Method::LearnDisplayExport { ref exe, .. }
+            | Method::LearnDisplayImport { ref exe, .. }
+                if crate::learned_display::valid_exe(exe).is_err() =>
+            {
+                Reply::Error { message: "the game must be an exe file name like game.exe".into() }
+            }
+            Method::LearnDisplayStatus { exe } => learn_reply(&g, &exe),
+            Method::LearnDisplaySet { exe, enabled } => {
+                g.learn.game_mut(&exe).enabled = enabled;
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayApply { exe } => {
+                let rec = g.learn.game_mut(&exe);
+                let mut any = false;
+                for m in rec.monitors.values_mut() {
+                    any |= m.learner.apply();
+                }
+                if !any {
+                    return Reply::Error {
+                        message: "this game's look has not settled yet; keep playing".into(),
+                    };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayAutoApply { exe, enabled } => {
+                let rec = g.learn.game_mut(&exe);
+                rec.auto_apply = enabled;
+                let ids: Vec<String> = rec.monitors.keys().cloned().collect();
+                let mut took = false;
+                for id in ids {
+                    took |= rec.take_offer_if_auto(&crate::types::MonitorId(id));
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                if took {
+                    reapply_learned(&mut g);
+                }
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayRelearn { exe } => {
+                for m in g.learn.game_mut(&exe).monitors.values_mut() {
+                    m.learner.relearn();
+                    m.hdr_skipped = false;
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayReset { exe } => {
+                g.learn.file.games.remove(&crate::learned_display::key(&exe));
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayExport { exe, name, note } => {
+                match crate::learned_display::export(&g.learn, &exe, name, &note) {
+                    Ok(json) => Reply::GameDisplayFile { json },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::LearnDisplayImport { exe, json } => {
+                if let Err(e) = crate::learned_display::import(&mut g.learn, &exe, &json) {
+                    return Reply::Error { message: format!("{e:#}") };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
             }
             Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
             Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {
@@ -2767,4 +3395,92 @@ fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Sta
         }
     }
     crate::audiodg::status(&Absent, &crate::audiodg::record_file(apo_backup_dir))
+}
+
+#[cfg(test)]
+mod learner_stop_tests {
+    use super::*;
+    use crate::types::{GameMatch, ProfileStatus};
+
+    /// r54: Draft, delete or learning off stops the learner at once; only a
+    /// focus change gets the grace period.
+    #[test]
+    fn a_profile_that_stops_learning_stops_the_learner_without_grace() {
+        let mut p = Profile::new("G", GameMatch::exe("g.exe"));
+        p.status = ProfileStatus::Ready;
+        p.audio.learn_game_eq = Some(true);
+        p.audio.game_eq_goal = Some(relay_audio::learn::Goal::Awareness);
+        assert!(learner_profile_still_learns(Some(&p)));
+        let mut draft = p.clone();
+        draft.status = ProfileStatus::Draft;
+        assert!(!learner_profile_still_learns(Some(&draft)));
+        let mut off = p.clone();
+        off.audio.learn_game_eq = Some(false);
+        assert!(!learner_profile_still_learns(Some(&off)));
+        assert!(!learner_profile_still_learns(None), "deleted");
+    }
+
+    #[test]
+    fn the_look_sampler_stops_when_its_game_is_still_in_front() {
+        assert!(look_game_still_focused("g.exe", Some("G.EXE")));
+        assert!(!look_game_still_focused("g.exe", Some("relay-ui.exe")));
+        assert!(!look_game_still_focused("g.exe", None));
+    }
+}
+
+#[cfg(test)]
+mod fg_reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn zero_windows_do_not_reset_the_count() {
+        let (c, s) = fg_reconcile_step(7, 5, 0);
+        assert_eq!((c, s), (1, FgStep::Wait));
+        let (c, s) = fg_reconcile_step(0, 5, c);
+        assert_eq!((c, s), (1, FgStep::Wait), "a toast's 0 must not reset");
+        assert_eq!(fg_reconcile_step(7, 5, c), (0, FgStep::CatchUp));
+    }
+
+    /// At the 500 ms cadence a missed switch is caught within 1 s, and a toast
+    /// (a 0 window) in between costs one tick, not a reset.
+    #[test]
+    fn a_missed_switch_is_caught_within_a_second_at_500_ms() {
+        assert_eq!(FG_RECONCILE_INTERVAL, Duration::from_millis(500));
+        let ticks_to_catch = |seq: &[u64]| {
+            let mut c = 0;
+            for (i, now) in seq.iter().enumerate() {
+                let (n, step) = fg_reconcile_step(*now, 5, c);
+                c = n;
+                if step == FgStep::CatchUp {
+                    return Some(i + 1);
+                }
+            }
+            None
+        };
+        let t = ticks_to_catch(&[7, 7, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_secs(1), "{t} ticks");
+        let t = ticks_to_catch(&[7, 0, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_millis(1500), "{t} ticks");
+    }
+
+    #[test]
+    fn profile_edits_reselect_only_when_they_matter() {
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        // The applied profile went Draft / was deleted: nothing selects now.
+        assert!(needs_reselect(Some(a), a, None));
+        // The applied profile's settings changed: still selected, re-apply.
+        assert!(needs_reselect(Some(a), a, Some(a)));
+        // Another profile became Ready for the focused app.
+        assert!(needs_reselect(None, b, Some(b)));
+        assert!(needs_reselect(Some(a), b, Some(b)));
+        // An unrelated edit leaves things alone.
+        assert!(!needs_reselect(Some(a), b, Some(a)));
+        assert!(!needs_reselect(None, b, None));
+    }
+
+    #[test]
+    fn a_match_resets() {
+        assert_eq!(fg_reconcile_step(5, 5, 1), (0, FgStep::Same));
+        assert_eq!(fg_reconcile_step(7, 5, 0).1, FgStep::Wait);
+    }
 }

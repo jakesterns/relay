@@ -22,6 +22,7 @@
 //! enforces capture-before-apply and owns the snapshot shape.
 
 pub mod gamma;
+pub mod learn;
 pub mod vcp;
 
 #[cfg(windows)]

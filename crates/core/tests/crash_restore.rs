@@ -184,3 +184,49 @@ async fn second_instance_exits_immediately() {
     core.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Editing the applied profile takes effect at once: a settings change
+/// re-applies (restore, then apply) and a delete restores and clears the
+/// active profile, instead of waiting for the next focus change.
+#[tokio::test]
+async fn editing_the_applied_profile_takes_effect_at_once() {
+    let root: PathBuf = std::env::temp_dir().join(format!("relay-edit-{}", Uuid::new_v4()));
+    let rec = root.join("recording.log");
+    std::fs::create_dir_all(&root).unwrap();
+    let instance = format!("edittest-{}", Uuid::new_v4().simple());
+
+    let mut core = Core::spawn(&root, &rec, &instance);
+    let mut c = core.connect().await;
+    let mut profile = Profile::new("Edit test", GameMatch::exe("relay-edit-test.exe"));
+    profile.status = ProfileStatus::Ready;
+    profile.display.follow_focus = true;
+    let id = profile.id;
+    assert!(matches!(
+        c.call(Method::SaveProfile { profile: Box::new(profile.clone()) }).await.unwrap(),
+        Reply::Ok
+    ));
+    assert!(matches!(c.call(Method::ApplyProfile { id }).await.unwrap(), Reply::Ok));
+    let count = |what: &str| recording(&rec).iter().filter(|l| *l == what).count();
+    assert_eq!(count("display.apply"), 1);
+
+    // Change its display settings while applied: re-applied right away.
+    profile.display.gpu.vibrance = 70;
+    assert!(matches!(
+        c.call(Method::SaveProfile { profile: Box::new(profile) }).await.unwrap(),
+        Reply::Ok
+    ));
+    assert_eq!(count("display.restore"), 1, "{:?}", recording(&rec));
+    assert_eq!(count("display.apply"), 2, "{:?}", recording(&rec));
+
+    // Delete it: restored and no longer active, with no focus change.
+    assert!(matches!(c.call(Method::DeleteProfile { id }).await.unwrap(), Reply::Ok));
+    assert_eq!(count("display.restore"), 2, "{:?}", recording(&rec));
+    match c.call(Method::Status).await.unwrap() {
+        Reply::Status { state } => assert!(state.active_profile.is_none(), "still active"),
+        other => panic!("unexpected reply {other:?}"),
+    }
+    assert_eq!(snapshot_applied(&root), Some(false));
+    drop(c);
+    core.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
