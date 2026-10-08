@@ -266,7 +266,9 @@ pub async fn run(
     let title = placement::window_title(opts.sender.as_deref());
     let ndi_video = ndi.clone();
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner, title, ndi_video) {
+        if let Err(e) =
+            video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner, title, ndi_video)
+        {
             // ERROR, and in share.log: the one line someone reads when a
             // receive dies (the dead-host fatal used to reach core.log only).
             tracing::error!(error = %e, "receiver failed; telling the sender why");

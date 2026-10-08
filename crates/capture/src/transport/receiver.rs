@@ -1052,6 +1052,8 @@ mod tests {
             return_image: image,
             return_created: created,
             output_device: None,
+            local_share: None,
+            ndi: false,
         }
     }
 
