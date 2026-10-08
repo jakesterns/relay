@@ -1,16 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, ErrorNote, Kv, Live } from "../components/Controls";
+import { Card, Chips, ErrorNote, Kv, Live } from "../components/Controls";
+import { CallGuide } from "../components/CallGuide";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
-import type { ProcessInfo } from "../lib/ipc";
+import { NdiCard } from "../components/NdiCard";
+import type { CleanFeed, ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
   api, codecLabel, onCoreEvents, type FirewallStatus, type Peer, type ShareCapabilities,
   type ShareStats, type StreamStatus, type VdeviceStatus, type VideoArea, type VideoCodec,
 } from "../lib/ipc";
+
+/** S50: the clean feed's two fixed sizes. 1080p is the default: it is the
+ *  most any call app sends, so a bigger window only makes them downscale. */
+const FEED_SIZES: { key: CleanFeed; label: string }[] = [
+  { key: "1920x1080", label: "1920×1080" },
+  { key: "2560x1440", label: "2560×1440" },
+];
 
 /** S40: where the received audio plays, as a row of its own. */
 const RECEIVE_DEVICES: MixerDevice[] = [{ track: "output", label: "Output" }];
@@ -221,7 +230,7 @@ function VirtualDeviceCard() {
 
   const mic = vd.mic_targets.length > 0
     ? vd.mic_targets[0].name
-    : "No route yet — the signed driver ships later; VB-Cable works meanwhile";
+    : "Use the call app's screen share with audio";
 
   return (
     <Card title="In calls">
@@ -398,12 +407,18 @@ function TrustedSendersCard({ tick }: { tick: number }) {
  *  not the PID: a PID is new every launch, the program is not. */
 const CALL_APP_KEY = "relay.callApp.exe";
 
+/** What the running receiver is returning audio from, as the core reports
+ *  it on every status line (r54). */
+interface LiveReturn { pid: number; exe: string }
+
 /** The return route (S19): pick the call app on this PC and its audio —
  *  the other participants, never this PC's own mic — goes back to the
- *  sending PC as one more track. Locked while receiving: the engine read
- *  the choice when it started. */
-function CallReturnCard({ value, locked, onChange }: {
-  value: ProcessInfo | null; locked: boolean; onChange: (p: ProcessInfo | null) => void;
+ *  sending PC as one more track. While receiving the card shows what the
+ *  receiver is actually doing, and the route can be turned off live (r54);
+ *  picking another app needs a new connection, so that waits for Stop. */
+function CallReturnCard({ value, locked, live, onChange, onStopLive }: {
+  value: ProcessInfo | null; locked: boolean; live: LiveReturn | null;
+  onChange: (p: ProcessInfo | null) => void; onStopLive: () => void;
 }) {
   const [picking, setPicking] = useState(false);
   const [procs, setProcs] = useState<ProcessInfo[]>([]);
@@ -411,6 +426,23 @@ function CallReturnCard({ value, locked, onChange }: {
     setPicking(true);
     void api.listProcesses().then(setProcs).catch(() => setProcs([]));
   };
+  if (locked) {
+    return (
+      <Card title="Send the call back">
+        <Kv k="Call app" v={live ? live.exe : "None"} />
+        {live && (
+          <div className="row">
+            <button className="btn q" onClick={onStopLive}>Off</button>
+          </div>
+        )}
+        <p className="note">
+          {live
+            ? "The other people on the call are heard on the sending PC. Only the call app's own output goes back, never this PC's microphone."
+            : "Not sending the call back. To pick a call app, stop receiving first."}
+        </p>
+      </Card>
+    );
+  }
   return (
     <Card title="Send the call back">
       <Kv k="Call app" v={value ? value.exe : "None"} />
@@ -460,6 +492,9 @@ export function Receive() {
     }).catch(() => {});
     return () => { live = false; };
   }, []);
+  // What the running receiver returns audio from (r54), from the core's
+  // status lines; separate from the pick above, which is for the next Start.
+  const [liveReturn, setLiveReturn] = useState<LiveReturn | null>(null);
   const pickCallApp = (p: ProcessInfo | null) => {
     setCallApp(p);
     if (p) localStorage.setItem(CALL_APP_KEY, p.exe);
@@ -500,12 +535,18 @@ export function Receive() {
     // The running receiver's call app, named by its exe. A window opened
     // mid-receive only learns it from the shell's stream status: the core's
     // replayed ReceiveStatus goes past before this page is listening.
+    // Every receiving line names the receiver's call app *now*; none means
+    // it is not returning anything (turned off, or the app had closed).
+    // The core only reports an app it checked is running, so this never
+    // says "closed" about an app whose audio is being captured.
     const showReturnApp = (pid?: number | null, exe?: string | null) => {
-      if (!pid) return;
+      if (!pid) { setLiveReturn(null); return; }
+      if (exe) { setLiveReturn({ pid, exe }); return; }
+      setLiveReturn({ pid, exe: "the call app" });
       api.listProcesses().then((ps) => {
         if (!live) return;
-        setCallApp(ps.find((x) => x.pid === pid)
-          ?? { pid, exe: exe || "an app that has closed", title: "", hwnd: 0 });
+        const p = ps.find((x) => x.pid === pid);
+        if (p) setLiveReturn({ pid, exe: p.exe });
       }).catch(() => {});
     };
     api.streamStatus().then((s) => {
@@ -539,6 +580,7 @@ export function Receive() {
         if (s.message) setError(s.message);
         if (s.codec) setCodec(s.codec);
         if (!s.receiving) {
+          if (!s.restarting) setLiveReturn(null);
           setSender((was) => { if (was) setEnded(was); return null; });
           setEndedClean(!!s.ended_by_sender);
           setCode(null); setCodec(null);
@@ -579,13 +621,23 @@ export function Receive() {
     try { await api.stopReceive(); } catch (e) { setError(errText(e)); }
     finally { setBusy(false); }
   };
-  const setMode = async (mode: "embedded" | "popout") => {
+  // S50: the clean feed's size; "Share to a call" opens it at 1080p.
+  const [feed, setFeed] = useState<CleanFeed>("1920x1080");
+  const setMode = async (mode: "embedded" | "popout" | "clean", size?: CleanFeed) => {
     setError(null);
-    try { await api.setStreamMode(mode); } catch (e) { setError(errText(e)); }
+    try { await api.setStreamMode(mode, mode === "clean" ? size ?? feed : undefined); }
+    catch (e) { setError(errText(e)); }
+  };
+  const pickFeed = (size: CleanFeed) => {
+    setFeed(size);
+    // A clean feed already up changes size at once; the window is still
+    // the one the call app is capturing.
+    void setMode("clean", size);
   };
 
   const embedded = !!stream?.live && stream.mode === "embedded";
   const popped = !!stream?.live && stream.mode === "popout";
+  const clean = !!stream?.live && stream.mode === "clean";
   // Re-measure whenever what is around the video area can change.
   const sceneRef = useVideoArea([receiving, sender, error, embedded]);
 
@@ -601,7 +653,9 @@ export function Receive() {
       ]
     : [];
 
-  const areaText = popped
+  const areaText = clean
+    ? `In its own window for calls · ${FEED_SIZES.find((f) => f.key === feed)?.label ?? feed}`
+    : popped
     ? `Playing in its own window · ${sender ?? ""}`.trim()
     : embedded
       ? null
@@ -636,7 +690,7 @@ export function Receive() {
         <OfflineBanner />
         <CodecBanner need="receive" />
         <FirewallBanner />
-        <div className="preview" data-testid="video-area" data-stream={embedded ? "embedded" : popped ? "popout" : "none"}>
+        <div className="preview" data-testid="video-area" data-stream={embedded ? "embedded" : popped ? "popout" : clean ? "clean" : "none"}>
           {/* The stream is a native window the shell keeps over this box, so
               the box itself stays empty: anything painted here would sit
               under the picture. */}
@@ -674,21 +728,34 @@ export function Receive() {
           {stream?.live && stream.width > 0 && (
             <Kv k="Stream" v={`${stream.width}×${stream.height}`} mono />
           )}
+          {(embedded || popped) && (
+            <button className="btn q" onClick={() => { setFeed("1920x1080"); void setMode("clean", "1920x1080"); }}>Share to a call</button>
+          )}
           {embedded && (
             <button className="btn q" onClick={() => void setMode("popout")}>Pop out into its own window</button>
           )}
-          {popped && (
+          {clean && (
+            <Chips label="Call window size" value={feed} options={FEED_SIZES} onChange={pickFeed} />
+          )}
+          {(popped || clean) && (
             <button className="btn q" onClick={() => void setMode("embedded")}>Bring back into Relay</button>
           )}
-          {stream?.live && !stream.excluded_from_capture && (
-            <p className="note">Windows could not hide the stream from screen capture on this PC, so
-              sharing this PC's screen while receiving would show the stream inside itself.</p>
+          {stream?.live && stream.excluded_from_capture && (
+            <p className="note" data-testid="capture-note">Hidden from screen capture while this PC is
+              also sharing its screen.</p>
           )}
         </Card>
+        <CallGuide sender={sender} />
         <StreamHealthCard on={receiving} s={live} state={healthState} d={healthDelta} />
         <TrustedSendersCard tick={peersTick} />
-        <CallReturnCard value={callApp} locked={receiving} onChange={pickCallApp} />
+        <CallReturnCard value={callApp} locked={receiving} live={liveReturn}
+          onChange={pickCallApp}
+          onStopLive={() => {
+            api.stopCallReturn().then(() => setLiveReturn(null)).catch((e) => setError(errText(e)));
+          }} />
         <VirtualDeviceCard />
+        <NdiCard side="receive" live={receiving ? live?.ndi : null}
+          sourceName={sender ? `Relay (from ${sender})` : "Relay (from the sending PC)"} />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>

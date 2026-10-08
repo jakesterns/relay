@@ -126,12 +126,18 @@ pub enum Method {
     },
     /// Stop receiving.
     StopReceive,
+    /// Stop sending the call app's audio back to the sender, live, while
+    /// receiving (r54). No restart; turning it on again is Stop and Start.
+    StopCallReturn,
     /// Move the receiver's stream window between the app window (`owner`,
-    /// the shell's HWND) and a window of its own (S29).
+    /// the shell's HWND) and a window of its own (S29), or make it a clean
+    /// feed of `feed`'s fixed size for call apps (S50; absent = 1920x1080).
     HostReceive {
         mode: crate::share::HostMode,
         #[serde(default)]
         owner: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<crate::share::CleanFeed>,
     },
     /// Browse the LAN for Relay receivers (blocks briefly).
     DiscoverReceivers,
@@ -232,6 +238,9 @@ pub enum Method {
     /// Virtual-device state: Windows support, registration, consent, OBS /
     /// VB-Cable detection. Read-only.
     VdeviceStatus,
+    /// S51: is the user-installed NDI® runtime there? A file-exists check:
+    /// nothing is loaded into the core.
+    NdiStatus,
     /// Record the first-run consent decision (camera / microphone opt-ins).
     /// Never installs anything by itself.
     SetVdeviceConsent {
@@ -280,6 +289,13 @@ pub enum Method {
     /// The user has seen the last-crash line; clear it and mark the records
     /// seen (S38).
     AckCrash,
+    /// S46: a profile's learned game EQ — read its status, or act on it
+    /// (learning switch, goal, auto-apply, Apply / Relearn / Reset, Import /
+    /// Export). Every action replies with the status after it.
+    GameEq {
+        id: Uuid,
+        action: crate::game_eq::GameEqAction,
+    },
     /// S45: what the updater knows and is doing.
     UpdateStatus,
     /// S45: "Check now" — check regardless of the daily limit.
@@ -292,6 +308,64 @@ pub enum Method {
     /// S45: "Skip this version".
     SkipUpdate {
         version: String,
+    },
+    /// S47: what Relay has learned about one game's look, per monitor.
+    LearnDisplayStatus {
+        exe: String,
+    },
+    /// S47: "Learn this game's look" on/off. With an imported look this is
+    /// "Keep learning to fine-tune for my monitor".
+    LearnDisplaySet {
+        exe: String,
+        enabled: bool,
+    },
+    /// S47: use the settled look (every monitor that has one).
+    LearnDisplayApply {
+        exe: String,
+    },
+    /// S47: apply new settled looks without asking (like S46 auto-apply).
+    LearnDisplayAutoApply {
+        exe: String,
+        enabled: bool,
+    },
+    /// S47: drop the evidence and learn again; what is applied stays until
+    /// a new look settles.
+    LearnDisplayRelearn {
+        exe: String,
+    },
+    /// S47: forget everything for this game (learned, applied, imported).
+    LearnDisplayReset {
+        exe: String,
+    },
+    /// S47: the current game layer as a versioned JSON file.
+    LearnDisplayExport {
+        exe: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        note: String,
+    },
+    /// S47: apply a game display file now ("applied (imported)").
+    LearnDisplayImport {
+        exe: String,
+        json: String,
+    },
+    /// S48: local videos to learn from, Relay's own recordings first.
+    ListLearnVideos,
+    /// S48: learn this profile's game sound and look from a local video
+    /// file (decoded faster than real time by an on-demand helper). The
+    /// evidence merges into the same per-game records as live play.
+    LearnFromFile {
+        id: Uuid,
+        path: String,
+    },
+    /// S48: the current (or last) video job for this profile, if any.
+    LearnFileStatus {
+        id: Uuid,
+    },
+    /// S48: stop the video job. Nothing from the file is kept.
+    LearnFileCancel {
+        id: Uuid,
     },
     Subscribe,
     Shutdown,
@@ -341,6 +415,14 @@ pub enum Reply {
     /// Reply to every S45 update method.
     Update {
         status: crate::update::UpdateStatus,
+    },
+    /// Reply to every S47 learn method except export.
+    LearnDisplay {
+        view: Box<crate::learned_display::LearnView>,
+    },
+    /// Reply to `LearnDisplayExport`: the file's text, for the shell to save.
+    GameDisplayFile {
+        json: String,
     },
     /// Reply to `ListAudioDevices` (S40).
     AudioDevices {
@@ -410,6 +492,11 @@ pub enum Reply {
     Vdevice {
         status: Box<crate::vdevice::VdeviceStatus>,
     },
+    /// S51: where the NDI runtime is, or that it is not, with the download
+    /// link and the trademark line the UI shows beside the toggle.
+    Ndi {
+        runtime: crate::ndi::NdiRuntime,
+    },
     DryRun {
         lines: Vec<String>,
     },
@@ -423,6 +510,24 @@ pub enum Reply {
     Presets {
         presets: Vec<SharePresetDef>,
         recording: RecordingSettings,
+    },
+    /// Reply to `ListLearnVideos` (S48).
+    LearnVideos {
+        videos: Vec<crate::learn_file::VideoFile>,
+        recording_dir: String,
+        privacy: String,
+        local_only: String,
+    },
+    /// Reply to the S48 file-learning methods. `None` = no job for this
+    /// profile.
+    LearnFile {
+        status: Option<Box<crate::learn_file::LearnFileStatus>>,
+    },
+    /// Reply to `GameEq` (S46). `export` is set for an Export.
+    GameEq {
+        status: Box<crate::game_eq::GameEqStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        export: Option<crate::game_eq::GameEqExport>,
     },
     Ok,
     Error {
@@ -472,8 +577,11 @@ pub enum Event {
         data: serde_json::Value,
     },
     /// The receiver's stream window (S29): it exists, or changed hosting
-    /// mode. `mode` is `embedded`, `popout` or `none`; `excluded_from_capture`
-    /// is what Windows reports back for the B9 guard, not what was asked.
+    /// mode. `mode` is `embedded`, `popout`, `clean` or `none`;
+    /// `excluded_from_capture` is what Windows reports back for the B9 guard,
+    /// not what was asked. Since S50 it is true only while this PC is also
+    /// sharing a screen the window is on, and the event repeats when that
+    /// changes.
     /// The shell positions the window from this; the webview only reads the
     /// stream size and mode.
     StreamWindow {
@@ -888,6 +996,30 @@ mod tests {
         assert!(matches!(back.method, Method::GetProfile { .. }));
     }
 
+    /// S51: locks the shape `ui/src/lib/ipc.ts` mirrors for NDI status and
+    /// the two settings.
+    #[test]
+    fn ndi_wire_shape() {
+        let r: Request = serde_json::from_str(r#"{"id":1,"method":"ndi_status"}"#).unwrap();
+        assert!(matches!(r.method, Method::NdiStatus));
+        let runtime = crate::ndi::locate_with(|_| None, None, |_| false);
+        let reply = serde_json::to_value(Reply::Ndi { runtime }).unwrap();
+        assert_eq!(reply["type"], "ndi");
+        let rt = &reply["runtime"];
+        assert_eq!(rt["present"], false);
+        assert!(rt.get("path").is_none(), "absent, not null");
+        assert_eq!(rt["searched"], serde_json::json!([]));
+        assert_eq!(rt["download_url"], "http://ndi.link/NDIRedistV6");
+        assert_eq!(rt["ndi_url"], "https://ndi.video/");
+        assert_eq!(rt["trademark"], "NDI® is a registered trademark of Vizrt NDI AB.");
+        // Older settings files read as off.
+        let prefs: crate::uiprefs::UiPrefs = serde_json::from_str("{}").unwrap();
+        assert!(!prefs.ndi_receive && !prefs.ndi_share);
+        let v = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(v["ndi_receive"], false);
+        assert_eq!(v["ndi_share"], false);
+    }
+
     /// S44: locks the shape `ui/src/lib/ipc.ts` mirrors for the audio-effects
     /// switch — the status call, its reply, and the elevated op.
     #[test]
@@ -1093,6 +1225,79 @@ mod tests {
         let v = serde_json::to_value(&reply).unwrap();
         assert_eq!(v["type"], "audio_devices");
         assert!(v["devices"]["render"].is_array() && v["devices"]["capture"].is_array());
+    }
+
+    #[test]
+    fn learn_file_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (listLearnVideos / learnFromFile /
+        // learnFileStatus / learnFileCancel).
+        let id = Uuid::nil();
+        let m = Method::LearnFromFile { id, path: "C:\\v\\a.mp4".into() };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "learn_from_file");
+        assert_eq!(v["params"]["path"], "C:\\v\\a.mp4");
+        for (name, json) in [
+            ("learn_file_status", format!(r#"{{"id":"{id}"}}"#)),
+            ("learn_file_cancel", format!(r#"{{"id":"{id}"}}"#)),
+        ] {
+            let line = format!(r#"{{"id":2,"method":"{name}","params":{json}}}"#);
+            assert!(serde_json::from_str::<Request>(&line).is_ok(), "{name}");
+        }
+        let r: Request = serde_json::from_str(r#"{"id":3,"method":"list_learn_videos"}"#).unwrap();
+        assert!(matches!(r.method, Method::ListLearnVideos));
+        let st =
+            crate::learn_file::LearnFileStatus::new(id, "g.exe", std::path::Path::new("a.mp4"));
+        let v = serde_json::to_value(Reply::LearnFile { status: Some(Box::new(st)) }).unwrap();
+        assert_eq!(v["type"], "learn_file");
+        assert_eq!(v["status"]["state"], "running");
+        assert_eq!(v["status"]["file_name"], "a.mp4");
+        assert!(v["status"]["local_only"].as_str().unwrap().contains("YouTube"));
+        let v = serde_json::to_value(Reply::LearnFile { status: None }).unwrap();
+        assert!(v["status"].is_null());
+        let v = serde_json::to_value(Reply::LearnVideos {
+            videos: vec![],
+            recording_dir: "C:\\Rec".into(),
+            privacy: crate::learn_file::PRIVACY_NOTICE.into(),
+            local_only: crate::learn_file::LOCAL_ONLY_NOTICE.into(),
+        })
+        .unwrap();
+        assert_eq!(v["type"], "learn_videos");
+        assert!(v["videos"].is_array());
+    }
+
+    #[test]
+    fn learn_display_wire_shape() {
+        // Mirrored by ui/src/lib/ipc.ts (learnDisplay*).
+        let m = Method::LearnDisplaySet { exe: "game.exe".into(), enabled: true };
+        let v = serde_json::to_value(Request { id: 1, method: m }).unwrap();
+        assert_eq!(v["method"], "learn_display_set");
+        assert_eq!(v["params"]["exe"], "game.exe");
+        assert_eq!(v["params"]["enabled"], true);
+        for (name, json) in [
+            ("learn_display_status", r#"{"exe":"g.exe"}"#),
+            ("learn_display_apply", r#"{"exe":"g.exe"}"#),
+            ("learn_display_relearn", r#"{"exe":"g.exe"}"#),
+            ("learn_display_reset", r#"{"exe":"g.exe"}"#),
+            ("learn_display_export", r#"{"exe":"g.exe"}"#),
+            ("learn_display_import", r#"{"exe":"g.exe","json":"{}"}"#),
+        ] {
+            let line = format!(r#"{{"id":2,"method":"{name}","params":{json}}}"#);
+            assert!(serde_json::from_str::<Request>(&line).is_ok(), "{name}");
+        }
+        let r: Request = serde_json::from_str(
+            r#"{"id":3,"method":"learn_display_export","params":{"exe":"g.exe","note":"n"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.method, Method::LearnDisplayExport { name: None, .. }));
+        let store = crate::learned_display::LearnStore::load(std::env::temp_dir().join("none"));
+        let view = crate::learned_display::view(&store, "g.exe", false, &|_| Default::default());
+        let v = serde_json::to_value(Reply::LearnDisplay { view: Box::new(view) }).unwrap();
+        assert_eq!(v["type"], "learn_display");
+        assert_eq!(v["view"]["status"], "off");
+        assert!(v["view"]["monitors"].is_array());
+        assert!(v["view"]["tournament"].as_str().unwrap().starts_with("Relay's visual"));
+        let v = serde_json::to_value(Reply::GameDisplayFile { json: "{}".into() }).unwrap();
+        assert_eq!(v["type"], "game_display_file");
     }
 
     #[test]

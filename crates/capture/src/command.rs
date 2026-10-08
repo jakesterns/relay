@@ -75,6 +75,18 @@ pub enum EngineCmd {
     Vcam {
         on: bool,
     },
+    /// Receiver only (r54): stop sending the call app's audio back, live,
+    /// with no restart. `on: true` is ignored: a return track can only be
+    /// added when the connection is made.
+    Return {
+        on: bool,
+    },
+    /// Both engines (S51): publish this engine's picture and sound as an
+    /// NDI® source, or stop, live. The receiver publishes what it shows; the
+    /// sender, what it shares. Loads the NDI runtime on the first `on`.
+    Ndi {
+        on: bool,
+    },
     /// Toggle continuous recording.
     Record {
         on: bool,
@@ -90,22 +102,57 @@ pub enum EngineCmd {
         fps: u32,
     },
     /// Receiver only: where the stream window lives. `owner` is the app
-    /// window's HWND (0 when popping out). See `render::host`.
+    /// window's HWND (0 when popping out). `feed` is the fixed client size
+    /// of a clean feed (S50); absent = 1920x1080. See `render::host`.
     Host {
         mode: HostMode,
         #[serde(default)]
         owner: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<CleanFeed>,
+    },
+    /// Receiver only (S50): what this same PC is sharing right now, if
+    /// anything. The stream window is hidden from screen capture only while
+    /// that share covers it (the B9 recursion); otherwise it stays pickable
+    /// in call apps. `null` = this PC is not sharing.
+    LocalShare {
+        #[serde(default)]
+        target: Option<SourceTarget>,
     },
 }
 
 /// How the receiver's window is hosted. `Embedded` = a frameless popup owned
 /// by the app window, positioned by the app over its video area; `Popout` =
-/// an ordinary top-level window of its own.
+/// an ordinary top-level window of its own; `Clean` = a borderless window of
+/// its own at a fixed client size, for call apps and OBS to capture (S50).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostMode {
     Embedded,
     Popout,
+    Clean,
+}
+
+/// The fixed client size of a clean feed (S50). Always exactly this size, so
+/// a call app or OBS capturing the window never sees it change and never
+/// rescales or crops; the stream is letterboxed into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CleanFeed {
+    #[default]
+    #[serde(rename = "1920x1080")]
+    Fhd,
+    #[serde(rename = "2560x1440")]
+    Qhd,
+}
+
+impl CleanFeed {
+    /// Client width and height in physical pixels.
+    pub fn size(self) -> (u32, u32) {
+        match self {
+            CleanFeed::Fhd => (1920, 1080),
+            CleanFeed::Qhd => (2560, 1440),
+        }
+    }
 }
 
 /// Parse one stdin line. `stop` (the M4 wire format) still works; everything
@@ -126,6 +173,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn return_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Return { on: false }).unwrap(),
+            r#"{"cmd":"return","on":false}"#
+        );
+        assert_eq!(
+            parse_line(r#"{"cmd":"return","on":false}"#),
+            Some(EngineCmd::Return { on: false })
+        );
+    }
+
+    #[test]
     fn bare_stop_still_works() {
         assert_eq!(parse_line("stop"), Some(EngineCmd::Stop));
         assert_eq!(parse_line("  stop  "), Some(EngineCmd::Stop));
@@ -141,13 +200,56 @@ mod tests {
     #[test]
     fn host_wire_shape_is_locked() {
         assert_eq!(
-            serde_json::to_string(&EngineCmd::Host { mode: HostMode::Embedded, owner: 0x1234 })
-                .unwrap(),
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Embedded,
+                owner: 0x1234,
+                feed: None
+            })
+            .unwrap(),
             r#"{"cmd":"host","mode":"embedded","owner":4660}"#
         );
         assert_eq!(
             parse_line(r#"{"cmd":"host","mode":"popout"}"#),
-            Some(EngineCmd::Host { mode: HostMode::Popout, owner: 0 })
+            Some(EngineCmd::Host { mode: HostMode::Popout, owner: 0, feed: None })
+        );
+    }
+
+    #[test]
+    fn clean_feed_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Clean,
+                owner: 0,
+                feed: Some(CleanFeed::Qhd)
+            })
+            .unwrap(),
+            r#"{"cmd":"host","mode":"clean","owner":0,"feed":"2560x1440"}"#
+        );
+        assert_eq!(
+            parse_line(r#"{"cmd":"host","mode":"clean","feed":"1920x1080"}"#),
+            Some(EngineCmd::Host { mode: HostMode::Clean, owner: 0, feed: Some(CleanFeed::Fhd) })
+        );
+        assert_eq!(parse_line(r#"{"cmd":"host","mode":"clean","feed":"4k"}"#), None);
+        assert_eq!(CleanFeed::default().size(), (1920, 1080));
+        assert_eq!(CleanFeed::Qhd.size(), (2560, 1440));
+    }
+
+    #[test]
+    fn local_share_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare {
+                target: Some(SourceTarget::Display { index: 1 })
+            })
+            .unwrap(),
+            r#"{"cmd":"local_share","target":{"kind":"display","index":1}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare { target: None }).unwrap(),
+            r#"{"cmd":"local_share","target":null}"#
+        );
+        assert_eq!(
+            parse_line(r#"{"cmd":"local_share"}"#),
+            Some(EngineCmd::LocalShare { target: None })
         );
     }
 
@@ -191,6 +293,16 @@ mod tests {
         );
         assert_eq!(parse_line(r#"{"cmd":"vcam","on":false}"#), Some(EngineCmd::Vcam { on: false }));
         assert_eq!(parse_line(r#"{"cmd":"vcam"}"#), None);
+    }
+
+    #[test]
+    fn ndi_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Ndi { on: true }).unwrap(),
+            r#"{"cmd":"ndi","on":true}"#
+        );
+        assert_eq!(parse_line(r#"{"cmd":"ndi","on":false}"#), Some(EngineCmd::Ndi { on: false }));
+        assert_eq!(parse_line(r#"{"cmd":"ndi"}"#), None);
     }
 
     #[test]

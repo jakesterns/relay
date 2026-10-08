@@ -1,5 +1,6 @@
-//! Share presets as data (`presets.json`): Game / DAW / Desktop ship as
-//! built-ins the user can edit, plus the recording settings (folder + disk
+//! Share presets as data (`presets.json`): Game / DAW / Desktop and, since
+//! S50, Discord (1080p60) and Discord 720p30 for calls ship as built-ins the
+//! user can edit, plus the recording settings (folder + disk
 //! budget). A profile's `SharePreset` chip names one of these by id; starting
 //! a share with a preset resolves it to a concrete [`ShareRequest`].
 
@@ -11,7 +12,13 @@ use serde::{Deserialize, Serialize};
 use crate::profiles::write_atomic;
 use crate::share::{RecordingContainer, ShareRequest, DEFAULT_PREVIEW_FPS};
 
-const FILE_VERSION: u32 = 1;
+/// 2 (S50): the call presets were added. A version-1 file gains them once,
+/// on load; after that a deleted one stays deleted like any built-in.
+const FILE_VERSION: u32 = 2;
+
+/// Built-ins each file version introduced after the first, so an older file
+/// gets exactly the ones it has never seen.
+const ADDED_IN: &[(u32, &[&str])] = &[(2, &["discord", "discord-720"])];
 
 /// Which desktop audio goes with the share. The microphone is a separate,
 /// independent choice — see [`PresetAudio`].
@@ -241,7 +248,59 @@ pub fn builtins() -> Vec<SharePresetDef> {
             container: RecordingContainer::Mp4,
             vcam: false,
         },
+        // S50: for a receiving PC that passes the share on to a call. Discord,
+        // Zoom, Teams and Meet all re-encode what they capture, and none of
+        // them sends more than 1080p60 (most calls far less), so a 4K or
+        // native-size feed only costs bandwidth and makes them downscale.
+        // 1080p60 at 20 Mb/s is clean enough that their re-encode starts from
+        // a near-perfect picture; 720p30 at 8 Mb/s is for a slow call or a
+        // free Discord account, which streams 720p30.
+        SharePresetDef {
+            id: "discord".into(),
+            name: "Discord".into(),
+            bitrate_mbps: 20,
+            fps: 60,
+            size: Some((1920, 1080)),
+            audio: PresetAudio::desktop(DesktopAudio::System),
+            cursor: true,
+            record: false,
+            replay_secs: 0,
+            container: RecordingContainer::Mp4,
+            vcam: false,
+        },
+        SharePresetDef {
+            id: "discord-720".into(),
+            name: "Discord 720p30".into(),
+            bitrate_mbps: 8,
+            fps: 30,
+            size: Some((1280, 720)),
+            audio: PresetAudio::desktop(DesktopAudio::System),
+            cursor: true,
+            record: false,
+            replay_secs: 0,
+            container: RecordingContainer::Mp4,
+            vcam: false,
+        },
     ]
+}
+
+/// Add the built-ins introduced after `version` that `presets` lacks, in
+/// built-in order, after the ones already there.
+fn add_new_builtins(version: u32, presets: &mut Vec<SharePresetDef>) {
+    let all = builtins();
+    for (since, ids) in ADDED_IN {
+        if version >= *since {
+            continue;
+        }
+        for id in *ids {
+            if presets.iter().any(|p| p.id == *id) {
+                continue;
+            }
+            if let Some(def) = all.iter().find(|p| p.id == *id) {
+                presets.push(def.clone());
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -266,8 +325,9 @@ impl PresetStore {
         let path = path.into();
         match std::fs::read(&path) {
             Ok(bytes) => {
-                let file: PresetsFile = serde_json::from_slice(&bytes)
+                let mut file: PresetsFile = serde_json::from_slice(&bytes)
                     .with_context(|| format!("parsing {}", path.display()))?;
+                add_new_builtins(file.version, &mut file.presets);
                 Ok(Self { path, recording: file.recording, presets: file.presets })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -346,6 +406,8 @@ pub fn to_share_request(
         size: preset.size,
         audio,
         audio_pid,
+        // Pinned to the live process by the service at spawn (r54).
+        audio_app: None,
         mic,
         rest,
         cursor: preset.cursor,
@@ -355,6 +417,8 @@ pub fn to_share_request(
         record_dir: Some(recording.resolved_dir()),
         container: preset.container,
         vcam: preset.vcam,
+        // Filled by the service from the saved Share setting (S51).
+        ndi: false,
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,
@@ -371,7 +435,10 @@ mod tests {
     #[test]
     fn builtins_match_the_plan() {
         let b = builtins();
-        assert_eq!(b.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["game", "daw", "desktop"]);
+        assert_eq!(
+            b.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["game", "daw", "desktop", "discord", "discord-720"]
+        );
         let daw = &b[1];
         // DAW preset: 1440p60, default endpoint audio, nothing touched.
         assert_eq!(daw.size, Some((2560, 1440)));
@@ -383,6 +450,60 @@ mod tests {
         assert!(!game.cursor, "games render their own cursor");
     }
 
+    /// S50: sizes and rates call apps handle well, at a bitrate their
+    /// re-encode can start clean from. The existing three are untouched.
+    #[test]
+    fn call_presets_are_sized_for_call_apps() {
+        let b = builtins();
+        let d = b.iter().find(|p| p.id == "discord").unwrap();
+        assert_eq!(d.name, "Discord");
+        assert_eq!((d.size, d.fps, d.bitrate_mbps), (Some((1920, 1080)), 60, 20));
+        assert_eq!(d.audio, PresetAudio::desktop(DesktopAudio::System), "the call hears the PC");
+        let s = b.iter().find(|p| p.id == "discord-720").unwrap();
+        assert_eq!((s.size, s.fps, s.bitrate_mbps), (Some((1280, 720)), 30, 8));
+        for p in [d, s] {
+            assert_eq!(p.replay_secs, 0, "{}: no replay ring on a call feed", p.id);
+            assert!(!p.record);
+            let req = to_share_request(p, "1".into(), None, None, &RecordingSettings::default());
+            assert_eq!(req.size, p.size);
+            assert_eq!(req.fps, p.fps);
+            assert!(req.audio && req.audio_pid.is_none());
+        }
+        // The three that were there before S50 keep their values.
+        assert_eq!((b[0].bitrate_mbps, b[0].fps, b[0].size), (60, 60, None));
+        assert_eq!((b[1].bitrate_mbps, b[1].fps, b[1].size), (40, 60, Some((2560, 1440))));
+        assert_eq!((b[2].bitrate_mbps, b[2].fps, b[2].size), (60, 60, None));
+    }
+
+    /// A presets.json written before S50 gains the call presets once, keeps
+    /// every edit and deletion it had, and a later deletion of a call preset
+    /// sticks.
+    #[test]
+    fn an_old_file_gains_the_call_presets_once() {
+        let dir = std::env::temp_dir().join(format!("relay-presets-s50-{}", std::process::id()));
+        let path = dir.join("presets.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut old = builtins();
+        old.truncate(3);
+        old.retain(|p| p.id != "desktop");
+        old[0].bitrate_mbps = 33;
+        let v1 = serde_json::json!({ "version": 1, "presets": old });
+        std::fs::write(&path, serde_json::to_vec(&v1).unwrap()).unwrap();
+
+        let mut store = PresetStore::load(&path).unwrap();
+        let ids: Vec<&str> = store.all().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, ["game", "daw", "discord", "discord-720"], "desktop stays deleted");
+        assert_eq!(store.get("game").unwrap().bitrate_mbps, 33, "edits kept");
+        assert!(store.remove("discord-720"));
+        store.save().unwrap();
+
+        let again = PresetStore::load(&path).unwrap();
+        assert!(again.get("discord-720").is_none(), "a v2 file is not re-seeded");
+        assert!(again.get("discord").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn store_seeds_builtins_and_round_trips_edits() {
         let dir = std::env::temp_dir().join(format!("relay-presets-{}", std::process::id()));
@@ -390,7 +511,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut store = PresetStore::load(&path).unwrap();
-        assert_eq!(store.all().len(), 3);
+        assert_eq!(store.all().len(), 5);
         let mut daw = store.get("daw").unwrap().clone();
         daw.bitrate_mbps = 25;
         store.upsert(daw);

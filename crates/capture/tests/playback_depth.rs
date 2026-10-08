@@ -32,6 +32,7 @@ fn measure(secs: u64) -> (f64, f64, Arc<PlaybackStats>) {
             relay_capture::devices::DeviceSlot::shared(None),
             stats2,
             faders,
+            None,
         )
     });
 

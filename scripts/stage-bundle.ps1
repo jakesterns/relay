@@ -139,6 +139,13 @@ if ($env:CI -or (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
     Write-Warning 'cargo-about not installed: licenses.html is a placeholder (CI builds the real one)'
 }
 
+# S51: Relay does not ship the NDI runtime (docs/dev/ndi-licensing.md). A copy
+# left in the staging folder by hand must not reach an installer by accident.
+$ndi = @(Get-ChildItem -Path $staging -Recurse -File -Filter 'Processing.NDI.*' -ErrorAction SilentlyContinue)
+if ($ndi.Count -gt 0) {
+    throw "NDI runtime files are in $staging ($($ndi.Name -join ', ')); Relay must not bundle them - see docs/dev/ndi-licensing.md"
+}
+
 Write-Host ''
 Write-Host "staged into $staging"
 Write-Host 'now run:  cd ui; pnpm tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json'

@@ -13,8 +13,9 @@ import type {
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import type { EndpointApo } from "../lib/ipc";
-import { devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import type { NdiRuntime } from "../lib/ipc";
+import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
+import { LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -70,6 +71,23 @@ export interface FakeCore {
   /** How the next UAC prompt is answered. `decline` is a normal answer, not
    *  an error: Windows resolves, nothing was attempted, nothing changed. */
   elevation: { decline: boolean };
+  /** S46: what the learner has gathered per profile id (the core keeps it
+   *  per exe; per profile is enough for screens). */
+  gameEq: Map<string, { progress: number; candidate: [number, number][] | null; needsRelearn: boolean; learningNow: boolean }>;
+  /** S47: learn views by lower-case exe. Missing = never touched. */
+  learn: Map<string, LearnView>;
+  /** S51: the NDI runtime as the core's file check sees it. Missing by
+   *  default, as on most PCs. */
+  ndi: NdiRuntime;
+  /** Links the shell was asked to open (`open_ndi_link`), in order. */
+  ndiOpened: string[];
+  /** S48: video jobs by profile id (the core keeps the current one). */
+  fileJobs: Map<string, LearnFileStatus>;
+  /** S48: what `list_learn_videos` lists, and what the native picker returns. */
+  videos: VideoFile[];
+  pickedVideo: string | null;
+  /** S48: the ETA the fake game EQ status reports (seconds). */
+  gameEqEta: number | null;
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -137,6 +155,8 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
       { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
       { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+      { id: "discord", name: "Discord", bitrate_mbps: 20, fps: 60, size: [1920, 1080], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+      { id: "discord-720", name: "Discord 720p30", bitrate_mbps: 8, fps: 30, size: [1280, 720], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
     ],
     recording: { cap_gb: 50, free_floor_gb: 10 },
     processes: [
@@ -180,13 +200,20 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       policy: { active_profiles: 2, enabled: true, default_inbound_block: true },
       unknown: false,
     },
-    stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true, receiving: false },
+    stream: { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: false, receiving: false },
     peers: [],
     autostart: false,
     prefs: {
       close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
       auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+      ndi_receive: false, ndi_share: false,
     },
+    ndi: {
+      present: false, searched: ["C:\\Program Files\\NDI\\NDI 6 Runtime\\v6"],
+      download_url: "http://ndi.link/NDIRedistV6", ndi_url: "https://ndi.video/",
+      trademark: "NDI® is a registered trademark of Vizrt NDI AB.",
+    },
+    ndiOpened: [],
     update: {
       current: "0.1.0", phase: "idle", available: null, last_check: null,
       last_error: null, last_result: null, waiting_for: null,
@@ -203,9 +230,29 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       ],
     },
     elevation: { decline: false },
+    gameEq: new Map(),
+    learn: new Map(),
+    fileJobs: new Map(),
+    videos: [
+      { name: "Relay 2026-10-01 21-04.mp4", path: "C:\\Users\\test\\Videos\\Relay\\Relay 2026-10-01 21-04.mp4", size_bytes: 1_800_000_000, modified_unix: 1_790_000_000, relay: true },
+      { name: "match.mkv", path: "C:\\Users\\test\\Videos\\match.mkv", size_bytes: 900_000_000, modified_unix: 1_789_000_000, relay: false },
+    ],
+    pickedVideo: "C:\\Users\\test\\Desktop\\clip.webm",
+    gameEqEta: 240,
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
+  };
+
+  const learnView = (exe: string): LearnView => {
+    const key = exe.toLowerCase();
+    let v = core.learn.get(key);
+    if (!v) {
+      v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
+        privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+      core.learn.set(key, v);
+    }
+    return v;
   };
 
   const summaries = (): ProfileSummary[] => [...core.profiles.values()].map(summarize);
@@ -240,7 +287,155 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     get_ui_prefs: () => structuredClone(core.prefs),
     set_ui_prefs: (a) => (core.prefs = structuredClone(a.prefs as UiPrefs)),
     ack_crash: () => void (core.state.last_crash = null),
+    game_eq: (a) => {
+      const id = a.id as string;
+      const p = core.profiles.get(id);
+      if (!p) throw new Error("no such profile");
+      const action = a.action as GameEqAction;
+      const rec = core.gameEq.get(id) ?? { progress: 0, candidate: null, needsRelearn: false, learningNow: false };
+      const au = p.audio;
+      let exported: GameEqExport | undefined;
+      switch (action.kind) {
+        case "set_learning": au.learn_game_eq = action.enabled; break;
+        case "set_auto_apply": au.game_eq_auto_apply = action.enabled; break;
+        case "set_goal": {
+          au.game_eq_goal = action.goal;
+          // The fake "re-derives" by scaling: Immersion is gentler.
+          if (rec.candidate) {
+            const k = action.goal === "immersion" ? 0.5 : 1;
+            rec.candidate = rec.candidate.map(([hz, db]) => [hz, Math.round(db * k * 10) / 10]);
+            if (au.game_eq?.source === "learned") au.game_eq = { ...au.game_eq, curve: rec.candidate };
+          }
+          break;
+        }
+        case "apply":
+          if (!rec.candidate) throw new Error("there is no learned curve to apply yet");
+          au.game_eq = { curve: rec.candidate, source: au.game_eq && au.game_eq.source !== "learned" ? "tuned" : "learned" };
+          break;
+        case "relearn": rec.candidate = null; rec.progress = 0; break;
+        case "reset": delete au.game_eq; delete au.learn_game_eq; rec.candidate = null; rec.progress = 0; break;
+        case "import": {
+          const f = JSON.parse(action.text) as { game: { exe: string }; curve: [number, number][] };
+          if (f.game.exe.toLowerCase() !== p.game.exe.toLowerCase()) {
+            throw new Error(`this file is for ${f.game.exe}, not ${p.game.exe}`);
+          }
+          au.game_eq = { curve: f.curve, source: "imported", base: f.curve };
+          delete au.learn_game_eq;
+          break;
+        }
+        case "export": {
+          const c = au.game_eq?.curve ?? rec.candidate;
+          if (!c) throw new Error("there is no game EQ to export yet");
+          exported = {
+            text: JSON.stringify({ format: "relay-game-eq", schema: 1, game: { exe: p.game.exe }, curve: c, note: action.note }),
+            path: `C:\\Users\\test\\AppData\\Local\\Relay\\data\\exports\\${p.game.exe.replace(/\.exe$/i, "")}-game-eq.json`,
+          };
+          break;
+        }
+        default: break;
+      }
+      core.gameEq.set(id, rec);
+      const processing = au.bands.length > 0 || au.hrtf || !!au.limiter || !!au.game_eq;
+      const imported = au.game_eq?.source === "imported" || au.game_eq?.source === "tuned";
+      const on = au.learn_game_eq ?? (processing && !imported);
+      const applied = au.game_eq?.curve ?? null;
+      const offer = rec.candidate;
+      const same = !!offer && !!applied && JSON.stringify(offer) === JSON.stringify(applied);
+      const state: GameEqStatus["state"] = rec.needsRelearn && !offer
+        ? (applied || on ? "needs_relearn" : "off")
+        : same || (applied && offer && !on) ? "applied"
+          : offer && on ? "ready" : applied ? "applied" : on ? "learning" : "off";
+      const status: GameEqStatus = {
+        exe: p.game.exe, state, learning_on: on, needs_goal: on && !au.game_eq_goal,
+        learning_now: rec.learningNow, goal: au.game_eq_goal ?? null, auto_apply: !!au.game_eq_auto_apply,
+        source: au.game_eq?.source ?? null, progress: offer ? 100 : rec.progress, active_minutes: 4.5,
+        targets: 120, maskers: 20, min_targets: 300, min_maskers: 60, distinct_voices: 2,
+        exe_version: "1.0.0.0", applied, offer, note: "", last_error: null,
+        eta_secs: offer ? 0 : core.gameEqEta,
+      };
+      return { status, ...(exported ? { export: exported } : {}) };
+    },
+    list_learn_videos: () => ({
+      videos: structuredClone(core.videos), recording_dir: "C:\\Users\\test\\Videos\\Relay",
+      privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+    }),
+    pick_video_file: () => core.pickedVideo,
+    learn_from_file: (a) => {
+      const id = String(a.id), path = String(a.path);
+      const p = core.profiles.get(id);
+      if (!p) throw new Error("no such profile");
+      if (/:\/\/|youtube/i.test(path)) throw new Error("Relay learns from video files on this PC only; it does not download from websites");
+      if (core.fileJobs.get(id)?.state === "running") throw new Error("Relay is already learning from a video; cancel it first");
+      const job: LearnFileStatus = {
+        profile: id, exe: p.game.exe.toLowerCase(), file_name: path.split(/[\\/]/).pop() ?? path,
+        state: "running", progress: 0, position_secs: 0, duration_secs: 600, speed: null,
+        audio_secs: 0, look_frames: 0, notes: [], message: null, privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+      };
+      core.fileJobs.set(id, job);
+      return structuredClone(job);
+    },
+    learn_file_status: (a) => {
+      const j = core.fileJobs.get(String(a.id));
+      return j ? structuredClone(j) : null;
+    },
+    learn_file_cancel: (a) => {
+      const j = core.fileJobs.get(String(a.id));
+      if (j && j.state === "running") j.state = "cancelled";
+      return j ? structuredClone(j) : null;
+    },
     update_status: () => structuredClone(core.update),
+    learn_display_status: (a) => structuredClone(learnView(String(a.exe))),
+    learn_display_set: (a) => {
+      const v = learnView(String(a.exe));
+      v.enabled = Boolean(a.enabled);
+      if (v.status === "off" && v.enabled) v.status = "learning";
+      else if (v.status === "learning" && !v.enabled) v.status = "off";
+      return structuredClone(v);
+    },
+    learn_display_apply: (a) => {
+      const v = learnView(String(a.exe));
+      const ready = v.monitors.filter((m) => m.converged);
+      if (ready.length === 0) throw new Error("this game's look has not settled yet; keep playing");
+      for (const m of ready) { m.applied = m.converged; m.use_learned = true; m.status = "applied"; }
+      v.status = "applied";
+      return structuredClone(v);
+    },
+    learn_display_auto_apply: (a) => {
+      const v = learnView(String(a.exe));
+      v.auto_apply = Boolean(a.enabled);
+      if (v.auto_apply) {
+        for (const m of v.monitors.filter((x) => x.offer)) {
+          m.applied = m.offer ?? null; m.adjustments = m.offer_adjustments ?? null;
+          m.offer = null; m.offer_adjustments = null; m.use_learned = true; m.status = "applied";
+          v.status = "applied";
+        }
+      }
+      return structuredClone(v);
+    },
+    learn_display_relearn: (a) => {
+      const v = learnView(String(a.exe));
+      for (const m of v.monitors) { m.converged = null; m.phase = "learning"; m.readiness.frames = 0; m.readiness.progress = 0; }
+      return structuredClone(v);
+    },
+    learn_display_reset: (a) => {
+      core.learn.delete(String(a.exe).toLowerCase());
+      return structuredClone(learnView(String(a.exe)));
+    },
+    learn_display_export: (a) => JSON.stringify({
+      format: "relay-game-display", version: 1, game: { exe: String(a.exe).toLowerCase() },
+      look: { shadow: 0.3, saturation: 0.1, highlight: 0 }, evidence: { frames: 900, scenes: 3 },
+      note: String(a.note ?? ""),
+    }),
+    learn_display_import: (a) => {
+      const f = JSON.parse(String(a.json)) as { format?: string; game?: { exe?: string }; look?: LookTargets; note?: string };
+      if (f.format !== "relay-game-display" || !f.look) throw new Error("this is not a Relay game display file");
+      if (f.game?.exe?.toLowerCase() !== String(a.exe).toLowerCase()) throw new Error(`this file is for ${f.game?.exe}, not ${a.exe}`);
+      const v = learnView(String(a.exe));
+      v.imported = { look: f.look, note: f.note ?? "" };
+      v.enabled = false;
+      v.status = "applied_imported";
+      return structuredClone(v);
+    },
     check_for_updates: () => {
       core.update.last_check = 1_790_000_000;
       return structuredClone(core.update);
@@ -305,6 +500,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     set_recording_settings: (a) => void (core.recording = structuredClone(a.settings as RecordingSettings)),
     start_receive: () => undefined,
     stop_receive: () => undefined,
+    stop_call_return: () => undefined,
     set_video_area: () => undefined,
     set_stream_mode: () => undefined,
     stream_status: () => structuredClone(core.stream),
@@ -425,6 +621,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       setApo(core, (a.endpoint as string | null) ?? null, false);
     },
     vdevice_status: () => structuredClone(core.vdevice),
+    ndi_status: () => structuredClone(core.ndi),
+    open_ndi_link: (a) => {
+      const which = a.which as string;
+      if (which !== "ndi" && which !== "runtime") throw new Error(`unknown NDI link ${which}`);
+      core.ndiOpened.push(which);
+    },
     set_vdevice_consent: (a) => {
       core.vdevice.consent = {
         decided_at: "2026-09-14T00:00:00Z",
@@ -518,15 +720,20 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
+  "game_eq",
+  "list_learn_videos", "pick_video_file", "learn_from_file", "learn_file_status", "learn_file_cancel",
+  "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
+  "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
-  "set_recording_settings", "start_receive", "stop_receive", "set_video_area",
+  "set_recording_settings", "start_receive", "stop_receive", "stop_call_return", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
   "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "audio_effects_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
+  "ndi_status", "open_ndi_link",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",
   "launch_uninstaller", "discover_receivers",
   "list_peers", "forget_peer", "set_peer_favourite",

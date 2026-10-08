@@ -6,6 +6,14 @@
 //! fills — that is how the geometry set on the `IMFVirtualCamera` reaches
 //! us). `ActivateObject` builds the [`CamSource`] with one NV12 stream.
 //!
+//! Sizes (r54): NV12 at the stream's size plus 1080p and 720p when the
+//! stream is larger, 1080p first then, the same rule as the DirectShow pin.
+//! Whatever type the app's pipeline sets is honoured: the source asks the
+//! producer for that size through the ring's size request (the share engine
+//! scales on the GPU) and area-scales anything else that arrives, aspect
+//! kept, instead of serving black. NV12 is top-down (`MF_MT_DEFAULT_STRIDE`
+//! positive), the way the ring holds it.
+//!
 //! Frames come from the [`crate::frames`] ring. The ring section is created
 //! here on first use (the frame server runs as LOCAL SERVICE, which holds
 //! `SeCreateGlobalPrivilege`); the receiver's create call then maps it and
@@ -48,8 +56,8 @@ use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
 use windows::Win32::System::Com::{IClassFactory, IClassFactory_Impl};
 
 use super::{
-    CLSID_RELAY_VCAM, DEFAULT_FPS, DEFAULT_HEIGHT, DEFAULT_WIDTH, RELAY_VCAM_ATTR_FPS,
-    RELAY_VCAM_ATTR_HEIGHT, RELAY_VCAM_ATTR_WIDTH,
+    diag, picture, CLSID_RELAY_VCAM, DEFAULT_FPS, DEFAULT_HEIGHT, DEFAULT_WIDTH,
+    RELAY_VCAM_ATTR_FPS, RELAY_VCAM_ATTR_HEIGHT, RELAY_VCAM_ATTR_WIDTH,
 };
 use crate::frames::{section_name_from_env, SharedFrames, SLOT_BYTES};
 
@@ -298,6 +306,7 @@ struct StreamShared {
     queue: IMFMediaEventQueue,
     descriptor: IMFStreamDescriptor,
     attrs: IMFAttributes,
+    /// The stream's own size (the first frame-server attribute set).
     width: u32,
     height: u32,
     fps: u32,
@@ -324,6 +333,27 @@ enum StreamState {
 struct RingState {
     section: Option<SharedFrames>,
     scratch: Vec<u8>,
+    scaler: picture::Scaler,
+    /// The size this source last asked the producer for.
+    requested: Option<(u32, u32)>,
+    /// Whether the last sample was live, for one log line per switch.
+    was_live: Option<bool>,
+}
+
+/// The sizes the frame-server stream offers, preferred first (r54): the
+/// stream's own, and 1080p / 720p when it is larger than them, with 1080p
+/// first for a stream larger than 1080p. Nothing larger than the stream is
+/// offered: the frame server's own pipeline scales up if an app wants that.
+pub fn offered_sizes(width: u32, height: u32) -> Vec<(u32, u32)> {
+    let larger_than_1080p = u64::from(width) * u64::from(height) > 1920 * 1080;
+    let mut sizes = if larger_than_1080p { vec![(1920, 1080)] } else { Vec::new() };
+    sizes.push((width, height));
+    for s in [(1920, 1080), (1280, 720)] {
+        if s.0 <= width && s.1 <= height && !sizes.contains(&s) {
+            sizes.push(s);
+        }
+    }
+    sizes
 }
 
 // SAFETY: all interior state is Mutex/atomic guarded; the MF interfaces held
@@ -332,13 +362,33 @@ unsafe impl Send for StreamShared {}
 unsafe impl Sync for StreamShared {}
 
 impl StreamShared {
-    fn frame_bytes(&self) -> usize {
-        (self.width as usize * self.height as usize) * 3 / 2
+    /// The size of the media type the app's pipeline set on the stream
+    /// (the first offered one until it sets another).
+    fn current_size(&self) -> (u32, u32) {
+        // SAFETY: plain reads of our own descriptor's handler.
+        let size = unsafe {
+            self.descriptor
+                .GetMediaTypeHandler()
+                .and_then(|h| h.GetCurrentMediaType())
+                .and_then(|t| t.GetUINT64(&MF_MT_FRAME_SIZE))
+        };
+        match size {
+            Ok(v) => {
+                let (w, h) = ((v >> 32) as u32, v as u32);
+                if w >= 2 && h >= 2 && w % 2 == 0 && h % 2 == 0 {
+                    (w, h)
+                } else {
+                    (self.width, self.height)
+                }
+            }
+            Err(_) => (self.width, self.height),
+        }
     }
 
-    /// Copy the newest ring frame into `out` (true) or leave it as black
-    /// (false). Never fails: no ring / no receiver / wrong size = black.
-    fn fill_from_ring(&self, out: &mut [u8]) -> bool {
+    /// Fill `out` (NV12 `w`×`h`) with the newest ring frame, scaled if the
+    /// producer sent another size (true), or leave it for black (false).
+    /// Never fails: no ring or no receiver = black.
+    fn fill_from_ring(&self, out: &mut [u8], w: u32, h: u32) -> bool {
         let mut ring = self.ring.lock().unwrap();
         if ring.section.is_none() {
             ring.section = SharedFrames::create(&section_name_from_env()).ok();
@@ -346,15 +396,32 @@ impl StreamShared {
         if ring.scratch.len() < SLOT_BYTES {
             ring.scratch.resize(SLOT_BYTES, 0);
         }
-        let RingState { section, scratch } = &mut *ring;
-        let Some(section) = section.as_ref() else { return false };
-        let Some(info) = section.block().read_latest(scratch) else { return false };
-        if (info.width, info.height) != (self.width, self.height) {
-            return false;
+        let RingState { section, scratch, scaler, requested, was_live } = &mut *ring;
+        let live = (|| {
+            let section = section.as_ref()?;
+            if *requested != Some((w, h)) {
+                section.block().request_size(w, h);
+                *requested = Some((w, h));
+            }
+            let info = section.block().read_latest(scratch)?;
+            if (info.width, info.height) == (w, h) {
+                out.copy_from_slice(&scratch[..out.len()]);
+            } else {
+                scaler.scale(scratch, info.width, info.height, out, w, h);
+            }
+            self.last_seq.store(info.seq, Ordering::Relaxed);
+            Some(())
+        })()
+        .is_some();
+        if *was_live != Some(live) {
+            diag::line(&match (*was_live, live) {
+                (_, true) => format!("frame server: ring up → NV12 {w}x{h}"),
+                (Some(true), false) => "frame server: vcam ring down → serving black".to_string(),
+                (_, false) => "frame server: no stream yet → serving black".to_string(),
+            });
+            *was_live = Some(live);
         }
-        out.copy_from_slice(&scratch[..out.len()]);
-        self.last_seq.store(info.seq, Ordering::Relaxed);
-        true
+        live
     }
 }
 
@@ -372,20 +439,27 @@ impl CamStream {
         // SAFETY: standard MF object creation; attribute keys are the
         // documented types.
         unsafe {
-            let mt = MFCreateMediaType()?;
-            mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
-            mt.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | height as u64)?;
-            mt.SetUINT64(&MF_MT_FRAME_RATE, ((fps as u64) << 32) | 1)?;
-            mt.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
-            mt.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            mt.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
-            mt.SetUINT32(&MF_MT_DEFAULT_STRIDE, width)?;
-            mt.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
-            mt.SetUINT32(&MF_MT_SAMPLE_SIZE, width * height * 3 / 2)?;
+            let mut types = Vec::new();
+            for (w, h) in offered_sizes(width, height) {
+                let mt = MFCreateMediaType()?;
+                mt.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+                mt.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+                mt.SetUINT64(&MF_MT_FRAME_SIZE, ((w as u64) << 32) | h as u64)?;
+                mt.SetUINT64(&MF_MT_FRAME_RATE, ((fps as u64) << 32) | 1)?;
+                mt.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1)?;
+                mt.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+                mt.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
+                // Positive stride: top-down, the ring's own orientation.
+                mt.SetUINT32(&MF_MT_DEFAULT_STRIDE, w)?;
+                mt.SetUINT32(&MF_MT_FIXED_SIZE_SAMPLES, 1)?;
+                mt.SetUINT32(&MF_MT_SAMPLE_SIZE, w * h * 3 / 2)?;
+                types.push(Some(mt));
+            }
 
-            let descriptor = MFCreateStreamDescriptor(0, &[Some(mt.clone())])?;
-            descriptor.GetMediaTypeHandler()?.SetCurrentMediaType(&mt)?;
+            let descriptor = MFCreateStreamDescriptor(0, &types)?;
+            descriptor
+                .GetMediaTypeHandler()?
+                .SetCurrentMediaType(types[0].as_ref().expect("built above"))?;
 
             let mut attrs = None;
             MFCreateAttributes(&mut attrs, 4)?;
@@ -474,7 +548,8 @@ impl IMFMediaStream_Impl for CamStream_Impl {
         if state == StreamState::Shutdown {
             return Err(MF_E_SHUTDOWN.into());
         }
-        let bytes = self.shared.frame_bytes();
+        let (w, h) = self.shared.current_size();
+        let bytes = picture::nv12_bytes(w, h);
         // SAFETY: standard sample construction; buffer locked/unlocked in
         // pairs and never escapes.
         unsafe {
@@ -483,9 +558,9 @@ impl IMFMediaStream_Impl for CamStream_Impl {
                 let mut data: *mut u8 = std::ptr::null_mut();
                 buffer.Lock(&mut data, None, None)?;
                 let out = std::slice::from_raw_parts_mut(data, bytes);
-                if !self.shared.fill_from_ring(out) {
+                if !self.shared.fill_from_ring(out, w, h) {
                     // Black NV12: luma 0x10, chroma 0x80.
-                    let y_len = self.shared.width as usize * self.shared.height as usize;
+                    let y_len = w as usize * h as usize;
                     out[..y_len].fill(0x10);
                     out[y_len..].fill(0x80);
                 }
@@ -672,6 +747,12 @@ impl IMFMediaSource_Impl for CamSource_Impl {
         let first = !inner.started;
         inner.started = true;
         *inner.stream_shared.state.lock().unwrap() = StreamState::Running;
+        // Once per start: the type the app's pipeline settled on.
+        let (w, h) = inner.stream_shared.current_size();
+        diag::line(&format!(
+            "frame server: started NV12 {w}x{h} @ {} fps (stream {}x{})",
+            inner.stream_shared.fps, inner.stream_shared.width, inner.stream_shared.height
+        ));
         // SAFETY: event queue delegation; the stream rides MENewStream as an
         // IUnknown param, per the media source contract.
         unsafe {
@@ -731,9 +812,16 @@ impl IMFMediaSource_Impl for CamSource_Impl {
         let mut inner = self.inner.lock().unwrap();
         inner.shutdown = true;
         *inner.stream_shared.state.lock().unwrap() = StreamState::Shutdown;
-        // Break the parent cycle and drop the ring mapping.
+        // Break the parent cycle, hand the producer back its own size, and
+        // drop the ring mapping.
         *inner.stream_shared.parent.lock().unwrap() = None;
-        inner.stream_shared.ring.lock().unwrap().section = None;
+        {
+            let mut ring = inner.stream_shared.ring.lock().unwrap();
+            if let (Some(section), Some((w, h))) = (ring.section.as_ref(), ring.requested) {
+                section.block().withdraw_request(w, h);
+            }
+            ring.section = None;
+        }
         // SAFETY: queue shutdown is idempotent.
         unsafe {
             let _ = inner.stream_shared.queue.Shutdown();

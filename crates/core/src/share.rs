@@ -46,6 +46,11 @@ pub struct ShareRequest {
     /// Capture just this process's audio (game-only) instead of the desktop mix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_pid: Option<u32>,
+    /// Which process `audio_pid` meant (r54): set by the service when the
+    /// share starts, checked against the live process before every spawn and
+    /// again in the engine, so a resumed share never captures a recycled PID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_app: Option<crate::proc_identity::ProcIdentity>,
     /// Also send the default microphone, as a second Opus track alongside
     /// the desktop/game mix rather than instead of it. Mic-only is `audio:
     /// false` with `mic: true`.
@@ -61,6 +66,11 @@ pub struct ShareRequest {
     /// holds the camera; a client's value is only a wish.
     #[serde(default)]
     pub vcam: bool,
+    /// Also publish the share as an NDI® source on the LAN (S51). The
+    /// service sets it from the saved Share setting; a client's value is
+    /// overwritten.
+    #[serde(default)]
+    pub ndi: bool,
     #[serde(default = "default_true")]
     pub cursor: bool,
     /// The preset this request was resolved from (informational).
@@ -189,16 +199,35 @@ pub enum EngineCmd {
     Vcam {
         on: bool,
     },
+    /// Receiver only (r54): stop sending the call app's audio back, live,
+    /// with no restart. Only `false` is acted on: turning a return route on
+    /// needs a new track, which needs a new connection.
+    Return {
+        on: bool,
+    },
+    /// Either engine (S51): publish as an NDI® source, or stop, live.
+    Ndi {
+        on: bool,
+    },
     /// Retune the in-app preview: thumbnails per second, 0 = off.
     Preview {
         fps: u32,
     },
     /// Receiver only: embed the stream window in the app window `owner`, or
-    /// pop it out into a window of its own (S29).
+    /// pop it out into a window of its own (S29), or make it a clean feed of
+    /// a fixed size for call apps (S50).
     Host {
         mode: HostMode,
         #[serde(default)]
         owner: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feed: Option<CleanFeed>,
+    },
+    /// Receiver only (S50): what this PC is sharing now, `None` = nothing.
+    /// The stream window is hidden from capture only while it is covered.
+    LocalShare {
+        #[serde(default)]
+        target: Option<SourceTarget>,
     },
 }
 
@@ -234,6 +263,19 @@ pub struct AudioDevices {
 pub enum HostMode {
     Embedded,
     Popout,
+    /// A borderless window of a fixed size for call apps and OBS (S50).
+    Clean,
+}
+
+/// Mirror of `relay_capture::command::CleanFeed`: a clean feed's fixed
+/// client size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CleanFeed {
+    #[default]
+    #[serde(rename = "1920x1080")]
+    Fhd,
+    #[serde(rename = "2560x1440")]
+    Qhd,
 }
 
 fn default_bitrate() -> u32 {
@@ -247,7 +289,7 @@ fn default_true() -> bool {
 }
 
 /// How to run the receiver side.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReceiveRequest {
     /// mDNS instance name; empty = hostname.
     #[serde(default)]
@@ -259,6 +301,10 @@ pub struct ReceiveRequest {
     /// this from the consent + registration state, not the client.
     #[serde(default)]
     pub vcam: bool,
+    /// Publish the received stream as an NDI® source, "Relay (from
+    /// <sender>)" (S51). Service-set from the saved Receive setting.
+    #[serde(default)]
+    pub ndi: bool,
     /// Render decoded audio to this endpoint id (interim virtual-mic route).
     /// Also service-set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,10 +319,20 @@ pub struct ReceiveRequest {
     /// pre-S19 record reads as off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_pid: Option<u32>,
+    /// Which process `return_pid` meant (r54): image path and creation time,
+    /// pinned by the service when the user starts receiving and re-checked on
+    /// every spawn and resume. Never trusted from a client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_app: Option<crate::proc_identity::ProcIdentity>,
     /// Where received audio plays (S40), from the saved mixer choice; `None`
     /// = the System default. `mic_route` wins when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    /// What this PC is sharing as the receiver starts (S50), passed as
+    /// `--local-share`. Service-set from the running share, never from a
+    /// client, and never persisted: a resumed receive is told afresh.
+    #[serde(skip)]
+    pub local_share: Option<SourceTarget>,
 }
 
 /// Lines the engine emits (a decoded subset of the child's NDJSON, plus process lifecycle).
@@ -330,6 +386,86 @@ pub enum ShareEvent {
     Refused { message: String },
     /// Receiver: a PC tried the wrong code; the wait goes on under a new one.
     WrongCode { name: String },
+    /// Receiver (r54): the call app's audio is not (or no longer) sent back.
+    /// `reason` is `user` for a live Off, else why the engine refused it.
+    ReturnOff { reason: String },
+    /// Sender (r54): the shared app's audio is not captured, because its PID
+    /// no longer names the process the core pinned.
+    AudioOff { reason: String },
+}
+
+/// What the user is told when a call app picked earlier is gone (r54).
+pub const RETURN_GONE_TEXT: &str =
+    "The call app you picked has closed, so its audio is not sent back. Pick it again on Receive.";
+/// What the user is told when the app whose sound was shared is gone (r54).
+pub const AUDIO_GONE_TEXT: &str =
+    "The app whose sound you were sharing has closed. The share goes on without its sound.";
+
+impl ReceiveRequest {
+    /// r54: pin the call app to the live process (a fresh Start), or check
+    /// the pinned one still is that process (a resume, a restart, a replay).
+    /// Anything that does not check out is dropped here, before an engine
+    /// could capture it. `Some` = it was dropped, and why.
+    pub fn settle_return(
+        &mut self,
+        fresh: bool,
+        probe: &dyn crate::proc_identity::ProcessProbe,
+    ) -> Option<crate::proc_identity::Stale> {
+        use crate::proc_identity::{settle, Settled};
+        match settle(self.return_pid, self.return_app.as_ref(), fresh, probe) {
+            Settled::None => {
+                self.return_pid = None;
+                self.return_app = None;
+                None
+            }
+            Settled::Keep(id) => {
+                self.return_pid = Some(id.pid);
+                self.return_app = Some(id);
+                None
+            }
+            Settled::Drop(why) => {
+                self.return_pid = None;
+                self.return_app = None;
+                Some(why)
+            }
+        }
+    }
+}
+
+impl ShareRequest {
+    /// r54: the same check for the app whose audio a share captures. A stale
+    /// one leaves the share without program audio -- never the whole
+    /// desktop mix instead, which could carry a call nobody chose to send.
+    pub fn settle_audio_app(
+        &mut self,
+        fresh: bool,
+        probe: &dyn crate::proc_identity::ProcessProbe,
+    ) -> Option<crate::proc_identity::Stale> {
+        use crate::proc_identity::{settle, Settled};
+        if !self.audio {
+            self.audio_app = None;
+            return None;
+        }
+        match settle(self.audio_pid, self.audio_app.as_ref(), fresh, probe) {
+            Settled::None => {
+                self.audio_pid = None;
+                self.audio_app = None;
+                None
+            }
+            Settled::Keep(id) => {
+                self.audio_pid = Some(id.pid);
+                self.audio_app = Some(id);
+                None
+            }
+            Settled::Drop(why) => {
+                self.audio_pid = None;
+                self.audio_app = None;
+                self.audio = false;
+                self.rest = false;
+                Some(why)
+            }
+        }
+    }
 }
 
 /// The path to `relay-share`, assumed to sit next to `relay-core`.
@@ -579,6 +715,13 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     } else if let Some(pid) = req.audio_pid {
         args.push("--audio-pid".into());
         args.push(pid.to_string());
+        // The engine re-checks the process right before it captures it.
+        if let Some(app) = req.audio_app.as_ref().filter(|a| a.pid == pid) {
+            args.push("--audio-pid-image".into());
+            args.push(app.image.clone());
+            args.push("--audio-pid-created".into());
+            args.push(app.created.to_string());
+        }
     }
     // Independent of the program source: `--audio-mic` adds a track.
     if req.mic {
@@ -591,6 +734,9 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     }
     if req.vcam {
         args.push("--vcam".into());
+    }
+    if req.ndi {
+        args.push("--ndi".into());
     }
     if !req.cursor {
         args.push("--no-cursor".into());
@@ -636,6 +782,27 @@ pub fn receive_vcam_sync(receiving: bool, camera_ok: bool) -> Option<EngineCmd> 
     receiving.then_some(EngineCmd::Vcam { on: camera_ok })
 }
 
+/// S50: the `local_share` command that brings a running receiver in line
+/// with what this PC is sharing now, or `None` when nothing needs saying —
+/// not receiving, or the receiver was already told exactly this. `told` is
+/// what it was last given (at spawn or by an earlier command).
+pub fn local_share_sync(
+    receiving: bool,
+    told: Option<Option<SourceTarget>>,
+    now: Option<SourceTarget>,
+) -> Option<EngineCmd> {
+    (receiving && told != Some(now)).then_some(EngineCmd::LocalShare { target: now })
+}
+
+/// The capture target a sender's `source` line reports, if it carries one.
+pub fn source_target_of(data: &serde_json::Value) -> Option<SourceTarget> {
+    data.get("target").and_then(|t| serde_json::from_value(t.clone()).ok())
+}
+
+/// What a sender captures before its first `source` line: the primary
+/// display, as `relay_capture::transport::sender` starts on.
+pub const INITIAL_SHARE_TARGET: SourceTarget = SourceTarget::Display { index: 0 };
+
 /// The `relay-share recv` command line for a request.
 fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     let mut args = vec!["recv".to_string()];
@@ -650,6 +817,9 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     if req.vcam {
         args.push("--vcam".into());
     }
+    if req.ndi {
+        args.push("--ndi".into());
+    }
     if let Some(ep) = req.mic_route.as_deref().filter(|e| !e.is_empty()) {
         args.push("--mic-route".into());
         args.push(ep.into());
@@ -661,12 +831,28 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     if let Some(pid) = req.return_pid.filter(|p| *p != 0) {
         args.push("--return-pid".into());
         args.push(pid.to_string());
+        if let Some(app) = req.return_app.as_ref().filter(|a| a.pid == pid) {
+            args.push("--return-image".into());
+            args.push(app.image.clone());
+            args.push("--return-created".into());
+            args.push(app.created.to_string());
+        }
     }
     if let Some(id) = req.output_device.as_deref().filter(|d| !d.is_empty()) {
         args.push("--output-device".into());
         args.push(id.into());
     }
+    push_local_share(&mut args, req);
     args
+}
+
+fn push_local_share(args: &mut Vec<String>, req: &ReceiveRequest) {
+    if let Some(t) = req.local_share {
+        if let Ok(json) = serde_json::to_string(&t) {
+            args.push("--local-share".into());
+            args.push(json);
+        }
+    }
 }
 
 /// The `relay-share host-stub` command line: the same flags as `recv`, on the
@@ -677,6 +863,7 @@ fn stub_args(req: &ReceiveRequest) -> Vec<String> {
         args.push("--host".into());
         args.push(h.to_string());
     }
+    push_local_share(&mut args, req);
     args
 }
 
@@ -744,6 +931,12 @@ fn decode_line(line: &str) -> Option<ShareEvent> {
         Some("wrong_code") => Some(ShareEvent::WrongCode {
             name: v.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
         }),
+        Some("return_off") => Some(ShareEvent::ReturnOff {
+            reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        }),
+        Some("audio_off") => Some(ShareEvent::AudioOff {
+            reason: v.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string(),
+        }),
         Some("stopped") => Some(ShareEvent::Exited { ok: true, code: Some(0) }),
         other => {
             debug!(?other, "ignoring engine line");
@@ -791,6 +984,90 @@ mod tests {
 
     use super::*;
 
+    mod r54 {
+        use super::*;
+        use crate::proc_identity::{ProcIdentity, ProcessProbe, Stale};
+
+        struct One(Option<ProcIdentity>);
+        impl ProcessProbe for One {
+            fn identity(&self, pid: u32) -> Option<ProcIdentity> {
+                self.0.clone().filter(|i| i.pid == pid)
+            }
+        }
+        fn app(pid: u32, image: &str, created: u64) -> ProcIdentity {
+            ProcIdentity { pid, image: image.into(), created }
+        }
+        fn recv(pid: Option<u32>, stored: Option<ProcIdentity>) -> ReceiveRequest {
+            ReceiveRequest { return_pid: pid, return_app: stored, ..Default::default() }
+        }
+
+        #[test]
+        fn a_resumed_receive_with_a_reused_pid_drops_the_route() {
+            // PC2: 2772 was a test process; now it is someone else.
+            let mut req = recv(Some(2772), Some(app(2772, r"C:\t\tone.exe", 1)));
+            let probe = One(Some(app(2772, r"C:\d\Discord.exe", 2)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Reused));
+            assert_eq!((req.return_pid, req.return_app.clone()), (None, None));
+            assert!(!recv_args(&req).iter().any(|a| a.starts_with("--return")));
+        }
+
+        #[test]
+        fn the_same_exe_with_a_new_start_time_is_refused() {
+            let mut req = recv(Some(10), Some(app(10, r"C:\d\Discord.exe", 1)));
+            let probe = One(Some(app(10, r"C:\d\Discord.exe", 5)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Reused));
+            assert_eq!(req.return_pid, None);
+        }
+
+        #[test]
+        fn a_pre_fix_record_with_a_bare_pid_is_dropped() {
+            let mut req = recv(Some(2772), None);
+            let probe = One(Some(app(2772, r"C:\d\Discord.exe", 2)));
+            assert_eq!(req.settle_return(false, &probe), Some(Stale::Gone));
+            assert_eq!(req.return_pid, None);
+        }
+
+        #[test]
+        fn a_valid_call_app_is_kept_and_a_fresh_pick_is_pinned() {
+            let live = app(4242, r"C:\d\Discord.exe", 7);
+            let probe = One(Some(live.clone()));
+            let mut req = recv(Some(4242), None);
+            assert_eq!(req.settle_return(true, &probe), None);
+            assert_eq!(req.return_app.as_ref(), Some(&live));
+            // The pinned request resumes fine while the process lives.
+            assert_eq!(req.settle_return(false, &probe), None);
+            assert_eq!(req.return_pid, Some(4242));
+            // A dead pick is dropped even when fresh.
+            let mut dead = recv(Some(4243), None);
+            assert_eq!(dead.settle_return(true, &probe), Some(Stale::Gone));
+        }
+
+        #[test]
+        fn a_stale_shared_app_turns_program_audio_off_not_to_the_desktop_mix() {
+            let mut req: ShareRequest =
+                serde_json::from_str(r#"{"code":"1","audio_pid":4321,"rest":true}"#).unwrap();
+            req.audio_app = Some(app(4321, r"C:\g\game.exe", 1));
+            let probe = One(Some(app(4321, r"C:\other.exe", 9)));
+            assert_eq!(req.settle_audio_app(false, &probe), Some(Stale::Reused));
+            assert!(!req.audio && !req.rest && req.audio_pid.is_none());
+            let args = send_args(&req);
+            assert!(args.contains(&"--no-audio".to_string()));
+            assert!(!args.iter().any(|a| a == "--audio-pid" || a == "--audio-rest"));
+        }
+
+        #[test]
+        fn a_valid_shared_app_is_pinned_and_passed_on() {
+            let live = app(4321, r"C:\g\game.exe", 3);
+            let probe = One(Some(live.clone()));
+            let mut req: ShareRequest =
+                serde_json::from_str(r#"{"code":"1","audio_pid":4321}"#).unwrap();
+            assert_eq!(req.settle_audio_app(true, &probe), None);
+            let args = send_args(&req);
+            let i = args.iter().position(|a| a == "--audio-pid-created").expect("identity passed");
+            assert_eq!(args[i + 1], "3");
+        }
+    }
+
     #[test]
     fn share_request_minimal_json_gets_defaults() {
         let req: ShareRequest = serde_json::from_str(r#"{"code":"123456"}"#).unwrap();
@@ -801,6 +1078,24 @@ mod tests {
         assert!(req.audio);
         assert_eq!(req.audio_pid, None);
         assert!(req.cursor);
+    }
+
+    #[test]
+    fn ndi_command_and_flags() {
+        // Must match relay_capture::command's own test byte for byte.
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Ndi { on: true }).unwrap(),
+            r#"{"cmd":"ndi","on":true}"#
+        );
+        let mut req: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert!(!req.ndi, "off unless the service turns it on");
+        assert!(!send_args(&req).contains(&"--ndi".to_string()));
+        req.ndi = true;
+        assert!(send_args(&req).contains(&"--ndi".to_string()));
+        let mut recv: ReceiveRequest = serde_json::from_str("{}").unwrap();
+        assert!(!recv_args(&recv).contains(&"--ndi".to_string()));
+        recv.ndi = true;
+        assert_eq!(recv_args(&recv), ["recv", "--ndi"]);
     }
 
     #[test]
@@ -1134,6 +1429,23 @@ mod tests {
         // S19: the return route only when a call app was picked; 0 is "none".
         let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":4242}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv", "--return-pid", "4242"]);
+        // r54: the pinned identity goes to the engine, which re-checks it.
+        let req: ReceiveRequest = serde_json::from_str(
+            r#"{"return_pid":4242,"return_app":{"pid":4242,"image":"C:\\d\\Discord.exe","created":99}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            recv_args(&req),
+            [
+                "recv",
+                "--return-pid",
+                "4242",
+                "--return-image",
+                r"C:\d\Discord.exe",
+                "--return-created",
+                "99"
+            ]
+        );
         let req: ReceiveRequest = serde_json::from_str(r#"{"return_pid":0}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
         // S40: a pinned output goes on the line; the default is no flag.
@@ -1141,6 +1453,16 @@ mod tests {
         assert_eq!(recv_args(&req), ["recv", "--output-device", "{spk}"]);
         let req: ReceiveRequest = serde_json::from_str(r#"{"output_device":""}"#).unwrap();
         assert_eq!(recv_args(&req), ["recv"]);
+        // S50: what this PC is sharing, service-set; a client cannot send it.
+        let mut req: ReceiveRequest =
+            serde_json::from_str(r#"{"local_share":{"kind":"display","index":3}}"#).unwrap();
+        assert_eq!(req.local_share, None, "not settable by a client");
+        req.local_share = Some(SourceTarget::Display { index: 1 });
+        assert_eq!(recv_args(&req), ["recv", "--local-share", r#"{"kind":"display","index":1}"#]);
+        assert_eq!(
+            stub_args(&req),
+            ["host-stub", "--local-share", r#"{"kind":"display","index":1}"#]
+        );
     }
 
     #[test]
@@ -1262,5 +1584,70 @@ mod tests {
         })
         .unwrap();
         assert_eq!(s, r#"{"event":"waiting","code":"123456","name":"studio"}"#);
+    }
+
+    /// The same strings `relay_capture::command` locks on the engine side.
+    #[test]
+    fn s50_wire_shapes_match_the_engine() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Clean,
+                owner: 0,
+                feed: Some(CleanFeed::Qhd)
+            })
+            .unwrap(),
+            r#"{"cmd":"host","mode":"clean","owner":0,"feed":"2560x1440"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Host {
+                mode: HostMode::Embedded,
+                owner: 7,
+                feed: None
+            })
+            .unwrap(),
+            r#"{"cmd":"host","mode":"embedded","owner":7}"#,
+            "an embed line is what it was before S50"
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare {
+                target: Some(SourceTarget::Display { index: 0 })
+            })
+            .unwrap(),
+            r#"{"cmd":"local_share","target":{"kind":"display","index":0}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::LocalShare { target: None }).unwrap(),
+            r#"{"cmd":"local_share","target":null}"#
+        );
+    }
+
+    /// A running receiver is told when this PC starts, switches or stops
+    /// sharing, once per change, and never when nothing is receiving.
+    #[test]
+    fn local_share_is_told_once_per_change() {
+        let d0 = Some(SourceTarget::Display { index: 0 });
+        let d1 = Some(SourceTarget::Display { index: 1 });
+        let say = |t| Some(EngineCmd::LocalShare { target: t });
+        assert_eq!(local_share_sync(false, None, d0), None, "nothing receiving");
+        // Spawned while not sharing: told `None` by the absence of the flag.
+        assert_eq!(local_share_sync(true, Some(None), None), None);
+        assert_eq!(local_share_sync(true, Some(None), d0), say(d0), "a local share starts");
+        assert_eq!(local_share_sync(true, Some(d0), d0), None, "same again: quiet");
+        assert_eq!(local_share_sync(true, Some(d0), d1), say(d1), "the share switches monitor");
+        assert_eq!(local_share_sync(true, Some(d1), None), say(None), "the share stops");
+        // Never told anything yet (should not happen, but say it rather than guess).
+        assert_eq!(local_share_sync(true, None, None), say(None));
+    }
+
+    #[test]
+    fn a_source_line_names_its_target() {
+        let v = serde_json::json!({
+            "event": "source", "target": {"kind": "display", "index": 2}, "width": 1, "height": 1
+        });
+        assert_eq!(source_target_of(&v), Some(SourceTarget::Display { index: 2 }));
+        let v = serde_json::json!({ "event": "source", "target": {"kind": "window", "hwnd": 9} });
+        assert_eq!(source_target_of(&v), Some(SourceTarget::Window { hwnd: 9 }));
+        assert_eq!(source_target_of(&serde_json::json!({ "event": "source" })), None);
+        assert_eq!(INITIAL_SHARE_TARGET, SourceTarget::Display { index: 0 });
     }
 }

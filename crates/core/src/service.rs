@@ -138,6 +138,11 @@ struct Inner {
     /// intent says it should not be.
     send_episode: Option<crate::resilience::Episode>,
     recv_episode: Option<crate::resilience::Episode>,
+    /// The call app the running receiver is returning audio from right now
+    /// (pid, exe name), as every receive status line reports it. Set at
+    /// spawn from the checked identity; cleared by a live Off or by the
+    /// engine refusing the route (r54).
+    recv_return: Option<(u32, String)>,
     /// The app window the receiver's stream is hosted in. Kept in memory
     /// only (the record on disk drops it: a window handle is meaningless to
     /// a fresh core), so a receiver brought back after a share ends is
@@ -147,6 +152,15 @@ struct Inner {
     /// or by a toggle), so a toggle is sent only when it changes: install
     /// and uninstall each sent it twice (PC2, r47).
     recv_vcam: Option<bool>,
+    /// S50: what the running share engine captures, from its `source`
+    /// lines (`None` before the first one: it starts on the primary).
+    share_target: Option<crate::share::SourceTarget>,
+    /// S50: what the running receiver was last told this PC is sharing (at
+    /// spawn or by a `local_share` command), so it is told once per change.
+    recv_local_told: Option<Option<crate::share::SourceTarget>>,
+    /// Consecutive 1 s ticks on which Windows' foreground window differed
+    /// from the one the hook last reported (see `reconcile_foreground`).
+    fg_mismatch: u8,
     /// When the current receive engine started. A restarted receiver that
     /// has stayed up for a while ends the episode even if no share arrived:
     /// otherwise the episode's clock ran on and the next unrelated failure,
@@ -154,6 +168,16 @@ struct Inner {
     recv_started: Option<std::time::Instant>,
     /// The update check and user-approved install (S45).
     update: crate::update::Updater,
+    /// S46: the learner helper for the focused game, while one runs.
+    learner: Option<crate::game_eq::Learner>,
+    /// S47: learned game looks (`learned-display.json`).
+    learn: crate::learned_display::LearnStore,
+    /// S47: the look sampler child, only while a learning-enabled game with
+    /// an active profile has focus. Dropping it kills it (by handle).
+    look: Option<crate::learned_display::Sampler>,
+    /// S48: the "learn from a video file" helper, while one runs (and its
+    /// final status after, for the UI).
+    file_job: Option<crate::learn_file::FileJob>,
 }
 
 /// S45: why an update must wait right now, if anything is in the way.
@@ -356,10 +380,18 @@ impl Service {
             recv_intent: None,
             send_episode: None,
             recv_episode: None,
+            recv_return: None,
             recv_host: None,
             recv_vcam: None,
+            share_target: None,
+            recv_local_told: None,
+            fg_mismatch: 0,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
+            learner: None,
+            learn: crate::learned_display::LearnStore::load(paths.learned_display_file()),
+            look: None,
+            file_job: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -395,10 +427,15 @@ impl Service {
         }
 
         // Stop any share/receive child so it never outlives the core.
-        let (share, receive) = {
+        let (share, receive, learner) = {
             let mut g = service.inner.lock();
-            (g.share.take(), g.receive.take())
+            // Dropping the video job kills its helper (by handle).
+            g.file_job = None;
+            (g.share.take(), g.receive.take(), g.learner.take())
         };
+        if let Some(l) = learner {
+            l.stop_blocking();
+        }
         if let Some(engine) = share {
             engine.stop();
         }
@@ -408,6 +445,11 @@ impl Service {
 
         // Belt and braces: whatever happened, put the machine back.
         let mut g = service.inner.lock();
+        if g.look.take().is_some() {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json on exit");
+            }
+        }
         if let Err(e) = g.applier.restore() {
             warn!(error = %e, "restore on exit failed; will retry on next start");
         }
@@ -474,9 +516,16 @@ impl Service {
         // is applied, so an idle core never wakes for it.
         let mut exit_watch = tokio::time::interval(Duration::from_millis(100));
         exit_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Foreground reconcile on its own cadence, first in the select: on
+        // the shared 1 s tick it ran behind the audio probe, the learners and
+        // the updater, and a missed switch took ~5 s on PC2.
+        let mut fg_watch = tokio::time::interval(FG_RECONCILE_INTERVAL);
+        fg_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let profiled = self.inner.lock().state.active_profile.is_some();
             tokio::select! {
+                biased;
+                _ = fg_watch.tick() => self.reconcile_foreground(),
                 _ = exit_watch.tick(), if profiled => self.recheck_focus(),
                 ev = rx.recv() => {
                     match ev {
@@ -504,11 +553,167 @@ impl Service {
                     self.recheck_monitor();
                     self.supervise();
                     self.update_tick();
+                    self.learner_tick();
+                    self.learn_tick();
+                    self.file_tick();
                 }
             }
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// S46, on the 1 s tick: notice a learner that exited, and take a newly
+    /// offered curve when the profile allows auto-apply.
+    fn learner_tick(&self) {
+        let mut g = self.inner.lock();
+        let Some(l) = g.learner.as_mut() else { return };
+        if !l.running() {
+            info!("the learner helper exited");
+            g.learner = None;
+            return;
+        }
+        if crate::game_eq::grace_expired(l.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the learner");
+            stop_learner(&mut g);
+            return;
+        }
+        if !l.take_fresh() {
+            return;
+        }
+        let id = l.profile;
+        let Some(mut profile) = g.store.get(id).cloned() else { return };
+        if !profile.audio.game_eq_auto_apply {
+            return;
+        }
+        let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) else { return };
+        if crate::game_eq::take_offer(&mut profile, &rec) {
+            info!(exe = %profile.game.exe, "auto-applied the newly learned game EQ");
+            g.store.upsert(profile);
+            if let Err(e) = g.store.save() {
+                warn!(error = %e, "saving the auto-applied game EQ failed");
+            }
+            drop(g);
+            reselect(&self.inner, &self.events);
+        }
+    }
+
+    /// S47, on the 1 s tick: fold the sampler's frame reports into the
+    /// learner, persist at checkpoints, and re-apply when the look in use
+    /// changed (Apply happened elsewhere, or a meaningfully different result
+    /// settled). Idle cores never get past the first line.
+    fn learn_tick(&self) {
+        use crate::learned_display::SamplerLine;
+        let mut g = self.inner.lock();
+        let Some(s) = g.look.as_mut() else { return };
+        if crate::learned_display::grace_expired(s.paused_since, std::time::Instant::now()) {
+            info!("the game stayed out of focus; stopping the look sampler");
+            g.look = None;
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+            return;
+        }
+        let exited = s.exited();
+        let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
+        let (exe, mon) = (s.exe.clone(), s.monitor.clone());
+        let before = g.learn.game(&exe).and_then(|r| r.effective(&mon));
+        let mut save = false;
+        for line in lines {
+            let rec = g.learn.game_mut(&exe).monitor_mut(&mon);
+            match line {
+                SamplerLine::Frame(r) => {
+                    rec.hdr_skipped = false;
+                    if rec.learner.observe(&r) {
+                        save = true;
+                        if g.learn.game_mut(&exe).take_offer_if_auto(&mon) {
+                            info!(exe = %exe, "auto-applied the newly settled look");
+                        }
+                    }
+                }
+                SamplerLine::Hdr => {
+                    info!(exe = %exe, "monitor is in HDR mode; not learning there");
+                    rec.hdr_skipped = true;
+                    save = true;
+                    stop = true;
+                }
+                SamplerLine::Error(e) => {
+                    warn!(error = %e, "look sampler stopped");
+                    stop = true;
+                }
+            }
+        }
+        if stop {
+            g.look = None;
+        }
+        if save {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+        }
+        if g.learn.game(&exe).and_then(|r| r.effective(&mon)) != before {
+            reapply_learned(&mut g);
+            let state = Box::new(g.state.clone());
+            drop(g);
+            let _ = self.events.send(Event::StateChanged { state });
+        }
+    }
+
+    /// S48, on the 1 s tick: read the video learner's progress; when it is
+    /// done, fold its look into the game's monitor records, keep learning on
+    /// for both halves (so live play refines the start), and take offers
+    /// that auto-apply allows. Idle cores never get past the first line.
+    fn file_tick(&self) {
+        let mut g = self.inner.lock();
+        let Some(job) = g.file_job.as_mut() else { return };
+        if !job.poll() {
+            return;
+        }
+        let state = job.status.state;
+        let (id, exe) = (job.status.profile, job.status.exe.clone());
+        let look = job.look.take();
+        info!(exe = %exe, ?state, "the video learner finished");
+        if state != crate::learn_file::FileJobState::Done {
+            return;
+        }
+        let monitors: Vec<crate::types::MonitorId> =
+            g.last_report.monitors.iter().map(|m| m.id.clone()).collect();
+        if let Some(look) = look {
+            let n = crate::learn_file::merge_look(&mut g.learn, &exe, &monitors, &look);
+            if n == 0 && look.agg.frames > 0 {
+                if let Some(j) = g.file_job.as_mut() {
+                    j.status.notes.push("No monitor was found to keep the look for.".into());
+                }
+            }
+            if look.agg.frames > 0 {
+                g.learn.game_mut(&exe).enabled = true;
+            }
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+        }
+        if let Some(mut profile) = g.store.get(id).cloned() {
+            let mut changed = false;
+            if profile.audio.learn_game_eq != Some(true) {
+                profile.audio.learn_game_eq = Some(true);
+                changed = true;
+            }
+            if profile.audio.game_eq_auto_apply {
+                if let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) {
+                    changed |= crate::game_eq::take_offer(&mut profile, &rec);
+                }
+            }
+            if changed {
+                g.store.upsert(profile);
+                if let Err(e) = g.store.save() {
+                    warn!(error = %e, "saving the profile after learning from a video failed");
+                }
+            }
+        }
+        reapply_learned(&mut g);
+        let state = Box::new(g.state.clone());
+        drop(g);
+        let _ = self.events.send(Event::StateChanged { state });
     }
 
     /// S45, on the 1 s tick: start the daily check when it is due, and run a
@@ -868,6 +1073,7 @@ impl Service {
             g.state.audio_chain = AudioChainState::Bypass;
             g.state.display_state = DisplayState::Default;
             g.state.display_via = DisplayVia::default();
+            stop_learner(&mut g);
             let state = Box::new(g.state.clone());
             drop(g);
             let _ = self.events.send(Event::StateChanged { state });
@@ -910,6 +1116,7 @@ impl Service {
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
         select_and_apply(&mut g, &fg);
+        sync_look(&mut g);
         let state = Box::new(g.state.clone());
         drop(g);
         let _ = self.events.send(Event::StateChanged { state });
@@ -923,6 +1130,40 @@ impl Service {
     /// no window at all, and then no foreground event ever fires: the live
     /// test closed Notepad and its profile stayed on the monitor until the
     /// guard undid it (2026-09-29). The brief says restore on exit too.
+    /// Safety net for the foreground hook. On the second PC a core started
+    /// from a test shell answered IPC for 8 minutes while its hook delivered
+    /// no foreground events at all (2026-10-01), so the game's profile never
+    /// applied. Once a second, ask Windows which window is in front (one
+    /// user32 call, nothing opened in the game) and, if it has differed from
+    /// the hook's view for two ticks in a row, act on it. Two ticks keeps the
+    /// hook in charge of fast switches and ignores Windows' own momentary
+    /// focus juggling. Same window: just refresh its title, which the hook
+    /// only reports on a switch.
+    fn reconcile_foreground(&self) {
+        let now = crate::winloop::foreground_hwnd();
+        let mut g = self.inner.lock();
+        let known = g.state.foreground.as_ref().map(|f| f.hwnd).unwrap_or(0);
+        let (count, step) = fg_reconcile_step(now, known, g.fg_mismatch);
+        g.fg_mismatch = count;
+        match step {
+            FgStep::Wait => return,
+            FgStep::Same => {
+                if let Some(t) = crate::winloop::window_title(now) {
+                    if let Some(f) = g.state.foreground.as_mut() {
+                        f.title = t;
+                    }
+                }
+                return;
+            }
+            FgStep::CatchUp => {}
+        }
+        drop(g);
+        if let Some(fg) = crate::winloop::current_foreground() {
+            warn!(exe = %fg.exe, pid = fg.pid, "missed a foreground change; catching up");
+            self.on_foreground(fg);
+        }
+    }
+
     fn recheck_focus(&self) {
         #[cfg(windows)]
         {
@@ -950,6 +1191,7 @@ impl Service {
                     title: String::new(),
                     hmonitor: 0,
                     hwnd: 0,
+                    image: String::new(),
                 });
                 info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
                 self.on_foreground(fg);
@@ -1010,6 +1252,7 @@ impl Service {
                         warn!(error = %e, "restore via hotkey failed");
                     }
                     g.pinned = true; // stay off until focus changes again
+                    stop_learner(&mut g);
                     g.state.active_profile = None;
                     g.state.audio_chain = AudioChainState::Bypass;
                     g.state.display_state = DisplayState::Default;
@@ -1092,6 +1335,7 @@ impl Service {
 /// app performs, not a second, thinner one.
 fn restore_all(g: &mut Inner) -> anyhow::Result<()> {
     g.pinned = false;
+    stop_learner(g);
     g.applier.restore()?;
     g.state.active_profile = None;
     g.state.audio_chain = AudioChainState::Bypass;
@@ -1114,6 +1358,38 @@ fn engine_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> R
     }
 }
 
+/// S50: what this PC is sharing right now, for the receiver's capture guard.
+/// A share engine that has not reported a source yet is on the primary.
+fn local_share_now(g: &Inner) -> Option<crate::share::SourceTarget> {
+    g.share.as_ref().map(|_| g.share_target.unwrap_or(crate::share::INITIAL_SHARE_TARGET))
+}
+
+/// S50: tell a running receiver what this PC is sharing (`now`), if that is
+/// news to it. The stream window is hidden from capture only while a local
+/// share covers it, so a receive on a PC that is not sharing stays pickable
+/// in call apps, and one on a PC that is sharing never captures itself (B9).
+fn sync_local_share_locked(g: &mut Inner, now: Option<crate::share::SourceTarget>) {
+    let receiving = g.receive.is_some();
+    let Some(cmd) = crate::share::local_share_sync(receiving, g.recv_local_told, now) else {
+        return;
+    };
+    if let Some(engine) = g.receive.as_mut() {
+        match engine.command(&cmd) {
+            Ok(()) => {
+                info!(?now, "told the receiver what this PC is sharing");
+                g.recv_local_told = Some(now);
+            }
+            Err(e) => warn!(error = %e, "could not tell the receiver about the local share"),
+        }
+    }
+}
+
+fn sync_local_share(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    let now = local_share_now(&g);
+    sync_local_share_locked(&mut g, now);
+}
+
 /// Like `engine_command`, for the receive engine.
 fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> Reply {
     let mut g = inner.lock();
@@ -1123,6 +1399,27 @@ fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> 
             Err(e) => Reply::Error { message: e.to_string() },
         },
         None => Reply::Error { message: "not receiving".into() },
+    }
+}
+
+/// S51: a changed NDI setting reaches the running engines at once. Best
+/// effort: an engine that cannot hear it keeps its spawn-time state, and the
+/// next share or receive starts from the saved setting anyway.
+fn sync_ndi(g: &mut Inner, before: &crate::uiprefs::UiPrefs, after: &crate::uiprefs::UiPrefs) {
+    for (changed, on, engine, what) in [
+        (
+            before.ndi_receive != after.ndi_receive,
+            after.ndi_receive,
+            g.receive.as_mut(),
+            "receiver",
+        ),
+        (before.ndi_share != after.ndi_share, after.ndi_share, g.share.as_mut(), "share"),
+    ] {
+        let (true, Some(engine)) = (changed, engine) else { continue };
+        match engine.command(&crate::share::EngineCmd::Ndi { on }) {
+            Ok(()) => tracing::info!(on, what, "NDI output toggled on the running engine"),
+            Err(e) => tracing::warn!(error = %e, what, "could not toggle NDI output"),
+        }
     }
 }
 
@@ -1176,6 +1473,204 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
     Some(t)
 }
 
+/// What one reconcile tick should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FgStep {
+    /// Nothing yet (no window, or one mismatch so far).
+    Wait,
+    /// The known window is still in front.
+    Same,
+    /// Two mismatching ticks: the hook missed a change.
+    CatchUp,
+}
+
+/// How often the foreground reconcile runs.
+const FG_RECONCILE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Mismatches needed before catching up.
+const FG_MISMATCH_TICKS: u8 = 2;
+
+/// Pure step of the foreground reconcile. A `0` window (a toast or the
+/// shell between windows) neither confirms nor resets: only a match resets
+/// the count. Resetting on 0 made a switch take ~8 s on PC2 instead of ~2.
+fn fg_reconcile_step(now: u64, known: u64, count: u8) -> (u8, FgStep) {
+    if now == 0 {
+        return (count, FgStep::Wait);
+    }
+    if now == known {
+        return (0, FgStep::Same);
+    }
+    let count = count.saturating_add(1);
+    if count < FG_MISMATCH_TICKS {
+        (count, FgStep::Wait)
+    } else {
+        (0, FgStep::CatchUp)
+    }
+}
+
+/// S47: the profile with this game's learned (or imported) look folded into
+/// its display settings, fitted to the target monitor's panel. The result
+/// goes through the ordinary capture → apply → restore path, so restore
+/// covers it exactly like a hand-set value.
+fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
+    use crate::learned_display::{caps_for, overlay};
+    let mut p = profile.clone();
+    let Some(t) = target else { return p };
+    if !p.display.follow_focus {
+        return p;
+    }
+    let Some(look) = g.learn.game(&p.game.exe).and_then(|r| r.effective(&t.id)) else {
+        return p;
+    };
+    let panel = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.panel.clone())
+        .unwrap_or_default();
+    let name = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.name.clone())
+        .unwrap_or_else(|| t.name.clone());
+    let adj = relay_display::learn::realize(&look, &caps_for(&panel, &name, &t.id.0));
+    overlay(&mut p.display, &adj);
+    p
+}
+
+/// S47: start, keep or stop the look sampler so it runs exactly while a
+/// learning-enabled game whose profile is applied has focus.
+/// A profile the learner may keep running for: it exists, is Ready (Draft
+/// never applies), and has learning on with a goal.
+fn learner_profile_still_learns(p: Option<&Profile>) -> bool {
+    p.is_some_and(|p| p.status == crate::types::ProfileStatus::Ready && p.audio.learning_active())
+}
+
+/// The sampler's game is still the foreground app (so a "not wanted" means
+/// its profile changed, not that focus moved away).
+fn look_game_still_focused(sampler_exe: &str, focused_exe: Option<&str>) -> bool {
+    focused_exe.is_some_and(|f| crate::learned_display::key(f) == sampler_exe)
+}
+
+fn sync_look(g: &mut Inner) {
+    use crate::learned_display::{build_fingerprint, key, Sampler};
+    let want = g
+        .state
+        .foreground
+        .clone()
+        .filter(|fg| {
+            g.state.active_profile.as_ref().is_some_and(|p| p.exe.eq_ignore_ascii_case(&fg.exe))
+        })
+        .filter(|fg| g.learn.is_enabled(&fg.exe))
+        .and_then(|fg| resolve_target(g, fg.hmonitor).map(|t| (fg, t)));
+    // May a paused sampler wait out the grace? Only when its game merely lost
+    // focus: still learning, still a Ready profile, and not still in front.
+    let grace_ok = g.look.as_ref().is_some_and(|s| {
+        g.learn.is_enabled(&s.exe)
+            && g.store.all().iter().any(|p| {
+                p.status == crate::types::ProfileStatus::Ready
+                    && crate::learned_display::key(&p.game.exe) == s.exe
+            })
+            && !look_game_still_focused(&s.exe, g.state.foreground.as_ref().map(|f| f.exe.as_str()))
+    });
+    match (g.look.as_mut(), &want) {
+        (Some(s), Some((fg, t))) if s.exe == key(&fg.exe) && s.monitor == t.id => {
+            s.resume();
+            return;
+        }
+        // Out of focus: pause and keep it for the grace period (Alt-Tab
+        // must not restart the helper); learn_tick drops it after that.
+        // With its game still in front (profile set to Draft, deleted,
+        // disabled, learning off) there is no grace: stop it now.
+        (Some(s), None) if grace_ok => {
+            s.pause();
+            return;
+        }
+        _ => {}
+    }
+    if g.look.take().is_some() {
+        // Keep the evidence gathered since the last checkpoint.
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    let Some((fg, t)) = want else { return };
+    let build = build_fingerprint(std::path::Path::new(&fg.image));
+    let rec = g.learn.game_mut(&fg.exe).monitor_mut(&t.id);
+    if !build.is_empty() && rec.learner.check_build(&build) {
+        info!(exe = %fg.exe, "game build is new to the learner; learning its look afresh");
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    match Sampler::start(&fg.exe, t.id.clone(), t.hmonitor) {
+        Ok(s) => g.look = Some(s),
+        Err(e) => warn!(error = %e, "could not start the look sampler"),
+    }
+}
+
+/// S47: the look in use changed while a profile is applied: put the
+/// original back and apply again with the new look.
+fn reapply_learned(g: &mut Inner) {
+    let Some(active) = g.state.active_profile.clone() else { return };
+    if g.pinned {
+        // A profile applied by hand stays applied regardless of focus:
+        // re-apply that same profile so the screen updates now.
+        let Some(profile) = g.store.get(active.id).cloned() else { return };
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-apply failed");
+            return;
+        }
+        let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
+        let target = resolve_target(g, hmon);
+        let correction = correction_for(g, &profile);
+        let to_apply = learned_profile(g, &profile, target.as_ref());
+        match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
+            Ok(applied) => {
+                g.state.display_state = applied.display;
+                g.state.display_via = applied.via;
+            }
+            Err(e) => {
+                warn!(error = %e, "re-applying the pinned profile failed");
+                g.pinned = false;
+                g.state.active_profile = None;
+                g.state.display_state = DisplayState::Default;
+                g.state.display_via = DisplayVia::default();
+            }
+        }
+        return;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return };
+    if let Err(e) = g.applier.restore() {
+        warn!(error = %e, "restore before re-apply failed");
+        return;
+    }
+    select_and_apply(g, &fg);
+}
+
+fn learn_reply(g: &Inner, exe: &str) -> Reply {
+    let names = |id: &crate::types::MonitorId| {
+        let lib = g.library.monitors.iter().find(|m| &m.id == id);
+        let probe = g.last_report.monitors.iter().find(|m| &m.id == id);
+        let name = lib
+            .map(|m| m.name.clone())
+            .or_else(|| probe.map(|m| m.name.clone()))
+            .unwrap_or_default();
+        (name, lib.map(|m| m.panel.clone()).unwrap_or_default())
+    };
+    let sampling = g.look.as_ref().is_some_and(|s| s.exe == crate::learned_display::key(exe));
+    Reply::LearnDisplay {
+        view: Box::new(crate::learned_display::view(&g.learn, exe, sampling, &names)),
+    }
+}
+
+fn save_learn(g: &Inner) -> Option<Reply> {
+    g.learn.save().err().map(|e| Reply::Error { message: format!("{e:#}") })
+}
+
 /// Pick and apply (or restore) for one foreground window, using the cached
 /// AutoEQ files live under `<source>/<rig> in-ear/...`, `over-ear`, `earbud`,
 /// so the catalogue path says what kind of thing this is without asking.
@@ -1203,16 +1698,83 @@ fn correction_for(g: &Inner, profile: &Profile) -> Option<Vec<(f32, f32)>> {
         .map(<[(f32, f32)]>::to_vec)
 }
 
+/// S46: stop the learner helper, if one runs. Non-blocking: it saves and
+/// exits on its own, and is killed by handle if it does not.
+fn stop_learner(g: &mut Inner) {
+    if let Some(l) = g.learner.take() {
+        l.stop();
+    }
+}
+
+/// S46: run the learner for `profile` on the focused game when its learning
+/// is on and a goal is chosen; otherwise make sure none runs.
+fn sync_learner(g: &mut Inner, profile: Option<&Profile>, fg: &Foreground) {
+    use crate::game_eq::LearnerStep;
+    let want = profile.filter(|p| p.audio.learning_active() && fg.pid != 0);
+    if g.learner.as_mut().is_some_and(|l| !l.running()) {
+        g.learner = None;
+    }
+    // Wherever focus is, a learner whose profile no longer learns (Draft,
+    // deleted, learning off) stops now: the grace is for focus loss only.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
+    let current = g.learner.as_ref().map(|l| (l.profile, l.pid, l.paused_since.is_some()));
+    match crate::game_eq::learner_step(current, want.map(|p| (p.id, fg.pid)), fg.pid) {
+        LearnerStep::Nothing | LearnerStep::Keep => {}
+        LearnerStep::Stop => {
+            info!("the focused game's profile no longer learns; stopping the learner now");
+            stop_learner(g);
+        }
+        LearnerStep::Pause => {
+            if let Some(l) = g.learner.as_mut() {
+                l.pause();
+            }
+        }
+        LearnerStep::Resume => {
+            if let Some(l) = g.learner.as_mut() {
+                l.resume();
+            }
+        }
+        LearnerStep::Start | LearnerStep::Restart => {
+            stop_learner(g);
+            // A video job is writing this game's record: live learning
+            // waits for it (both would fight over the record lock).
+            let busy = g.file_job.as_ref().is_some_and(|j| {
+                j.running() && want.is_some_and(|p| j.status.exe.eq_ignore_ascii_case(&p.game.exe))
+            });
+            if busy {
+                info!("learning from a video for this game; live learning waits");
+                return;
+            }
+            if let Some(p) = want {
+                match crate::game_eq::Learner::spawn(&g.paths, p, fg) {
+                    Ok(l) => g.learner = Some(l),
+                    Err(e) => warn!(error = %e, "could not start learning this game's sound"),
+                }
+            }
+        }
+    }
+}
+
 /// connected-hardware view. Mutates state only; the caller broadcasts.
+///
+/// (See also [`after_profile_edit`], which re-runs this when a save or
+/// delete changes what should be applied right now.)
 fn select_and_apply(g: &mut Inner, fg: &Foreground) {
     let hw = g.connected.clone();
     let pick = g.store.select(&fg.exe, &fg.title, &hw).cloned();
+    sync_learner(g, pick.as_ref(), fg);
     match pick {
         Some(profile) => {
             g.pinned = false;
             let target = resolve_target(g, fg.hmonitor);
             let correction = correction_for(g, &profile);
-            match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+            let to_apply = learned_profile(g, &profile, target.as_ref());
+            match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                 Ok(applied) => {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
@@ -1247,6 +1809,68 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.state.display_via = DisplayVia::default();
         }
     }
+}
+
+/// Does a profile edit change what should be applied now? Yes when the
+/// edited profile is the active one (its settings may have changed, or it
+/// went Draft / was deleted), or when selection now picks something else.
+fn needs_reselect(active: Option<uuid::Uuid>, edited: uuid::Uuid, now: Option<uuid::Uuid>) -> bool {
+    active == Some(edited) || now != active
+}
+
+/// After a profile save or delete: re-run selection at once instead of on
+/// the next focus change. Restores when nothing matches any more (Draft,
+/// deleted, exe changed) and stops its learners; re-applies when the active
+/// profile's own settings changed. Returns true when state may have changed.
+fn after_profile_edit(g: &mut Inner, edited: uuid::Uuid, deleted: bool) -> bool {
+    // A paused learner or sampler whose profile stopped learning (Draft,
+    // deleted, learning off) goes now, even with Relay's window in front.
+    if let Some(id) = g.learner.as_ref().map(|l| l.profile) {
+        if !learner_profile_still_learns(g.store.get(id)) {
+            info!("the learner's profile no longer learns; stopping it now");
+            stop_learner(g);
+        }
+    }
+    sync_look(g);
+    let active = g.state.active_profile.as_ref().map(|p| p.id);
+    if g.pinned {
+        if active != Some(edited) {
+            return false;
+        }
+        if deleted {
+            if let Err(e) = g.applier.restore() {
+                warn!(error = %e, "restore after deleting the applied profile failed");
+            }
+            g.pinned = false;
+            g.state.active_profile = None;
+            g.state.audio_chain = AudioChainState::Bypass;
+            g.state.display_state = DisplayState::Default;
+            g.applied_audio = AudioChainState::Bypass;
+            g.audio_watch = false;
+            g.state.display_via = DisplayVia::default();
+            stop_learner(g);
+            sync_look(g);
+        } else {
+            reapply_learned(g);
+        }
+        return true;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return false };
+    let now = g.store.select(&fg.exe, &fg.title, &g.connected).map(|p| p.id);
+    if !needs_reselect(active, edited, now) {
+        return false;
+    }
+    info!(profile = %edited, "profile edited while relevant to the focused app; re-selecting");
+    // Restore first so a changed profile re-applies (the applier treats the
+    // same profile on the same monitor as already applied).
+    if g.applier.is_applied() {
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-selecting failed");
+        }
+    }
+    select_and_apply(g, &fg);
+    sync_look(g);
+    true
 }
 
 /// Re-run selection for whatever is in the foreground (no focus change
@@ -1447,10 +2071,32 @@ fn spawn_share(
         req.mic_device = saved.get(MixerSide::Send, DeviceTrack::Mic).map(str::to_string);
         req.output_device = saved.get(MixerSide::Send, DeviceTrack::Output).map(str::to_string);
     }
+    // r54: the app whose audio this share captures must still be the
+    // process that was picked. A resume or a hotkey replay hours later must
+    // not capture whatever now holds the PID.
+    if let Some(why) = req.settle_audio_app(by_user, &crate::proc_identity::LiveProbe) {
+        warn!(?why, "the shared app is gone; the share goes on without its sound");
+        let _ = events.send(Event::Notice { text: crate::share::AUDIO_GONE_TEXT.into() });
+        if let Some(r) = g.send_intent.as_mut().and_then(|r| r.share.as_mut()) {
+            let _ = r.settle_audio_app(false, &crate::proc_identity::LiveProbe);
+        }
+        if g.send_intent.is_some() {
+            persist_intent(&g);
+        }
+    }
+    // S50: a receive on this PC hides its window from capture *before* the
+    // first frame is captured, not a moment after.
+    g.share_target = None;
+    sync_local_share_locked(&mut g, Some(crate::share::INITIAL_SHARE_TARGET));
+    // S51: NDI output is a saved setting, never the client's say.
+    req.ndi = g.prefs.prefs().ndi_share;
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
-        Err(e) => return Reply::Error { message: e.to_string() },
+        Err(e) => {
+            sync_local_share_locked(&mut g, None);
+            return Reply::Error { message: e.to_string() };
+        }
     };
     g.share = Some(engine);
     g.preview_fps = req.preview_fps;
@@ -1523,6 +2169,10 @@ fn spawn_share(
                     let _ = events2.send(Event::ReplaySaved { path, ms });
                 }
                 ShareEvent::SourceChanged { data } => {
+                    if let Some(t) = crate::share::source_target_of(&data) {
+                        inner2.lock().share_target = Some(t);
+                        sync_local_share(&inner2);
+                    }
                     let _ = events2.send(Event::SourceChanged { data });
                 }
                 // The sender's stats lines carry the codec for the strip.
@@ -1532,9 +2182,15 @@ fn spawn_share(
                 | ShareEvent::RenderUp { .. }
                 | ShareEvent::Host { .. }
                 | ShareEvent::HostClose
+                | ShareEvent::ReturnOff { .. }
                 | ShareEvent::SenderStopped
                 | ShareEvent::WrongCode { .. } => {}
                 ShareEvent::Refused { message } => refused = Some(message),
+                ShareEvent::AudioOff { reason } => {
+                    warn!(%reason, "the engine did not capture the shared app's audio");
+                    let _ =
+                        events2.send(Event::Notice { text: crate::share::AUDIO_GONE_TEXT.into() });
+                }
                 ShareEvent::Exited { ok, code } => {
                     on_share_exit(&inner2, &events2, ok, code, refused.take())
                 }
@@ -1569,6 +2225,9 @@ fn on_share_exit(
 ) {
     let mut g = inner.lock();
     g.share = None;
+    g.share_target = None;
+    // S50: nothing is being captured here now; a receive becomes pickable.
+    sync_local_share_locked(&mut g, None);
     // Refused by the other PC: a final answer, not a drop. No crash record,
     // no reconnecting -- clear the intent and say why.
     if let Some(message) = refused {
@@ -1710,6 +2369,8 @@ fn spawn_receive(
         .audio_devices
         .get(crate::share::MixerSide::Receive, crate::share::DeviceTrack::Output)
         .map(str::to_string);
+    // S51: from the saved Receive setting, like the routing above.
+    req.ndi = g.prefs.prefs().ndi_receive;
     // S36: the reverse of the rule in `spawn_share` -- a share that is
     // feeding Relay Camera keeps it while it runs.
     if req.vcam && g.share.is_some() && g.last_share.as_ref().is_some_and(|r| r.vcam) {
@@ -1719,6 +2380,25 @@ fn spawn_receive(
         });
     }
     g.recv_vcam = Some(req.vcam);
+    // r54: the call app must still be the process that was picked, on every
+    // spawn: a fresh Start pins it, a resume or restart re-checks it. A PID
+    // that is gone or reused is dropped here, before any engine sees it, and
+    // the record forgets it too so no later resume can try it again.
+    if let Some(why) = req.settle_return(by_user, &crate::proc_identity::LiveProbe) {
+        warn!(?why, "the call app is gone; receiving without the return route");
+        let _ = events.send(Event::Notice { text: crate::share::RETURN_GONE_TEXT.into() });
+        if let Some(r) = g.recv_intent.as_mut().and_then(|r| r.receive.as_mut()) {
+            r.return_pid = None;
+            r.return_app = None;
+        }
+        if g.recv_intent.is_some() {
+            persist_intent(&g);
+        }
+    }
+    g.recv_return = req.return_app.as_ref().map(|a| (a.pid, a.exe()));
+    // S50: what this PC is sharing, decided here like the other routing.
+    req.local_share = local_share_now(&g);
+    g.recv_local_told = Some(req.local_share);
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start_receive(&req, tx) {
         Ok(e) => e,
@@ -1737,15 +2417,14 @@ fn spawn_receive(
     }
     drop(g);
 
-    // Every status line says which call app this receiver returns from.
-    let ret_pid = req.return_pid.filter(|p| *p != 0);
-    #[cfg(windows)]
-    let ret_exe = ret_pid
-        .and_then(crate::winloop::process_image_path)
-        .map(|p| crate::winloop::exe_name(&p))
-        .filter(|e| !e.is_empty());
-    #[cfg(not(windows))]
-    let ret_exe: Option<String> = None;
+    // Every status line says which call app this receiver returns from right
+    // now: the checked identity, until a live Off or the engine drops it.
+    let current_return = |inner: &Arc<Mutex<Inner>>| -> (Option<u32>, Option<String>) {
+        match inner.lock().recv_return.clone() {
+            Some((pid, exe)) => (Some(pid), Some(exe).filter(|e| !e.is_empty())),
+            None => (None, None),
+        }
+    };
     let events2 = events.clone();
     let inner2 = inner.clone();
     std::thread::Builder::new()
@@ -1785,13 +2464,7 @@ fn spawn_receive(
                             persist_intent(&ig);
                         }
                     }
-                    let return_pid = inner2
-                        .lock()
-                        .recv_intent
-                        .as_ref()
-                        .and_then(|r| r.receive.as_ref())
-                        .and_then(|q| q.return_pid)
-                        .filter(|p| *p != 0);
+                    let (return_pid, return_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: Some(code),
@@ -1802,10 +2475,11 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe,
                     });
                 }
                 ShareEvent::Codec { codec } => {
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -1816,12 +2490,13 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 ShareEvent::Paired { sender, trusted } => {
                     last_sender = Some(sender.clone());
                     last_trusted = trusted;
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -1832,7 +2507,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 ShareEvent::Stats { data } => {
@@ -1863,6 +2538,7 @@ fn spawn_receive(
                             persist_intent(&ig);
                         }
                     }
+                    let (ret_pid, ret_exe) = current_return(&inner2);
                     let _ = events2.send(Event::ReceiveStatus {
                         receiving: true,
                         code: None,
@@ -1873,7 +2549,7 @@ fn spawn_receive(
                         ended_by_sender: false,
                         restarting: false,
                         return_pid: ret_pid,
-                        return_exe: ret_exe.clone(),
+                        return_exe: ret_exe,
                     });
                 }
                 // Keep *why* it stopped. An engine that dies during startup --
@@ -1895,9 +2571,9 @@ fn spawn_receive(
                 // shell everything it needs.
                 ShareEvent::RenderUp { hwnd, width, height, host, excluded_from_capture } => {
                     stream_size = (width, height);
-                    if !excluded_from_capture {
-                        warn!("stream window is NOT excluded from capture (B9)");
-                    }
+                    // S50: capturable is the normal state now; the engine
+                    // hides it only while this PC shares what it is on.
+                    info!(excluded_from_capture, "stream window up");
                     let _ = events2.send(Event::StreamWindow {
                         hwnd,
                         width,
@@ -1908,9 +2584,6 @@ fn spawn_receive(
                 }
                 ShareEvent::Host { mode, hwnd, excluded_from_capture } => {
                     info!(mode, hwnd, excluded_from_capture, "stream window mode from the engine");
-                    if !excluded_from_capture {
-                        warn!(mode, "stream window is NOT excluded from capture (B9)");
-                    }
                     let _ = events2.send(Event::StreamWindow {
                         hwnd,
                         width: stream_size.0,
@@ -1922,6 +2595,19 @@ fn spawn_receive(
                 ShareEvent::SenderStopped => ended_by_sender = true,
                 // Only a sender is refused; a receiver never emits it.
                 ShareEvent::Refused { .. } => {}
+                // r54: the engine is not (or no longer) sending the call
+                // back. Forget the route everywhere, and say so unless the
+                // user just turned it off themselves.
+                ShareEvent::ReturnOff { reason } => {
+                    clear_return(&inner2);
+                    if reason != "user" {
+                        warn!(%reason, "the receiver refused the call app");
+                        let _ = events2
+                            .send(Event::Notice { text: crate::share::RETURN_GONE_TEXT.into() });
+                    }
+                    let _ = events2.send(return_status_line());
+                }
+                ShareEvent::AudioOff { .. } => {}
                 ShareEvent::WrongCode { name } => {
                     let who = if name.is_empty() { "A PC".to_string() } else { name.clone() };
                     let text = format!(
@@ -1990,6 +2676,59 @@ fn kill_receive(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) ->
     Reply::Ok
 }
 
+/// r54: forget the receiver's return route: the live state the status lines
+/// read, and the intent record, so a resume cannot bring it back.
+fn clear_return(inner: &Arc<Mutex<Inner>>) {
+    let mut g = inner.lock();
+    g.recv_return = None;
+    let had = g.recv_intent.as_mut().and_then(|r| r.receive.as_mut()).is_some_and(|q| {
+        let had = q.return_pid.is_some() || q.return_app.is_some();
+        q.return_pid = None;
+        q.return_app = None;
+        had
+    });
+    if had {
+        persist_intent(&g);
+    }
+}
+
+/// A receiving status line that only says "no call app now": every other
+/// field is absent, so the page and the shell keep what they have.
+fn return_status_line() -> Event {
+    Event::ReceiveStatus {
+        receiving: true,
+        code: None,
+        sender: None,
+        message: None,
+        codec: None,
+        trusted: false,
+        ended_by_sender: false,
+        restarting: false,
+        return_pid: None,
+        return_exe: None,
+    }
+}
+
+/// r54: turn the call-audio return off on the running receiver, live, with
+/// no restart. Turning it on again needs a new connection, so that is a
+/// Stop and Start.
+fn stop_call_return(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
+    let sent = {
+        let mut g = inner.lock();
+        match g.receive.as_mut() {
+            Some(engine) => engine.command(&crate::share::EngineCmd::Return { on: false }),
+            None => return Reply::Error { message: "not receiving".into() },
+        }
+    };
+    if let Err(e) = sent {
+        return Reply::Error { message: e.to_string() };
+    }
+    info!("call return turned off on the running receiver");
+    clear_return(inner);
+    let _ = events.send(return_status_line());
+    Reply::Ok
+}
+
 fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> Reply {
     let (engine, was_recovering) = {
         let mut g = inner.lock();
@@ -2006,6 +2745,9 @@ fn kill_share(inner: &Arc<Mutex<Inner>>, events: &broadcast::Sender<Event>) -> R
         None if was_recovering => {}
         None => return Reply::Error { message: "no share is running".into() },
     }
+    // S50: only once the capture has stopped does the receive here become
+    // capturable again.
+    sync_local_share(inner);
     let state = {
         let mut g = inner.lock();
         g.state.sharing = crate::types::ShareState::Off;
@@ -2076,20 +2818,73 @@ impl IpcHandler {
                 None => Reply::Error { message: "no such profile".into() },
             },
             Method::SaveProfile { profile } => {
+                let id = profile.id;
                 g.store.upsert(*profile);
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, false) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
+            }
+            Method::GameEq { id, action } => {
+                let Some(mut profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                // Take a helper on this record out under the lock, then work
+                // without it: the record lock (held by the helper until it has
+                // made its final save and exited) orders the rest.
+                let stopping = if action.touches_record()
+                    && g.learner.as_ref().is_some_and(|l| l.profile == id)
+                {
+                    g.learner.take()
+                } else {
+                    None
+                };
+                let paths = g.paths.clone();
+                drop(g);
+                if let Some(l) = stopping {
+                    l.stop();
+                }
+                let result = crate::game_eq::apply_action(&paths, &mut profile, &action);
+                g = self.inner.lock();
+                let crate::game_eq::ActionResult { changed, export, notice } = match result {
+                    Ok(r) => r,
+                    Err(e) => return Reply::Error { message: e.to_string() },
+                };
+                if changed {
+                    g.store.upsert(profile.clone());
+                    if let Err(e) = g.store.save() {
+                        return Reply::Error { message: e.to_string() };
+                    }
+                }
+                let restart = changed || action.touches_record();
+                if restart {
+                    drop(g);
+                    reselect(&self.inner, &self.events);
+                    g = self.inner.lock();
+                }
+                let learning_now = g.learner.as_ref().is_some_and(|l| l.profile == id);
+                let mut status = crate::game_eq::status(&paths, &profile, learning_now);
+                status.notice = notice;
+                Reply::GameEq { status: Box::new(status), export }
             }
             Method::DeleteProfile { id } => {
                 if !g.store.remove(id) {
                     return Reply::Error { message: "no such profile".into() };
                 }
-                match g.store.save() {
+                let reply = match g.store.save() {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
+                };
+                if after_profile_edit(&mut g, id, true) {
+                    let _ =
+                        self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
+                reply
             }
             Method::ApplyProfile { id } => {
                 let Some(profile) = g.store.get(id).cloned() else {
@@ -2100,7 +2895,8 @@ impl IpcHandler {
                 let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
                 let target = resolve_target(&g, hmon);
                 let correction = correction_for(&g, &profile);
-                match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+                let to_apply = learned_profile(&g, &profile, target.as_ref());
+                match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                     Ok(applied) => {
                         g.pinned = true;
                         g.state.active_profile = Some(profile.summary());
@@ -2121,11 +2917,165 @@ impl IpcHandler {
             Method::ListProcesses => {
                 Reply::Processes { processes: crate::processes::list_windowed_and_audible() }
             }
-            Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
-            Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {
-                Ok(()) => Reply::UiPrefs { prefs: g.prefs.get() },
-                Err(e) => Reply::Error { message: format!("{e:#}") },
+            Method::LearnDisplayStatus { ref exe }
+            | Method::LearnDisplaySet { ref exe, .. }
+            | Method::LearnDisplayApply { ref exe }
+            | Method::LearnDisplayRelearn { ref exe }
+            | Method::LearnDisplayAutoApply { ref exe, .. }
+            | Method::LearnDisplayReset { ref exe }
+            | Method::LearnDisplayExport { ref exe, .. }
+            | Method::LearnDisplayImport { ref exe, .. }
+                if crate::learned_display::valid_exe(exe).is_err() =>
+            {
+                Reply::Error { message: "the game must be an exe file name like game.exe".into() }
+            }
+            Method::LearnDisplayStatus { exe } => learn_reply(&g, &exe),
+            Method::LearnDisplaySet { exe, enabled } => {
+                g.learn.game_mut(&exe).enabled = enabled;
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayApply { exe } => {
+                let rec = g.learn.game_mut(&exe);
+                let mut any = false;
+                for m in rec.monitors.values_mut() {
+                    any |= m.learner.apply();
+                }
+                if !any {
+                    return Reply::Error {
+                        message: "this game's look has not settled yet; keep playing".into(),
+                    };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayAutoApply { exe, enabled } => {
+                let rec = g.learn.game_mut(&exe);
+                rec.auto_apply = enabled;
+                let ids: Vec<String> = rec.monitors.keys().cloned().collect();
+                let mut took = false;
+                for id in ids {
+                    took |= rec.take_offer_if_auto(&crate::types::MonitorId(id));
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                if took {
+                    reapply_learned(&mut g);
+                }
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayRelearn { exe } => {
+                for m in g.learn.game_mut(&exe).monitors.values_mut() {
+                    m.learner.relearn();
+                    m.hdr_skipped = false;
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayReset { exe } => {
+                g.learn.file.games.remove(&crate::learned_display::key(&exe));
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayExport { exe, name, note } => {
+                match crate::learned_display::export(&g.learn, &exe, name, &note) {
+                    Ok(json) => Reply::GameDisplayFile { json },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::LearnDisplayImport { exe, json } => {
+                if let Err(e) = crate::learned_display::import(&mut g.learn, &exe, &json) {
+                    return Reply::Error { message: format!("{e:#}") };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::ListLearnVideos => {
+                let dir = g.presets.recording.resolved_dir();
+                Reply::LearnVideos {
+                    videos: crate::learn_file::list_videos(&crate::learn_file::video_folders(&dir)),
+                    recording_dir: dir,
+                    privacy: crate::learn_file::PRIVACY_NOTICE.into(),
+                    local_only: crate::learn_file::LOCAL_ONLY_NOTICE.into(),
+                }
+            }
+            Method::LearnFromFile { id, path } => {
+                let Some(profile) = g.store.get(id).cloned() else {
+                    return Reply::Error { message: "no such profile".into() };
+                };
+                let file = match crate::learn_file::validate_video_path(&path) {
+                    Ok(f) => f,
+                    Err(e) => return Reply::Error { message: format!("{e:#}") },
+                };
+                if g.file_job.as_ref().is_some_and(|j| j.running()) {
+                    return Reply::Error {
+                        message: "Relay is already learning from a video; cancel it first".into(),
+                    };
+                }
+                // The live learner holds this game's record; it stops (and
+                // saves) first, and the helper waits on the record lock.
+                if g.learner.as_ref().is_some_and(|l| l.profile == id) {
+                    stop_learner(&mut g);
+                }
+                match crate::learn_file::FileJob::spawn(&g.paths, &profile, &file) {
+                    Ok(job) => {
+                        let st = job.status.clone();
+                        g.file_job = Some(job);
+                        Reply::LearnFile { status: Some(Box::new(st)) }
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::LearnFileStatus { id } => Reply::LearnFile {
+                status: g
+                    .file_job
+                    .as_ref()
+                    .filter(|j| j.status.profile == id)
+                    .map(|j| Box::new(j.status.clone())),
             },
+            Method::LearnFileCancel { id } => {
+                if let Some(j) = g.file_job.as_mut().filter(|j| j.status.profile == id) {
+                    j.cancel();
+                    j.poll();
+                }
+                Reply::LearnFile {
+                    status: g
+                        .file_job
+                        .as_ref()
+                        .filter(|j| j.status.profile == id)
+                        .map(|j| Box::new(j.status.clone())),
+                }
+            }
+            Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
+            Method::SetUiPrefs { prefs } => {
+                let before = g.prefs.get();
+                match g.prefs.set(prefs) {
+                    Ok(()) => {
+                        let after = g.prefs.get();
+                        sync_ndi(&mut g, &before, &after);
+                        Reply::UiPrefs { prefs: after }
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::NdiStatus => Reply::Ndi { runtime: crate::ndi::locate_runtime() },
             Method::GetAutostart => match crate::autostart::is_enabled() {
                 Ok(enabled) => Reply::Autostart { enabled },
                 Err(e) => Reply::Error { message: e.to_string() },
@@ -2250,13 +3200,17 @@ impl IpcHandler {
                 drop(g);
                 kill_receive(&self.inner, &self.events)
             }
-            Method::HostReceive { mode, owner } => {
+            Method::StopCallReturn => {
                 drop(g);
-                info!(?mode, owner, "host command for the receiver");
+                stop_call_return(&self.inner, &self.events)
+            }
+            Method::HostReceive { mode, owner, feed } => {
+                drop(g);
+                info!(?mode, owner, ?feed, "host command for the receiver");
                 if owner != 0 {
                     self.inner.lock().recv_host = Some(owner);
                 }
-                receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner })
+                receive_command(&self.inner, &crate::share::EngineCmd::Host { mode, owner, feed })
             }
             Method::DiscoverReceivers => {
                 drop(g);
@@ -2767,4 +3721,92 @@ fn audio_effects_status(apo_backup_dir: &std::path::Path) -> crate::audiodg::Sta
         }
     }
     crate::audiodg::status(&Absent, &crate::audiodg::record_file(apo_backup_dir))
+}
+
+#[cfg(test)]
+mod learner_stop_tests {
+    use super::*;
+    use crate::types::{GameMatch, ProfileStatus};
+
+    /// r54: Draft, delete or learning off stops the learner at once; only a
+    /// focus change gets the grace period.
+    #[test]
+    fn a_profile_that_stops_learning_stops_the_learner_without_grace() {
+        let mut p = Profile::new("G", GameMatch::exe("g.exe"));
+        p.status = ProfileStatus::Ready;
+        p.audio.learn_game_eq = Some(true);
+        p.audio.game_eq_goal = Some(relay_audio::learn::Goal::Awareness);
+        assert!(learner_profile_still_learns(Some(&p)));
+        let mut draft = p.clone();
+        draft.status = ProfileStatus::Draft;
+        assert!(!learner_profile_still_learns(Some(&draft)));
+        let mut off = p.clone();
+        off.audio.learn_game_eq = Some(false);
+        assert!(!learner_profile_still_learns(Some(&off)));
+        assert!(!learner_profile_still_learns(None), "deleted");
+    }
+
+    #[test]
+    fn the_look_sampler_stops_when_its_game_is_still_in_front() {
+        assert!(look_game_still_focused("g.exe", Some("G.EXE")));
+        assert!(!look_game_still_focused("g.exe", Some("relay-ui.exe")));
+        assert!(!look_game_still_focused("g.exe", None));
+    }
+}
+
+#[cfg(test)]
+mod fg_reconcile_tests {
+    use super::*;
+
+    #[test]
+    fn zero_windows_do_not_reset_the_count() {
+        let (c, s) = fg_reconcile_step(7, 5, 0);
+        assert_eq!((c, s), (1, FgStep::Wait));
+        let (c, s) = fg_reconcile_step(0, 5, c);
+        assert_eq!((c, s), (1, FgStep::Wait), "a toast's 0 must not reset");
+        assert_eq!(fg_reconcile_step(7, 5, c), (0, FgStep::CatchUp));
+    }
+
+    /// At the 500 ms cadence a missed switch is caught within 1 s, and a toast
+    /// (a 0 window) in between costs one tick, not a reset.
+    #[test]
+    fn a_missed_switch_is_caught_within_a_second_at_500_ms() {
+        assert_eq!(FG_RECONCILE_INTERVAL, Duration::from_millis(500));
+        let ticks_to_catch = |seq: &[u64]| {
+            let mut c = 0;
+            for (i, now) in seq.iter().enumerate() {
+                let (n, step) = fg_reconcile_step(*now, 5, c);
+                c = n;
+                if step == FgStep::CatchUp {
+                    return Some(i + 1);
+                }
+            }
+            None
+        };
+        let t = ticks_to_catch(&[7, 7, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_secs(1), "{t} ticks");
+        let t = ticks_to_catch(&[7, 0, 7]).unwrap();
+        assert!(FG_RECONCILE_INTERVAL * t as u32 <= Duration::from_millis(1500), "{t} ticks");
+    }
+
+    #[test]
+    fn profile_edits_reselect_only_when_they_matter() {
+        let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        // The applied profile went Draft / was deleted: nothing selects now.
+        assert!(needs_reselect(Some(a), a, None));
+        // The applied profile's settings changed: still selected, re-apply.
+        assert!(needs_reselect(Some(a), a, Some(a)));
+        // Another profile became Ready for the focused app.
+        assert!(needs_reselect(None, b, Some(b)));
+        assert!(needs_reselect(Some(a), b, Some(b)));
+        // An unrelated edit leaves things alone.
+        assert!(!needs_reselect(Some(a), b, Some(a)));
+        assert!(!needs_reselect(None, b, None));
+    }
+
+    #[test]
+    fn a_match_resets() {
+        assert_eq!(fg_reconcile_step(5, 5, 1), (0, FgStep::Same));
+        assert_eq!(fg_reconcile_step(7, 5, 0).1, FgStep::Wait);
+    }
 }

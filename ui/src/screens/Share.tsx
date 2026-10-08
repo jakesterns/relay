@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
+import { NdiCard } from "../components/NdiCard";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
@@ -11,6 +12,7 @@ import {
   api, onCoreEvents, presetAudioLabel,
   type DesktopAudio, type DiscoveredReceiver, type Peer, type ProcessInfo, type ShareCapabilities,
   type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
+  type NdiLive,
 } from "../lib/ipc";
 
 /** S40: the mic picks its input; the call coming back picks where it plays.
@@ -117,6 +119,8 @@ export function Share() {
   const [showWindows, setShowWindows] = useState(false);
   // Latest capture thumbnail from the engine; cleared when the share stops.
   const [preview, setPreview] = useState<SharePreview | null>(null);
+  // S51: the engine's NDI state, from its stats line.
+  const [ndiLive, setNdiLive] = useState<NdiLive | null>(null);
   const [windows, setWindows] = useState<ProcessInfo[]>([]);
   // What the capability probe found, so the strip names the encoder this PC
   // actually has rather than assuming NVENC.
@@ -164,6 +168,7 @@ export function Share() {
       sharePreview: (p: SharePreview) => setPreview(p),
       shareStats: (s: ShareStats) => {
         if (s.bitrate_mbps === undefined) return;
+        setNdiLive(s.ndi ?? null);
         const h = [...histRef.current.slice(1), Math.min(1, (s.bitrate_mbps ?? 0) / bitrateCeil)];
         histRef.current = h;
         setStrip({
@@ -443,6 +448,7 @@ export function Share() {
             <Kv k="Relay Camera" v="Live on this PC — pick it in OBS" />
           )}
         </Card>
+        <NdiCard side="share" live={sharing ? ndiLive : null} sourceName="Relay share" />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {sharing
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>
@@ -467,11 +473,15 @@ export function Share() {
   );
 }
 
-/** The three ids `presets.rs::builtins()` ships, pinned on the Rust side by
+/** The ids `presets.rs::builtins()` ships, pinned on the Rust side by
  *  `builtins_match_the_plan`. They can be edited like any other preset, but
  *  not deleted: `PresetStore::load` only re-seeds them when presets.json is
  *  missing entirely, so removing one here would be permanent. */
-const BUILTIN_PRESETS = ["game", "daw", "desktop"];
+export const BUILTIN_PRESETS = ["game", "daw", "desktop", "discord", "discord-720"];
+
+/** The call presets (S50): sized for what Discord, Zoom, Teams and Meet do
+ *  with a picture, which is re-encode it at 1080p60 or less. */
+export const CALL_PRESETS = ["discord", "discord-720"];
 
 /** The selected preset: its settings, and an editor for them.
  *
@@ -541,6 +551,11 @@ function PresetCard({ def, locked, onSaved }: {
         <Kv k="Container" v={(def.container ?? "mp4").toUpperCase()} mono />
         <Kv k="Relay Camera here"
           v={camOk ? (def.vcam ? "On" : "Off") : "Unavailable (needs Windows 11 22H2+)"} />
+        {CALL_PRESETS.includes(def.id) && (
+          <p className="note" data-testid="call-preset-note">For a PC that passes the share on to a call:
+            Discord, Zoom, Teams and Meet re-encode what they get, and none sends more than
+            1080p60. Use 720p30 on a slow call or a free Discord account.</p>
+        )}
         {locked && <p className="note">Stop sharing to change the preset.</p>}
       </Card>
     );

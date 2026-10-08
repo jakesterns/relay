@@ -17,7 +17,92 @@ export interface AudioSettings {
   bands: EqBand[]; hrtf: boolean; limiter?: Limiter; apply_to_share: boolean;
   /** Apply the headset's imported correction curve ahead of `bands`. */
   headset_correction: boolean;
+  /** S46: learn this game's EQ. Absent = the default (on with audio
+   *  processing unless the layer was imported). */
+  learn_game_eq?: boolean;
+  /** S46: the player's goal; asked before learning starts. */
+  game_eq_goal?: Goal;
+  /** S46: take a newly converged curve without asking. */
+  game_eq_auto_apply?: boolean;
+  /** S46: the applied game layer (learned, imported or tuned). */
+  game_eq?: GameEqLayer;
 }
+
+/* ---- S46: learned game EQ. Mirror of crates/core/src/game_eq.rs and
+ *      crates/audio/src/learn/{derive,file,state}.rs. ---- */
+export type Goal = "awareness" | "dialogue" | "immersion";
+export type LayerSource = "learned" | "imported" | "tuned";
+export type LearnStatus = "off" | "learning" | "ready" | "applied" | "needs_relearn";
+export interface GameEqLayer {
+  curve: [number, number][]; source: LayerSource; exe_version?: string; note?: string;
+  base?: [number, number][];
+}
+export interface GameEqStatus {
+  exe: string; state: LearnStatus;
+  learning_on: boolean; needs_goal: boolean; learning_now: boolean;
+  goal: Goal | null; auto_apply: boolean; source: LayerSource | null;
+  progress: number; active_minutes: number;
+  targets: number; maskers: number; min_targets: number; min_maskers: number;
+  distinct_voices: number; exe_version: string | null;
+  applied: [number, number][] | null; offer: [number, number][] | null;
+  note: string; last_error: string | null;
+  /** A one-off message about the action just taken (e.g. an import made safe). */
+  notice?: string;
+  /** Evidence per sound class, by name (the record's arrays are in this order). */
+  classes?: ClassCount[];
+  /** Frames left out of the statistics, by reason. */
+  excluded?: {
+    overlay_voice: number; player_chat: number; cutscene_or_idle: number;
+    silence: number; clipped: number; volume_change: number;
+  };
+  /** What the last step to ready waits on. */
+  convergence?: { agreeing: number; needed: number; max_delta_db: number } | null;
+  /** S48: seconds of active play still needed (null = not known yet; 0 = ready). */
+  eta_secs?: number | null;
+}
+
+/* ---- S48: learn from a video file. Mirror of crates/core/src/learn_file.rs. ---- */
+export interface VideoFile {
+  name: string; path: string; size_bytes: number; modified_unix: number;
+  /** In Relay's recording folder (listed first). */
+  relay: boolean;
+}
+export interface LearnVideos { videos: VideoFile[]; recording_dir: string; privacy: string; local_only: string }
+export type FileJobState = "running" | "done" | "cancelled" | "failed";
+export interface LearnFileStatus {
+  profile: string; exe: string; file_name: string; state: FileJobState;
+  /** 0..1; null when the file does not say how long it is. */
+  progress: number | null;
+  position_secs: number; duration_secs: number | null;
+  /** Content seconds per wall-clock second. */
+  speed: number | null;
+  audio_secs: number; look_frames: number; look_gameplay_frames?: number;
+  cpu_secs?: number | null;
+  notes?: string[]; message?: string | null;
+  privacy: string; local_only: string;
+}
+export const VIDEO_PRIVACY = "Relay reads the file on this PC to learn the game's sound and look. It keeps statistics only; the file is never copied, uploaded or changed.";
+export const VIDEO_LOCAL_ONLY = "Local files only. Relay does not download videos from YouTube or other sites; their terms do not allow it.";
+export interface ClassCount { class: string; events: number; frames: number }
+export type GameEqAction =
+  | { kind: "status" }
+  | { kind: "set_learning"; enabled: boolean }
+  | { kind: "set_goal"; goal: Goal }
+  | { kind: "set_auto_apply"; enabled: boolean }
+  | { kind: "apply" }
+  | { kind: "relearn" }
+  | { kind: "reset" }
+  | { kind: "import"; text: string }
+  | { kind: "export"; note: string };
+export interface GameEqExport { text: string; path: string }
+export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
+
+/** The three goals, each with the one line the prompt shows. */
+export const GOALS: { key: Goal; label: string; line: string }[] = [
+  { key: "awareness", label: "Awareness", line: "Hear footsteps, reloads and callouts; tame explosions, music and engines." },
+  { key: "dialogue", label: "Dialogue", line: "Keep voices clear over effects and music." },
+  { key: "immersion", label: "Immersion", line: "A gentle balance that stays close to the game's own mix." },
+];
 export interface GpuColor { vibrance: number; gamma: number; contrast: number; shadow_lift: number; hue_deg: number }
 export interface MonitorSettings { brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number }
 export interface DisplaySettings { gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean }
@@ -133,13 +218,57 @@ export type HardwareItem =
   | { kind: "monitor"; value: HardwareMonitor };
 
 export interface Foreground { pid: number; exe: string; title: string; hmonitor: number }
+
+// S47: learned game display. Mirrors crates/core/src/learned_display.rs.
+/** Panel-neutral look, each axis 0..1 (0 = leave the game alone). */
+export interface LookTargets { shadow: number; saturation: number; highlight: number }
+export type PanelKind = "oled" | "ips" | "va" | "tn" | "unknown";
+export type LookPhase = "learning" | "converged";
+export type LookStatus = "off" | "learning" | "ready" | "applied" | "applied_imported" | "hdr_skipped";
+export interface LookReadiness {
+  frames: number; frames_needed: number; scenes: number; scenes_needed: number;
+  stable_checkpoints: number; checkpoints_needed: number; progress: number;
+  /** Checkpoints taken so far; gameplay frames per scene bucket, dark → bright. */
+  checkpoints?: number; scene_frames?: number[];
+  /** Largest disagreement among kept checkpoints, in applied units. */
+  delta?: { gamma: number; shadow_lift: number; vibrance: number } | null;
+  /** The newest checkpoint's look, shown while still learning. */
+  candidate?: LookTargets | null;
+  /** S48: seconds of gameplay still needed (null = a kind of scene is missing). */
+  eta_secs?: number | null;
+  /** S48: a one-scene game whose statistics are tight takes the shorter budget. */
+  confident?: boolean;
+}
+export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
+export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
+export interface MonitorLearnView {
+  monitor: MonitorId; monitor_name: string; panel: PanelKind; panel_guessed?: boolean; phase: LookPhase;
+  readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
+  use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
+  adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;
+  /** What the newest checkpoint would apply on this panel. */
+  candidate_adjustments?: LookAdjustments | null;
+  /** A settled look waiting for Apply; `adjustments` is only what is applied. */
+  offer?: LookTargets | null; offer_adjustments?: LookAdjustments | null;
+}
+export interface ImportedLook { look: LookTargets; note: string }
+export interface LearnView {
+  exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
+  monitors: MonitorLearnView[]; imported: ImportedLook | null;
+  privacy: string; tournament: string;
+}
+/** The owner's exact wording (S47). A notice only. */
+export const TOURNAMENT_NOTICE =
+  "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.";
+export const LOOK_PRIVACY =
+  "Frames are analysed in memory at low resolution while the game has focus. No frames are recorded or saved, and nothing leaves this PC.";
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
 export type ShareState =
   | { kind: "off" }
   | { kind: "sharing"; peer: string }
   /** The share dropped and Relay is bringing it back (S38). */
   | { kind: "reconnecting"; peer: string; attempt: number };
-export type AudioChainState = "bypass" | "active" | "exclusivebypassed";
+export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled" | "notloaded";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
 export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
@@ -281,6 +410,31 @@ export interface ShareStats {
   /** Frames held back while waiting for that keyframe (capped at ~1 s). */
   frames_withheld?: number;
   audio?: AudioHealth;
+  /** NDI® output on this engine (S51). Absent from engines older than S51. */
+  ndi?: NdiLive;
+}
+/** The `ndi` object in an engine's stats line. Mirrors `NdiOutput::status_json`. */
+export interface NdiLive {
+  on: boolean;
+  /** The source name as published; NDI shows it as "MACHINE (name)". */
+  name: string;
+  /** NDI receivers connected right now (on only). */
+  connections?: number;
+  video?: { sent: number; dropped: number };
+  audio?: { sent: number; dropped: number };
+  /** Why the last turn-on failed (off only). */
+  error?: string | null;
+  runtime_missing?: boolean;
+}
+/** Mirror of `crates/core/src/ndi.rs` `NdiRuntime` (S51). */
+export interface NdiRuntime {
+  present: boolean;
+  /** Absent when not found. */
+  path?: string;
+  searched: string[];
+  download_url: string;
+  ndi_url: string;
+  trademark: string;
 }
 /** The receiver's audio pipeline, from `playback.rs` (S33's B16 work). */
 export interface AudioHealth {
@@ -449,6 +603,10 @@ export interface UiPrefs {
   auto_install_updates?: boolean;
   /** Offer pre-releases too (S45). Default off. */
   prerelease_updates?: boolean;
+  /** Publish what this PC receives as an NDI® source (S51). Default off. */
+  ndi_receive?: boolean;
+  /** Publish this PC's own share as an NDI source (S51). Default off. */
+  ndi_share?: boolean;
 }
 
 /** Mirror of `crates/core/src/update.rs` (S45). */
@@ -499,12 +657,17 @@ export interface ReceiveStatus {
 
 /** How the received stream's native window is hosted (S29). `embedded` =
  *  inside this window over the Receive screen's video area; `popout` = a
- *  window of its own; `none` = no stream window right now. */
-export type StreamMode = "embedded" | "popout" | "none";
+ *  window of its own; `clean` = a borderless window of a fixed size for call
+ *  apps and OBS to capture (S50); `none` = no stream window right now. */
+export type StreamMode = "embedded" | "popout" | "clean" | "none";
+/** A clean feed's fixed client size. Mirror of `share::CleanFeed`. */
+export type CleanFeed = "1920x1080" | "2560x1440";
 /** Mirror of the shell's `stream_host::StreamStatus`. */
 export interface StreamStatus {
   live: boolean; mode: StreamMode; width: number; height: number;
-  /** Windows confirmed the window is hidden from screen capture (B9). */
+  /** Windows confirmed the window is hidden from screen capture (B9). Since
+   *  S50 that is only while this PC is also sharing a screen it is on;
+   *  otherwise the window is capturable, so call apps can pick it. */
   excluded_from_capture: boolean;
   /** The receive state the core last pushed, for a screen that mounts
    *  mid-receive. Absent from a shell that predates it. */
@@ -515,7 +678,7 @@ export interface StreamStatus {
 /** The video area in CSS px, relative to the viewport. */
 export interface VideoArea { x: number; y: number; w: number; h: number }
 
-const noStream: StreamStatus = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: true };
+const noStream: StreamStatus = { live: false, mode: "none", width: 0, height: 0, excluded_from_capture: false };
 
 export const isTauri = (): boolean =>
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -692,6 +855,8 @@ const mockPresets: SharePresetDef[] = [
   { id: "game", name: "Game", bitrate_mbps: 60, fps: 60, audio: { desktop: "game", mic: false }, cursor: false, record: false, replay_secs: 60, container: "mp4" },
   { id: "daw", name: "DAW", bitrate_mbps: 40, fps: 60, size: [2560, 1440], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
   { id: "desktop", name: "Desktop", bitrate_mbps: 60, fps: 60, audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "discord", name: "Discord", bitrate_mbps: 20, fps: 60, size: [1920, 1080], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
+  { id: "discord-720", name: "Discord 720p30", bitrate_mbps: 8, fps: 30, size: [1280, 720], audio: { desktop: "system", mic: false }, cursor: true, record: false, replay_secs: 0, container: "mp4" },
 ];
 const mockRecording: RecordingSettings = { cap_gb: 50, free_floor_gb: 10 };
 
@@ -708,6 +873,12 @@ const mockCatalog: CatalogEntry[] = [
 let mockUiPrefs: UiPrefs = {
   close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
   auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+  ndi_receive: false, ndi_share: false,
+};
+/** Browser-mode stand-in: a PC without the NDI runtime, the common case. */
+const mockNdi: NdiRuntime = {
+  present: false, searched: [], download_url: "http://ndi.link/NDIRedistV6",
+  ndi_url: "https://ndi.video/", trademark: "NDI® is a registered trademark of Vizrt NDI AB.",
 };
 /** Browser-mode stand-in for the endpoint list (S40). */
 const mockAudioDevices: AudioDevices = {
@@ -884,15 +1055,23 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("stop_receive");
   },
+  /** Stop sending the call app's audio back, live, while receiving (r54).
+   *  Turning it on again is Stop and Start receiving. */
+  async stopCallReturn(): Promise<void> {
+    if (!isTauri()) return;
+    return invoke<void>("stop_call_return");
+  },
   /** Where the Receive screen's video area is, so the shell can put the
    *  stream window over it; `null` when the screen is not showing. */
   async setVideoArea(area: VideoArea | null): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("set_video_area", { area });
   },
-  async setStreamMode(mode: "embedded" | "popout"): Promise<void> {
+  /** `feed` only means something with `clean` (S50): the clean feed's
+   *  fixed size; absent = 1920x1080. */
+  async setStreamMode(mode: "embedded" | "popout" | "clean", feed?: CleanFeed): Promise<void> {
     if (!isTauri()) return;
-    return invoke<void>("set_stream_mode", { mode });
+    return invoke<void>("set_stream_mode", feed ? { mode, feed } : { mode });
   },
   async streamStatus(): Promise<StreamStatus> {
     if (!isTauri()) return { ...noStream };
@@ -1045,6 +1224,17 @@ export const api = {
     return invoke<ElevationResult>("run_elevated", { op });
   },
   /** Read-only: Windows support, registration, consent, OBS / VB-Cable. */
+  /** S51: is the NDI runtime installed? A file check; nothing is loaded. */
+  async ndiStatus(): Promise<NdiRuntime> {
+    if (!isTauri()) return structuredClone(mockNdi);
+    return invoke<NdiRuntime>("ndi_status");
+  },
+  /** Open ndi.video, or NDI's runtime download, in the browser. The shell
+   *  holds the URLs; the page only says which. */
+  async openNdiLink(which: "ndi" | "runtime"): Promise<void> {
+    if (!isTauri()) return;
+    await invoke("open_ndi_link", { which });
+  },
   async vdeviceStatus(): Promise<VdeviceStatus> {
     if (!isTauri()) return structuredClone(mockVdevice);
     return invoke<VdeviceStatus>("vdevice_status");
@@ -1150,6 +1340,74 @@ export const api = {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
   },
+  /** S46: read or act on a profile's learned game EQ. */
+  async gameEq(id: string, action: GameEqAction): Promise<GameEqReply> {
+    if (!isTauri()) return mockGameEq(id, action);
+    return invoke<GameEqReply>("game_eq", { id, action });
+  },
+  // S48 learn from a video file. Browser mode runs a pretend job.
+  async listLearnVideos(): Promise<LearnVideos> {
+    if (!isTauri()) return {
+      videos: [
+        { name: "Relay 2026-10-01 21-04.mp4", path: "C:\\Users\\you\\Videos\\Relay\\Relay 2026-10-01 21-04.mp4", size_bytes: 1_800_000_000, modified_unix: 1_790_000_000, relay: true },
+        { name: "match.mkv", path: "C:\\Users\\you\\Videos\\match.mkv", size_bytes: 900_000_000, modified_unix: 1_789_000_000, relay: false },
+      ],
+      recording_dir: "C:\\Users\\you\\Videos\\Relay", privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+    };
+    return invoke<LearnVideos>("list_learn_videos");
+  },
+  /** The native "choose a video" dialog (mp4/mkv/mov/webm). null = closed. */
+  async pickVideoFile(): Promise<string | null> {
+    if (!isTauri()) return "C:\\Users\\you\\Videos\\match.mkv";
+    return invoke<string | null>("pick_video_file");
+  },
+  async learnFromFile(id: string, path: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) return mockLearnFile(id, path);
+    return invoke<LearnFileStatus | null>("learn_from_file", { id, path });
+  },
+  async learnFileStatus(id: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) return mockLearnFileTick(id);
+    return invoke<LearnFileStatus | null>("learn_file_status", { id });
+  },
+  async learnFileCancel(id: string): Promise<LearnFileStatus | null> {
+    if (!isTauri()) { const j = mockFileJobs.get(id); if (j && j.state === "running") j.state = "cancelled"; return j ? structuredClone(j) : null; }
+    return invoke<LearnFileStatus | null>("learn_file_cancel", { id });
+  },
+  // S47 learned game display. Browser mode keeps an in-memory record.
+  async learnDisplayStatus(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_status", { exe });
+  },
+  async learnDisplaySet(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_set", { exe, enabled });
+  },
+  async learnDisplayApply(exe: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("this game's look has not settled yet; keep playing");
+    return invoke<LearnView>("learn_display_apply", { exe });
+  },
+  async learnDisplayAutoApply(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.auto_apply = enabled; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_auto_apply", { exe, enabled });
+  },
+  async learnDisplayRelearn(exe: string): Promise<LearnView> {
+    if (!isTauri()) return structuredClone(mockLearn(exe));
+    return invoke<LearnView>("learn_display_relearn", { exe });
+  },
+  async learnDisplayReset(exe: string): Promise<LearnView> {
+    if (!isTauri()) { mockLearnStore.delete(exe.toLowerCase()); return structuredClone(mockLearn(exe)); }
+    return invoke<LearnView>("learn_display_reset", { exe });
+  },
+  /** The current game layer as the versioned JSON file's text. */
+  async learnDisplayExport(exe: string, note: string, name?: string): Promise<string> {
+    if (!isTauri()) throw new Error("nothing has been learned for this game yet");
+    return invoke<string>("learn_display_export", { exe, name: name ?? null, note });
+  },
+  async learnDisplayImport(exe: string, json: string): Promise<LearnView> {
+    if (!isTauri()) throw new Error("importing needs the Relay service");
+    return invoke<LearnView>("learn_display_import", { exe, json });
+  },
+
   // S45 updates. Browser mode has nothing to offer.
   async updateStatus(): Promise<UpdateStatus> {
     if (!isTauri()) return structuredClone(mockUpdate);
@@ -1172,6 +1430,77 @@ export const api = {
     return invoke<UpdateStatus>("skip_update", { version });
   },
 };
+
+/** Browser-mode stand-in for the learned game EQ (S46): nothing is learned
+ *  in a browser, so it only reflects the profile's own switches. */
+function mockGameEq(id: string, action: GameEqAction): GameEqReply {
+  const p = mockStore.get(id);
+  if (!p) throw new Error("no such profile");
+  const a = p.audio;
+  if (action.kind === "set_learning") a.learn_game_eq = action.enabled;
+  if (action.kind === "set_goal") a.game_eq_goal = action.goal;
+  if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
+  if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
+  if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
+    throw new Error("needs the Relay core");
+  }
+  const processing = a.bands.length > 0 || a.hrtf || !!a.limiter || !!a.game_eq;
+  const on = a.learn_game_eq ?? (processing && a.game_eq?.source !== "imported" && a.game_eq?.source !== "tuned");
+  return {
+    status: {
+      exe: p.game.exe, state: a.game_eq ? "applied" : on ? "learning" : "off",
+      learning_on: on, needs_goal: on && !a.game_eq_goal, learning_now: false,
+      goal: a.game_eq_goal ?? null, auto_apply: !!a.game_eq_auto_apply,
+      source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
+      targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
+      exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
+    },
+  };
+}
+
+/** Browser-mode stand-in for a video job (S48): advances a pretend 10 min
+ *  file by 75 s per status read, at "15x". */
+const mockFileJobs = new Map<string, LearnFileStatus>();
+function mockLearnFile(id: string, path: string): LearnFileStatus {
+  const p = mockStore.get(id);
+  if (!p) throw new Error("no such profile");
+  if (/:\/\/|youtube/i.test(path)) throw new Error("Relay learns from video files on this PC only; it does not download from websites");
+  const running = mockFileJobs.get(id);
+  if (running?.state === "running") throw new Error("Relay is already learning from a video; cancel it first");
+  const job: LearnFileStatus = {
+    profile: id, exe: p.game.exe.toLowerCase(), file_name: path.split(/[\\/]/).pop() ?? path,
+    state: "running", progress: 0, position_secs: 0, duration_secs: 600, speed: null,
+    audio_secs: 0, look_frames: 0, notes: [], message: null, privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+  };
+  mockFileJobs.set(id, job);
+  return structuredClone(job);
+}
+function mockLearnFileTick(id: string): LearnFileStatus | null {
+  const j = mockFileJobs.get(id);
+  if (!j) return null;
+  if (j.state === "running") {
+    j.position_secs = Math.min(600, j.position_secs + 75);
+    j.progress = j.position_secs / 600;
+    j.speed = 15;
+    if (j.position_secs >= 600) {
+      j.state = "done"; j.audio_secs = 600; j.look_frames = 1200; j.look_gameplay_frames = 980; j.cpu_secs = 31;
+    }
+  }
+  return structuredClone(j);
+}
+
+const mockLearnStore = new Map<string, LearnView>();
+/** Browser-mode stand-in for the learn view (S47). */
+function mockLearn(exe: string): LearnView {
+  const key = exe.toLowerCase();
+  let v = mockLearnStore.get(key);
+  if (!v) {
+    v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
+      privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+    mockLearnStore.set(key, v);
+  }
+  return v;
+}
 
 /** Browser-mode stand-in for the updater (S45). */
 const mockUpdate: UpdateStatus = {

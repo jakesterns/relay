@@ -623,9 +623,13 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         audio_pid: std::env::var("RELAY_AUDIO_PID")
                             .ok()
                             .and_then(|s| s.parse().ok()),
+                        // Pinned by the service when the share starts.
+                        audio_app: None,
                         mic: std::env::var("RELAY_MIC").is_ok(),
                         rest: std::env::var("RELAY_REST").is_ok(),
                         vcam: false,
+                        // The service fills it from the saved setting.
+                        ndi: false,
                         mic_device: None,
                         output_device: None,
                         cursor: true,

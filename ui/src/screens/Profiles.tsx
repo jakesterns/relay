@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Pill } from "../components/Controls";
+import { Card, Chips, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
@@ -14,8 +14,23 @@ const shareLabel: Record<ProfileSummary["share"], string> = { game: "Game", daw:
 const kindLabel: Record<HeadsetKind, string> = { headphone: "Headphones", iem: "IEM", speakers: "Speakers" };
 
 /** Which controls Relay can drive on this panel, from its advertised VCP codes. */
+/** What a scan found, one clause per monitor. */
+export function scanSummary(monitors: { name: string; ddc?: number[] }[]): string {
+  if (monitors.length === 0) return "No monitors found.";
+  return monitors.map((m) => m.ddc && m.ddc.length > 0
+    ? `${m.name || "Monitor"}: ${ddcControls(m.ddc)}`
+    : `${m.name || "Monitor"}: no DDC/CI response (turn on DDC/CI in the monitor's menu)`).join(" · ");
+}
+
 function ddcControls(codes: number[]): string {
-  const known: [number, string][] = [[0x10, "brightness"], [0x12, "contrast"], [0x87, "sharpness"]];
+  // Every MCCS control Relay recognises, in the order a person reads them.
+  const known: [number, string][] = [
+    [0x10, "brightness"], [0x12, "contrast"], [0x14, "colour preset"],
+    [0x16, "red gain"], [0x18, "green gain"], [0x1a, "blue gain"],
+    [0x6c, "red black level"], [0x6e, "green black level"], [0x70, "blue black level"],
+    [0x87, "sharpness"], [0x60, "input source"], [0x62, "volume"], [0x8d, "mute"],
+    [0xdc, "display mode"], [0xd6, "power mode"],
+  ];
   const names = known.filter(([c]) => codes.includes(c)).map(([, n]) => n);
   return names.length ? `controls: ${names.join(", ")}` : `DDC/CI ${codes.length} codes`;
 }
@@ -33,6 +48,7 @@ export function Profiles() {
   const [hwError, setHwError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState<string | null>(null);
 
   const apply = async (id: string) => {
     setListError(null);
@@ -76,7 +92,12 @@ export function Profiles() {
   const rescan = async () => {
     setScanning(true);
     setHwError(null);
-    try { await api.probeHardware(); await refresh(); }
+    setScanNote(null);
+    try {
+      const report = await api.probeHardware();
+      await refresh();
+      setScanNote(scanSummary(report.monitors));
+    }
     catch (e) { setHwError(errText(e)); }
     finally { setScanning(false); }
   };
@@ -96,7 +117,7 @@ export function Profiles() {
         <div className="stat">
           <div><label>Memory</label><div className="v">{fmtMb(fp.rss_bytes)}<u>MB</u></div><div className="hint">Background part of Relay</div></div>
           <div><label>CPU</label><div className="v">{fp.cpu_percent.toFixed(1)}<u>%</u></div><div className="hint">{active ? "Profile active" : "Waiting for a game"}</div></div>
-          <div><label>Audio chain</label><div className="v">{chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : "Exclusive"}</div><div className="hint">{chain === "bypass" ? "Pass-through · 0 ms" : chain === "active" ? "EQ + HRTF" : "Game bypasses the APO"}</div></div>
+          <div><label>Audio chain</label><div className="v">{chain === "bypass" ? "Bypass" : chain === "active" ? "Active" : chain === "notinstalled" || chain === "notloaded" ? "Not audible" : "Exclusive"}</div><div className="hint">{chain === "bypass" ? "Pass-through · 0 ms" : chain === "active" ? "EQ + HRTF" : chain === "notinstalled" ? "Audio effects not installed" : chain === "notloaded" ? "Installed, not loaded by Windows" : "Game bypasses the APO"}</div></div>
           <div><label>Display</label><div className="v">{state.display_state === "applied" ? "Applied" : "Default"}</div><div className="hint">{state.display_state === "applied" ? "Backup on disk" : "Windows settings"}</div></div>
         </div>
         {editing && (
@@ -207,6 +228,7 @@ export function Profiles() {
           <button className="btn q" disabled={scanning} onClick={() => void rescan()}>
             {scanning ? "Scanning…" : "Scan monitor controls"}
           </button>
+          <DoneNote text={scanNote} onDismiss={() => setScanNote(null)} />
           <ErrorNote text={hwError} onDismiss={() => setHwError(null)} />
         </Card>
         <Card>

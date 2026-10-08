@@ -216,6 +216,12 @@ export function Settings() {
           <Kv k="Data folder" v={state.build?.data_dir ?? "—"} mono />
           <Kv k="Log file" v={state.build?.log_file ?? "—"} mono />
           <Kv k="Version" v={state.build?.version ?? "—"} mono />
+          {/* S51: the attribution NDI's licence asks for in the About box. */}
+          <p className="note" data-testid="ndi-attribution">
+            NDI® is a registered trademark of Vizrt NDI AB.{" "}
+            <button type="button" className="linkbtn"
+              onClick={() => { api.openNdiLink("ndi").catch(() => {}); }}>ndi.video</button>
+          </p>
         </Card>
         <p className="note">Uninstalling removes every component listed here, the startup entry, and restores the audio chain. Nothing is left behind.</p>
         <p className="note">Relay is installed for your user account only — it writes nothing to Program Files and installs no drivers unless you opt in above.</p>
@@ -531,7 +537,7 @@ function VdeviceConsentRow() {
   const perUser = status?.camera_path === "direct_show";
   const micNote = status && status.mic_targets.length > 0
     ? `Mic route: ${status.mic_targets[0].name}.`
-    : "Mic: waiting on the signed driver; install VB-Cable for the interim route.";
+    : "Call audio: share your screen in the call app with its audio option on, and the other PC's sound goes with it.";
   const sub = status === null
     ? (offline && !mock ? "Relay is not running — status unknown." : "Show incoming shares as a webcam in calls.")
     : !status.camera_supported
