@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{DisplaySettings, MonitorId};
 
-/// The sampler's rate. One frame a second is plenty for a look that takes
-/// minutes to converge, and keeps the cost unmeasurable.
-pub const SAMPLE_FPS: u32 = 1;
+/// The sampler's rate: S48 samples twice a second (was once) so a look settles
+/// in half the time; the cost per sample is unchanged (measured in S48).
+pub const SAMPLE_FPS: u32 = relay_display::learn::converge::SAMPLE_FPS;
 
 /// Exact wording the owner chose for the tournament notice (S47). A notice
 /// only: no confirmation, no responsibility taken.

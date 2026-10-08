@@ -106,6 +106,10 @@ inert today: no quirks row is a `VerifiedCode` with a level range, so
 
 ### Confidence and convergence (`converge.rs`)
 
+> **S48** samples at 2 fps with 30 s checkpoints, two agreeing, and a
+> confident one-scene budget of 4 min; see `S48-fast-learning.md`. The S47
+> table below is kept for the record.
+
 | Constant | Value | Meaning |
 |---|---|---|
 | `MIN_GAMEPLAY_FRAMES` | 600 | 10 min of gameplay at 1 fps |

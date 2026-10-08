@@ -99,6 +99,14 @@ pub struct Aggregate {
     pub hue_hist: [f64; HUE_BINS],
     /// Weighted frames per APL bucket.
     pub apl_buckets: [f64; APL_BUCKETS],
+    /// S48: squared sums of the three look inputs, for their standard
+    /// errors. Absent (0) in records written before S48.
+    #[serde(default)]
+    pub crush_sq: f64,
+    #[serde(default)]
+    pub sat_sq: f64,
+    #[serde(default)]
+    pub clip_sq: f64,
 }
 
 pub fn apl_bucket(mean_luma: f32) -> usize {
@@ -123,12 +131,18 @@ impl Aggregate {
             self.sat_p90 *= k;
             self.hue_hist.iter_mut().for_each(|v| *v *= k);
             self.apl_buckets.iter_mut().for_each(|v| *v *= k);
+            self.crush_sq *= k;
+            self.sat_sq *= k;
+            self.clip_sq *= k;
         }
         self.weight += 1.0;
         self.frames += 1;
         self.mean_luma += s.mean_luma as f64;
         self.crush_frac += s.crush_frac as f64;
         self.clip_frac += s.clip_frac as f64;
+        self.crush_sq += (s.crush_frac as f64).powi(2);
+        self.sat_sq += (s.sat_mean as f64).powi(2);
+        self.clip_sq += (s.clip_frac as f64).powi(2);
         self.crushed_detail_w += (s.crushed_detail * s.crush_frac) as f64;
         self.crush_w += s.crush_frac as f64;
         self.sat_mean += s.sat_mean as f64;
@@ -137,6 +151,74 @@ impl Aggregate {
             *a += v as f64;
         }
         self.apl_buckets[apl_bucket(s.mean_luma)] += 1.0;
+    }
+
+    /// S48: add another aggregate (a video file's, say) into this one. Sums
+    /// add, so each side counts by its weight; if the total passes `window`
+    /// both are scaled down together to it, as the rolling decay would.
+    pub fn merge(&mut self, o: &Aggregate, window: f64) {
+        self.weight += o.weight;
+        self.frames += o.frames;
+        self.mean_luma += o.mean_luma;
+        self.crush_frac += o.crush_frac;
+        self.clip_frac += o.clip_frac;
+        self.crushed_detail_w += o.crushed_detail_w;
+        self.crush_w += o.crush_w;
+        self.sat_mean += o.sat_mean;
+        self.sat_p90 += o.sat_p90;
+        for (a, b) in self.hue_hist.iter_mut().zip(o.hue_hist) {
+            *a += b;
+        }
+        for (a, b) in self.apl_buckets.iter_mut().zip(o.apl_buckets) {
+            *a += b;
+        }
+        self.crush_sq += o.crush_sq;
+        self.sat_sq += o.sat_sq;
+        self.clip_sq += o.clip_sq;
+        if window > 0.0 && self.weight > window {
+            let k = window / self.weight;
+            self.weight = window;
+            for v in [
+                &mut self.mean_luma,
+                &mut self.crush_frac,
+                &mut self.clip_frac,
+                &mut self.crushed_detail_w,
+                &mut self.crush_w,
+                &mut self.sat_mean,
+                &mut self.sat_p90,
+                &mut self.crush_sq,
+                &mut self.sat_sq,
+                &mut self.clip_sq,
+            ] {
+                *v *= k;
+            }
+            self.hue_hist.iter_mut().for_each(|v| *v *= k);
+            self.apl_buckets.iter_mut().for_each(|v| *v *= k);
+        }
+    }
+
+    /// Standard errors of the three look axes (shadow, saturation,
+    /// highlight, in look units) with samples `decorrelation` frames apart
+    /// counted as one. `None` without squared sums (a pre-S48 record) or
+    /// with under two independent samples.
+    pub fn standard_errors(&self, decorrelation: f64) -> Option<[f32; 3]> {
+        let n = self.weight / decorrelation.max(1.0);
+        if n < 2.0 || (self.crush_sq <= 0.0 && self.crush_frac > 0.0) {
+            return None;
+        }
+        let se = |sum: f64, sq: f64, span: f32| -> Option<f32> {
+            let mean = sum / self.weight;
+            let var = sq / self.weight - mean * mean;
+            if var < -1e-9 {
+                return None;
+            }
+            Some((var.max(0.0).sqrt() / n.sqrt()) as f32 / span)
+        };
+        Some([
+            se(self.crush_frac, self.crush_sq, CRUSH_SPAN)?,
+            se(self.sat_mean, self.sat_sq, SAT_SPAN)?,
+            se(self.clip_frac, self.clip_sq, CLIP_SPAN)?,
+        ])
     }
 
     fn mean(&self, v: f64) -> f32 {

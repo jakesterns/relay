@@ -90,6 +90,8 @@ describe("learning, applying and files", () => {
     const { h, eq } = await mount();
     expect(eq().getByRole("progressbar", { name: "Learning progress" })).toHaveAttribute("aria-valuenow", "42");
     expect(eq().getByText(/Learning · 42%/)).toBeInTheDocument();
+    // S48: the ETA from the core's event rate, rounded up.
+    expect(eq().getByText("Learning · 42% · about 4 min left")).toBeInTheDocument();
     expect(eq().getByRole("button", { name: "Apply" })).toBeDisabled();
 
     core.gameEq.set("1", { progress: 100, candidate: curve, needsRelearn: false, learningNow: false });
@@ -196,6 +198,23 @@ describe("learning, applying and files", () => {
     await settle();
     expect(actions()).toContain("reset");
     expect(profile1().audio.game_eq).toBeUndefined();
+  });
+
+  it("says when the time left is not known yet (S48)", async () => {
+    const p = profile1();
+    p.audio.game_eq_goal = "awareness";
+    p.audio.learn_game_eq = true;
+    core.gameEqEta = null;
+    core.gameEq.set("1", { progress: 3, candidate: null, needsRelearn: false, learningNow: true });
+    const { eq } = await mount();
+    expect(eq().getByText("Learning · 3% · time left not known yet")).toBeInTheDocument();
+  });
+
+  it("offers learning from a recording beside it (S48)", async () => {
+    await mount();
+    const v = within(card("Learn faster: use a recording"));
+    expect(v.getByRole("button", { name: "Learn from a video file…" })).toBeInTheDocument();
+    expect(v.getByText(/Local files only/)).toBeInTheDocument();
   });
 
   it("says what it listens to and that nothing leaves the PC", async () => {

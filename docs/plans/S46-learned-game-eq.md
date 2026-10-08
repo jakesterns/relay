@@ -126,6 +126,11 @@ and a learned layer follows immediately.
 
 ### Readiness, rolling window, versions
 
+> **S48** made this faster: 30 s checkpoints, two agreeing, 5 min minimum,
+> and an evidence count scaled by per-band standard error (40–120 targets,
+> 20–60 maskers), plus an ETA. See `S48-fast-learning.md`; the S46 values
+> below are kept for the record.
+
 Evidence, not a timer: ready when the window holds `MIN_CUES` = 120 target
 events and `MIN_MASKERS` = 60 masker events for the goal (stationary classes
 count one per 0.5 s) over at least `MIN_ACTIVE_SECS` = 10 min of active play,

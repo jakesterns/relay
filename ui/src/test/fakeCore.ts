@@ -13,8 +13,8 @@ import type {
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
-import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus, LearnView, LookTargets } from "../lib/ipc";
-import { LOOK_PRIVACY, TOURNAMENT_NOTICE, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
+import { LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -75,6 +75,13 @@ export interface FakeCore {
   gameEq: Map<string, { progress: number; candidate: [number, number][] | null; needsRelearn: boolean; learningNow: boolean }>;
   /** S47: learn views by lower-case exe. Missing = never touched. */
   learn: Map<string, LearnView>;
+  /** S48: video jobs by profile id (the core keeps the current one). */
+  fileJobs: Map<string, LearnFileStatus>;
+  /** S48: what `list_learn_videos` lists, and what the native picker returns. */
+  videos: VideoFile[];
+  pickedVideo: string | null;
+  /** S48: the ETA the fake game EQ status reports (seconds). */
+  gameEqEta: number | null;
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -210,6 +217,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     elevation: { decline: false },
     gameEq: new Map(),
     learn: new Map(),
+    fileJobs: new Map(),
+    videos: [
+      { name: "Relay 2026-10-01 21-04.mp4", path: "C:\\Users\\test\\Videos\\Relay\\Relay 2026-10-01 21-04.mp4", size_bytes: 1_800_000_000, modified_unix: 1_790_000_000, relay: true },
+      { name: "match.mkv", path: "C:\\Users\\test\\Videos\\match.mkv", size_bytes: 900_000_000, modified_unix: 1_789_000_000, relay: false },
+    ],
+    pickedVideo: "C:\\Users\\test\\Desktop\\clip.webm",
+    gameEqEta: 240,
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
@@ -322,8 +336,37 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         source: au.game_eq?.source ?? null, progress: offer ? 100 : rec.progress, active_minutes: 4.5,
         targets: 120, maskers: 20, min_targets: 300, min_maskers: 60, distinct_voices: 2,
         exe_version: "1.0.0.0", applied, offer, note: "", last_error: null,
+        eta_secs: offer ? 0 : core.gameEqEta,
       };
       return { status, ...(exported ? { export: exported } : {}) };
+    },
+    list_learn_videos: () => ({
+      videos: structuredClone(core.videos), recording_dir: "C:\\Users\\test\\Videos\\Relay",
+      privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+    }),
+    pick_video_file: () => core.pickedVideo,
+    learn_from_file: (a) => {
+      const id = String(a.id), path = String(a.path);
+      const p = core.profiles.get(id);
+      if (!p) throw new Error("no such profile");
+      if (/:\/\/|youtube/i.test(path)) throw new Error("Relay learns from video files on this PC only; it does not download from websites");
+      if (core.fileJobs.get(id)?.state === "running") throw new Error("Relay is already learning from a video; cancel it first");
+      const job: LearnFileStatus = {
+        profile: id, exe: p.game.exe.toLowerCase(), file_name: path.split(/[\\/]/).pop() ?? path,
+        state: "running", progress: 0, position_secs: 0, duration_secs: 600, speed: null,
+        audio_secs: 0, look_frames: 0, notes: [], message: null, privacy: VIDEO_PRIVACY, local_only: VIDEO_LOCAL_ONLY,
+      };
+      core.fileJobs.set(id, job);
+      return structuredClone(job);
+    },
+    learn_file_status: (a) => {
+      const j = core.fileJobs.get(String(a.id));
+      return j ? structuredClone(j) : null;
+    },
+    learn_file_cancel: (a) => {
+      const j = core.fileJobs.get(String(a.id));
+      if (j && j.state === "running") j.state = "cancelled";
+      return j ? structuredClone(j) : null;
     },
     update_status: () => structuredClone(core.update),
     learn_display_status: (a) => structuredClone(learnView(String(a.exe))),
@@ -656,6 +699,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "game_eq",
+  "list_learn_videos", "pick_video_file", "learn_from_file", "learn_file_status", "learn_file_cancel",
   "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
   "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",

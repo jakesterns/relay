@@ -425,7 +425,7 @@ fn not_ready_without_enough_frames() {
 #[test]
 fn one_kind_of_scene_needs_the_longer_one_scene_budget() {
     let mut l = Learner::new("b1");
-    for _ in 0..MIN_FRAMES_ONE_SCENE - 1 {
+    for _ in 0..MIN_FRAMES_ONE_SCENE_CONFIDENT - 1 {
         l.observe(&gameplay(0.3, 0.2));
     }
     assert_eq!(l.scenes(), 1);
@@ -531,10 +531,17 @@ fn learner_round_trips_through_json() {
 
 #[test]
 fn convergence_constants() {
-    assert_eq!(MIN_GAMEPLAY_FRAMES, 600);
+    assert_eq!(SAMPLE_FPS, 2);
+    assert_eq!(MIN_GAMEPLAY_FRAMES, 600, "5 min at 2 fps");
     assert_eq!(MIN_SCENES, 3);
-    assert_eq!(CHECKPOINT_FRAMES, 120);
-    assert_eq!(CONVERGE_CHECKPOINTS, 3);
+    assert_eq!(CHECKPOINT_FRAMES, 60, "30 s at 2 fps");
+    assert_eq!(CHECKPOINT_FRAMES / SAMPLE_FPS, 30);
+    assert_eq!(CONVERGE_CHECKPOINTS, 2);
+    assert_eq!(ROLLING_WINDOW_FRAMES, 3600.0 * SAMPLE_FPS as f64, "an hour");
+    assert_eq!((MIN_FRAMES_ONE_SCENE, MIN_FRAMES_ONE_SCENE_CONFIDENT), (900, 480));
+    assert_eq!((CONFIDENT_SE, DECORRELATION_FRAMES), (0.0125, 4.0));
+    const { assert!(MIN_FRAMES_ONE_SCENE_CONFIDENT < MIN_FRAMES_ONE_SCENE) };
+    const { assert!(CONFIDENT_SE < crate::learn::derive::LOOK_STEP / 2.0) };
     const { assert!(CONVERGE_TOLERANCE < MEANINGFUL_CHANGE) };
     assert!(ROLLING_WINDOW_FRAMES > MIN_GAMEPLAY_FRAMES as f64);
 }
@@ -829,7 +836,8 @@ fn a_night_only_game_converges_and_asks_for_shadow() {
     }
     assert!(l.single_scene());
     assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
-    assert!(frames as u64 >= MIN_FRAMES_ONE_SCENE);
+    assert!(frames as u64 >= MIN_FRAMES_ONE_SCENE_CONFIDENT);
+    assert!(l.readiness().confident, "steady night frames take the confident budget");
     assert!(l.converged.unwrap().shadow > 0.0);
     assert_eq!(l.readiness().scenes_needed, 1);
 }
@@ -874,4 +882,173 @@ fn the_candidate_look_is_visible_before_convergence() {
     }
     assert_eq!(l.phase(), Phase::Learning);
     assert_eq!(l.readiness().candidate.unwrap().shadow, 0.5);
+}
+
+// --- S48: faster learning ----------------------------------------------------
+
+/// The CPU side of one sample (analysis of a 480×270 frame), measured, so
+/// the 2 fps budget is a number: at 2 fps it must stay under 1 % of a core.
+/// (The GPU blt and ~190 KB readback are not CPU work.)
+#[test]
+fn analysis_cost_at_two_fps_is_under_one_percent_of_a_core() {
+    let frames: Vec<Vec<u8>> = (0..20).map(dark_crushed).collect();
+    let mut an = Analyser::new();
+    let mut l = Learner::new("b1");
+    let n = 200;
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let r = run(&mut an, &frames[i % frames.len()]);
+        l.observe(&r);
+    }
+    let per = t.elapsed().as_secs_f64() / n as f64;
+    let share = per * SAMPLE_FPS as f64 * 100.0;
+    eprintln!(
+        "S48 look analysis: {:.2} ms per sample = {share:.3} % of one core at {SAMPLE_FPS} fps",
+        per * 1e3
+    );
+    if !cfg!(debug_assertions) {
+        assert!(share < 1.0, "{share} %");
+    }
+}
+
+/// Gameplay seconds until the learner settles, sampling at [`SAMPLE_FPS`].
+fn settle_secs(mut next: impl FnMut(usize) -> FrameReport, max_frames: usize) -> Option<f32> {
+    let mut l = Learner::new("b1");
+    for i in 0..max_frames {
+        l.observe(&next(i));
+        if l.phase() == Phase::Converged {
+            return Some((i + 1) as f32 / SAMPLE_FPS as f32);
+        }
+    }
+    None
+}
+
+/// A steady, varied game (three scenes) settled no sooner than 600 s of
+/// gameplay with the S47 constants (600 frames at 1 fps, three agreeing
+/// checkpoints two minutes apart). At 2 fps with 30 s checkpoints it takes
+/// half that.
+#[test]
+fn a_steady_varied_game_settles_in_half_the_time() {
+    let s47_minimum_secs = 600.0;
+    let secs = settle_secs(|i| gameplay([0.05, 0.3, 0.7][i % 3], 0.14), 4000).expect("settles");
+    eprintln!("S48 steady varied game: settled after {secs} s of gameplay (S47: >= 600 s)");
+    assert!(secs <= 0.55 * s47_minimum_secs, "{secs} s");
+    assert!(secs >= MIN_GAMEPLAY_FRAMES as f32 / SAMPLE_FPS as f32);
+}
+
+/// A night-only game with tight statistics takes the confident one-scene
+/// budget (4 min instead of 7.5, and 15 under S47); a noisy one does not.
+#[test]
+fn a_tight_dark_only_game_needs_fewer_frames() {
+    let tight = settle_secs(|i| gameplay(0.04 + (i % 7) as f32 * 0.005, 0.2), 4000).unwrap();
+    let mut rng = Lcg(7);
+    let noisy = settle_secs(
+        |_| {
+            let mut r = gameplay(0.04 + rng.next() * 0.03, 0.05 + rng.next() * 0.5);
+            r.stats.sat_mean = 0.1 + rng.next() * 0.5;
+            r
+        },
+        6000,
+    );
+    eprintln!("S48 dark-only: tight {tight} s, noisy {noisy:?} s (S47: >= 900 s)");
+    assert!(tight <= (MIN_FRAMES_ONE_SCENE_CONFIDENT + CHECKPOINT_FRAMES as u64) as f32 / 2.0);
+    let noisy = noisy.expect("a noisy night game still settles, on the long budget");
+    assert!(noisy >= MIN_FRAMES_ONE_SCENE as f32 / SAMPLE_FPS as f32, "{noisy} s");
+}
+
+#[test]
+fn confidence_needs_squared_sums_and_tight_spread() {
+    let mut l = Learner::new("b1");
+    assert!(!l.confident(), "no evidence is not confident");
+    for _ in 0..400 {
+        l.observe(&gameplay(0.05, 0.2));
+    }
+    assert!(l.confident());
+    let se = l.agg.standard_errors(DECORRELATION_FRAMES).unwrap();
+    assert!(se.iter().all(|s| *s < 1e-3), "{se:?}");
+    // A pre-S48 record has no squared sums: unknown, never "confident".
+    let mut old = l.clone();
+    old.agg.crush_sq = 0.0;
+    old.agg.sat_sq = 0.0;
+    old.agg.clip_sq = 0.0;
+    assert!(!old.confident());
+    let json = serde_json::to_string(&old)
+        .unwrap()
+        .replace(",\"crush_sq\":0.0,\"sat_sq\":0.0,\"clip_sq\":0.0", "");
+    assert!(!json.contains("crush_sq"));
+    let back: Learner = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.agg.crush_sq, 0.0);
+}
+
+#[test]
+fn eta_counts_down_and_is_unknown_without_the_scenes() {
+    let mut l = Learner::new("b1");
+    assert_eq!(l.eta_secs(), None, "no scenes yet");
+    for i in 0..90 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let a = l.eta_secs().expect("three scenes seen");
+    assert_eq!(a, ((MIN_GAMEPLAY_FRAMES - 90) / SAMPLE_FPS as u64) as u32);
+    feed(&mut l, 200, 0.14);
+    let b = l.eta_secs().unwrap();
+    assert!(b < a, "{b} < {a}");
+    feed(&mut l, 2000, 0.14);
+    assert_eq!(l.phase(), Phase::Converged);
+    assert_eq!(l.eta_secs(), Some(0));
+    assert_eq!(l.readiness().eta_secs, Some(0));
+    // Two scenes, neither dominant: the missing scene has no ETA.
+    let mut two = Learner::new("b1");
+    for i in 0..300 {
+        two.observe(&gameplay(if i % 4 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert_eq!(two.eta_secs(), None);
+}
+
+/// A video file's learner merged into a live one: the evidence adds,
+/// weighted by frames, and convergence still needs agreement.
+#[test]
+fn file_evidence_merges_weighted_by_frames() {
+    // From a file: 700 frames of a game with crush 0.14 (settles).
+    let mut file = Learner::new("");
+    feed(&mut file, 700, 0.14);
+    assert_eq!(file.phase(), Phase::Converged);
+    // Into an empty record: it is settled here too.
+    let mut fresh = Learner::new("b1");
+    fresh.merge(&file);
+    assert_eq!(fresh.agg.frames, 700);
+    assert_eq!(fresh.phase(), Phase::Converged);
+    assert_eq!(fresh.converged, file.converged);
+    assert!(!fresh.use_learned, "a merge never applies anything by itself");
+    // Into live evidence of a darker game (crush 0.24): the merged mean sits
+    // between, weighted by frames.
+    let mut live = Learner::new("b1");
+    feed(&mut live, 300, 0.24);
+    live.merge(&file);
+    let m = live.agg.summary().crush_frac;
+    let want = (300.0 * 0.24 + 700.0 * 0.14) / 1000.0;
+    assert!((m - want).abs() < 1e-4, "{m} vs {want}");
+    assert_eq!(live.agg.frames, 1000);
+    // The merged checkpoint has to agree with the live one before it: not
+    // settled from the merge alone.
+    assert_eq!(live.phase(), Phase::Learning, "{:?}", live.readiness());
+    // Live play then settles it under the usual rules.
+    feed(&mut live, 2 * CHECKPOINT_FRAMES as usize, 0.17);
+    assert_eq!(live.phase(), Phase::Converged);
+}
+
+#[test]
+fn a_merge_stays_inside_the_rolling_window() {
+    let mut a = Learner::new("b1");
+    feed(&mut a, ROLLING_WINDOW_FRAMES as usize, 0.1);
+    let mut b = Learner::new("");
+    feed(&mut b, ROLLING_WINDOW_FRAMES as usize, 0.3);
+    a.merge(&b);
+    assert!(a.agg.weight <= ROLLING_WINDOW_FRAMES + 1e-6);
+    let m = a.agg.summary().crush_frac;
+    assert!((m - 0.2).abs() < 0.01, "equal weights meet in the middle: {m}");
+    // Exclusions add.
+    let mut c = Learner::new("");
+    c.observe(&FrameReport { class: FrameClass::Cutscene, ..gameplay(0.3, 0.1) });
+    a.merge(&c);
+    assert_eq!(a.excluded.cutscene, 1);
 }
