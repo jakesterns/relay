@@ -626,6 +626,8 @@ fn client_command(cmd: &str, arg: Option<&str>, json: bool) -> Result<()> {
                         mic: std::env::var("RELAY_MIC").is_ok(),
                         rest: std::env::var("RELAY_REST").is_ok(),
                         vcam: false,
+                        // The service fills it from the saved setting.
+                        ndi: false,
                         mic_device: None,
                         output_device: None,
                         cursor: true,

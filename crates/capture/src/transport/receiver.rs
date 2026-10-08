@@ -44,6 +44,9 @@ pub struct RecvOpts {
     /// Play received audio on this endpoint (S40); `None` = the System
     /// default, followed if it changes. `mic_route` wins when both are set.
     pub output_device: Option<String>,
+    /// Publish the received stream as an NDI® source (S51). A `ndi` command
+    /// changes it live, while waiting or mid-share.
+    pub ndi: bool,
 }
 
 /// One depacketized video access unit.
@@ -200,6 +203,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // Relay Camera can be switched on or off while waiting (S43b): the
     // choice is carried into the render thread when a sender connects.
     let mut vcam = opts.vcam;
+    // S51: like the camera, an NDI toggle while waiting is carried over.
+    let mut ndi = opts.ndi;
     // Where received audio plays (S40). Made here so a pick while waiting
     // for a sender is kept; the virtual-mic route, when set, is the output.
     let output = crate::devices::DeviceSlot::shared(
@@ -227,6 +232,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                         Some(crate::command::EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received while waiting for a sender");
                             vcam = on;
+                        }
+                        Some(crate::command::EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received while waiting for a sender");
+                            ndi = on;
                         }
                         _ => {}
                     },
@@ -646,6 +655,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         mic_route: opts.mic_route.clone(),
         host,
         output: output.clone(),
+        ndi,
+        sender_name: sender_name.clone(),
     };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.

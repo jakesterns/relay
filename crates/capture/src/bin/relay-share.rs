@@ -192,6 +192,25 @@ fn run() -> Result<()> {
             let opts = relay_capture::learn::LearnArgs::parse(&args[1..])?;
             relay_capture::learn::run(opts)
         }
+        // S51: can this PC publish NDI? Loads the user-installed runtime the
+        // way NDI output would and reports what happened, as JSON. Never an
+        // error exit: a missing runtime is an answer, not a failure.
+        #[cfg(windows)]
+        "ndi-probe" => {
+            let found = relay_core::ndi::locate_runtime();
+            let report = match relay_capture::ndi::ffi::Runtime::get() {
+                Ok(rt) => serde_json::json!({
+                    "present": true, "loaded": true, "path": rt.path, "version": rt.version,
+                }),
+                Err(e) => serde_json::json!({
+                    "present": found.present, "loaded": false, "path": found.path,
+                    "searched": found.searched, "runtime_missing": e.runtime_missing(),
+                    "error": e.to_string(), "download_url": found.download_url,
+                }),
+            };
+            println!("{report}");
+            Ok(())
+        }
         #[cfg(windows)]
         "recv" => {
             let opts = parse_recv_args(&args[1..])?;
@@ -282,6 +301,7 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         preview_fps: 0,
         container: relay_core::share::RecordingContainer::Mp4,
         vcam: false,
+        ndi: false,
         mic_device: None,
         output_device: None,
     };
@@ -314,6 +334,8 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
             "--no-cursor" => opts.cursor = false,
             // S36: also feed "Relay Camera" on this PC with the captured frames.
             "--vcam" => opts.vcam = true,
+            // S51: also publish the share as an NDI source on this PC's LAN.
+            "--ndi" => opts.ndi = true,
             "--preview-fps" => opts.preview_fps = it.next().context("--preview-fps N")?.parse()?,
             "--size" => {
                 let s = it.next().context("--size WxH")?;
@@ -353,6 +375,7 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
         host: None,
         return_pid: None,
         output_device: None,
+        ndi: false,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -361,6 +384,8 @@ fn parse_recv_args(args: &[String]) -> Result<relay_capture::transport::receiver
             "--headless" => opts.headless = true,
             "--code" => opts.code = it.next().cloned(),
             "--vcam" => opts.vcam = true,
+            // S51: publish the received stream as an NDI source.
+            "--ndi" => opts.ndi = true,
             "--mic-route" => opts.mic_route = it.next().cloned(),
             // S40: play received audio on this endpoint instead of the default.
             "--output-device" => opts.output_device = it.next().cloned(),
@@ -812,7 +837,9 @@ relay-share [probe|bench-capture [SECS]|bench-encode [SECS] [WxH|4k]|send|recv]
                  keeps aggregate statistics only, never audio
   recv           receive a share and render it to a window
                  (--vcam mirrors into the Relay virtual camera;
-                  --mic-route <endpoint-id> renders audio to that endpoint)
+                  --mic-route <endpoint-id> renders audio to that endpoint;
+                  --ndi publishes it as an NDI source; send takes --ndi too)
+  ndi-probe      load the user-installed NDI runtime and report, as JSON
 ";
 
 #[cfg(all(test, windows))]
@@ -830,6 +857,14 @@ mod tests {
         assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--fps", "2"])).unwrap(), (1, 2));
         assert!(parse_look_args(&s(&[])).is_err());
         assert!(parse_look_args(&s(&["--hmonitor", "1", "--save-frames"])).is_err());
+    }
+
+    #[test]
+    fn ndi_flag_on_both_engines() {
+        assert!(!parse_send_args(&s(&["--code", "1"])).unwrap().ndi, "off by default");
+        assert!(parse_send_args(&s(&["--code", "1", "--ndi"])).unwrap().ndi);
+        assert!(!parse_recv_args(&s(&[])).unwrap().ndi);
+        assert!(parse_recv_args(&s(&["--ndi"])).unwrap().ndi);
     }
 
     #[test]

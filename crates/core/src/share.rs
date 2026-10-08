@@ -61,6 +61,11 @@ pub struct ShareRequest {
     /// holds the camera; a client's value is only a wish.
     #[serde(default)]
     pub vcam: bool,
+    /// Also publish the share as an NDI® source on the LAN (S51). The
+    /// service sets it from the saved Share setting; a client's value is
+    /// overwritten.
+    #[serde(default)]
+    pub ndi: bool,
     #[serde(default = "default_true")]
     pub cursor: bool,
     /// The preset this request was resolved from (informational).
@@ -189,6 +194,10 @@ pub enum EngineCmd {
     Vcam {
         on: bool,
     },
+    /// Either engine (S51): publish as an NDI® source, or stop, live.
+    Ndi {
+        on: bool,
+    },
     /// Retune the in-app preview: thumbnails per second, 0 = off.
     Preview {
         fps: u32,
@@ -259,6 +268,10 @@ pub struct ReceiveRequest {
     /// this from the consent + registration state, not the client.
     #[serde(default)]
     pub vcam: bool,
+    /// Publish the received stream as an NDI® source, "Relay (from
+    /// <sender>)" (S51). Service-set from the saved Receive setting.
+    #[serde(default)]
+    pub ndi: bool,
     /// Render decoded audio to this endpoint id (interim virtual-mic route).
     /// Also service-set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -592,6 +605,9 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     if req.vcam {
         args.push("--vcam".into());
     }
+    if req.ndi {
+        args.push("--ndi".into());
+    }
     if !req.cursor {
         args.push("--no-cursor".into());
     }
@@ -649,6 +665,9 @@ fn recv_args(req: &ReceiveRequest) -> Vec<String> {
     }
     if req.vcam {
         args.push("--vcam".into());
+    }
+    if req.ndi {
+        args.push("--ndi".into());
     }
     if let Some(ep) = req.mic_route.as_deref().filter(|e| !e.is_empty()) {
         args.push("--mic-route".into());
@@ -801,6 +820,24 @@ mod tests {
         assert!(req.audio);
         assert_eq!(req.audio_pid, None);
         assert!(req.cursor);
+    }
+
+    #[test]
+    fn ndi_command_and_flags() {
+        // Must match relay_capture::command's own test byte for byte.
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Ndi { on: true }).unwrap(),
+            r#"{"cmd":"ndi","on":true}"#
+        );
+        let mut req: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert!(!req.ndi, "off unless the service turns it on");
+        assert!(!send_args(&req).contains(&"--ndi".to_string()));
+        req.ndi = true;
+        assert!(send_args(&req).contains(&"--ndi".to_string()));
+        let mut recv: ReceiveRequest = serde_json::from_str("{}").unwrap();
+        assert!(!recv_args(&recv).contains(&"--ndi".to_string()));
+        recv.ndi = true;
+        assert_eq!(recv_args(&recv), ["recv", "--ndi"]);
     }
 
     #[test]

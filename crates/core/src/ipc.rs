@@ -232,6 +232,9 @@ pub enum Method {
     /// Virtual-device state: Windows support, registration, consent, OBS /
     /// VB-Cable detection. Read-only.
     VdeviceStatus,
+    /// S51: is the user-installed NDI® runtime there? A file-exists check:
+    /// nothing is loaded into the core.
+    NdiStatus,
     /// Record the first-run consent decision (camera / microphone opt-ins).
     /// Never installs anything by itself.
     SetVdeviceConsent {
@@ -465,6 +468,11 @@ pub enum Reply {
     },
     Vdevice {
         status: Box<crate::vdevice::VdeviceStatus>,
+    },
+    /// S51: where the NDI runtime is, or that it is not, with the download
+    /// link and the trademark line the UI shows beside the toggle.
+    Ndi {
+        runtime: crate::ndi::NdiRuntime,
     },
     DryRun {
         lines: Vec<String>,
@@ -948,6 +956,30 @@ mod tests {
         assert_eq!(v["params"]["id"], Uuid::nil().to_string());
         let back: Request = serde_json::from_value(v).unwrap();
         assert!(matches!(back.method, Method::GetProfile { .. }));
+    }
+
+    /// S51: locks the shape `ui/src/lib/ipc.ts` mirrors for NDI status and
+    /// the two settings.
+    #[test]
+    fn ndi_wire_shape() {
+        let r: Request = serde_json::from_str(r#"{"id":1,"method":"ndi_status"}"#).unwrap();
+        assert!(matches!(r.method, Method::NdiStatus));
+        let runtime = crate::ndi::locate_with(|_| None, None, |_| false);
+        let reply = serde_json::to_value(Reply::Ndi { runtime }).unwrap();
+        assert_eq!(reply["type"], "ndi");
+        let rt = &reply["runtime"];
+        assert_eq!(rt["present"], false);
+        assert!(rt.get("path").is_none(), "absent, not null");
+        assert_eq!(rt["searched"], serde_json::json!([]));
+        assert_eq!(rt["download_url"], "http://ndi.link/NDIRedistV6");
+        assert_eq!(rt["ndi_url"], "https://ndi.video/");
+        assert_eq!(rt["trademark"], "NDI® is a registered trademark of Vizrt NDI AB.");
+        // Older settings files read as off.
+        let prefs: crate::uiprefs::UiPrefs = serde_json::from_str("{}").unwrap();
+        assert!(!prefs.ndi_receive && !prefs.ndi_share);
+        let v = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(v["ndi_receive"], false);
+        assert_eq!(v["ndi_share"], false);
     }
 
     /// S44: locks the shape `ui/src/lib/ipc.ts` mirrors for the audio-effects
