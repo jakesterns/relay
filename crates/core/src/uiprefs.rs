@@ -69,6 +69,14 @@ pub struct UiPrefs {
     /// Offer pre-releases too (S45). Off by default.
     #[serde(default)]
     pub prerelease_updates: bool,
+    /// Publish what this PC receives as an NDI® source, "Relay (from
+    /// <sender>)" (S51). Off by default; needs the user-installed NDI
+    /// runtime. Follows live: a running receiver turns it on or off at once.
+    #[serde(default)]
+    pub ndi_receive: bool,
+    /// Publish this PC's own share as an NDI source too (S51). Off by default.
+    #[serde(default)]
+    pub ndi_share: bool,
 }
 
 /// Per-track device choices from the mixer (S40). `None` = System default,
@@ -137,6 +145,8 @@ impl Default for UiPrefs {
             auto_check_updates: true,
             auto_install_updates: false,
             prerelease_updates: false,
+            ndi_receive: false,
+            ndi_share: false,
         }
     }
 }

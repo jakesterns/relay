@@ -499,6 +499,9 @@ pub struct OpusStream {
     faders: Option<(Arc<crate::mixer::Faders>, crate::mixer::Track)>,
     /// Gain the previous frame ended on, so a change ramps from there.
     gain: f32,
+    /// NDI output's audio tee on the sender (S51): each 10 ms frame as it
+    /// is encoded, after the fader. Off costs one atomic load.
+    ndi: Option<crate::ndi::AudioProducer>,
 }
 
 pub struct OpusPacket {
@@ -598,6 +601,7 @@ impl OpusStream {
             peak: 0.0,
             faders: None,
             gain: 1.0,
+            ndi: None,
         })
     }
 
@@ -605,6 +609,11 @@ impl OpusStream {
     /// Without this the stream encodes at unity, as it always has.
     pub fn set_faders(&mut self, faders: Arc<crate::mixer::Faders>, track: crate::mixer::Track) {
         self.faders = Some((faders, track));
+    }
+
+    /// Also hand each frame to NDI output (S51), as the share hears it.
+    pub fn set_ndi(&mut self, out: Arc<crate::ndi::NdiOutput>) {
+        self.ndi = Some(crate::ndi::AudioProducer::new(out, 48_000));
     }
 
     /// The endpoint's own sample rate, before conversion.
@@ -677,6 +686,9 @@ impl OpusStream {
                 crate::mixer::apply_gain(&mut frame, self.gain, faders.get(*track).target());
         }
         self.peak = frame.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        if let Some(ndi) = self.ndi.as_mut() {
+            ndi.push(&frame, 2, 0);
+        }
         let data = self.encoder.encode_vec_float(&frame, 1500)?;
         Ok(Some(OpusPacket {
             data,

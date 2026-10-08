@@ -216,6 +216,12 @@ export function Settings() {
           <Kv k="Data folder" v={state.build?.data_dir ?? "—"} mono />
           <Kv k="Log file" v={state.build?.log_file ?? "—"} mono />
           <Kv k="Version" v={state.build?.version ?? "—"} mono />
+          {/* S51: the attribution NDI's licence asks for in the About box. */}
+          <p className="note" data-testid="ndi-attribution">
+            NDI® is a registered trademark of Vizrt NDI AB.{" "}
+            <button type="button" className="linkbtn"
+              onClick={() => { api.openNdiLink("ndi").catch(() => {}); }}>ndi.video</button>
+          </p>
         </Card>
         <p className="note">Uninstalling removes every component listed here, the startup entry, and restores the audio chain. Nothing is left behind.</p>
         <p className="note">Relay is installed for your user account only — it writes nothing to Program Files and installs no drivers unless you opt in above.</p>

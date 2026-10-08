@@ -381,6 +381,31 @@ export interface ShareStats {
   /** Frames held back while waiting for that keyframe (capped at ~1 s). */
   frames_withheld?: number;
   audio?: AudioHealth;
+  /** NDI® output on this engine (S51). Absent from engines older than S51. */
+  ndi?: NdiLive;
+}
+/** The `ndi` object in an engine's stats line. Mirrors `NdiOutput::status_json`. */
+export interface NdiLive {
+  on: boolean;
+  /** The source name as published; NDI shows it as "MACHINE (name)". */
+  name: string;
+  /** NDI receivers connected right now (on only). */
+  connections?: number;
+  video?: { sent: number; dropped: number };
+  audio?: { sent: number; dropped: number };
+  /** Why the last turn-on failed (off only). */
+  error?: string | null;
+  runtime_missing?: boolean;
+}
+/** Mirror of `crates/core/src/ndi.rs` `NdiRuntime` (S51). */
+export interface NdiRuntime {
+  present: boolean;
+  /** Absent when not found. */
+  path?: string;
+  searched: string[];
+  download_url: string;
+  ndi_url: string;
+  trademark: string;
 }
 /** The receiver's audio pipeline, from `playback.rs` (S33's B16 work). */
 export interface AudioHealth {
@@ -549,6 +574,10 @@ export interface UiPrefs {
   auto_install_updates?: boolean;
   /** Offer pre-releases too (S45). Default off. */
   prerelease_updates?: boolean;
+  /** Publish what this PC receives as an NDI® source (S51). Default off. */
+  ndi_receive?: boolean;
+  /** Publish this PC's own share as an NDI source (S51). Default off. */
+  ndi_share?: boolean;
 }
 
 /** Mirror of `crates/core/src/update.rs` (S45). */
@@ -815,6 +844,12 @@ const mockCatalog: CatalogEntry[] = [
 let mockUiPrefs: UiPrefs = {
   close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
   auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+  ndi_receive: false, ndi_share: false,
+};
+/** Browser-mode stand-in: a PC without the NDI runtime, the common case. */
+const mockNdi: NdiRuntime = {
+  present: false, searched: [], download_url: "http://ndi.link/NDIRedistV6",
+  ndi_url: "https://ndi.video/", trademark: "NDI® is a registered trademark of Vizrt NDI AB.",
 };
 /** Browser-mode stand-in for the endpoint list (S40). */
 const mockAudioDevices: AudioDevices = {
@@ -1160,6 +1195,17 @@ export const api = {
     return invoke<ElevationResult>("run_elevated", { op });
   },
   /** Read-only: Windows support, registration, consent, OBS / VB-Cable. */
+  /** S51: is the NDI runtime installed? A file check; nothing is loaded. */
+  async ndiStatus(): Promise<NdiRuntime> {
+    if (!isTauri()) return structuredClone(mockNdi);
+    return invoke<NdiRuntime>("ndi_status");
+  },
+  /** Open ndi.video, or NDI's runtime download, in the browser. The shell
+   *  holds the URLs; the page only says which. */
+  async openNdiLink(which: "ndi" | "runtime"): Promise<void> {
+    if (!isTauri()) return;
+    await invoke("open_ndi_link", { which });
+  },
   async vdeviceStatus(): Promise<VdeviceStatus> {
     if (!isTauri()) return structuredClone(mockVdevice);
     return invoke<VdeviceStatus>("vdevice_status");

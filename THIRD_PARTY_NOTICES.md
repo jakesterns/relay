@@ -44,6 +44,29 @@ and ship in the installer as `licenses.html`.
   CC BY-NC-SA). Relay does not redistribute them; fetched curves are cached
   only on the user's own PC.
 
+## 4. NDI® (optional NDI output)
+
+NDI® is a registered trademark of Vizrt NDI AB. More about NDI:
+https://ndi.video/
+
+- Relay's NDI output (S51) publishes a received stream, or this PC's own
+  share, as an NDI source. It is off unless the user turns it on.
+- **Relay does not include any NDI software.** No NDI SDK file, header,
+  library or runtime is in this repository or in the Relay installer. NDI
+  output uses the *NDI 6 Runtime* that the user installs from NDI
+  (http://ndi.link/NDIRedistV6, or NDI Tools from https://ndi.video/tools/),
+  under NDI's own licence, which the user accepts in NDI's installer.
+  Relay loads that runtime by its full path only while NDI output is on.
+- The C declarations Relay uses to call the runtime
+  (`crates/capture/src/ndi/ffi.rs`) are written by hand from the documented
+  NDI C API. The NDI SDK's header files are published by Vizrt NDI AB under
+  the MIT License (full text below, "MIT License (AutoEQ)" — the same terms),
+  and the SDK documentation permits distributing them, and work derived from
+  them, with open-source projects.
+- Relay is not a product of, and is not endorsed by, Vizrt NDI AB.
+
+Details and sources: `docs/dev/ndi-licensing.md`.
+
 ---
 
 ## Apache License 2.0

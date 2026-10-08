@@ -13,6 +13,7 @@ import type {
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
+import type { NdiRuntime } from "../lib/ipc";
 import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus, LearnView, LookTargets } from "../lib/ipc";
 import { LOOK_PRIVACY, TOURNAMENT_NOTICE, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
@@ -75,6 +76,11 @@ export interface FakeCore {
   gameEq: Map<string, { progress: number; candidate: [number, number][] | null; needsRelearn: boolean; learningNow: boolean }>;
   /** S47: learn views by lower-case exe. Missing = never touched. */
   learn: Map<string, LearnView>;
+  /** S51: the NDI runtime as the core's file check sees it. Missing by
+   *  default, as on most PCs. */
+  ndi: NdiRuntime;
+  /** Links the shell was asked to open (`open_ndi_link`), in order. */
+  ndiOpened: string[];
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -193,7 +199,14 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     prefs: {
       close_action: "keep_running", resilience: true, close_notice: true, audio_devices: {},
       auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+      ndi_receive: false, ndi_share: false,
     },
+    ndi: {
+      present: false, searched: ["C:\\Program Files\\NDI\\NDI 6 Runtime\\v6"],
+      download_url: "http://ndi.link/NDIRedistV6", ndi_url: "https://ndi.video/",
+      trademark: "NDI® is a registered trademark of Vizrt NDI AB.",
+    },
+    ndiOpened: [],
     update: {
       current: "0.1.0", phase: "idle", available: null, last_check: null,
       last_error: null, last_result: null, waiting_for: null,
@@ -565,6 +578,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       setApo(core, (a.endpoint as string | null) ?? null, false);
     },
     vdevice_status: () => structuredClone(core.vdevice),
+    ndi_status: () => structuredClone(core.ndi),
+    open_ndi_link: (a) => {
+      const which = a.which as string;
+      if (which !== "ndi" && which !== "runtime") throw new Error(`unknown NDI link ${which}`);
+      core.ndiOpened.push(which);
+    },
     set_vdevice_consent: (a) => {
       core.vdevice.consent = {
         decided_at: "2026-09-14T00:00:00Z",
@@ -670,6 +689,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "apo_status", "audio_effects_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",
   "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
+  "ndi_status", "open_ndi_link",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",
   "launch_uninstaller", "discover_receivers",
   "list_peers", "forget_peer", "set_peer_favourite",

@@ -132,12 +132,13 @@ pub fn run(
     device: Arc<DeviceSlot>,
     stats: Arc<PlaybackStats>,
     faders: Arc<crate::mixer::Faders>,
+    ndi: Option<Arc<crate::ndi::NdiOutput>>,
 ) -> Result<()> {
     anyhow::ensure!(!streams.is_empty(), "playback needs at least one stream");
     // SAFETY: COM for this thread; WASAPI render loop; balanced on return.
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().context("CoInitializeEx")?;
-        let result = render_loop(streams, stop, device, stats, faders);
+        let result = render_loop(streams, stop, device, stats, faders, ndi);
         CoUninitialize();
         result
     }
@@ -420,6 +421,9 @@ struct Mix {
     steps: Vec<f32>,
     targets: Vec<f32>,
     pcm: Vec<f32>,
+    /// NDI output's audio tee (S51): the mix exactly as it goes to the
+    /// endpoint. `None` for the sender's call return.
+    ndi: Option<crate::ndi::AudioProducer>,
 }
 
 unsafe fn play(
@@ -477,6 +481,12 @@ unsafe fn play(
             // Land exactly, so float drift over many buffers cannot creep.
             mix.gains.copy_from_slice(&mix.targets);
             stats.peak_milli.store((peak * 1e3) as u32, Ordering::Relaxed);
+            // Tee the mix to NDI before the buffer goes to the engine: the
+            // same samples, stamped for when they will be heard (`padding`
+            // frames are queued ahead of them). Never blocks.
+            if let Some(ndi) = mix.ndi.as_mut() {
+                ndi.push(buf, 2, padding);
+            }
             out.render.ReleaseBuffer(room, 0)?;
         }
 
@@ -504,6 +514,7 @@ unsafe fn render_loop(
     device: Arc<DeviceSlot>,
     stats: Arc<PlaybackStats>,
     faders: Arc<crate::mixer::Faders>,
+    ndi: Option<Arc<crate::ndi::NdiOutput>>,
 ) -> Result<()> {
     let legacy = std::env::var_os("RELAY_AUDIO_LEGACY").is_some();
     devices::watch_defaults();
@@ -529,6 +540,7 @@ unsafe fn render_loop(
         targets: vec![1.0f32; n],
         // Room for the longest Opus frame (120 ms), whatever the sender chose.
         pcm: vec![0f32; 5760 * 2],
+        ndi: ndi.map(|n| crate::ndi::AudioProducer::new(n, RATE)),
     };
 
     // The first open fails the call, as it always has; after that a lost or

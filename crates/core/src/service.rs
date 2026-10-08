@@ -1338,6 +1338,27 @@ fn receive_command(inner: &Arc<Mutex<Inner>>, cmd: &crate::share::EngineCmd) -> 
     }
 }
 
+/// S51: a changed NDI setting reaches the running engines at once. Best
+/// effort: an engine that cannot hear it keeps its spawn-time state, and the
+/// next share or receive starts from the saved setting anyway.
+fn sync_ndi(g: &mut Inner, before: &crate::uiprefs::UiPrefs, after: &crate::uiprefs::UiPrefs) {
+    for (changed, on, engine, what) in [
+        (
+            before.ndi_receive != after.ndi_receive,
+            after.ndi_receive,
+            g.receive.as_mut(),
+            "receiver",
+        ),
+        (before.ndi_share != after.ndi_share, after.ndi_share, g.share.as_mut(), "share"),
+    ] {
+        let (true, Some(engine)) = (changed, engine) else { continue };
+        match engine.command(&crate::share::EngineCmd::Ndi { on }) {
+            Ok(()) => tracing::info!(on, what, "NDI output toggled on the running engine"),
+            Err(e) => tracing::warn!(error = %e, what, "could not toggle NDI output"),
+        }
+    }
+}
+
 /// S43b: after the camera is installed or removed, or consent changes, tell
 /// a running receiver (waiting or mid-share) to start or stop Relay Camera
 /// by the same rule that decides `--vcam` at spawn. Best effort.
@@ -1994,6 +2015,8 @@ fn spawn_share(
     // first frame is captured, not a moment after.
     g.share_target = None;
     sync_local_share_locked(&mut g, Some(crate::share::INITIAL_SHARE_TARGET));
+    // S51: NDI output is a saved setting, never the client's say.
+    req.ndi = g.prefs.prefs().ndi_share;
     let (tx, rx) = std::sync::mpsc::channel::<ShareEvent>();
     let engine = match ShareEngine::start(&req, tx) {
         Ok(e) => e,
@@ -2273,6 +2296,8 @@ fn spawn_receive(
         .audio_devices
         .get(crate::share::MixerSide::Receive, crate::share::DeviceTrack::Output)
         .map(str::to_string);
+    // S51: from the saved Receive setting, like the routing above.
+    req.ndi = g.prefs.prefs().ndi_receive;
     // S36: the reverse of the rule in `spawn_share` -- a share that is
     // feeding Relay Camera keeps it while it runs.
     if req.vcam && g.share.is_some() && g.last_share.as_ref().is_some_and(|r| r.vcam) {
@@ -2910,10 +2935,18 @@ impl IpcHandler {
                 learn_reply(&g, &exe)
             }
             Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
-            Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {
-                Ok(()) => Reply::UiPrefs { prefs: g.prefs.get() },
-                Err(e) => Reply::Error { message: format!("{e:#}") },
-            },
+            Method::SetUiPrefs { prefs } => {
+                let before = g.prefs.get();
+                match g.prefs.set(prefs) {
+                    Ok(()) => {
+                        let after = g.prefs.get();
+                        sync_ndi(&mut g, &before, &after);
+                        Reply::UiPrefs { prefs: after }
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::NdiStatus => Reply::Ndi { runtime: crate::ndi::locate_runtime() },
             Method::GetAutostart => match crate::autostart::is_enabled() {
                 Ok(enabled) => Reply::Autostart { enabled },
                 Err(e) => Reply::Error { message: e.to_string() },

@@ -6,6 +6,7 @@ import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import { ago } from "../lib/ago";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
+import { NdiCard } from "../components/NdiCard";
 import type { CleanFeed, ProcessInfo } from "../lib/ipc";
 import { HealthTracker, healthText, type HealthDelta, type HealthState } from "../lib/health";
 import {
@@ -753,6 +754,8 @@ export function Receive() {
             api.stopCallReturn().then(() => setLiveReturn(null)).catch((e) => setError(errText(e)));
           }} />
         <VirtualDeviceCard />
+        <NdiCard side="receive" live={receiving ? live?.ndi : null}
+          sourceName={sender ? `Relay (from ${sender})` : "Relay (from the sending PC)"} />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {receiving
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop receiving</button>

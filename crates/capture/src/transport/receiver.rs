@@ -54,6 +54,9 @@ pub struct RecvOpts {
     /// `--local-share`; later changes come as `local_share` commands. The
     /// stream window is hidden from capture only while this covers it.
     pub local_share: Option<crate::command::SourceTarget>,
+    /// Publish the received stream as an NDI® source (S51). A `ndi` command
+    /// changes it live, while waiting or mid-share.
+    pub ndi: bool,
 }
 
 /// One depacketized video access unit.
@@ -230,6 +233,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
     // What this PC is sharing (S50), kept up to date while waiting so the
     // window is created with the right capture decision.
     let mut local_share = opts.local_share;
+    // S51: like the camera, an NDI toggle while waiting is carried over.
+    let mut ndi = opts.ndi;
     // Where received audio plays (S40). Made here so a pick while waiting
     // for a sender is kept; the virtual-mic route, when set, is the output.
     let output = crate::devices::DeviceSlot::shared(
@@ -267,6 +272,10 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
                             if return_pid.take().is_some() {
                                 println!("{}", serde_json::json!({ "event": "return_off", "reason": "user" }));
                             }
+                        }
+                        Some(crate::command::EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received while waiting for a sender");
+                            ndi = on;
                         }
                         _ => {}
                     },
@@ -707,6 +716,8 @@ pub async fn run(opts: RecvOpts) -> Result<()> {
         return_stop: return_stop.clone(),
         local_share,
         sender: Some(sender_name.clone()),
+        ndi,
+        sender_name: sender_name.clone(),
     };
     // The render loop ends on either: the transport closing, or the sender
     // going away on the signalling socket.

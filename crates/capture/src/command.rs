@@ -81,6 +81,12 @@ pub enum EngineCmd {
     Return {
         on: bool,
     },
+    /// Both engines (S51): publish this engine's picture and sound as an
+    /// NDI® source, or stop, live. The receiver publishes what it shows; the
+    /// sender, what it shares. Loads the NDI runtime on the first `on`.
+    Ndi {
+        on: bool,
+    },
     /// Toggle continuous recording.
     Record {
         on: bool,
@@ -287,6 +293,16 @@ mod tests {
         );
         assert_eq!(parse_line(r#"{"cmd":"vcam","on":false}"#), Some(EngineCmd::Vcam { on: false }));
         assert_eq!(parse_line(r#"{"cmd":"vcam"}"#), None);
+    }
+
+    #[test]
+    fn ndi_wire_shape_is_locked() {
+        assert_eq!(
+            serde_json::to_string(&EngineCmd::Ndi { on: true }).unwrap(),
+            r#"{"cmd":"ndi","on":true}"#
+        );
+        assert_eq!(parse_line(r#"{"cmd":"ndi","on":false}"#), Some(EngineCmd::Ndi { on: false }));
+        assert_eq!(parse_line(r#"{"cmd":"ndi"}"#), None);
     }
 
     #[test]

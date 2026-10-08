@@ -30,6 +30,7 @@ pub mod learn;
 #[cfg(windows)]
 pub mod look;
 pub mod mixer;
+pub mod ndi;
 pub mod pace;
 #[cfg(windows)]
 pub mod playback;

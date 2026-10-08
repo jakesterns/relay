@@ -417,6 +417,8 @@ pub fn to_share_request(
         record_dir: Some(recording.resolved_dir()),
         container: preset.container,
         vcam: preset.vcam,
+        // Filled by the service from the saved Share setting (S51).
+        ndi: false,
         // The app window is open when someone starts a share from it, so a
         // couple of thumbnails a second is what they expect to see.
         preview_fps: DEFAULT_PREVIEW_FPS,

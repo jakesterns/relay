@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
+import { NdiCard } from "../components/NdiCard";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
@@ -11,6 +12,7 @@ import {
   api, onCoreEvents, presetAudioLabel,
   type DesktopAudio, type DiscoveredReceiver, type Peer, type ProcessInfo, type ShareCapabilities,
   type SharePresetDef, type ShareStats, type VideoCodec, type SharePreview, type SourceTarget,
+  type NdiLive,
 } from "../lib/ipc";
 
 /** S40: the mic picks its input; the call coming back picks where it plays.
@@ -117,6 +119,8 @@ export function Share() {
   const [showWindows, setShowWindows] = useState(false);
   // Latest capture thumbnail from the engine; cleared when the share stops.
   const [preview, setPreview] = useState<SharePreview | null>(null);
+  // S51: the engine's NDI state, from its stats line.
+  const [ndiLive, setNdiLive] = useState<NdiLive | null>(null);
   const [windows, setWindows] = useState<ProcessInfo[]>([]);
   // What the capability probe found, so the strip names the encoder this PC
   // actually has rather than assuming NVENC.
@@ -164,6 +168,7 @@ export function Share() {
       sharePreview: (p: SharePreview) => setPreview(p),
       shareStats: (s: ShareStats) => {
         if (s.bitrate_mbps === undefined) return;
+        setNdiLive(s.ndi ?? null);
         const h = [...histRef.current.slice(1), Math.min(1, (s.bitrate_mbps ?? 0) / bitrateCeil)];
         histRef.current = h;
         setStrip({
@@ -443,6 +448,7 @@ export function Share() {
             <Kv k="Relay Camera" v="Live on this PC — pick it in OBS" />
           )}
         </Card>
+        <NdiCard side="share" live={sharing ? ndiLive : null} sourceName="Relay share" />
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         {sharing
           ? <button className="btn acc" onClick={stop} disabled={busy}>Stop sharing</button>

@@ -33,6 +33,12 @@ Relay is pre-release and developed by one person. Be aware of what works today:
   exact change; turning it off again, or uninstalling Relay, puts back exactly
   what was there before. Everything else in Relay works without it.
 - The **virtual camera** works on Windows 11; Windows 10 support is limited.
+- **NDI® output** (optional, off by default): the receiving PC can publish the
+  stream as an NDI source, "Relay (from <sender>)", for OBS (with its NDI
+  plugin), vMix, NDI Studio Monitor and other NDI apps on the same network;
+  the sending PC can publish its own share too. It needs the free NDI runtime
+  from NDI ([ndi.video](https://ndi.video/)), which Relay does not include.
+  NDI® is a registered trademark of Vizrt NDI AB.
 
 Only Windows 10 and 11 (x64) are supported.
 
@@ -103,6 +109,8 @@ runbooks.
 
 Relay is released under the [MIT licence](LICENSE). Bundled third-party
 assets (SADIE II HRIRs, the Geist fonts, the AutoEQ index) are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which also explains how the
+optional NDI output uses the separately installed NDI runtime
+([docs/dev/ndi-licensing.md](docs/dev/ndi-licensing.md)). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to contribute. Release signing is described
 in the [code signing policy](docs/CODE_SIGNING_POLICY.md).
