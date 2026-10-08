@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, Chips, ChipSet, ConfirmButton, ErrorNote, Kv, Live, Toggle } from "../components/Controls";
 import { MixerCard, type MixerDevice, type MixerRow } from "../components/Mixer";
 import { OfflineBanner } from "../components/Offline";
+import { LinkCell, LinkNote } from "../components/LinkNote";
 import { CodecBanner, FirewallBanner } from "./Receive";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
@@ -39,6 +40,8 @@ interface Strip {
   replayFill: number; recStoppedDisk: boolean;
   /** The codec the running share negotiated; null until the engine says. */
   codec: VideoCodec | null;
+  /** S49: both ends' links and what Relay is doing about them. */
+  link?: ShareStats["link"]; peer_link?: ShareStats["peer_link"]; adapt?: ShareStats["adapt"];
 }
 const idleStrip: Strip = {
   mbps: 0, latencyMs: 0, dropped: 0, sent: 0, gpuPct: 0, cpuPct: 0, fps: 0,
@@ -191,6 +194,7 @@ export function Share() {
           replayFill: s.replay_fill ?? 0,
           recStoppedDisk: s.rec_stopped_disk ?? false,
           codec: s.codec ?? null,
+          link: s.link, peer_link: s.peer_link, adapt: s.adapt,
         });
       },
       shareStatus: (st) => { if (st.message) setError(st.message); },
@@ -375,6 +379,7 @@ export function Share() {
             : <div className="idlemsg">Capture starts when you share. Nothing is running now.</div>}
         </div>
         <InstrumentStrip s={strip} live={sharing} recOn={rec.on} encoder={encoderBrand(caps)} />
+        <LinkNote s={strip} live={sharing} />
         {sharing && (
           <div className="recrow">
             <button className={"btn" + (rec.on ? " danger" : "")} onClick={() => void toggleRecord()}>
@@ -727,6 +732,7 @@ function InstrumentStrip({ s, live, recOn, encoder }: {
           <div className="seg">{Array.from({ length: audioSegs }, (_, i) => <b key={i} className={i < restLit ? "" : "off"} />)}</div>
         </div>
       )}
+      <LinkCell s={s} live={live} />
       <div className={recWarn ? "warn" : ""}>
         <label><i className={"recdot" + (recording ? " on" : "")} />Rec</label>
         <div className="v">{recording ? s.recMb.toFixed(0) : "—"}<u>MB</u></div>

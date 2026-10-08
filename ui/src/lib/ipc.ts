@@ -281,6 +281,33 @@ export interface ShareStats {
   /** Frames held back while waiting for that keyframe (capped at ~1 s). */
   frames_withheld?: number;
   audio?: AudioHealth;
+
+  // --- S49: the links and what Relay is doing about them. Both ends. ---
+  /** This PC's link to the other one. */
+  link?: LinkInfo;
+  /** The other PC's link, when its Relay reports one (S49 or newer). */
+  peer_link?: LinkInfo;
+  /** What the sender is doing to stay smooth on this link. */
+  adapt?: AdaptInfo;
+  /** Receiver: the playout buffer's hold now, ms (0 on a wired link). */
+  playout_ms?: number;
+}
+/** One end's network link (`netcheck::LinkInfo` as `receiver::link_json`). */
+export interface LinkInfo {
+  kind: "wired" | "wi_fi" | "other" | "unknown";
+  /** "Wi-Fi (5 GHz, 866 Mb/s)", "Wired (1 Gb/s)". */
+  label: string;
+  wifi: boolean;
+  band?: "2.4" | "5" | "6" | null;
+  mbps?: number | null;
+}
+/** `control::adapt_json`: the rung the encoder runs at, the share's top
+ *  rung, the bitrate target and why. `note` is the plain-English line. */
+export interface AdaptInfo {
+  rung: string; top: string; width: number; height: number; fps: number;
+  target_mbps: number;
+  cause: "steady" | "queue" | "loss" | "recovering";
+  note?: string | null;
 }
 /** The receiver's audio pipeline, from `playback.rs` (S33's B16 work). */
 export interface AudioHealth {
