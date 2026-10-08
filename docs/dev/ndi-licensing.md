@@ -28,13 +28,18 @@ legal advice; bundling is still worth putting past a lawyer.
    `NdiRuntime.bundled` says which one was found; the NDI card shows
    "Included with Relay" or "Installed from NDI". Without either, the card
    still says "NDI output needs the NDI runtime" and links NDI's download.
-4. **Dev builds still build without it.** `stage-bundle.ps1` defaults to
-   `-Ndi Auto`: it bundles a verified copy if `fetch-ndi-runtime.ps1` already
-   left one in `target\ndi-runtime\<version>`, otherwise it leaves
-   `binaries\ndi` empty and warns, and NDI output falls back to an installed
-   runtime (the same pattern as the `licenses.html` placeholder). The
-   release workflow runs `stage-bundle.ps1 -Ndi Require`, which fetches,
-   verifies, and fails the build if anything is missing or does not match.
+4. **Every installer bundles it.** `stage-bundle.ps1` fetches and verifies
+   the pinned runtime on every build, local, test or release, and fails the
+   build if it is missing or does not match: a test installer without it
+   did not test what ships (PC2, r56: a 4.7 MB installer with no NDI). The
+   download is cached once per machine in
+   `%LOCALAPPDATA%\RelayBuildCache\ndi-runtime\<version>` (or under
+   `RELAY_BUILD_CACHE`) and re-verified before each use. `-NoNdi` is the
+   explicit offline-development opt-out: `binaries\ndi` stays empty, it
+   warns, and NDI output falls back to an installed runtime. Plain
+   `cargo build` never needs it.
+   An update over a running install moves a still-loaded copy aside instead
+   of skipping it (`crates/core/src/update_files.rs`).
 5. **Licence terms:** the installer's licence page
    (`ui/src-tauri/installer/license.txt`, Tauri `bundle.licenseFile`) is
    Relay's MIT licence (Part 1) plus the NDI terms S1 §3d requires (Part 2).
@@ -86,7 +91,7 @@ reasonable efforts to keep the versions you distribute up to date".
    `NDI_RUNTIME_DIR_V6`.
 3. Check each shipped file's SHA-256, the DLL's signature, and its
    FileVersion against the pin.
-4. Copy to `target\ndi-runtime\<version>`. `stage-bundle.ps1` copies from
+4. Copy to the build cache folder. `stage-bundle.ps1` copies from
    there into `ui\src-tauri\binaries\ndi`, re-checks hashes and signature,
    and refuses any `Processing.NDI.*` file anywhere else in the staging folder.
 

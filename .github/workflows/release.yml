@@ -66,13 +66,13 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      # -Ndi Require: fetch the NDI(R) 6 runtime from NDI, verify the pinned
-      # SHA-256s and Vizrt's signature (scripts/ndi-runtime.psd1), and fail
-      # the release without it. It is never in the repository. NDI(R) is a
+      # stage-bundle.ps1 always fetches the NDI(R) 6 runtime from NDI,
+      # verifies the pinned SHA-256s and Vizrt's signature
+      # (scripts/ndi-runtime.psd1), and fails without it (no -NoNdi here). It is never in the repository. NDI(R) is a
       # registered trademark of Vizrt NDI AB; see docs/dev/ndi-licensing.md.
       - name: Build and stage helper binaries (+ bundled NDI runtime)
         shell: pwsh
-        run: ./scripts/stage-bundle.ps1 -Ndi Require
+        run: ./scripts/stage-bundle.ps1
 
       # relay-ui.exe only; the installer is built after signing.
       - name: Build relay-ui (no bundle)

@@ -48,6 +48,7 @@ pub mod types;
 pub mod uiprefs;
 pub mod uninstall;
 pub mod update;
+pub mod update_files;
 pub mod vdevice;
 pub mod winloop;
 

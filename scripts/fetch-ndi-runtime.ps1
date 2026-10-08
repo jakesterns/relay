@@ -20,19 +20,30 @@
   Any mismatch throws. When -Out already holds files that match every pin,
   nothing is downloaded.
 
-  stage-bundle.ps1 -Ndi Require calls this (the release workflow does that);
-  a developer can run it once to get a local installer with NDI in it.
+  stage-bundle.ps1 calls this for every build (local, test and release)
+  unless it is given -NoNdi.
 
 .PARAMETER Out
-  Folder for the verified files. Default: target\ndi-runtime\<version>.
+  Folder for the verified files. Default: the shared build cache,
+  %LOCALAPPDATA%\RelayBuildCache\ndi-runtime\<version> (or under
+  $env:RELAY_BUILD_CACHE), so every worktree reuses one download. Never
+  %LOCALAPPDATA%\Relay: that is the install folder.
+
+.PARAMETER PrintCacheDir
+  Print the default -Out folder and exit.
 #>
 [CmdletBinding()]
-param([string]$Out)
+param([string]$Out, [switch]$PrintCacheDir)
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $pins = Import-PowerShellDataFile (Join-Path $PSScriptRoot 'ndi-runtime.psd1')
-if (-not $Out) { $Out = Join-Path $repo ("target\ndi-runtime\" + $pins.Version) }
+$cacheRoot = if ($env:RELAY_BUILD_CACHE) { $env:RELAY_BUILD_CACHE }
+    elseif ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'RelayBuildCache' }
+    else { Join-Path $repo 'target\build-cache' }
+$defaultOut = Join-Path $cacheRoot ('ndi-runtime\' + $pins.Version)
+if ($PrintCacheDir) { Write-Output $defaultOut; return }
+if (-not $Out) { $Out = $defaultOut }
 
 function Get-Sha256([string]$Path) {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()

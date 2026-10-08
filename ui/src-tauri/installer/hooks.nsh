@@ -49,6 +49,37 @@
   !endif
 !macroend
 
+; DLLs other programs load from this folder (crates/core/src/update_files.rs):
+; the camera DLL inside Discord/Zoom/browsers, the APO inside audiodg, the
+; NDI runtime inside relay-share. A loaded DLL cannot be overwritten, and the
+; plain File command then kept the old one silently (PC2, r54-r56). It can be
+; renamed, though: move it aside to NAME.oldN, so the new file goes in at the
+; same path every registration already names, and the next program to load
+; it gets the new version. relay-core update-files (post-install, and every
+; core start) deletes the aside copies once nothing holds them and names the
+; apps that still do. If even the rename fails, stop: never a silent mix.
+!macro RELAY_MOVE_ASIDE_IF_LOCKED NAME
+  ${If} ${FileExists} "$INSTDIR\${NAME}"
+    ClearErrors
+    Delete "$INSTDIR\${NAME}"
+    ${If} ${FileExists} "$INSTDIR\${NAME}"
+      StrCpy $R7 1
+      ${DoWhile} ${FileExists} "$INSTDIR\${NAME}.old$R7"
+        IntOp $R7 $R7 + 1
+      ${Loop}
+      ClearErrors
+      Rename "$INSTDIR\${NAME}" "$INSTDIR\${NAME}.old$R7"
+      ${If} ${FileExists} "$INSTDIR\${NAME}"
+        DetailPrint "${NAME} is in use and could not be replaced."
+        MessageBox MB_ICONSTOP|MB_OK "${NAME} in $INSTDIR is in use by another program and cannot be replaced.$\r$\n$\r$\nClose the apps that use the Relay Camera or NDI output (Discord, Zoom, OBS, browsers), then run the installer again. Relay was not updated." /SD IDOK
+        SetErrorLevel 2
+        Abort
+      ${EndIf}
+      DetailPrint "${NAME} is in use; the old copy was moved aside to ${NAME}.old$R7 and is removed once it is closed."
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_PREINSTALL
   ; A running core holds relay-core.exe and the share engine open, so an
   ; upgrade over a live install would fail to replace them. Shutting it down
@@ -69,6 +100,10 @@
       CopyFiles /SILENT "$PLUGINSDIR\active-stream.json" "$INSTDIR\data\active-stream.json"
     ${EndIf}
   ${EndIf}
+
+  !insertmacro RELAY_MOVE_ASIDE_IF_LOCKED "relay_vdevice.dll"
+  !insertmacro RELAY_MOVE_ASIDE_IF_LOCKED "relay_apo.dll"
+  !insertmacro RELAY_MOVE_ASIDE_IF_LOCKED "Processing.NDI.Lib.x64.dll"
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL
@@ -79,6 +114,24 @@
   ; registered -- nothing loads the DLL then.
   nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$INSTDIR\relay_vdevice.dll" /grant *S-1-5-19:(RX)'
   Pop $0
+
+  ; Any DLL moved aside above: delete the copies already free, and tell the
+  ; user which apps still run the old one (exit 2). Shown interactively and
+  ; for an in-app update (/RELAUNCH: the user just chose Install now); a
+  ; plain silent install only logs it, and the core logs it again on start.
+  nsExec::ExecToStack '"$INSTDIR\relay-core.exe" update-files'
+  Pop $0
+  Pop $1
+  ${If} $0 == 2
+    DetailPrint "$1"
+    ${GetOptions} $CMDLINE "/RELAUNCH" $2
+    ${If} ${Errors}
+    ${AndIf} ${Silent}
+      ; logged only
+    ${Else}
+      MessageBox MB_ICONINFORMATION|MB_OK "$1"
+    ${EndIf}
+  ${EndIf}
 
   ; One bookkeeping key, under the current publisher only (see the macro).
   !insertmacro RELAY_DROP_OLD_PUBLISHER_KEY
@@ -191,6 +244,12 @@
   Pop $0
   nsExec::ExecToLog 'taskkill /F /IM relay-preview.exe /T'
   Pop $0
+
+  ; Copies an update moved aside (RELAY_MOVE_ASIDE_IF_LOCKED). One still
+  ; loaded stays until that app closes; it is the only file left behind.
+  Delete "$INSTDIR\relay_vdevice.dll.old*"
+  Delete "$INSTDIR\relay_apo.dll.old*"
+  Delete "$INSTDIR\Processing.NDI.Lib.x64.dll.old*"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
