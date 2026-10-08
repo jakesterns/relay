@@ -667,6 +667,11 @@ impl Filter {
         // back, so dropping the app's last filter reference frees both.
         let weak = filter.downgrade()?;
         let pin: IPin = Pin { shared, filter: weak }.into();
+        // SAFETY: both are fresh objects of this module, not yet shared.
+        unsafe {
+            null_outs::patch_filter(&filter);
+            null_outs::patch_pin(&pin);
+        }
         object.pin.lock().unwrap().replace(pin);
         Ok(filter)
     }
@@ -798,6 +803,112 @@ impl IBaseFilter_Impl for Filter_Impl {
 impl IAMFilterMiscFlags_Impl for Filter_Impl {
     fn GetMiscFlags(&self) -> u32 {
         AM_FILTER_MISC_FLAGS_IS_SOURCE.0 as u32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Out pointers on failure
+// ---------------------------------------------------------------------------
+
+/// DirectShow callers rely on a failed (or `S_FALSE`) getter leaving its out
+/// pointer NULL — `IPin::ConnectedTo` on an unconnected pin is the classic
+/// case, and qcap's graph walk (`ICaptureGraphBuilder2::FindInterface`, which
+/// OBS calls on every activation) reads it. The `windows` shims only write
+/// the out pointer on `Ok`, so a failure left the caller's garbage in place:
+/// r57 crashed OBS inside qcap on activation. Each object's vtable is pointed
+/// at a copy whose getters NULL the out pointer, then call the generated shim.
+mod null_outs {
+    use std::sync::OnceLock;
+
+    use windows::core::{Interface, HRESULT, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::E_POINTER;
+    use windows::Win32::Media::DirectShow::{IBaseFilter, IBaseFilter_Vtbl, IPin, IPin_Vtbl};
+
+    type Raw = *mut core::ffi::c_void;
+
+    static PIN_ORIG: OnceLock<IPin_Vtbl> = OnceLock::new();
+    static PIN_FIXED: OnceLock<IPin_Vtbl> = OnceLock::new();
+    static FILTER_ORIG: OnceLock<IBaseFilter_Vtbl> = OnceLock::new();
+    static FILTER_FIXED: OnceLock<IBaseFilter_Vtbl> = OnceLock::new();
+
+    unsafe extern "system" fn connected_to(this: Raw, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: caller's out pointer, checked; the original shim is ours.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (PIN_ORIG.get().expect("patched").ConnectedTo)(this, out)
+        }
+    }
+
+    unsafe extern "system" fn get_sync_source(this: Raw, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above. No clock = S_FALSE with a NULL clock, per the docs.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (FILTER_ORIG.get().expect("patched").base__.GetSyncSource)(this, out)
+        }
+    }
+
+    unsafe extern "system" fn find_pin(this: Raw, id: PCWSTR, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (FILTER_ORIG.get().expect("patched").FindPin)(this, id, out)
+        }
+    }
+
+    unsafe extern "system" fn query_vendor_info(this: Raw, out: *mut PWSTR) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above.
+        unsafe {
+            *out = PWSTR::null();
+            (FILTER_ORIG.get().expect("patched").QueryVendorInfo)(this, out)
+        }
+    }
+
+    /// # Safety
+    /// `pin` must be a fresh [`super::Pin`] (its vtable still the generated one).
+    pub unsafe fn patch_pin(pin: &IPin) {
+        // SAFETY: a COM interface pointer points at its vtable pointer; every
+        // Pin shares one generated vtable, copied once (all fn pointers).
+        unsafe {
+            let slot = pin.as_raw() as *mut *const IPin_Vtbl;
+            let orig = PIN_ORIG.get_or_init(|| std::ptr::read(*slot));
+            let fixed = PIN_FIXED.get_or_init(|| {
+                let mut v = std::ptr::read(orig);
+                v.ConnectedTo = connected_to;
+                v
+            });
+            *slot = fixed;
+        }
+    }
+
+    /// # Safety
+    /// `filter` must be a fresh [`super::Filter`]. `IMediaFilter` and
+    /// `IPersist` share this vtable, so they get the fix too.
+    pub unsafe fn patch_filter(filter: &IBaseFilter) {
+        // SAFETY: as in `patch_pin`.
+        unsafe {
+            let slot = filter.as_raw() as *mut *const IBaseFilter_Vtbl;
+            let orig = FILTER_ORIG.get_or_init(|| std::ptr::read(*slot));
+            let fixed = FILTER_FIXED.get_or_init(|| {
+                let mut v = std::ptr::read(orig);
+                v.base__.GetSyncSource = get_sync_source;
+                v.FindPin = find_pin;
+                v.QueryVendorInfo = query_vendor_info;
+                v
+            });
+            *slot = fixed;
+        }
     }
 }
 
