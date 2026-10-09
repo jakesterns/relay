@@ -314,12 +314,18 @@ fn parse_send_args(args: &[String]) -> Result<relay_capture::transport::sender::
         output_device: None,
         audio_image: None,
         audio_created: None,
+        source: None,
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--peer" => opts.peer = it.next().cloned(),
             "--code" => opts.code = it.next().cloned().unwrap_or_default(),
+            // The source to start on, as switch-target JSON (r60).
+            "--source" => {
+                let json = it.next().context("--source JSON")?;
+                opts.source = Some(serde_json::from_str(json).context("--source")?)
+            }
             // The remembered receiver's DTLS fingerprint (S35); replaces --code.
             "--trusted" => opts.trusted = it.next().cloned(),
             "--bitrate" => {
@@ -939,6 +945,16 @@ mod tests {
 
     /// Mic alone is still expressible, and is what the core emits for a
     /// legacy `mic` preset — so those presets behave exactly as before.
+    #[test]
+    fn source_arg_sets_the_starting_source() {
+        let o = parse_send_args(&s(&["--code", "1"])).unwrap();
+        assert_eq!(o.source, None, "primary display by default");
+        let o = parse_send_args(&s(&["--code", "1", "--source", r#"{"kind":"window","hwnd":20958}"#]))
+            .unwrap();
+        assert_eq!(o.source, Some(relay_capture::command::SourceTarget::Window { hwnd: 20958 }));
+        assert!(parse_send_args(&s(&["--code", "1", "--source", "nope"])).is_err());
+    }
+
     #[test]
     fn mic_only_is_no_audio_plus_audio_mic() {
         let o = parse_send_args(&s(&["--code", "1", "--no-audio", "--audio-mic"])).unwrap();

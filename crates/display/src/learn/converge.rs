@@ -78,6 +78,9 @@ pub const CONFIDENT_SE: f32 = 0.0125;
 pub const DECORRELATION_FRAMES: f64 = 4.0;
 /// Gameplay frames between checkpoints (30 s at 2 fps).
 pub const CHECKPOINT_FRAMES: u32 = 60;
+/// Floor on the gameplay share the ETA divides by, so a menu-heavy start does
+/// not show hours.
+pub const MIN_GAMEPLAY_SHARE: f64 = 0.25;
 /// Consecutive checkpoints that must agree for convergence (S48: 2, was 3).
 pub const CONVERGE_CHECKPOINTS: usize = 2;
 /// Kept for the look-space distance used by the freeze rule's tests; the
@@ -188,9 +191,12 @@ pub struct Readiness {
     pub candidate: Option<LookTargets>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
-    /// Seconds of gameplay still needed at [`SAMPLE_FPS`] (S48). `Some(0)`
-    /// once settled; `None` while a scene is missing, which no amount of the
-    /// same scene can supply.
+    /// Seconds still needed at [`SAMPLE_FPS`] (S48), in wall-clock time at
+    /// the share of sampled frames that has been gameplay so far. `Some(0)`
+    /// once settled; `None` while a needed scene has not been seen at all,
+    /// which no amount of the same scene can supply. A scene seen but short
+    /// of [`MIN_FRAMES_PER_SCENE`] is estimated at its rate so far (r58: the
+    /// ETA was blank for all of a varied Warzone run).
     #[serde(default)]
     pub eta_secs: Option<u32>,
     /// The one-scene budget was cut short because the statistics are tight.
@@ -255,9 +261,7 @@ impl Learner {
         if self.converged.is_some() {
             return Some(0);
         }
-        if self.scenes() < self.scenes_needed() {
-            return None;
-        }
+        let scene_frames = self.scene_frames_left()?;
         let frames_left = self.frames_needed().saturating_sub(self.agg.frames);
         let stable = if self.has_evidence() { self.stable_checkpoints() } else { 0 };
         // The checkpoint under way, plus one per agreeing checkpoint still
@@ -265,8 +269,40 @@ impl Learner {
         let checks = CONVERGE_CHECKPOINTS.saturating_sub(stable).max(1) as u64;
         let settle = checks * CHECKPOINT_FRAMES as u64
             - (self.since_checkpoint as u64).min(CHECKPOINT_FRAMES as u64);
-        let frames = frames_left.max(settle);
-        Some(frames.div_ceil(SAMPLE_FPS as u64) as u32)
+        let frames = frames_left.max(settle).max(scene_frames);
+        // Gameplay frames come at the rate gameplay has been sampled: static,
+        // loading and idle frames are not learned from (r58: Tarkov's ETA
+        // said 42 s at 79 % with 400 static frames excluded).
+        let seen = self.agg.frames + self.excluded.total();
+        let share = if seen == 0 {
+            1.0
+        } else {
+            (self.agg.frames as f64 / seen as f64).clamp(MIN_GAMEPLAY_SHARE, 1.0)
+        };
+        Some((frames as f64 / share / SAMPLE_FPS as f64).ceil() as u32)
+    }
+
+    /// Gameplay frames until enough scenes have [`MIN_FRAMES_PER_SCENE`],
+    /// each still-short scene filling at its share of the gameplay so far.
+    /// `None` when fewer scenes than needed have been seen at all.
+    fn scene_frames_left(&self) -> Option<u64> {
+        let missing = self.scenes_needed().saturating_sub(self.scenes());
+        if missing == 0 {
+            return Some(0);
+        }
+        let total: f64 = self.agg.apl_buckets.iter().sum();
+        let mut left: Vec<f64> = self
+            .agg
+            .apl_buckets
+            .iter()
+            .filter(|w| **w > 0.0 && **w < MIN_FRAMES_PER_SCENE)
+            .map(|w| (MIN_FRAMES_PER_SCENE - w) * total / w)
+            .collect();
+        if left.len() < missing {
+            return None;
+        }
+        left.sort_by(f64::total_cmp);
+        Some(left[missing - 1].ceil() as u64)
     }
 
     /// S48: fold `other` (a learner fed from a video file of the same game)

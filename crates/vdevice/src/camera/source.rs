@@ -415,9 +415,9 @@ impl StreamShared {
         .is_some();
         if *was_live != Some(live) {
             diag::line(&match (*was_live, live) {
-                (_, true) => format!("frame server: ring up → NV12 {w}x{h}"),
-                (Some(true), false) => "frame server: vcam ring down → serving black".to_string(),
-                (_, false) => "frame server: no stream yet → serving black".to_string(),
+                (_, true) => format!("frame server: ring up -> NV12 {w}x{h}"),
+                (Some(true), false) => "frame server: vcam ring down -> serving black".to_string(),
+                (_, false) => "frame server: no stream yet -> serving black".to_string(),
             });
             *was_live = Some(live);
         }

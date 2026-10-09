@@ -109,6 +109,12 @@ pub struct SendOpts {
     /// and creation time from the core. See [`guard_audio_pid`].
     pub audio_image: Option<String>,
     pub audio_created: Option<u64>,
+    /// What to capture from the first frame; `None` = the primary display.
+    /// A reconnect resumes the source the share was on (r59: it restarted on
+    /// the desktop after the user had switched to one window). A source that
+    /// cannot be opened ends the video pipeline; it never falls back to the
+    /// desktop.
+    pub source: Option<SourceTarget>,
 }
 
 /// Rate-limited JPEG thumbnails of the capture, emitted as `preview` events.
@@ -892,8 +898,10 @@ pub async fn run(opts: SendOpts) -> Result<()> {
     }
 
     // Source-switch mailbox: stdin queues, the pipeline applies at a frame
-    // boundary. The share always starts on the primary display.
-    let switcher = Arc::new(StdMutex::new(Switcher::new(SourceTarget::Display { index: 0 })));
+    // boundary. The share starts on `opts.source`, else the primary display.
+    let switcher = Arc::new(StdMutex::new(Switcher::new(
+        opts.source.unwrap_or(SourceTarget::Display { index: 0 }),
+    )));
 
     // Recorder slot: created inside the video pipeline once the capture size
     // is known; every other reader treats "not there yet" as "off".
@@ -1443,7 +1451,15 @@ fn video_pipeline(
     let _mf = crate::probe::MediaFoundation::start()?;
     let hmon = crate::d3d::primary_monitor();
     let gpu = crate::d3d::device_for_monitor(hmon)?;
-    let mut src = crate::source::create(&gpu, hmon, cursor)?;
+    let initial = switcher.lock().unwrap().current();
+    let (mut src, initial_crop) = if initial == (SourceTarget::Display { index: 0 }) {
+        (crate::source::create(&gpu, hmon, cursor)?, None)
+    } else {
+        // Fail closed: a resumed window that is gone must not become the
+        // desktop.
+        create_target_source(&gpu, initial, cursor)
+            .with_context(|| format!("the share's source ({initial:?}) could not be opened"))?
+    };
     let in_size = src.size();
     // The encoder's output size is fixed for the life of the share; sources
     // of any size are GPU-scaled into it, so switching never renegotiates.
@@ -1529,7 +1545,8 @@ fn video_pipeline(
     // Built on the first frame rather than here: a source swap can change the
     // input size, and rebuilding from the frame keeps one code path.
     let mut preview = PreviewTap::new(preview_fps.clone());
-    let mut crop: Option<(u32, u32, u32, u32)> = None;
+    let mut crop: Option<(u32, u32, u32, u32)> = initial_crop;
+    conv.set_source_rect(crop);
     let mut pacer = crate::pace::FramePacer::new(fps);
     // The last NV12 handed to the encoder. WGC and DXGI deliver nothing while
     // the screen is still, and a receiver hearing nothing for 3 s treats the
@@ -1582,6 +1599,27 @@ fn video_pipeline(
                             pacer = crate::pace::FramePacer::new(r.fps);
                             inflight.clear();
                             last_nv12 = None;
+                            // A still screen delivers no new frame, and the
+                            // new encoder has nothing to repeat: the receiver
+                            // heard nothing for 3 s and ended the share (r60,
+                            // a static window stepped to 1080p). A fresh
+                            // source hands over its first frame at once.
+                            let t = switcher.lock().unwrap().current();
+                            match create_target_source(&gpu, t, cursor) {
+                                Ok((new_src, new_crop)) => {
+                                    src = new_src;
+                                    conv_in = src.size();
+                                    conv = crate::encode::convert::Converter::new(
+                                        &gpu,
+                                        conv_in,
+                                        size,
+                                    )?;
+                                    conv.set_source_rect(new_crop);
+                                    crop = new_crop;
+                                    preview.invalidate();
+                                }
+                                Err(e) => warn!(error = %e, "reopening the source for the new rung failed"),
+                            }
                             if let Some(rec) = recorder.get() {
                                 rec.resize(r.width, r.height);
                             }
