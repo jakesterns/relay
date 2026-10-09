@@ -3,6 +3,7 @@
 # receiver) through the Wi-Fi link model, on one PC. Safe on the PC being used:
 # the receiver is headless, and the sender captures a synthetic noise pattern
 # (RELAY_TEST_SOURCE), not the screen, so the encoder runs at its target.
+# SRC_KIND=still sends one frame and then nothing, like a still window.
 #
 #   scripts/wifi-sim-check.sh PROFILE SECS SIZE FPS MBPS [extra send flags...]
 #   scripts/wifi-sim-check.sh wifi-busy 90 3840x2160 60 60
@@ -21,7 +22,7 @@ mkdir -p "$OUT"
 TAG="${TAG_PREFIX:-}${PROFILE%%,*}-${SIZE}-${FPS}-${MBPS}"
 export RELAY_INSTANCE="wifisim$$"
 if [ "$PROFILE" != "none" ]; then export RELAY_TEST_NET="$PROFILE"; fi
-export RELAY_TEST_SOURCE="noise:$SIZE"
+export RELAY_TEST_SOURCE="${SRC_KIND:-noise}:$SIZE"
 NAME="wifisim-$$"
 CODE=$(printf '%06d' $(( $$ % 1000000 )))
 
