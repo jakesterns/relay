@@ -1599,6 +1599,27 @@ fn video_pipeline(
                             pacer = crate::pace::FramePacer::new(r.fps);
                             inflight.clear();
                             last_nv12 = None;
+                            // A still screen delivers no new frame, and the
+                            // new encoder has nothing to repeat: the receiver
+                            // heard nothing for 3 s and ended the share (r60,
+                            // a static window stepped to 1080p). A fresh
+                            // source hands over its first frame at once.
+                            let t = switcher.lock().unwrap().current();
+                            match create_target_source(&gpu, t, cursor) {
+                                Ok((new_src, new_crop)) => {
+                                    src = new_src;
+                                    conv_in = src.size();
+                                    conv = crate::encode::convert::Converter::new(
+                                        &gpu,
+                                        conv_in,
+                                        size,
+                                    )?;
+                                    conv.set_source_rect(new_crop);
+                                    crop = new_crop;
+                                    preview.invalidate();
+                                }
+                                Err(e) => warn!(error = %e, "reopening the source for the new rung failed"),
+                            }
                             if let Some(rec) = recorder.get() {
                                 rec.resize(r.width, r.height);
                             }
