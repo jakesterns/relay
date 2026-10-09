@@ -432,15 +432,15 @@ fn streams_ring_frames_in_every_format_with_monotonic_timestamps() {
         })
     };
     let (log, _) = run_with_sink(MEDIASUBTYPE_NV12, 1000, |pin| {
-        assert_eq!(first_offer(pin), (MEDIASUBTYPE_NV12, 1280, 720), "idle: 720p NV12 first");
+        assert_eq!(first_offer(pin), (MEDIASUBTYPE_NV12, 1920, 1080), "idle: 1080p NV12 first");
     });
     late.join().unwrap();
-    assert_eq!(log.connected, Some((MEDIASUBTYPE_NV12, 1280, 720)));
-    let n720 = picture::nv12_bytes(1280, 720);
-    assert!(log.samples.iter().all(|s| s.2.len() == n720), "every sample stays 720p NV12");
-    let mut scaled = vec![0u8; n720];
-    picture::scale_nv12(&frame, w, h, &mut scaled, 1280, 720);
-    assert!(log.samples.iter().any(|s| s.2 == scaled), "late 320x180 stream scaled to 720p");
+    assert_eq!(log.connected, Some((MEDIASUBTYPE_NV12, 1920, 1080)));
+    let n1080 = picture::nv12_bytes(1920, 1080);
+    assert!(log.samples.iter().all(|s| s.2.len() == n1080), "every sample stays 1080p NV12");
+    let mut scaled = vec![0u8; n1080];
+    picture::scale_nv12(&frame, w, h, &mut scaled, 1920, 1080);
+    assert!(log.samples.iter().any(|s| s.2 == scaled), "late 320x180 stream scaled to 1080p");
     assert_eq!(log.type_changes, 0, "no media-type change mid-run");
 
     // With a size announced, the stream's own size is first again.
