@@ -80,10 +80,12 @@ use crate::frames::{dshow_section_name_from_env, SharedFrames, MAX_HEIGHT, MAX_W
 const KSPROPERTY_SUPPORT_GET: u32 = 1;
 /// Pin name / id apps see.
 const PIN_NAME: &str = "Capture";
-/// Size when no producer has announced one yet: 720p, whose NV12 frame
-/// (1.4 MB) fits the default buffers of clients that take the first type
-/// (ffmpeg dropped frames at 1080p on the Win10 pass, S43b).
-const FALLBACK: (u32, u32, u32) = (1280, 720, 30);
+/// Size when no producer has announced one yet: 1080p60. An app that opens
+/// the camera before a share keeps the type it connected with, and OBS on
+/// "device default" takes the first one: at the old 720p30 a streamer's
+/// scene stayed 720p30 until the device was re-picked (r58). Call apps ask
+/// for their own size, and 720p / 360p stay offered.
+const FALLBACK: (u32, u32, u32) = (1920, 1080, 60);
 /// The ring is considered gone when its frame counter has not moved for
 /// this long; the app then gets the waiting still instead of a frozen frame.
 const STALE_AFTER: Duration = Duration::from_secs(2);
@@ -366,15 +368,15 @@ impl FrameSource {
             let f = self.f;
             diag::line(&match (self.was_live, live) {
                 (_, true) => format!(
-                    "ring up: {}x{} frames → {} {}x{}",
+                    "ring up: {}x{} frames -> {} {}x{}",
                     self.last_ring_size.0,
                     self.last_ring_size.1,
                     f.fmt.name(),
                     f.width,
                     f.height
                 ),
-                (Some(true), false) => "vcam ring down → showing the waiting still".to_string(),
-                (_, false) => "no stream yet → showing the waiting still".to_string(),
+                (Some(true), false) => "vcam ring down -> showing the waiting still".to_string(),
+                (_, false) => "no stream yet -> showing the waiting still".to_string(),
             });
             self.was_live = Some(live);
         }
@@ -414,7 +416,7 @@ impl FrameSource {
         if (info.width, info.height) != self.last_ring_size {
             if self.was_live == Some(true) {
                 diag::line(&format!(
-                    "ring frames now {}x{} (was {}x{}) → {} {}x{}",
+                    "ring frames now {}x{} (was {}x{}) -> {} {}x{}",
                     info.width,
                     info.height,
                     self.last_ring_size.0,
@@ -667,6 +669,11 @@ impl Filter {
         // back, so dropping the app's last filter reference frees both.
         let weak = filter.downgrade()?;
         let pin: IPin = Pin { shared, filter: weak }.into();
+        // SAFETY: both are fresh objects of this module, not yet shared.
+        unsafe {
+            null_outs::patch_filter(&filter);
+            null_outs::patch_pin(&pin);
+        }
         object.pin.lock().unwrap().replace(pin);
         Ok(filter)
     }
@@ -798,6 +805,112 @@ impl IBaseFilter_Impl for Filter_Impl {
 impl IAMFilterMiscFlags_Impl for Filter_Impl {
     fn GetMiscFlags(&self) -> u32 {
         AM_FILTER_MISC_FLAGS_IS_SOURCE.0 as u32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Out pointers on failure
+// ---------------------------------------------------------------------------
+
+/// DirectShow callers rely on a failed (or `S_FALSE`) getter leaving its out
+/// pointer NULL — `IPin::ConnectedTo` on an unconnected pin is the classic
+/// case, and qcap's graph walk (`ICaptureGraphBuilder2::FindInterface`, which
+/// OBS calls on every activation) reads it. The `windows` shims only write
+/// the out pointer on `Ok`, so a failure left the caller's garbage in place:
+/// r57 crashed OBS inside qcap on activation. Each object's vtable is pointed
+/// at a copy whose getters NULL the out pointer, then call the generated shim.
+mod null_outs {
+    use std::sync::OnceLock;
+
+    use windows::core::{Interface, HRESULT, PCWSTR, PWSTR};
+    use windows::Win32::Foundation::E_POINTER;
+    use windows::Win32::Media::DirectShow::{IBaseFilter, IBaseFilter_Vtbl, IPin, IPin_Vtbl};
+
+    type Raw = *mut core::ffi::c_void;
+
+    static PIN_ORIG: OnceLock<IPin_Vtbl> = OnceLock::new();
+    static PIN_FIXED: OnceLock<IPin_Vtbl> = OnceLock::new();
+    static FILTER_ORIG: OnceLock<IBaseFilter_Vtbl> = OnceLock::new();
+    static FILTER_FIXED: OnceLock<IBaseFilter_Vtbl> = OnceLock::new();
+
+    unsafe extern "system" fn connected_to(this: Raw, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: caller's out pointer, checked; the original shim is ours.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (PIN_ORIG.get().expect("patched").ConnectedTo)(this, out)
+        }
+    }
+
+    unsafe extern "system" fn get_sync_source(this: Raw, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above. No clock = S_FALSE with a NULL clock, per the docs.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (FILTER_ORIG.get().expect("patched").base__.GetSyncSource)(this, out)
+        }
+    }
+
+    unsafe extern "system" fn find_pin(this: Raw, id: PCWSTR, out: *mut Raw) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above.
+        unsafe {
+            *out = std::ptr::null_mut();
+            (FILTER_ORIG.get().expect("patched").FindPin)(this, id, out)
+        }
+    }
+
+    unsafe extern "system" fn query_vendor_info(this: Raw, out: *mut PWSTR) -> HRESULT {
+        if out.is_null() {
+            return E_POINTER;
+        }
+        // SAFETY: as above.
+        unsafe {
+            *out = PWSTR::null();
+            (FILTER_ORIG.get().expect("patched").QueryVendorInfo)(this, out)
+        }
+    }
+
+    /// # Safety
+    /// `pin` must be a fresh [`super::Pin`] (its vtable still the generated one).
+    pub unsafe fn patch_pin(pin: &IPin) {
+        // SAFETY: a COM interface pointer points at its vtable pointer; every
+        // Pin shares one generated vtable, copied once (all fn pointers).
+        unsafe {
+            let slot = pin.as_raw() as *mut *const IPin_Vtbl;
+            let orig = PIN_ORIG.get_or_init(|| std::ptr::read(*slot));
+            let fixed = PIN_FIXED.get_or_init(|| {
+                let mut v = std::ptr::read(orig);
+                v.ConnectedTo = connected_to;
+                v
+            });
+            *slot = fixed;
+        }
+    }
+
+    /// # Safety
+    /// `filter` must be a fresh [`super::Filter`]. `IMediaFilter` and
+    /// `IPersist` share this vtable, so they get the fix too.
+    pub unsafe fn patch_filter(filter: &IBaseFilter) {
+        // SAFETY: as in `patch_pin`.
+        unsafe {
+            let slot = filter.as_raw() as *mut *const IBaseFilter_Vtbl;
+            let orig = FILTER_ORIG.get_or_init(|| std::ptr::read(*slot));
+            let fixed = FILTER_FIXED.get_or_init(|| {
+                let mut v = std::ptr::read(orig);
+                v.base__.GetSyncSource = get_sync_source;
+                v.FindPin = find_pin;
+                v.QueryVendorInfo = query_vendor_info;
+                v
+            });
+            *slot = fixed;
+        }
     }
 }
 
@@ -1331,10 +1444,11 @@ mod tests {
         assert_eq!(offered_formats(Some((1600, 900, 60)))[0].width, 1600);
         // Hint equal to a standard size is not listed twice.
         assert_eq!(offered_formats(Some((1280, 720, 30))).len(), 9);
-        // No producer yet: 720p30, then 1080p and 360p.
-        assert_eq!(offered_formats(None)[0].width, 1280);
-        assert_eq!(offered_formats(None)[0].height, 720);
-        assert_eq!(offered_formats(None)[0].fps, 30);
+        // No producer yet: 1080p60, then 720p and 360p.
+        assert_eq!(offered_formats(None)[0].width, 1920);
+        assert_eq!(offered_formats(None)[0].height, 1080);
+        assert_eq!(offered_formats(None)[0].fps, 60);
+        assert_eq!(offered_formats(None).len(), 9);
     }
 
     #[test]

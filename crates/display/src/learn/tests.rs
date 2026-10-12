@@ -843,15 +843,23 @@ fn a_night_only_game_converges_and_asks_for_shadow() {
 }
 
 #[test]
-fn varied_content_still_needs_three_scenes() {
+fn varied_content_needs_three_scenes_until_the_longer_budget() {
     let mut l = Learner::new("b1");
-    // 80 % night, 20 % daylight: not one scene, only two buckets.
-    for i in 0..3000 {
+    // 80 % night, 20 % daylight: not one scene, only two buckets. Before the
+    // limited-variety budget it still waits for a third scene ...
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 50) {
         l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
     }
     assert!(!l.single_scene());
     assert_eq!(l.readiness().scenes_needed, MIN_SCENES);
+    assert_eq!(l.readiness().frames_needed, MIN_FRAMES_ONE_SCENE);
     assert_eq!(l.phase(), Phase::Learning);
+    // ... and past it, the two scenes it shows are the game (r62).
+    for i in 0..2000 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert_eq!(l.readiness().scenes_needed, 2);
+    assert_eq!(l.phase(), Phase::Converged);
     assert_eq!((DOMINANT_SCENE_SHARE, MIN_FRAMES_ONE_SCENE), (0.9, 900));
 }
 
@@ -996,12 +1004,86 @@ fn eta_counts_down_and_is_unknown_without_the_scenes() {
     assert_eq!(l.phase(), Phase::Converged);
     assert_eq!(l.eta_secs(), Some(0));
     assert_eq!(l.readiness().eta_secs, Some(0));
-    // Two scenes, neither dominant: the missing scene has no ETA.
+    // Two scenes, neither dominant: the limited-variety budget (r62).
     let mut two = Learner::new("b1");
     for i in 0..300 {
         two.observe(&gameplay(if i % 4 == 0 { 0.7 } else { 0.05 }, 0.2));
     }
-    assert_eq!(two.eta_secs(), None);
+    let eta = two.eta_secs().expect("two scenes still have an ETA");
+    let budget = ((MIN_FRAMES_ONE_SCENE - 300) / SAMPLE_FPS as u64) as u32;
+    assert!(eta.abs_diff(budget) <= 2, "{eta} vs {budget}");
+    // A third scene seen but short (r58, Warzone): estimated at its rate.
+    // 10 of 310 frames so far -> 20 more needs ~620 gameplay frames.
+    for _ in 0..10 {
+        two.observe(&gameplay(0.3, 0.2));
+    }
+    let eta = two.eta_secs().expect("short scene estimated");
+    let want = ((MIN_FRAMES_PER_SCENE - 10.0) * 310.0 / 10.0 / SAMPLE_FPS as f64).ceil() as u32;
+    assert_eq!(eta, want);
+}
+
+/// r62 Tarkov night: two scenes, 19 % / 81 %, never a third. It converges on
+/// the limited-variety budget instead of waiting forever.
+#[test]
+fn two_scene_content_converges_on_the_longer_budget() {
+    let mut l = Learner::new("b1");
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 100) {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.scenes(), 2);
+    assert!(!l.single_scene());
+    assert_eq!(l.phase(), Phase::Learning, "not before the budget");
+    assert!(l.eta_secs().is_some());
+    for i in 0..1200 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
+    assert_eq!(l.eta_secs(), Some(0));
+}
+
+/// r58 Tarkov: the ETA is wall-clock time, so frames that are not gameplay
+/// (static, loading, idle) slow it in proportion.
+#[test]
+fn eta_scales_with_the_gameplay_share() {
+    let mut l = Learner::new("b1");
+    for i in 0..90 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let all_gameplay = l.eta_secs().unwrap();
+    // An older record has no recent share: the whole run's share is used.
+    l.recent_gameplay_share = None;
+    l.excluded.static_frames = 90; // half of what was seen
+    let half = l.eta_secs().unwrap();
+    assert!((half as i64 - 2 * all_gameplay as i64).abs() <= 1, "{half} vs {all_gameplay}");
+    l.excluded.static_frames = 100_000; // floored, not hours
+    let floored = l.eta_secs().unwrap();
+    assert!(floored as f64 <= all_gameplay as f64 / MIN_GAMEPLAY_SHARE + 1.0);
+}
+
+/// r63: a static stretch slows the ETA within about a minute, not over the
+/// whole run, and it speeds back up when play resumes.
+#[test]
+fn eta_follows_the_recent_gameplay_share() {
+    let mut l = Learner::new("b1");
+    for i in 0..300 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let playing = l.eta_secs().unwrap();
+    let mut still = gameplay(0.3, 0.14);
+    still.class = FrameClass::Static;
+    for _ in 0..120 {
+        l.observe(&still);
+    }
+    let paused = l.eta_secs().unwrap();
+    // Same gameplay left; ~63 % of the last minute was static.
+    assert!(paused as f64 > 2.0 * playing as f64, "{paused} vs {playing}");
+    for i in 0..120 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let resumed = l.eta_secs().unwrap();
+    assert!(resumed < paused, "{resumed} < {paused}");
+    l.relearn();
+    assert_eq!(l.recent_gameplay_share, None);
 }
 
 /// A video file's learner merged into a live one: the evidence adds,

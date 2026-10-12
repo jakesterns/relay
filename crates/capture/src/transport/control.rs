@@ -181,11 +181,21 @@ pub struct RateControl {
     last_cause: Cause,
     /// Time since the last congestion event of either kind.
     since_congestion: std::time::Duration,
+    /// What this share actually sent over the last report window, when the
+    /// sender says ([`RateControl::set_sent_kbps`]).
+    sent_kbps: Option<u32>,
 }
 
 pub const QUEUE_MS: f32 = 15.0;
 pub const QUEUE_SEVERE_MS: f32 = 40.0;
 const OVERUSE_REPORTS: u32 = 2;
+/// Below this *sending* rate the share is all but idle (a still window sends
+/// ~17 kb/s), and a "queue" is not one this share is building: cutting the
+/// target would only starve the next motion. r65: one 58 ms reading on a
+/// still window cut 60 -> 15 Mb/s, and r60's like it stepped the ladder.
+/// What the sender sends, not what arrives: a link that collapsed under a
+/// full-rate share also delivers little, and that one must be cut.
+pub const QUEUE_MIN_KBPS: u32 = 2_000;
 pub const BACKOFF: f32 = 0.85;
 /// A cut aims to drain the measured queue within about this long.
 pub const DRAIN_MS: f32 = 500.0;
@@ -213,7 +223,14 @@ impl RateControl {
             acc_ms: 0,
             last_cause: Cause::Steady,
             since_congestion: std::time::Duration::MAX / 4,
+            sent_kbps: None,
         }
+    }
+
+    /// The video rate actually sent since the last report. Below
+    /// [`QUEUE_MIN_KBPS`], queue readings do not cut.
+    pub fn set_sent_kbps(&mut self, kbps: u32) {
+        self.sent_kbps = Some(kbps);
     }
 
     pub fn ceiling(&self) -> u32 {
@@ -288,13 +305,14 @@ impl RateControl {
 
         // Delay.
         let q = f.queue_ms;
-        self.over_run = if q > QUEUE_MS { self.over_run + 1 } else { 0 };
+        let idle = self.sent_kbps.is_some_and(|k| k < QUEUE_MIN_KBPS);
+        self.over_run = if q > QUEUE_MS && !idle { self.over_run + 1 } else { 0 };
         // A queue draining within the window (its first unit waited longer
         // than its last) is a stall or a spike being released, not a link
         // carrying less than we send: it does not count as severe.
         let draining_in_window = f.queue_first_ms > f.queue_last_ms + 10.0;
-        let overuse =
-            (q > QUEUE_SEVERE_MS && !draining_in_window) || self.over_run >= OVERUSE_REPORTS;
+        let overuse = !idle
+            && ((q > QUEUE_SEVERE_MS && !draining_in_window) || self.over_run >= OVERUSE_REPORTS);
         let draining = q < self.prev_queue_ms - 2.0;
         self.prev_queue_ms = q;
         let may_cut = match self.since_cut {
@@ -672,6 +690,21 @@ mod tests {
         for q in [70.0, 50.0, 30.0, 16.0] {
             assert_eq!(c.on_feedback(&report(0, q, 21.0)), cut, "draining at {q} ms");
         }
+    }
+
+    /// r65: a still window sends ~17 kb/s; one high queue reading there is
+    /// not congestion this share causes, and never cuts the target.
+    #[test]
+    fn a_queue_reading_on_an_idle_share_does_not_cut() {
+        let mut c = RateControl::new(60_000_000);
+        c.set_sent_kbps(17);
+        for q in [58.0, 58.0, 70.0, 30.0] {
+            assert_eq!(c.on_feedback(&report(0, q, 0.017)), 60_000_000, "idle at {q} ms");
+        }
+        // Sending for real, a collapsed link (little arrives) still cuts.
+        c.set_sent_kbps(40_000);
+        c.on_feedback(&report(0, 58.0, 0.5));
+        assert!(c.on_feedback(&report(0, 58.0, 0.5)) < 60_000_000);
     }
 
     #[test]

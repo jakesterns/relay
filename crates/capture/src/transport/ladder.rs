@@ -72,6 +72,9 @@ pub struct Ladder {
     /// Time since the last step up, while a flap could still undo it.
     since_up: Option<Duration>,
     up_backoff: Duration,
+    /// The target at the previous tick: a fall is a congestion cut, which
+    /// restarts the wait before a step up.
+    last_target: u32,
 }
 
 impl Ladder {
@@ -103,6 +106,7 @@ impl Ladder {
             since_change: Duration::MAX / 4,
             since_up: None,
             up_backoff: UP_BACKOFF,
+            last_target: 0,
         }
     }
 
@@ -140,7 +144,12 @@ impl Ladder {
         self.below_for = if starved { self.below_for + dt } else { Duration::ZERO };
         let roomy =
             self.idx > 0 && f64::from(target) >= f64::from(self.floors[self.idx - 1]) * UP_MARGIN;
-        self.above_for = if roomy { self.above_for + dt } else { Duration::ZERO };
+        // The controller just cut: the link is congested now, whatever the
+        // target's level. A step up half a second after a queue cut (r66,
+        // capacity-drop) only to step down again 5 s later is a flap.
+        let cut = target < self.last_target;
+        self.last_target = target;
+        self.above_for = if roomy && !cut { self.above_for + dt } else { Duration::ZERO };
 
         // Starved to under half the rung's floor, the encoder cannot honour the
         // target at this size at all (NVENC at 4K on the S49 model would not go
@@ -182,6 +191,27 @@ mod tests {
     fn run(l: &mut Ladder, secs: f64, target: u32, ceiling: u32) -> Vec<Rung> {
         let n = (secs / TICK.as_secs_f64()).round() as usize;
         (0..n).filter_map(|_| l.on_tick(TICK, target, ceiling)).collect()
+    }
+
+    /// r66: a cut restarts the wait for a step up, even when the cut
+    /// target still clears the upper rung's margin.
+    #[test]
+    fn a_cut_restarts_the_wait_for_a_step_up() {
+        let mut l = Ladder::new(UHD, VideoCodec::Hevc);
+        let ceiling = 60_000_000;
+        // Down a rung.
+        let low = l.floor_of(0) / 3;
+        assert!(!run(&mut l, 10.0, low, ceiling).is_empty());
+        let up = (f64::from(l.floor_of(0)) * UP_MARGIN) as u32;
+        assert!(run(&mut l, UP_HOLD.as_secs_f64() - 1.0, up + 2_000_000, ceiling).is_empty());
+        // A cut that still clears the margin: no step now, and the hold
+        // starts again from here.
+        assert_eq!(l.on_tick(TICK, up + 1_000_000, ceiling), None);
+        assert!(run(&mut l, UP_HOLD.as_secs_f64() - 1.0, up + 1_000_000, ceiling).is_empty());
+        assert!(
+            !run(&mut l, 2.0, up + 1_000_000, ceiling).is_empty(),
+            "then up, after a full hold"
+        );
     }
 
     #[test]

@@ -65,6 +65,11 @@ pub const MIN_SCENES: usize = 3;
 pub const DOMINANT_SCENE_SHARE: f64 = 0.9;
 /// ... and it has this many gameplay frames (7.5 min at 2 fps: more than the
 /// varied case, since one scene is less evidence per frame) ...
+///
+/// The same budget settles content that shows fewer than [`MIN_SCENES`]
+/// scenes without one dominating: a dark-map game that only ever fills two
+/// buckets (r62, Tarkov night: 19 % / 81 %) would otherwise never converge.
+/// Past this many frames, the scenes it has shown are the scenes it has.
 pub const MIN_FRAMES_ONE_SCENE: u64 = 900;
 /// ... or only this many (4 min) when its statistics are already tight: the
 /// standard error of every look axis is under [`CONFIDENT_SE`] (S48).
@@ -78,6 +83,11 @@ pub const CONFIDENT_SE: f32 = 0.0125;
 pub const DECORRELATION_FRAMES: f64 = 4.0;
 /// Gameplay frames between checkpoints (30 s at 2 fps).
 pub const CHECKPOINT_FRAMES: u32 = 60;
+/// Frames (1 min at [`SAMPLE_FPS`]) the recent gameplay share is smoothed over.
+pub const RECENT_SHARE_FRAMES: f64 = 120.0;
+/// Floor on the gameplay share the ETA divides by, so a menu-heavy start does
+/// not show hours.
+pub const MIN_GAMEPLAY_SHARE: f64 = 0.25;
 /// Consecutive checkpoints that must agree for convergence (S48: 2, was 3).
 pub const CONVERGE_CHECKPOINTS: usize = 2;
 /// Kept for the look-space distance used by the freeze rule's tests; the
@@ -161,6 +171,12 @@ pub struct Learner {
     /// The user pressed Apply: follow convergence (under the freeze rule).
     #[serde(default)]
     pub use_learned: bool,
+    /// Share of recently sampled frames that were gameplay, smoothed over
+    /// about [`RECENT_SHARE_FRAMES`]. The ETA runs at this rate: the whole
+    /// run's share reacts too slowly and under-predicted ~20 % through a
+    /// static stretch (r63, Tarkov).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_gameplay_share: Option<f64>,
 }
 
 /// How far along the evidence is.
@@ -188,9 +204,12 @@ pub struct Readiness {
     pub candidate: Option<LookTargets>,
     /// 0..=1 overall, for the progress bar.
     pub progress: f32,
-    /// Seconds of gameplay still needed at [`SAMPLE_FPS`] (S48). `Some(0)`
-    /// once settled; `None` while a scene is missing, which no amount of the
-    /// same scene can supply.
+    /// Seconds still needed at [`SAMPLE_FPS`] (S48), in wall-clock time at
+    /// the share of sampled frames that has been gameplay so far. `Some(0)`
+    /// once settled; `None` only before any gameplay. A scene seen but short
+    /// of [`MIN_FRAMES_PER_SCENE`] is estimated at its rate so far (r58: the
+    /// ETA was blank for all of a varied Warzone run); content that shows
+    /// fewer scenes settles on the longer limited-variety budget (r62).
     #[serde(default)]
     pub eta_secs: Option<u32>,
     /// The one-scene budget was cut short because the statistics are tight.
@@ -225,6 +244,9 @@ impl Learner {
     fn scenes_needed(&self) -> usize {
         if self.single_scene() {
             1
+        } else if self.agg.frames >= MIN_FRAMES_ONE_SCENE {
+            // Limited variety, enough of it: what has been seen is the game.
+            MIN_SCENES.min(self.scenes().max(1))
         } else {
             MIN_SCENES
         }
@@ -245,6 +267,9 @@ impl Learner {
             } else {
                 MIN_FRAMES_ONE_SCENE
             }
+        } else if self.scenes() < MIN_SCENES {
+            // Fewer scenes than a varied game: more frames instead.
+            MIN_FRAMES_ONE_SCENE
         } else {
             MIN_GAMEPLAY_FRAMES
         }
@@ -255,9 +280,7 @@ impl Learner {
         if self.converged.is_some() {
             return Some(0);
         }
-        if self.scenes() < self.scenes_needed() {
-            return None;
-        }
+        let scene_frames = self.scene_frames_left()?;
         let frames_left = self.frames_needed().saturating_sub(self.agg.frames);
         let stable = if self.has_evidence() { self.stable_checkpoints() } else { 0 };
         // The checkpoint under way, plus one per agreeing checkpoint still
@@ -265,8 +288,44 @@ impl Learner {
         let checks = CONVERGE_CHECKPOINTS.saturating_sub(stable).max(1) as u64;
         let settle = checks * CHECKPOINT_FRAMES as u64
             - (self.since_checkpoint as u64).min(CHECKPOINT_FRAMES as u64);
-        let frames = frames_left.max(settle);
-        Some(frames.div_ceil(SAMPLE_FPS as u64) as u32)
+        let frames = frames_left.max(settle).max(scene_frames);
+        // Gameplay frames come at the rate gameplay has been sampled: static,
+        // loading and idle frames are not learned from (r58: Tarkov's ETA
+        // said 42 s at 79 % with 400 static frames excluded).
+        let seen = self.agg.frames + self.excluded.total();
+        let share = self
+            .recent_gameplay_share
+            .unwrap_or(if seen == 0 { 1.0 } else { self.agg.frames as f64 / seen as f64 })
+            .clamp(MIN_GAMEPLAY_SHARE, 1.0);
+        Some((frames as f64 / share / SAMPLE_FPS as f64).ceil() as u32)
+    }
+
+    /// Gameplay frames until enough scenes have [`MIN_FRAMES_PER_SCENE`],
+    /// each still-short scene filling at its share of the gameplay so far.
+    /// When too few scenes have been seen at all, the limited-variety budget
+    /// ([`MIN_FRAMES_ONE_SCENE`], already in `frames_needed`) decides instead.
+    /// `None` only before any gameplay.
+    fn scene_frames_left(&self) -> Option<u64> {
+        if self.agg.frames == 0 {
+            return None;
+        }
+        let missing = self.scenes_needed().saturating_sub(self.scenes());
+        if missing == 0 {
+            return Some(0);
+        }
+        let total: f64 = self.agg.apl_buckets.iter().sum();
+        let mut left: Vec<f64> = self
+            .agg
+            .apl_buckets
+            .iter()
+            .filter(|w| **w > 0.0 && **w < MIN_FRAMES_PER_SCENE)
+            .map(|w| (MIN_FRAMES_PER_SCENE - w) * total / w)
+            .collect();
+        if left.len() < missing {
+            return Some(0);
+        }
+        left.sort_by(f64::total_cmp);
+        Some(left[missing - 1].ceil() as u64)
     }
 
     /// S48: fold `other` (a learner fed from a video file of the same game)
@@ -374,6 +433,7 @@ impl Learner {
         self.checkpoints.clear();
         self.since_checkpoint = 0;
         self.converged = None;
+        self.recent_gameplay_share = None;
     }
 
     /// Back to nothing: no evidence, nothing applied.
@@ -398,6 +458,11 @@ impl Learner {
     /// Feed one analysed frame. Returns true when a checkpoint was taken
     /// (the caller persists then, not on every frame).
     pub fn observe(&mut self, r: &FrameReport) -> bool {
+        let g = if r.class == FrameClass::Gameplay { 1.0 } else { 0.0 };
+        self.recent_gameplay_share = Some(match self.recent_gameplay_share {
+            None => g,
+            Some(s) => s + (g - s) / RECENT_SHARE_FRAMES,
+        });
         match r.class {
             FrameClass::Gameplay => {}
             FrameClass::Static => {

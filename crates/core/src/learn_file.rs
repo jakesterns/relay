@@ -101,6 +101,18 @@ fn modified_unix(m: &std::fs::Metadata) -> u64 {
         .unwrap_or(0)
 }
 
+/// A file name for display: Windows Game Bar puts invisible direction and
+/// zero-width marks into its clip names (r58), which the UI showed as-is.
+/// Only the label changes; the path is used untouched.
+fn display_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| {
+            !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+        })
+        .collect()
+}
+
 /// Videos in each folder (top level only), newest first per folder, in the
 /// folders' order: Relay's recording folder first, then the user's Videos
 /// folder. A file seen twice is listed once (as a Relay recording).
@@ -113,7 +125,7 @@ pub fn list_videos(folders: &[(PathBuf, bool)]) -> Vec<VideoFile> {
             .filter_map(|e| {
                 let p = e.path();
                 let m = e.metadata().ok()?;
-                let name = p.file_name()?.to_string_lossy().into_owned();
+                let name = display_name(&p.file_name()?.to_string_lossy());
                 (m.is_file() && m.len() > 0 && has_video_extension(&p)).then(|| VideoFile {
                     name,
                     path: p.display().to_string(),
@@ -194,7 +206,7 @@ impl LearnFileStatus {
             exe: exe.to_ascii_lowercase(),
             file_name: file
                 .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
+                .map(|n| display_name(&n.to_string_lossy()))
                 .unwrap_or_default(),
             state: FileJobState::Running,
             progress: Some(0.0),
@@ -518,6 +530,7 @@ mod tests {
     fn helper_lines_update_the_status() {
         let mut st = LearnFileStatus::new(Uuid::nil(), "Game.exe", Path::new("C:\\v\\clip.mp4"));
         assert_eq!((st.exe.as_str(), st.file_name.as_str()), ("game.exe", "clip.mp4"));
+        assert_eq!(display_name("Call of Duty\u{200E} 2026\u{200B}.mp4"), "Call of Duty 2026.mp4");
         let p = decode_file_line(
             r#"{"event":"progress","pos_secs":30,"duration_secs":120,"speed":14.5}"#,
         )

@@ -432,15 +432,15 @@ fn streams_ring_frames_in_every_format_with_monotonic_timestamps() {
         })
     };
     let (log, _) = run_with_sink(MEDIASUBTYPE_NV12, 1000, |pin| {
-        assert_eq!(first_offer(pin), (MEDIASUBTYPE_NV12, 1280, 720), "idle: 720p NV12 first");
+        assert_eq!(first_offer(pin), (MEDIASUBTYPE_NV12, 1920, 1080), "idle: 1080p NV12 first");
     });
     late.join().unwrap();
-    assert_eq!(log.connected, Some((MEDIASUBTYPE_NV12, 1280, 720)));
-    let n720 = picture::nv12_bytes(1280, 720);
-    assert!(log.samples.iter().all(|s| s.2.len() == n720), "every sample stays 720p NV12");
-    let mut scaled = vec![0u8; n720];
-    picture::scale_nv12(&frame, w, h, &mut scaled, 1280, 720);
-    assert!(log.samples.iter().any(|s| s.2 == scaled), "late 320x180 stream scaled to 720p");
+    assert_eq!(log.connected, Some((MEDIASUBTYPE_NV12, 1920, 1080)));
+    let n1080 = picture::nv12_bytes(1920, 1080);
+    assert!(log.samples.iter().all(|s| s.2.len() == n1080), "every sample stays 1080p NV12");
+    let mut scaled = vec![0u8; n1080];
+    picture::scale_nv12(&frame, w, h, &mut scaled, 1920, 1080);
+    assert!(log.samples.iter().any(|s| s.2 == scaled), "late 320x180 stream scaled to 1080p");
     assert_eq!(log.type_changes, 0, "no media-type change mid-run");
 
     // With a size announced, the stream's own size is first again.
@@ -611,5 +611,121 @@ fn filter_and_pin_are_freed_with_no_cycle() {
         let mut info = PIN_INFO::default();
         pin.QueryPinInfo(&mut info).unwrap();
         assert!(std::mem::ManuallyDrop::take(&mut info.pFilter).is_none());
+    }
+}
+
+/// The calls OBS's libdshowcapture makes on activation, through the real
+/// qcap/quartz graph objects: `ICaptureGraphBuilder2::FindInterface` for a
+/// crossbar (r57 crashed OBS inside qcap here), then pin lookup.
+#[test]
+fn obs_shaped_graph_probe_does_not_crash() {
+    use windows::Win32::Media::DirectShow::{IAMCrossbar, ICaptureGraphBuilder2, IGraphBuilder};
+    use windows::Win32::Media::MediaFoundation::{CLSID_CaptureGraphBuilder2, CLSID_FilterGraph};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    com();
+    setup_env();
+    let filter = filter_via_class_factory();
+    // SAFETY: standard DirectShow graph calls on live objects.
+    unsafe {
+        let graph: IGraphBuilder =
+            CoCreateInstance(&CLSID_FilterGraph, None, CLSCTX_INPROC_SERVER).expect("graph");
+        let builder: ICaptureGraphBuilder2 =
+            CoCreateInstance(&CLSID_CaptureGraphBuilder2, None, CLSCTX_INPROC_SERVER)
+                .expect("builder");
+        builder.SetFiltergraph(&graph).expect("SetFiltergraph");
+        graph.AddFilter(&filter, windows::core::w!("Relay Camera")).expect("AddFilter");
+        eprintln!("FindInterface crossbar…");
+        let mut out: *mut core::ffi::c_void = std::ptr::null_mut();
+        let r = builder.FindInterface(None, None, &filter, &IAMCrossbar::IID, &mut out);
+        eprintln!("FindInterface crossbar -> {r:?}");
+        assert!(r.is_err(), "no crossbar");
+        let mut out: *mut core::ffi::c_void = std::ptr::null_mut();
+        let r = builder.FindInterface(
+            Some(&PIN_CATEGORY_CAPTURE),
+            Some(&windows::Win32::Media::MediaFoundation::MEDIATYPE_Video),
+            &filter,
+            &IAMStreamConfig::IID,
+            &mut out,
+        );
+        eprintln!("FindInterface stream config -> {r:?}");
+        assert!(r.is_ok(), "stream config found on the capture pin");
+        drop(IAMStreamConfig::from_raw(out));
+        graph.RemoveFilter(&filter).expect("RemoveFilter");
+    }
+}
+
+/// OBS's activate → run → stop → deactivate → activate cycle against a real
+/// qcap downstream filter (Smart Tee), through the graph's `ConnectDirect`.
+#[test]
+fn graph_connect_run_reconnect_cycle() {
+    use windows::Win32::Media::DirectShow::{IGraphBuilder, IMediaControl};
+    use windows::Win32::Media::MediaFoundation::{CLSID_FilterGraph, CLSID_SmartTee};
+    use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+    com();
+    setup_env();
+    for round in 0..3 {
+        let filter = filter_via_class_factory();
+        // SAFETY: standard DirectShow graph calls on live objects.
+        unsafe {
+            let graph: IGraphBuilder =
+                CoCreateInstance(&CLSID_FilterGraph, None, CLSCTX_INPROC_SERVER).expect("graph");
+            let tee: IBaseFilter =
+                CoCreateInstance(&CLSID_SmartTee, None, CLSCTX_INPROC_SERVER).expect("tee");
+            graph.AddFilter(&filter, windows::core::w!("Relay Camera")).unwrap();
+            graph.AddFilter(&tee, windows::core::w!("Tee")).unwrap();
+            let out = output_pin(&filter);
+            let e = tee.EnumPins().unwrap();
+            let mut pins = [None];
+            let mut n = 0;
+            let _ = e.Next(&mut pins, Some(&mut n));
+            let tee_in = pins[0].take().unwrap();
+            eprintln!("round {round}: ConnectDirect");
+            graph.ConnectDirect(&out, &tee_in, None).expect("ConnectDirect");
+            let mc: IMediaControl = graph.cast().unwrap();
+            eprintln!("round {round}: Run");
+            let _ = mc.Run();
+            std::thread::sleep(Duration::from_millis(300));
+            eprintln!("round {round}: Stop");
+            mc.Stop().unwrap();
+            graph.RemoveFilter(&tee).unwrap();
+            graph.RemoveFilter(&filter).unwrap();
+            eprintln!("round {round}: ConnectedTo after removal = {:?}", out.ConnectedTo().is_ok());
+        }
+    }
+}
+
+/// Failed getters NULL their out pointer (the r57 OBS crash: garbage left in
+/// `ConnectedTo`'s out by an unconnected pin, read by qcap).
+#[test]
+fn failed_getters_null_their_out_pointer() {
+    use windows::Win32::Media::DirectShow::{IBaseFilter_Vtbl, IPin_Vtbl};
+    com();
+    setup_env();
+    let filter = filter_via_class_factory();
+    let pin = output_pin(&filter);
+    let poison = 0xDEAD_BEEF_usize as *mut core::ffi::c_void;
+    // SAFETY: raw vtable calls with valid out slots, as a C caller makes them.
+    unsafe {
+        let mut out = poison;
+        let vt = &**(pin.as_raw() as *const *const IPin_Vtbl);
+        let hr = (vt.ConnectedTo)(pin.as_raw(), &mut out);
+        assert!(hr.is_err(), "unconnected");
+        assert!(out.is_null(), "ConnectedTo out NULLed");
+        let vt = &**(filter.as_raw() as *const *const IBaseFilter_Vtbl);
+        let mut out = poison;
+        let hr = (vt.base__.GetSyncSource)(filter.as_raw(), &mut out);
+        assert_eq!(hr, windows::Win32::Foundation::S_FALSE, "no clock");
+        assert!(out.is_null(), "GetSyncSource out NULLed");
+        let mut out = poison;
+        let hr = (vt.FindPin)(filter.as_raw(), windows::core::w!("nope"), &mut out);
+        assert!(hr.is_err());
+        assert!(out.is_null(), "FindPin out NULLed");
+        let mut s = windows::core::PWSTR(poison as *mut u16);
+        let hr = (vt.QueryVendorInfo)(filter.as_raw(), &mut s);
+        assert!(hr.is_err());
+        assert!(s.is_null(), "QueryVendorInfo out NULLed");
+        // The interfaces still work through the patched vtables.
+        assert!(pin.QueryDirection().is_ok());
+        assert!(filter.FindPin(windows::core::w!("Capture")).is_ok());
     }
 }

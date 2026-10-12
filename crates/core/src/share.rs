@@ -100,6 +100,11 @@ pub struct ShareRequest {
     /// Where the call coming back plays (S40); `None` = the System default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_device: Option<String>,
+    /// The source to start on; `None` = the primary display. The service
+    /// keeps the share's intent record on whatever the engine last switched
+    /// to, so a reconnect resumes that source instead of the desktop (r59).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceTarget>,
 }
 
 /// Container the recorder muxes into. Both carry the identical HEVC + Opus
@@ -738,6 +743,10 @@ fn send_args(req: &ShareRequest) -> Vec<String> {
     if req.ndi {
         args.push("--ndi".into());
     }
+    if let Some(t) = req.source.filter(|t| *t != INITIAL_SHARE_TARGET) {
+        args.push("--source".into());
+        args.push(serde_json::to_string(&t).expect("a source target serialises"));
+    }
     if !req.cursor {
         args.push("--no-cursor".into());
     }
@@ -1096,6 +1105,23 @@ mod tests {
         assert!(!recv_args(&recv).contains(&"--ndi".to_string()));
         recv.ndi = true;
         assert_eq!(recv_args(&recv), ["recv", "--ndi"]);
+    }
+
+    /// r59: a reconnect starts on the source the share was on. The primary
+    /// display is the engine's default and is not spelled out.
+    #[test]
+    fn send_args_carry_a_non_default_source() {
+        let mut req: ShareRequest = serde_json::from_str(r#"{"code":"123456"}"#).unwrap();
+        req.source = Some(SourceTarget::Window { hwnd: 0x51DE });
+        let a = send_args(&req);
+        let i = a.iter().position(|x| x == "--source").expect("--source");
+        assert_eq!(a[i + 1], r#"{"kind":"window","hwnd":20958}"#);
+        req.source = Some(INITIAL_SHARE_TARGET);
+        assert!(!send_args(&req).iter().any(|x| x == "--source"));
+        // Older intent files have no source and still parse.
+        assert_eq!(req.source.and(None::<SourceTarget>), None);
+        let old: ShareRequest = serde_json::from_str(r#"{"code":"1"}"#).unwrap();
+        assert_eq!(old.source, None);
     }
 
     #[test]

@@ -11,7 +11,10 @@
 //! noise every frame was a scene cut sixty times a second: no encoder can
 //! hold a target on that, and it measured the encoder, not the link.
 //!
-//! `noise` uses the monitor's size; `noise:WIDTHxHEIGHT` sets one.
+//! `noise` uses the monitor's size; `noise:WIDTHxHEIGHT` sets one. `still`
+//! (same size forms) delivers the first frame and then nothing, the way WGC
+//! behaves on a window that does not change (r60: a ladder step on a still
+//! window left the receiver with nothing for 3 s).
 
 use std::time::{Duration, Instant};
 
@@ -44,12 +47,13 @@ pub struct NoiseSource {
     size: (u32, u32),
     frame: u64,
     due: Instant,
+    still: bool,
 }
 
 /// `Some(size)` when `RELAY_TEST_SOURCE` asks for the noise source.
 pub fn requested(monitor: (u32, u32)) -> Option<(u32, u32)> {
     let v = std::env::var("RELAY_TEST_SOURCE").ok()?;
-    let rest = v.strip_prefix("noise")?;
+    let rest = v.strip_prefix("noise").or_else(|| v.strip_prefix("still"))?;
     let Some(dims) = rest.strip_prefix(':') else { return Some(monitor) };
     let (w, h) = dims.split_once('x')?;
     Some((w.parse().ok()?, h.parse().ok()?))
@@ -126,12 +130,17 @@ impl NoiseSource {
             size: (w, h),
             frame: 0,
             due: Instant::now(),
+            still: std::env::var("RELAY_TEST_SOURCE").is_ok_and(|v| v.starts_with("still")),
         })
     }
 }
 
 impl FrameSource for NoiseSource {
     fn next(&mut self, timeout: Duration) -> Result<Option<CapturedFrame>> {
+        if self.still && self.frame > 0 {
+            std::thread::sleep(timeout);
+            return Ok(None);
+        }
         let now = Instant::now();
         if self.due > now {
             let wait = self.due - now;
