@@ -3645,11 +3645,29 @@ impl IpcHandler {
                 Err(e) => Reply::Error { message: format!("{e:#}") },
             },
             Method::Subscribe => {
+                let idle = g.receive.is_none();
                 drop(g);
-                let (recv, stream) = {
+                let (mut recv, stream) = {
                     let last = self.last_recv.lock().unwrap();
                     (last.recv.clone(), last.stream.clone())
                 };
+                // A core that has never received says so: a window that
+                // outlived the previous core (shut down and started again
+                // under it, r64) still showed "Stop receiving" over nothing.
+                if recv.is_none() && idle {
+                    recv = Some(Event::ReceiveStatus {
+                        receiving: false,
+                        code: None,
+                        sender: None,
+                        message: None,
+                        codec: None,
+                        trusted: false,
+                        ended_by_sender: false,
+                        restarting: false,
+                        return_pid: None,
+                        return_exe: None,
+                    });
+                }
                 // Receive status first: the shell's stream state hangs off it.
                 for ev in [recv, stream].into_iter().flatten() {
                     let _ = self.events.send(ev);
