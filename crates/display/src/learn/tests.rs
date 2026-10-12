@@ -1050,12 +1050,40 @@ fn eta_scales_with_the_gameplay_share() {
         l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
     }
     let all_gameplay = l.eta_secs().unwrap();
+    // An older record has no recent share: the whole run's share is used.
+    l.recent_gameplay_share = None;
     l.excluded.static_frames = 90; // half of what was seen
     let half = l.eta_secs().unwrap();
     assert!((half as i64 - 2 * all_gameplay as i64).abs() <= 1, "{half} vs {all_gameplay}");
     l.excluded.static_frames = 100_000; // floored, not hours
     let floored = l.eta_secs().unwrap();
     assert!(floored as f64 <= all_gameplay as f64 / MIN_GAMEPLAY_SHARE + 1.0);
+}
+
+/// r63: a static stretch slows the ETA within about a minute, not over the
+/// whole run, and it speeds back up when play resumes.
+#[test]
+fn eta_follows_the_recent_gameplay_share() {
+    let mut l = Learner::new("b1");
+    for i in 0..300 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let playing = l.eta_secs().unwrap();
+    let mut still = gameplay(0.3, 0.14);
+    still.class = FrameClass::Static;
+    for _ in 0..120 {
+        l.observe(&still);
+    }
+    let paused = l.eta_secs().unwrap();
+    // Same gameplay left; ~63 % of the last minute was static.
+    assert!(paused as f64 > 2.0 * playing as f64, "{paused} vs {playing}");
+    for i in 0..120 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let resumed = l.eta_secs().unwrap();
+    assert!(resumed < paused, "{resumed} < {paused}");
+    l.relearn();
+    assert_eq!(l.recent_gameplay_share, None);
 }
 
 /// A video file's learner merged into a live one: the evidence adds,

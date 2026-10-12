@@ -83,6 +83,8 @@ pub const CONFIDENT_SE: f32 = 0.0125;
 pub const DECORRELATION_FRAMES: f64 = 4.0;
 /// Gameplay frames between checkpoints (30 s at 2 fps).
 pub const CHECKPOINT_FRAMES: u32 = 60;
+/// Frames (1 min at [`SAMPLE_FPS`]) the recent gameplay share is smoothed over.
+pub const RECENT_SHARE_FRAMES: f64 = 120.0;
 /// Floor on the gameplay share the ETA divides by, so a menu-heavy start does
 /// not show hours.
 pub const MIN_GAMEPLAY_SHARE: f64 = 0.25;
@@ -169,6 +171,12 @@ pub struct Learner {
     /// The user pressed Apply: follow convergence (under the freeze rule).
     #[serde(default)]
     pub use_learned: bool,
+    /// Share of recently sampled frames that were gameplay, smoothed over
+    /// about [`RECENT_SHARE_FRAMES`]. The ETA runs at this rate: the whole
+    /// run's share reacts too slowly and under-predicted ~20 % through a
+    /// static stretch (r63, Tarkov).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent_gameplay_share: Option<f64>,
 }
 
 /// How far along the evidence is.
@@ -285,11 +293,10 @@ impl Learner {
         // loading and idle frames are not learned from (r58: Tarkov's ETA
         // said 42 s at 79 % with 400 static frames excluded).
         let seen = self.agg.frames + self.excluded.total();
-        let share = if seen == 0 {
-            1.0
-        } else {
-            (self.agg.frames as f64 / seen as f64).clamp(MIN_GAMEPLAY_SHARE, 1.0)
-        };
+        let share = self
+            .recent_gameplay_share
+            .unwrap_or(if seen == 0 { 1.0 } else { self.agg.frames as f64 / seen as f64 })
+            .clamp(MIN_GAMEPLAY_SHARE, 1.0);
         Some((frames as f64 / share / SAMPLE_FPS as f64).ceil() as u32)
     }
 
@@ -426,6 +433,7 @@ impl Learner {
         self.checkpoints.clear();
         self.since_checkpoint = 0;
         self.converged = None;
+        self.recent_gameplay_share = None;
     }
 
     /// Back to nothing: no evidence, nothing applied.
@@ -450,6 +458,11 @@ impl Learner {
     /// Feed one analysed frame. Returns true when a checkpoint was taken
     /// (the caller persists then, not on every frame).
     pub fn observe(&mut self, r: &FrameReport) -> bool {
+        let g = if r.class == FrameClass::Gameplay { 1.0 } else { 0.0 };
+        self.recent_gameplay_share = Some(match self.recent_gameplay_share {
+            None => g,
+            Some(s) => s + (g - s) / RECENT_SHARE_FRAMES,
+        });
         match r.class {
             FrameClass::Gameplay => {}
             FrameClass::Static => {
