@@ -65,6 +65,11 @@ pub const MIN_SCENES: usize = 3;
 pub const DOMINANT_SCENE_SHARE: f64 = 0.9;
 /// ... and it has this many gameplay frames (7.5 min at 2 fps: more than the
 /// varied case, since one scene is less evidence per frame) ...
+///
+/// The same budget settles content that shows fewer than [`MIN_SCENES`]
+/// scenes without one dominating: a dark-map game that only ever fills two
+/// buckets (r62, Tarkov night: 19 % / 81 %) would otherwise never converge.
+/// Past this many frames, the scenes it has shown are the scenes it has.
 pub const MIN_FRAMES_ONE_SCENE: u64 = 900;
 /// ... or only this many (4 min) when its statistics are already tight: the
 /// standard error of every look axis is under [`CONFIDENT_SE`] (S48).
@@ -193,10 +198,10 @@ pub struct Readiness {
     pub progress: f32,
     /// Seconds still needed at [`SAMPLE_FPS`] (S48), in wall-clock time at
     /// the share of sampled frames that has been gameplay so far. `Some(0)`
-    /// once settled; `None` while a needed scene has not been seen at all,
-    /// which no amount of the same scene can supply. A scene seen but short
+    /// once settled; `None` only before any gameplay. A scene seen but short
     /// of [`MIN_FRAMES_PER_SCENE`] is estimated at its rate so far (r58: the
-    /// ETA was blank for all of a varied Warzone run).
+    /// ETA was blank for all of a varied Warzone run); content that shows
+    /// fewer scenes settles on the longer limited-variety budget (r62).
     #[serde(default)]
     pub eta_secs: Option<u32>,
     /// The one-scene budget was cut short because the statistics are tight.
@@ -231,6 +236,9 @@ impl Learner {
     fn scenes_needed(&self) -> usize {
         if self.single_scene() {
             1
+        } else if self.agg.frames >= MIN_FRAMES_ONE_SCENE {
+            // Limited variety, enough of it: what has been seen is the game.
+            MIN_SCENES.min(self.scenes().max(1))
         } else {
             MIN_SCENES
         }
@@ -251,6 +259,9 @@ impl Learner {
             } else {
                 MIN_FRAMES_ONE_SCENE
             }
+        } else if self.scenes() < MIN_SCENES {
+            // Fewer scenes than a varied game: more frames instead.
+            MIN_FRAMES_ONE_SCENE
         } else {
             MIN_GAMEPLAY_FRAMES
         }
@@ -284,8 +295,13 @@ impl Learner {
 
     /// Gameplay frames until enough scenes have [`MIN_FRAMES_PER_SCENE`],
     /// each still-short scene filling at its share of the gameplay so far.
-    /// `None` when fewer scenes than needed have been seen at all.
+    /// When too few scenes have been seen at all, the limited-variety budget
+    /// ([`MIN_FRAMES_ONE_SCENE`], already in `frames_needed`) decides instead.
+    /// `None` only before any gameplay.
     fn scene_frames_left(&self) -> Option<u64> {
+        if self.agg.frames == 0 {
+            return None;
+        }
         let missing = self.scenes_needed().saturating_sub(self.scenes());
         if missing == 0 {
             return Some(0);
@@ -299,7 +315,7 @@ impl Learner {
             .map(|w| (MIN_FRAMES_PER_SCENE - w) * total / w)
             .collect();
         if left.len() < missing {
-            return None;
+            return Some(0);
         }
         left.sort_by(f64::total_cmp);
         Some(left[missing - 1].ceil() as u64)

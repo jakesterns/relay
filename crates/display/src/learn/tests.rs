@@ -843,15 +843,23 @@ fn a_night_only_game_converges_and_asks_for_shadow() {
 }
 
 #[test]
-fn varied_content_still_needs_three_scenes() {
+fn varied_content_needs_three_scenes_until_the_longer_budget() {
     let mut l = Learner::new("b1");
-    // 80 % night, 20 % daylight: not one scene, only two buckets.
-    for i in 0..3000 {
+    // 80 % night, 20 % daylight: not one scene, only two buckets. Before the
+    // limited-variety budget it still waits for a third scene ...
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 50) {
         l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
     }
     assert!(!l.single_scene());
     assert_eq!(l.readiness().scenes_needed, MIN_SCENES);
+    assert_eq!(l.readiness().frames_needed, MIN_FRAMES_ONE_SCENE);
     assert_eq!(l.phase(), Phase::Learning);
+    // ... and past it, the two scenes it shows are the game (r62).
+    for i in 0..2000 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert_eq!(l.readiness().scenes_needed, 2);
+    assert_eq!(l.phase(), Phase::Converged);
     assert_eq!((DOMINANT_SCENE_SHARE, MIN_FRAMES_ONE_SCENE), (0.9, 900));
 }
 
@@ -996,12 +1004,14 @@ fn eta_counts_down_and_is_unknown_without_the_scenes() {
     assert_eq!(l.phase(), Phase::Converged);
     assert_eq!(l.eta_secs(), Some(0));
     assert_eq!(l.readiness().eta_secs, Some(0));
-    // Two scenes, neither dominant: the never-seen scene has no ETA.
+    // Two scenes, neither dominant: the limited-variety budget (r62).
     let mut two = Learner::new("b1");
     for i in 0..300 {
         two.observe(&gameplay(if i % 4 == 0 { 0.7 } else { 0.05 }, 0.2));
     }
-    assert_eq!(two.eta_secs(), None);
+    let eta = two.eta_secs().expect("two scenes still have an ETA");
+    let budget = ((MIN_FRAMES_ONE_SCENE - 300) / SAMPLE_FPS as u64) as u32;
+    assert!(eta.abs_diff(budget) <= 2, "{eta} vs {budget}");
     // A third scene seen but short (r58, Warzone): estimated at its rate.
     // 10 of 310 frames so far -> 20 more needs ~620 gameplay frames.
     for _ in 0..10 {
@@ -1010,6 +1020,25 @@ fn eta_counts_down_and_is_unknown_without_the_scenes() {
     let eta = two.eta_secs().expect("short scene estimated");
     let want = ((MIN_FRAMES_PER_SCENE - 10.0) * 310.0 / 10.0 / SAMPLE_FPS as f64).ceil() as u32;
     assert_eq!(eta, want);
+}
+
+/// r62 Tarkov night: two scenes, 19 % / 81 %, never a third. It converges on
+/// the limited-variety budget instead of waiting forever.
+#[test]
+fn two_scene_content_converges_on_the_longer_budget() {
+    let mut l = Learner::new("b1");
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 100) {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.scenes(), 2);
+    assert!(!l.single_scene());
+    assert_eq!(l.phase(), Phase::Learning, "not before the budget");
+    assert!(l.eta_secs().is_some());
+    for i in 0..1200 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
+    assert_eq!(l.eta_secs(), Some(0));
 }
 
 /// r58 Tarkov: the ETA is wall-clock time, so frames that are not gameplay
