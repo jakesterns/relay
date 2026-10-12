@@ -721,12 +721,15 @@ pub async fn run(opts: SendOpts) -> Result<()> {
         let target = target_bps.clone();
         let retx = events.retransmit_budget.clone();
         let state = adapt_state.clone();
+        let sent_stats = stats.clone();
         // S30's loss controller, wrapped by S49's delay half and ladder
         // (`control::SenderAdapt`). With an older receiver only the loss
         // half runs, exactly as before.
         let mut adapt = super::control::SenderAdapt::new(opts.bitrate_bps, None);
         let mut announced: Option<(super::ladder::Rung, super::control::Cause, u32)> = None;
         let mut last_report: Option<super::control::Feedback> = None;
+        // Video bytes sent at the previous report, for the controller's idle test.
+        let mut sent_at: Option<(Instant, u64)> = None;
         let mut clock = signal::ClockFilter::seeded(offset_ns, rtt_ns);
         let mut bye_rx = bye_rx;
         // Test hook: the pre-S33 behaviour, to measure the drift it leaves.
@@ -756,6 +759,13 @@ pub async fn run(opts: SendOpts) -> Result<()> {
                                     "feedback"
                                 );
                                 last_report = Some(report);
+                                let bytes = sent_stats.video_bytes.load(Ordering::Relaxed);
+                                let now = Instant::now();
+                                if let Some((t, b)) = sent_at {
+                                    let ms = now.duration_since(t).as_millis().max(1) as u64;
+                                    adapt.control.set_sent_kbps((bytes.saturating_sub(b) * 8 / ms) as u32);
+                                }
+                                sent_at = Some((now, bytes));
                                 Some(adapt.on_feedback(&report))
                             }
                             Ok(signal::SigMsg::Pong { seq: got, t1_ns, t2_ns, t3_ns }) if got == seq => {
