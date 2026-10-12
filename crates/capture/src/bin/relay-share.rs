@@ -949,8 +949,9 @@ mod tests {
     fn source_arg_sets_the_starting_source() {
         let o = parse_send_args(&s(&["--code", "1"])).unwrap();
         assert_eq!(o.source, None, "primary display by default");
-        let o = parse_send_args(&s(&["--code", "1", "--source", r#"{"kind":"window","hwnd":20958}"#]))
-            .unwrap();
+        let o =
+            parse_send_args(&s(&["--code", "1", "--source", r#"{"kind":"window","hwnd":20958}"#]))
+                .unwrap();
         assert_eq!(o.source, Some(relay_capture::command::SourceTarget::Window { hwnd: 20958 }));
         assert!(parse_send_args(&s(&["--code", "1", "--source", "nope"])).is_err());
     }

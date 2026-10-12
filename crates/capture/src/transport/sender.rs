@@ -1620,15 +1620,15 @@ fn video_pipeline(
                                     src = new_src;
                                     conv_in = src.size();
                                     conv = crate::encode::convert::Converter::new(
-                                        &gpu,
-                                        conv_in,
-                                        size,
+                                        &gpu, conv_in, size,
                                     )?;
                                     conv.set_source_rect(new_crop);
                                     crop = new_crop;
                                     preview.invalidate();
                                 }
-                                Err(e) => warn!(error = %e, "reopening the source for the new rung failed"),
+                                Err(e) => {
+                                    warn!(error = %e, "reopening the source for the new rung failed")
+                                }
                             }
                             if let Some(rec) = recorder.get() {
                                 rec.resize(r.width, r.height);
