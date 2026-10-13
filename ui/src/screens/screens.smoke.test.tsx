@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import { renderApp, renderScreen, settle } from "../test/render";
 import { makeFakeCore } from "../test/fakeCore";
+import { card } from "../test/dom";
 import * as tauri from "../test/tauriMock";
 import { Games } from "./Games";
 import { Profiles } from "./Profiles";
@@ -98,7 +99,9 @@ describe("offline core (inside Tauri, nothing behind the pipe)", () => {
     renderScreen(<Receive />);
     await settle();
     expect(screen.getByText(/Relay is not running — status unknown/)).toBeInTheDocument();
-    expect(screen.queryByText(/Relay Camera/)).not.toBeInTheDocument();
+    // The status card claims nothing. (The S50 guide names Relay Camera as
+    // a choice, not a status, so it is not what this is about.)
+    expect(card("In calls").textContent).not.toMatch(/Relay Camera/);
   });
 
   it("the app shell still mounts and does not trap the user on first run", async () => {

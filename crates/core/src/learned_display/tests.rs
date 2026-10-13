@@ -235,6 +235,13 @@ fn view_carries_the_exact_notices_and_progress() {
     assert_eq!(m.phase, Phase::Converged);
     assert!(m.hdr_skipped);
     assert!(m.adjustments.is_none(), "nothing applied yet");
+    // The breakdown and per-scene counts reach the view (PC2, r49).
+    assert_eq!(m.readiness.scene_frames.len(), 5);
+    assert_eq!(m.readiness.scene_frames.iter().sum::<u64>(), 1200);
+    let json = serde_json::to_value(m).unwrap();
+    for k in ["static_frames", "loading", "cutscene", "outlier", "idle", "warmup"] {
+        assert!(json["excluded_by"].get(k).is_some(), "{k}");
+    }
 }
 
 #[test]
@@ -249,8 +256,9 @@ fn sampler_wire_lines_decode() {
     );
     assert_eq!(decode_line("garbage"), None);
     assert_eq!(decode_line(r#"{"event":"stats"}"#), None);
-    assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "1"]);
-    assert_eq!(SAMPLE_FPS, 1);
+    assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "2"]);
+    assert_eq!(SAMPLE_FPS, 2);
+    const { assert!(SAMPLE_FPS <= 2, "relay-share look caps at MAX_FPS = 2") };
 }
 
 #[test]
@@ -272,6 +280,93 @@ fn a_fast_exit_never_loses_the_hdr_line() {
     // Running and quiet: not finished.
     let (_tx, rx) = std::sync::mpsc::channel::<SamplerLine>();
     assert_eq!(drain(&rx, false), (vec![], false));
+}
+
+#[test]
+fn the_panel_is_guessed_from_the_model_when_unset() {
+    assert_eq!(panel_kind("", "AW2518H", "DEL40E0-1"), (PanelKind::Tn, true));
+    assert_eq!(panel_kind("IPS", "AW2518H", "DEL40E0-1"), (PanelKind::Ips, false), "the user wins");
+    assert_eq!(panel_kind("", "Generic", "ABC"), (PanelKind::Unknown, false));
+    let v = {
+        let mut s = tmp_store("guess");
+        s.game_mut("game.exe").monitor_mut(&MonitorId("DEL40E0-1".into()));
+        view(&s, "game.exe", false, &|_| ("AW2518H".into(), String::new()))
+    };
+    assert_eq!((v.monitors[0].panel, v.monitors[0].panel_guessed), (PanelKind::Tn, true));
+}
+
+#[test]
+fn alt_tab_grace_is_fifteen_seconds() {
+    let now = std::time::Instant::now();
+    assert_eq!(LOOK_BLUR_GRACE, std::time::Duration::from_secs(15));
+    assert!(!grace_expired(None, now));
+    assert!(!grace_expired(Some(now), now + std::time::Duration::from_secs(14)));
+    assert!(grace_expired(Some(now), now + LOOK_BLUR_GRACE));
+}
+
+#[test]
+fn a_sampler_restart_keeps_the_learners_evidence() {
+    // The learner lives in the store, not the sampler: a new sampler process
+    // for the same game, monitor and build continues where the last left off.
+    let mut s = tmp_store("restart");
+    let l = converged_learner();
+    let frames = l.agg.frames;
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: l, hdr_skipped: false });
+    let rec = s.game_mut("game.exe").monitor_mut(&mon());
+    assert!(!rec.learner.check_build("b1"), "same build: no reset");
+    assert_eq!(rec.learner.agg.frames, frames);
+    assert_eq!(rec.learner.phase(), Phase::Converged);
+}
+
+#[test]
+fn top_level_status_agrees_with_the_monitors() {
+    let mut s = tmp_store("overall");
+    s.game_mut("game.exe").enabled = true;
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    let v = view(&s, "game.exe", true, &|_| ("x".into(), "WOLED".into()));
+    assert_eq!(v.monitors[0].status, LookStatus::Ready);
+    assert_eq!(v.status, LookStatus::Ready, "was 'learning' on PC2");
+    // The candidate shows even before Apply, fitted to the panel.
+    assert!(v.monitors[0].candidate_adjustments.is_some());
+    let empty = view(&tmp_store("overall2"), "game.exe", false, &|_| Default::default());
+    assert_eq!(empty.status, LookStatus::Off);
+}
+
+#[test]
+fn a_settled_look_is_an_offer_until_applied() {
+    let mut s = tmp_store("offer");
+    s.game_mut("game.exe")
+        .monitors
+        .insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    let v = view(&s, "game.exe", false, &|_| ("AW2518H".into(), "TN".into()));
+    let m = &v.monitors[0];
+    assert_eq!(m.status, LookStatus::Ready);
+    assert!(m.adjustments.is_none(), "nothing is applied yet");
+    assert!(m.offer.is_some() && m.offer_adjustments.is_some());
+    // Apply: the offer becomes what is applied.
+    assert!(s.game_mut("game.exe").monitors.get_mut(&mon().0).unwrap().learner.apply());
+    let v = view(&s, "game.exe", false, &|_| ("AW2518H".into(), "TN".into()));
+    let m = &v.monitors[0];
+    assert_eq!(m.status, LookStatus::Applied);
+    assert!(m.offer.is_none());
+    assert_eq!(m.adjustments, Some(realize(&m.applied.unwrap(), &panel_caps("TN"))));
+}
+
+#[test]
+fn auto_apply_takes_the_offer_only_when_allowed() {
+    let mut g = GameRecord::default();
+    g.monitors.insert(mon().0, MonitorRecord { learner: converged_learner(), hdr_skipped: false });
+    assert!(!g.take_offer_if_auto(&mon()), "off by default");
+    assert!(g.offer(&mon()).is_some());
+    g.auto_apply = true;
+    assert!(g.take_offer_if_auto(&mon()));
+    assert!(g.offer(&mon()).is_none());
+    assert_eq!(g.status(Some(&mon())), LookStatus::Applied);
+    assert!(!g.take_offer_if_auto(&mon()), "nothing left to take");
 }
 
 #[test]

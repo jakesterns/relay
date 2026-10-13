@@ -45,6 +45,7 @@ fn apply_writes_params_and_restore_bypasses() {
         limiter: None,
         apply_to_share: false,
         headset_correction: false,
+        ..AudioSettings::default()
     };
     let state = control.apply(&settings, None).expect("apply");
     assert_eq!(state, relay_core::types::AudioChainState::Active);

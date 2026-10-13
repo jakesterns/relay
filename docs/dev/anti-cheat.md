@@ -60,6 +60,23 @@ anti-cheat; **high** = would be detected or banned.
 | 25 | `crates/capture/src/look.rs` (S47 look sampler, `relay-share look`) | While a profiled game with "Learn this game's look" on has focus: DXGI Desktop Duplication of the game's **monitor** (output-level), latest frame once a second, scaled to 480×270 on the GPU and analysed in memory; only numbers leave the process; process at below-normal priority, killed on blur | No: the desktop compositor's output, not the game | low | The same OS broker Discord and OBS "Display Capture" use, and that Windows itself uses for Remote Desktop. **Why duplication, not WGC:** duplication is per output and never names the game's window or process; WGC would need a `GraphicsCaptureItem` for the game window (still the OS, but aimed at the game) and may draw a capture border. Duplication also coalesces updates itself, so sampling at 1 fps costs nothing in between. No injection, no hooks, no swapchain access. Games that use `WDA_EXCLUDEFROMCAPTURE` show black frames, which classify as Loading and are never learned from. HDR outputs are skipped, not worked around. |
 | 26 | `crates/capture/src/look.rs` `input_idle_ms` (S47) | `GetLastInputInfo` + `GetTickCount` once per sample: one system-wide "last input" timestamp | No | none | No hook (`SetWindowsHookEx` is not used), no raw input registration, no key or button data — only *when* the last input of any kind happened anywhere on the system. Frames after more than `INPUT_IDLE_MAX_MS` (20 s) without input are not counted as gameplay (cutscenes, menus, AFK). Screen savers and power management read the same value. |
 | 27 | `crates/core/src/learned_display.rs` `build_fingerprint` (S47) | File size + modified time of the game's exe, from the path #3 already resolved | No: ordinary file metadata on disk | none | Used to notice a game update and relearn. Nothing is opened in the game process; the exe file is not read. The path is never sent over IPC (it can contain the user name). |
+| 28 | `crates/capture/src/learn.rs` (`relay-share learn`, S46) | Learned game EQ: `ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK)` with the focused game's PID, include-tree mode — the same call as #12 | No: audiodg hands Relay a copy of the game's own mixed stream | low | Process loopback only, exactly what OBS 28+ "Application Audio Capture" and Discord's per-app stream audio do. Runs in a separate helper process spawned only while a profiled game with learning on has focus, and torn down on blur. Captures the game's PID only: Discord, browsers and every other app are never in it. Keeps aggregate statistics (per-band level histograms, event counts); no audio is stored or sent. |
+| 29 | `crates/capture/src/learn.rs` `input_idle_ms` (S46) | `GetLastInputInfo` + `GetTickCount` once a second while learning | No | none | One system-wide timestamp of the last input, the call screen savers and "away" indicators use. No hook (`SetWindowsHookEx` is still absent), no key or button identity, nothing per process. Used only to leave out audio heard while nobody is playing (cutscenes, menus, AFK). |
+| 30 | `crates/core/src/game_eq.rs` `exe_version` (S46) | `GetFileVersionInfoW` / `VerQueryValueW` on the game's exe **path** (from #3's query) | No: reads the file on disk | none | No process handle; the same read Explorer's Properties > Details tab does. Used to notice a game update and relearn. |
+
+## S46 summary
+
+Learned game EQ adds no new kind of access. Its audio comes from process
+loopback of the game's PID (#28, the same OS path as #12, Discord and OBS);
+"is anyone playing" is the system-wide idle timestamp (#29); a game update is
+noticed from the exe file's version resource (#30). Nothing is injected,
+hooked or read from the game, and the analysis runs in `relay-share`, never
+in the always-on core. Process loopback taps the game's streams in the audio
+engine before the endpoint effect chain, so the learner hears the game's
+pre-EQ mix (not Relay's own processing); `learn_source` in
+`crates/capture/src/learn.rs` pins it to the game's PID. Voice chat apps (Discord and the rest) are never
+captured; only chat the game itself plays can be, and that is recognised
+(codec band limit) and left out of the statistics.
 
 ## Open risks
 

@@ -29,9 +29,10 @@ async function mount(exe: string | null = "game.exe") {
 function monitor(over: Partial<MonitorLearnView> = {}): MonitorLearnView {
   return {
     monitor: "GSM5C7C-x", monitor_name: "LG ULTRAGEAR+", panel: "oled", phase: "learning",
-    readiness: { frames: 300, frames_needed: 600, scenes: 2, scenes_needed: 3, stable_checkpoints: 0, checkpoints_needed: 3, progress: 0.45 },
+    readiness: { frames: 300, frames_needed: 600, scenes: 2, scenes_needed: 3, stable_checkpoints: 1, checkpoints_needed: 3, progress: 0.45, checkpoints: 2, scene_frames: [120, 180, 0, 0, 0] },
     converged: null, applied: null, use_learned: false, hdr_skipped: false, status: "learning",
-    adjustments: null, excluded: 12, ...over,
+    adjustments: null, excluded: 12,
+    excluded_by: { static_frames: 3, loading: 7, cutscene: 0, outlier: 0, idle: 1, warmup: 1 }, ...over,
   };
 }
 
@@ -72,14 +73,35 @@ describe("the learn-this-game's-look card", () => {
     const bar = screen.getByRole("progressbar");
     expect(bar).toHaveAttribute("aria-valuenow", "45");
     expect(screen.getByText(/300 \/ 600 gameplay frames · 2 \/ 3 kinds of scene/)).toBeInTheDocument();
-    expect(screen.getByText(/12 skipped/)).toBeInTheDocument();
+    expect(screen.getByTestId("look-skipped")).toHaveTextContent("12 skipped: static/menu 3 · loading 7 · idle 1 · warm-up 1");
+    expect(screen.getByTestId("look-scenes")).toHaveTextContent("Scenes (dark → bright): 120 / 180 / 0 / 0 / 0");
+    expect(screen.getByText(/checkpoints 1 stable of 2/)).toBeInTheDocument();
+    // S48: a scene is missing, so no ETA is made up.
+    expect(screen.getByTestId("look-eta")).toHaveTextContent(/Time left not known yet/);
+  });
+
+  it("shows an honest ETA once every kind of scene has been seen (S48)", async () => {
+    const m = monitor();
+    m.readiness = { ...m.readiness, scenes: 3, eta_secs: 150, confident: true };
+    seed({ monitors: [m] });
+    await mount();
+    expect(screen.getByTestId("look-eta")).toHaveTextContent("about 3 min left of gameplay · steady picture, so fewer frames are needed");
+  });
+
+  it("shows the candidate look while still learning", async () => {
+    seed({ monitors: [monitor({
+      readiness: { ...monitor().readiness, candidate: { shadow: 0.35, saturation: 0.1, highlight: 0 } },
+      candidate_adjustments: { gamma: 1.05, shadow_lift: 0, vibrance: 51, notes: [] },
+    })] });
+    await mount();
+    expect(screen.getByText(/shadows 35% · colour 10% · highlights 0% → gamma 1\.05 · lift 0 · vibrance 51/)).toBeInTheDocument();
   });
 
   it("Apply is offered once a look has settled, and applies it", async () => {
     const look = { shadow: 0.4, saturation: 0.1, highlight: 0 };
     seed({ status: "ready", monitors: [monitor({ phase: "converged", converged: look, status: "ready" })] });
     const user = await mount();
-    expect(screen.getByTestId("look-status")).toHaveTextContent(/^Ready/);
+    expect(screen.getByTestId("look-status")).toHaveTextContent("A look is ready — Apply to use it.");
     expect(screen.getByText(/shadows 40% · colour 10% · highlights 0%/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Apply" }));
     expect(cmds()).toContain("learn_display_apply");
@@ -131,6 +153,33 @@ describe("the learn-this-game's-look card", () => {
     await user.type(screen.getByRole("textbox", { name: "Export note" }), "dark maps");
     await user.click(screen.getByRole("button", { name: "Export" }));
     expect(tauri.calls.find((c) => c.cmd === "learn_display_export")?.args).toMatchObject({ exe: "game.exe", note: "dark maps" });
+  });
+
+  it("shows a guessed panel type and saves the user's confirmation", async () => {
+    core.hardware.monitors.push({ id: "DEL40E0-1", name: "AW2518H", panel: "" });
+    seed({ monitors: [monitor({ monitor: "DEL40E0-1", monitor_name: "AW2518H", panel: "tn", panel_guessed: true,
+      readiness: { ...monitor().readiness, delta: { gamma: 0.01, shadow_lift: 4, vibrance: 1 } } })] });
+    const user = await mount();
+    expect(screen.getByText("TN (guessed from the model)")).toBeInTheDocument();
+    expect(screen.getByTestId("look-delta")).toHaveTextContent("gamma 0.010 · lift 4 · vibrance 1");
+    await user.selectOptions(screen.getByRole("combobox", { name: /Panel type of AW2518H/ }), "TN");
+    await act(async () => { await Promise.resolve(); });
+    const saved = core.hardware.monitors.find((m) => m.id === "DEL40E0-1");
+    expect(saved?.panel).toBe("TN");
+  });
+
+  it("a settled look is offered, and auto-apply takes it", async () => {
+    const look = { shadow: 0.55, saturation: 0, highlight: 0 };
+    const adj = { gamma: 1.05, shadow_lift: 11, vibrance: 50, notes: [] };
+    seed({ status: "ready", monitors: [monitor({ phase: "converged", converged: look, status: "ready", offer: look, offer_adjustments: adj })] });
+    const user = await mount();
+    expect(screen.getByText(/Ready to apply/)).toBeInTheDocument();
+    expect(screen.getByText(/gamma 1\.05 · lift 11 · vibrance 50/)).toBeInTheDocument();
+    expect(screen.queryByText("On this panel")).toBeNull();
+    await user.click(screen.getByRole("switch", { name: /Apply new looks automatically/ }));
+    expect(tauri.calls.find((c) => c.cmd === "learn_display_auto_apply")?.args).toEqual({ exe: "game.exe", enabled: true });
+    expect(screen.getByText("On this panel")).toBeInTheDocument();
+    expect(screen.queryByText(/Ready to apply/)).toBeNull();
   });
 
   it("an HDR monitor says nothing was learned there", async () => {

@@ -104,6 +104,40 @@ pub fn window_alive(hwnd: u64) -> bool {
     }
 }
 
+/// The window Windows says is in front (0 = none). One user32 call; nothing
+/// is opened in the owning process.
+pub fn foreground_hwnd() -> u64 {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+        // SAFETY: plain query.
+        unsafe { GetForegroundWindow().0 as u64 }
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+/// A window's current title, from win32k's cached text (no message is sent
+/// to the window and nothing is opened in its process).
+pub fn window_title(hwnd: u64) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::InternalGetWindowText;
+        let mut buf = [0u16; 512];
+        // SAFETY: valid buffer; a stale handle just returns 0.
+        let n = unsafe { InternalGetWindowText(HWND(hwnd as *mut _), &mut buf) } as usize;
+        (n > 0).then(|| String::from_utf16_lossy(&buf[..n]))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        None
+    }
+}
+
 pub fn process_image_path(pid: u32) -> Option<String> {
     // SAFETY: only limited-information access is requested; see `imp::process_image`.
     unsafe { imp::process_image(pid) }

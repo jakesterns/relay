@@ -20,6 +20,7 @@
 use windows::core::GUID;
 
 pub mod control;
+pub mod diag;
 #[cfg(feature = "com")]
 pub mod dshow;
 pub mod picture;

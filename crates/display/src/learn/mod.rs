@@ -15,7 +15,7 @@ pub mod converge;
 pub mod derive;
 
 pub use analyse::{with_input_idle, Analyser, Frame, FrameClass, FrameReport, FrameStats, Order};
-pub use converge::{Learner, Phase, Readiness};
+pub use converge::{Learner, Phase, Readiness, SAMPLE_FPS};
 pub use derive::{realize, Adjustments, LookTargets, PanelCaps, PanelKind};
 
 /// DXGI colour space of an output in HDR (PQ / BT.2020) mode:

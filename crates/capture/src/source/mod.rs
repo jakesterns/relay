@@ -6,6 +6,7 @@
 //! consumer converts it to NV12 on the GPU and closes it.
 
 pub mod dxgi;
+pub mod pattern;
 pub mod switch;
 pub mod wgc;
 
@@ -46,6 +47,12 @@ pub fn create(
     hmonitor: windows::Win32::Graphics::Gdi::HMONITOR,
     cursor: bool,
 ) -> anyhow::Result<Box<dyn FrameSource>> {
+    if std::env::var_os("RELAY_TEST_SOURCE").is_some() {
+        let monitor = crate::d3d::monitor_size(hmonitor).unwrap_or((1920, 1080));
+        if let Some(size) = pattern::requested(monitor) {
+            return Ok(Box::new(pattern::NoiseSource::new(gpu, size)?));
+        }
+    }
     let force_dxgi = std::env::var("RELAY_CAPTURE").is_ok_and(|v| v == "dxgi");
     if crate::probe::wgc_supported() && !force_dxgi {
         Ok(Box::new(wgc::WgcCapture::monitor(gpu, hmonitor, cursor)?))

@@ -24,9 +24,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{DisplaySettings, MonitorId};
 
-/// The sampler's rate. One frame a second is plenty for a look that takes
-/// minutes to converge, and keeps the cost unmeasurable.
-pub const SAMPLE_FPS: u32 = 1;
+/// The sampler's rate: S48 samples twice a second (was once) so a look settles
+/// in half the time; the cost per sample is unchanged (measured in S48).
+pub const SAMPLE_FPS: u32 = relay_display::learn::converge::SAMPLE_FPS;
 
 /// Exact wording the owner chose for the tournament notice (S47). A notice
 /// only: no confirmation, no responsibility taken.
@@ -67,9 +67,33 @@ pub struct GameRecord {
     pub monitors: BTreeMap<String, MonitorRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported: Option<ImportedLook>,
+    /// Take a newly settled look without asking (the S46 audio flow's
+    /// "auto-apply"). Off by default: a settled look is an *offer* until the
+    /// user presses Apply.
+    #[serde(default)]
+    pub auto_apply: bool,
 }
 
 impl GameRecord {
+    /// The settled look waiting for Apply on `monitor`, if any. Once a look
+    /// is in use the freeze rule decides later changes, so there is no
+    /// offer then.
+    pub fn offer(&self, monitor: &MonitorId) -> Option<LookTargets> {
+        let m = self.monitors.get(&monitor.0)?;
+        if m.learner.use_learned {
+            return None;
+        }
+        m.learner.converged
+    }
+
+    /// With auto-apply on, take the offer on `monitor`. True when it did.
+    pub fn take_offer_if_auto(&mut self, monitor: &MonitorId) -> bool {
+        if !self.auto_apply || self.offer(monitor).is_none() {
+            return false;
+        }
+        self.monitors.get_mut(&monitor.0).is_some_and(|m| m.learner.apply())
+    }
+
     /// The look in use on `monitor`, panel-neutral:
     /// 1. this monitor's applied learned look;
     /// 2. else the applied learned look with the most evidence on any other
@@ -201,6 +225,23 @@ pub fn panel_caps(panel_label: &str) -> PanelCaps {
     PanelCaps { kind: PanelKind::from_label(panel_label), black_equalizer_max: None }
 }
 
+/// The panel type to use: what the user wrote in the library, else a guess
+/// from the model name / EDID id (`true` = guessed, so the UI asks the user
+/// to confirm), else Unknown.
+pub fn panel_kind(label: &str, name: &str, id: &str) -> (PanelKind, bool) {
+    match PanelKind::from_label(label) {
+        PanelKind::Unknown => match PanelKind::guess_from_model(name, id) {
+            Some(k) => (k, true),
+            None => (PanelKind::Unknown, false),
+        },
+        k => (k, false),
+    }
+}
+
+pub fn caps_for(label: &str, name: &str, id: &str) -> PanelCaps {
+    PanelCaps { kind: panel_kind(label, name, id).0, black_equalizer_max: None }
+}
+
 /// Fold learned adjustments into a profile's display settings. The profile
 /// stays the user's taste; the learned look is a correction on top, and the
 /// result goes through the ordinary capture → apply → restore path.
@@ -250,6 +291,9 @@ pub struct MonitorLearnView {
     pub monitor: MonitorId,
     pub monitor_name: String,
     pub panel: PanelKind,
+    /// The panel type was guessed from the model, not set by the user.
+    #[serde(default)]
+    pub panel_guessed: bool,
     pub phase: Phase,
     pub readiness: Readiness,
     #[serde(default)]
@@ -263,6 +307,18 @@ pub struct MonitorLearnView {
     #[serde(default)]
     pub adjustments: Option<Adjustments>,
     pub excluded: u64,
+    /// What the newest checkpoint would apply on this panel (learning too).
+    #[serde(default)]
+    pub candidate_adjustments: Option<Adjustments>,
+    /// A settled look waiting for Apply, and what it would apply here.
+    /// `adjustments` is only ever what is actually applied.
+    #[serde(default)]
+    pub offer: Option<LookTargets>,
+    #[serde(default)]
+    pub offer_adjustments: Option<Adjustments>,
+    /// Why frames were skipped, by kind, so a tester can see the cause.
+    #[serde(default)]
+    pub excluded_by: relay_display::learn::converge::Excluded,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +328,9 @@ pub struct LearnView {
     pub enabled: bool,
     /// Game-level state, for the card header.
     pub status: LookStatus,
+    /// New settled looks apply without asking.
+    #[serde(default)]
+    pub auto_apply: bool,
     /// The sampler is running for this game right now.
     pub sampling: bool,
     pub monitors: Vec<MonitorLearnView>,
@@ -279,6 +338,28 @@ pub struct LearnView {
     pub imported: Option<ImportedLook>,
     pub privacy: String,
     pub tournament: String,
+}
+
+/// The game-level status, agreeing with the monitors: the most advanced
+/// monitor state wins (Applied > Applied (imported) > Ready > Learning >
+/// HDR skipped > Off). With no monitor seen yet, the record decides.
+pub fn overall_status(rec: &GameRecord, monitors: &[MonitorLearnView]) -> LookStatus {
+    let rank = |s: LookStatus| match s {
+        LookStatus::Applied => 5,
+        LookStatus::AppliedImported => 4,
+        LookStatus::Ready => 3,
+        LookStatus::Learning => 2,
+        LookStatus::HdrSkipped => 1,
+        LookStatus::Off => 0,
+    };
+    let best = monitors.iter().map(|m| m.status).max_by_key(|s| rank(*s));
+    match best {
+        // A monitor that has learned nothing yet reads Off/Learning by the
+        // game's switch; keep that consistent at the top.
+        Some(LookStatus::Off) | None => rec.status(None),
+        Some(LookStatus::Learning) if !rec.enabled => rec.status(None),
+        Some(s) => s,
+    }
 }
 
 /// `names` maps monitor id → (display name, panel label).
@@ -295,13 +376,15 @@ pub fn view(
         .map(|(id, m)| {
             let id = MonitorId(id.clone());
             let (name, panel) = names(&id);
-            let caps = panel_caps(&panel);
+            let (kind, guessed) = panel_kind(&panel, &name, &id.0);
+            let caps = PanelCaps { kind, ..panel_caps(&panel) };
             let l = &m.learner;
             let ex = l.excluded;
             MonitorLearnView {
                 monitor: id.clone(),
                 monitor_name: name,
                 panel: caps.kind,
+                panel_guessed: guessed,
                 phase: l.phase(),
                 readiness: l.readiness(),
                 converged: l.converged,
@@ -310,14 +393,19 @@ pub fn view(
                 hdr_skipped: m.hdr_skipped,
                 status: rec.status(Some(&id)),
                 adjustments: rec.effective(&id).map(|look| realize(&look, &caps)),
-                excluded: ex.static_frames + ex.loading + ex.cutscene + ex.outlier + ex.idle,
+                candidate_adjustments: l.readiness().candidate.map(|c| realize(&c, &caps)),
+                offer: rec.offer(&id),
+                offer_adjustments: rec.offer(&id).map(|o| realize(&o, &caps)),
+                excluded: ex.total(),
+                excluded_by: ex,
             }
         })
-        .collect();
+        .collect::<Vec<MonitorLearnView>>();
     LearnView {
         exe: key(exe),
         enabled: rec.enabled,
-        status: rec.status(None),
+        auto_apply: rec.auto_apply,
+        status: overall_status(&rec, &monitors),
         sampling,
         monitors,
         imported: rec.imported.clone(),
@@ -573,9 +661,41 @@ pub struct Sampler {
     pub exe: String,
     pub monitor: MonitorId,
     pub rx: Receiver<SamplerLine>,
+    /// Set while the game is out of focus: the sampler is told to stop
+    /// sampling, and is dropped once `LOOK_BLUR_GRACE` passes.
+    pub paused_since: Option<std::time::Instant>,
+}
+
+/// Alt-Tab grace, the same as the audio learner's: a game out of focus for
+/// less than this keeps its sampler (paused) and resumes without a restart.
+pub const LOOK_BLUR_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub fn grace_expired(paused_since: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    paused_since.is_some_and(|t| now.saturating_duration_since(t) >= LOOK_BLUR_GRACE)
 }
 
 impl Sampler {
+    fn send(&mut self, line: &str) {
+        if let Some(s) = self.stdin.as_mut() {
+            let _ = s.write_all(line.as_bytes());
+            let _ = s.flush();
+        }
+    }
+
+    /// Stop sampling (the game lost focus); keep the process.
+    pub fn pause(&mut self) {
+        if self.paused_since.is_none() {
+            self.send("pause\n");
+            self.paused_since = Some(std::time::Instant::now());
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if self.paused_since.take().is_some() {
+            self.send("resume\n");
+        }
+    }
+
     pub fn start(exe: &str, monitor: MonitorId, hmonitor: i64) -> Result<Self> {
         let bin = crate::share::share_binary()?;
         anyhow::ensure!(bin.exists(), "sampler not found at {}", bin.display());
@@ -605,7 +725,7 @@ impl Sampler {
                 }
             },
         )?;
-        Ok(Self { child, stdin, exe: key(exe), monitor, rx })
+        Ok(Self { child, stdin, exe: key(exe), monitor, rx, paused_since: None })
     }
 
     pub fn exited(&mut self) -> bool {

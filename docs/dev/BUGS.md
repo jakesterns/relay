@@ -176,6 +176,15 @@ the dev box. The owner saw the Relay window in the stream but not the surface
 inside it; everything else on the desktop came through. The exclusion holds
 on a real capture, in the embedded (owned popup) state, at 60 fps.
 
+*Changed 2026-10-07 (S50):* the exclusion is now conditional. It made the
+stream impossible to pick in Discord, Zoom, Teams, Meet or OBS on the receiving
+PC, which is the main thing a receiving PC in a call wants. The window is now
+excluded only while this same PC is sending a share whose area the window is
+on (`render::placement::should_exclude`), re-decided on local share start,
+switch and stop, on every move, and on display changes. The recursion this
+bug describes needs exactly that case, so it stays covered. See
+`docs/plans/S50-share-and-go.md`.
+
 ### B7 — Unverified: did a receiver window ever appear?
 On the Windows 10 PC the render thread died 0.2 s after the first frame. Nobody
 established whether a window appeared first and vanished, or never appeared at
@@ -666,6 +675,35 @@ now the first thing to run.
   that turned out to be a missed click. The code path was genuinely wrong and
   the fix stands, but the symptom that prompted it was misattributed.
 
+### B19 — Under burst loss the picture froze for hold after hold  |  FIXED 2026-10-07 (S49), loopback model only
+Found by S49's Wi-Fi link model, not on hardware: no test PC has Wi-Fi.
+`reorder::Reorder` gave each hole its 40 ms hold starting from when the hole
+*before* it was given up, not from when it was seen. One lost packet costs one
+hold, as designed. A burst that leaves thirty holes cost thirty holds in a row:
+on the capacity-drop model the receiver showed nothing for 1.2 s, and the
+"queueing delay" it reported was its own reorder buffer. A hole is now held
+from the arrival of the first packet past it. Unit test
+`many_holes_expire_together_not_end_to_end`. On a wired LAN, where holes come
+one at a time, nothing changes.
+
+### B20 — On a link that lost capacity, retransmissions crowded out the video  |  FIXED 2026-10-07 (S49), loopback model only
+Also found by the link model. When the rate halves, the access point drops what
+does not fit, the receiver NACKs every hole (four times each, then twelve), and
+the sender's NACK responder answers every one. On the capacity-drop model that
+was 85 Mb/s arriving against a 2.5 Mb/s target: congestion collapse, the
+picture frozen for seconds. Retransmissions now have a budget while the
+bitrate controller is constrained (15 % of the target, at least 1 Mb/s;
+`feedback::RetransmitBudget`, an interceptor in front of the responder). A
+wired share is never constrained, so its retransmissions stay unlimited.
+
+### B21 — A Wi-Fi burst overflowed webrtc-rs's 256-packet track queue  |  FIXED 2026-10-07 (S49), loopback model only
+The S30 hazard again, by another route: after a 150 ms radio stall the backlog
+arrives at once, and the receiver's video loop (reorder, depacketize, timers,
+keyframe requests per packet) fell behind the driver's 256-slot `try_send`
+queue — 400 packets dropped in one burst on a link model that had lost none.
+A drain task now moves packets into a 16k queue as fast as they arrive
+(`receiver::drain_track`).
+
 ### B18 — Relay Camera never started for an installed user  |  FIXED 2026-09-29 (`fix/vcam-acl`)
 Found by the first live pass after registration (main PC, Windows 11 26200).
 `MFCreateVirtualCamera` succeeded, but `IMFVirtualCamera::Start` returned
@@ -726,6 +764,17 @@ the contents, state what is owed.
 | r34 | `876f274` | Repairs counted once per hole; RTP-full log rate-limited; fader aria-valuetext | 2026-09-29: row 2a pass (every=200: 19 repairs, 0 lost) | row 2b with `every=200,retx` never decoded -- test setting, a keyframe spans a multiple of 200 every time |
 | r35 | `07ecf31` | Still-screen repeat honours keyframe requests; receiver logs each recovery | 2026-09-29: 2b 59 recoveries, median 17 ms | 4 double losses at 534 ms (waited for the 500 ms retry) |
 | r36 | `52f2399` | Re-ask at once when the answering keyframe is damaged | 2026-09-29: **B15 closed on two PCs** -- 54 losses, 54 requests, median 18 ms, max 91 ms, 0 stalls | health banner pulses under steady loss (UX call) |
+| r57 | `0b8b7a4` (rc/2) | RC1 + S49 Wi-Fi + bundled NDI + locked-DLL rename | 2026-10-08: NDI DLL present; camera DLL swapped while Discord held it (`.old1` kept, update-files names Discord) | **Fail**: Relay Camera crashed OBS 32.0.4 on activate (c0000005 in qcap, `HDevice::ConnectPins`) |
+| r58 | `f11cee3` (fix/obs-dshow-null-outs) | DirectShow getters NULL their out pointer on failure (`ConnectedTo` unconnected, `GetSyncSource`, `FindPin`, `QueryVendorInfo`) | 2026-10-08: OBS activates Relay Camera, no crash; camera not mirrored/flipped, bars correct, circle round, grating 2-px 0.55 (720p) / 0.68 (1080p60); window capture correct; **NDI** 2560x1440 in OBS (DistroAV), grating 0.91; learn-from-file 30 s clip in 3.5 s (10x); live audio ready 6.9 min with ETA from min 2; Tarkov look converged 10.5 min, gamma ramp on focus / identity on blur <1 s | OBS keeps the connect-time camera size until the device is re-picked (720p if OBS opened first); **Fail**: no "Share to a call" after a UI restart mid-receive; look ETA blank while scenes fill, under-predicts with static frames |
+| r59 | `efef834` | Core replays the stream window on Subscribe; ASCII camera log; Game Bar names cleaned | 2026-10-08: card after a fresh UI shows Share to a call, no stale "waiting" | **Fail (privacy)**: the install dropped the receive and the sender's reconnect came back on display 0 -- the desktop -- instead of the window it had switched to |
+| r60 | `a722431` | Reconnect resumes the share's source (`--source`; intent follows each switch; closed window ends the share, never the desktop); look ETA estimates filling scenes and scales by gameplay share | 2026-10-08: receiver killed by PID, back in 9.9 s **on the test window**; clean feed 1920x1080 in OBS WGC, marker top-left, bars correct, circle round, grating 0.59 / 1.00 | look ETA live re-run |
+| r61 | `2711424` | Sender reopens the capture source after a rung rebuild (r60 Go Live check: a still window stepped 1440p60 → 1080p60, nothing to repeat, receiver ended the share after 3 s); `RELAY_TEST_SOURCE=still` | 2026-10-08: **Discord Go Live** lists "Relay — from JAKE" with the bars (owner, by eye, on r60 at 1080p30); still-window soak 177 s at 1440p60 on two PCs, 0 drops, 670/670 presented; loopback still source over `wifi-bad` held through two rung steps for 57 s | a rung step on two PCs (needs a forced-loss sender) |
+| r62 | `dac6e58` | Relay Camera (Win10) offers 1080p60 first when no stream is up | 2026-10-12: OBS with no share connects NV12 1920x1080 @ 60; Warzone look ETA never null while scenes fill, within ~30 s from min 3, converged 7.0 min; audio ready 8.6 / 5.5 min with accurate ETAs | **Fail**: Tarkov night look stuck at 2 scenes (19 / 81 %), ETA null 11+ min (converged only when a third bucket appeared at 13.6 min) |
+| r63 | `e0a8303` | Fewer than 3 scenes settle on the 900-frame budget with the scenes seen; ETA counts down to it | 2026-10-12: fresh Tarkov run, ETA never null (462 s at 20/900 frames, down to 50), converged 6.4 min after a third scene arrived; audio ready 5.9 min | the 900-frame two-scene convergence itself live (unit-tested: `two_scene_content_converges_on_the_longer_budget`); ETA under-predicts ~20 % through static stretches |
+| r64 | `fedc5dc` | Look ETA runs at the recent (1 min) gameplay share | 2026-10-12: Tarkov with a 2 min pause -- ETA rises within 30 s of the pause, falls after; within ~15 s of actual once the minute after resume has passed; a dark-only stretch converges on the 900-frame budget | over-estimates up to ~170 s in the minute after a resume (by design of the 1 min window); forced rung step on two PCs not possible with `RELAY_TEST_LOSS` (repaired loss is not congestion) -- loopback-covered |
+| r65 | `df4043f` | A fresh core tells a new subscriber it is not receiving | 2026-10-12: core shutdown + relaunch under an open window -- Idle + Start receiving in 4 s, Start works; still share without loss env: 0 "receiver stalled" (test A's three came with injected loss) | -- |
+| r66 | `4d0edcd` | No queue-driven cut while the sender sends < 2 Mb/s (r65: a 58 ms reading on a still window cut 60 → 15 Mb/s) | 2026-10-12: 5 min still soak -- one adapt line (1440p60, 60 Mb/s, steady), no cut, 1125/1125 presented, 0 stalls; loopback: moving noise over wifi-busy still backs off (10.2 Mb/s) | -- |
+| r67 | `52c5887` | A congestion cut restarts the ladder's step-up hold (r66 test D: 1080p30 → 1080p60 half a second after a queue cut) | 2026-10-12, two PCs: **forced rung steps** (receiver `RELAY_TEST_NET=capacity-drop`, sender `RELAY_TEST_SOURCE=noise`): 1440p60 → 1080p60 → 1440p60 (52 s after the last cut) → 1080p60 → 1080p30 → 1080p60 (64 s after), frames through every step, never ended; **two-scene look** from `relay-two-scene-test3.mp4` (synthetic, 75/25 in buckets 0/1): 1437 gameplay frames, scenes_needed 2 past 900, converged | -- |
 
 Each build supersedes the one before; install over the top without
 uninstalling, on both PCs — that is the standing-rule check itself.

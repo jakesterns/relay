@@ -35,12 +35,13 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 
-use crate::command::{self, EngineCmd, HostMode};
+use crate::command::{self, CleanFeed, EngineCmd, HostMode, SourceTarget};
 use crate::decode::mf::MfDecoder;
 use crate::transport::receiver::{AccessUnit, RecvStats};
 use crate::{probe, signal_now_ns};
 
 pub mod host;
+pub mod placement;
 
 /// Receiver output options beyond the window itself.
 #[derive(Debug, Default, Clone)]
@@ -57,6 +58,19 @@ pub struct RenderOpts {
     /// The output endpoint received audio plays on (S40), changed live by a
     /// `device` command. Empty = the System default, followed if it moves.
     pub output: Arc<crate::devices::DeviceSlot>,
+    /// Stops the call-audio return (S19) when set; a `return` command with
+    /// `on: false` sets it live (r54). Shared with the return capture thread.
+    pub return_stop: Arc<AtomicBool>,
+    /// What this same PC is sharing, as the core last said (S50); `None` =
+    /// not sharing. Decides whether the stream window is hidden from capture.
+    pub local_share: Option<SourceTarget>,
+    /// The sender's name, for the window title call apps list it by.
+    pub sender: Option<String>,
+    /// Publish the stream as an NDI® source from the start (S51); a `ndi`
+    /// command flips it live.
+    pub ndi: bool,
+    /// The sending PC's name, for the NDI source name.
+    pub sender_name: String,
 }
 
 /// Apply a `device` command on the receiver. Only `Output` means anything
@@ -92,7 +106,15 @@ pub type AbortTx = mpsc::Sender<(String, tokio::sync::oneshot::Sender<()>)>;
 /// a host command that arrived before it did.
 pub struct HostLink {
     hwnd: AtomicIsize,
-    pending: Mutex<Option<(HostMode, u64)>>,
+    pending: Mutex<Option<(HostMode, u64, CleanFeed)>>,
+    /// What this PC is sharing right now (S50), the capture guard's input.
+    /// Written by the transport from the core's `local_share` command, read
+    /// by the window thread.
+    local_share: Mutex<Option<SourceTarget>>,
+    /// The back buffer size the window wants instead of the stream's: a
+    /// clean feed's fixed size, which the render thread letterboxes into.
+    /// Set by the window thread before it bumps `surface_gen`.
+    surface_size: Mutex<Option<(u32, u32)>>,
     /// Bumped by the window thread after every hosting-mode change. The
     /// render thread recreates its swapchain when it sees a new value: a
     /// flip-model swapchain does not reliably keep presenting into a window
@@ -102,12 +124,37 @@ pub struct HostLink {
 }
 
 impl HostLink {
-    fn new() -> Arc<Self> {
+    fn new(local_share: Option<SourceTarget>) -> Arc<Self> {
         Arc::new(Self {
             hwnd: AtomicIsize::new(0),
             pending: Mutex::new(None),
+            local_share: Mutex::new(local_share),
+            surface_size: Mutex::new(None),
             surface_gen: AtomicU64::new(0),
         })
+    }
+
+    /// The core says what this PC is sharing now (S50). The window thread
+    /// re-takes the capture decision at once if the window exists, and at
+    /// creation otherwise.
+    pub fn set_local_share(&self, target: Option<SourceTarget>) {
+        *self.local_share.lock().unwrap() = target;
+        let hwnd = self.hwnd.load(Ordering::Acquire);
+        if hwnd != 0 {
+            host::post_guard(HWND(hwnd as *mut _));
+        }
+    }
+
+    pub(crate) fn local_share(&self) -> Option<SourceTarget> {
+        *self.local_share.lock().unwrap()
+    }
+
+    pub(crate) fn set_surface_size(&self, size: Option<(u32, u32)>) {
+        *self.surface_size.lock().unwrap() = size;
+    }
+
+    fn surface_size(&self) -> Option<(u32, u32)> {
+        *self.surface_size.lock().unwrap()
     }
 
     /// The window changed mode; the swapchain should be rebuilt.
@@ -122,16 +169,16 @@ impl HostLink {
     /// Ask the window thread to change hosting mode. Before the window
     /// exists the request is parked and applied at creation, so a command
     /// that races the first frame is not lost.
-    pub fn post(&self, mode: HostMode, owner: u64) {
+    pub fn post(&self, mode: HostMode, owner: u64, feed: CleanFeed) {
         let hwnd = self.hwnd.load(Ordering::Acquire);
         if hwnd == 0 {
-            *self.pending.lock().unwrap() = Some((mode, owner));
+            *self.pending.lock().unwrap() = Some((mode, owner, feed));
             return;
         }
-        host::post_mode(HWND(hwnd as *mut _), mode, owner);
+        host::post_mode(HWND(hwnd as *mut _), mode, owner, feed);
     }
 
-    fn take_pending(&self) -> Option<(HostMode, u64)> {
+    fn take_pending(&self) -> Option<(HostMode, u64, CleanFeed)> {
         self.pending.lock().unwrap().take()
     }
 
@@ -175,6 +222,16 @@ pub async fn run(
     // Per-track gain and mute (S37): set from stdin here, read by playback.
     let faders = crate::mixer::Faders::shared();
     let faders2 = faders.clone();
+    // NDI output (S51): made here, loaded only when turned on. The render
+    // and playback threads tee into it; off costs them one atomic load.
+    let ndi = crate::ndi::NdiOutput::with_runtime(relay_core::ndi::receive_source_name(
+        &opts.sender_name,
+    ));
+    if opts.ndi {
+        let n = ndi.clone();
+        tokio::task::spawn_blocking(move || n.apply(true));
+    }
+    let ndi_audio = ndi.clone();
     let audio_join =
         std::thread::Builder::new().name("relay-audio-playback".into()).spawn(move || {
             use crate::mixer::Track;
@@ -184,6 +241,7 @@ pub async fn run(
                 output2,
                 audio_stats2,
                 faders2,
+                Some(ndi_audio),
             ) {
                 warn!(error = %e, "audio playback stopped");
             }
@@ -197,15 +255,20 @@ pub async fn run(
     // the render thread follows it through `VcamSwitch`.
     let vcam = Arc::new(AtomicBool::new(opts.vcam));
     let vcam_cmd = vcam.clone();
+    let opts_return_stop = opts.return_stop.clone();
     let failure: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     let failure2 = failure.clone();
     let quit = Arc::new(AtomicBool::new(false));
     let quit2 = quit.clone();
-    let link = HostLink::new();
+    let link = HostLink::new(opts.local_share);
     let link2 = link.clone();
     let host_owner = opts.host;
+    let title = placement::window_title(opts.sender.as_deref());
+    let ndi_video = ndi.clone();
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
-        if let Err(e) = video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner) {
+        if let Err(e) =
+            video_thread(aus, stats2, pl, vcam, quit2, link2, host_owner, title, ndi_video)
+        {
             // ERROR, and in share.log: the one line someone reads when a
             // receive dies (the dead-host fatal used to reach core.log only).
             tracing::error!(error = %e, "receiver failed; telling the sender why");
@@ -248,7 +311,7 @@ pub async fn run(
                 let recovered = stats.video_recovered.load(Ordering::Relaxed);
                 let keyframe_requests = stats.keyframe_requests.load(Ordering::Relaxed);
                 let withheld = stats.video_aus_dropped.load(Ordering::Relaxed);
-                println!("{}", serde_json::json!({
+                let mut line = serde_json::json!({
                     "event": "stats",
                     "aus": aus,
                     "presented": presented,
@@ -264,7 +327,10 @@ pub async fn run(
                     "keyframe_requests": keyframe_requests,
                     "frames_withheld": withheld,
                     "audio": audio_stats.json(),
-                }));
+                    "ndi": ndi.status_json(),
+                });
+                stats.s49_fields(&mut line);
+                println!("{line}");
 
                 // Also to the log. A receiver that freezes mid-share leaves
                 // nothing behind otherwise: on a real machine the picture
@@ -300,13 +366,27 @@ pub async fn run(
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
                         Some(EngineCmd::Stop) => { info!("stop command received"); break; }
-                        Some(EngineCmd::Host { mode, owner }) => {
-                            info!(?mode, owner, "host command received on stdin");
-                            link.post(mode, owner)
+                        Some(EngineCmd::Host { mode, owner, feed }) => {
+                            info!(?mode, owner, ?feed, "host command received on stdin");
+                            link.post(mode, owner, feed.unwrap_or_default())
+                        }
+                        Some(EngineCmd::LocalShare { target }) => {
+                            info!(?target, "local share changed; re-checking capture exclusion");
+                            link.set_local_share(target)
                         }
                         Some(EngineCmd::Vcam { on }) => {
                             info!(on, "vcam command received; Relay Camera follows live");
                             vcam_cmd.store(on, Ordering::Release);
+                        }
+                        Some(EngineCmd::Return { on: false }) => {
+                            info!("return command: the call app's audio is no longer sent back");
+                            opts_return_stop.store(true, Ordering::Release);
+                            println!("{}", serde_json::json!({ "event": "return_off", "reason": "user" }));
+                        }
+                        Some(EngineCmd::Ndi { on }) => {
+                            info!(on, "ndi command received");
+                            let n = ndi.clone();
+                            tokio::task::spawn_blocking(move || n.apply(on));
                         }
                         Some(EngineCmd::Mixer { faders: set }) => {
                             faders.apply(&set);
@@ -405,14 +485,21 @@ pub struct Surface {
     vp_device: ID3D11VideoDevice,
     vp_context: ID3D11VideoContext,
     hwnd: HWND,
+    /// The stream's size: the back buffer's unless the window asks for
+    /// another (a clean feed).
     size: (u32, u32),
+    /// The back buffer's size now. The picture is letterboxed into it.
+    target: (u32, u32),
 }
 
 impl Surface {
     /// Replace the swapchain with a new one on the same window and device.
     /// Called after the window's hosting mode changed; see `HostLink`.
-    fn recreate_swapchain(&mut self) -> Result<()> {
-        let (w, h) = self.size;
+    /// `target` is the back buffer the mode wants (a clean feed's fixed
+    /// size), `None` = the stream's own size.
+    fn recreate_swapchain(&mut self, target: Option<(u32, u32)>) -> Result<()> {
+        let (w, h) = target.unwrap_or(self.size);
+        self.target = (w, h);
         let dxgi_device: IDXGIDevice = self.device.cast()?;
         // SAFETY: live device. The old chain must be *gone* before the new
         // one is created: a window carries one swapchain, and creating a
@@ -501,6 +588,7 @@ impl Surface {
             vp_context,
             hwnd,
             size: (w, h),
+            target: (w, h),
         })
     }
 }
@@ -555,6 +643,7 @@ fn follow_vcam(
 }
 
 /// Decode + present. Owns the D3D objects; the window is on its own thread.
+#[allow(clippy::too_many_arguments)]
 fn video_thread(
     mut aus: mpsc::Receiver<AccessUnit>,
     stats: Arc<RecvStats>,
@@ -563,6 +652,8 @@ fn video_thread(
     quit: Arc<AtomicBool>,
     link: Arc<HostLink>,
     host_owner: Option<u64>,
+    title: String,
+    ndi: Arc<crate::ndi::NdiOutput>,
 ) -> Result<()> {
     // SAFETY: COM MTA for MF + free-threaded D3D; balanced on return.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
@@ -587,7 +678,7 @@ fn video_thread(
     let (w, h) = crate::decode::probe_dimensions(codec, &first.data).unwrap_or((2560, 1440));
     info!(w, h, codec = codec.label(), "stream dimensions");
 
-    let win = host::WindowThread::start(w, h, host_owner, link.clone(), quit.clone())?;
+    let win = host::WindowThread::start(w, h, host_owner, title, link.clone(), quit.clone())?;
     let mut surface = Surface::new(win.hwnd, w, h)?;
     let mut surface_gen = link.surface_gen();
     let mut decoder = MfDecoder::new(&surface.device, codec, w, h)?;
@@ -620,6 +711,10 @@ fn video_thread(
     let mut vcam_switch = VcamSwitch::default();
     let mut vcam_sink: Option<crate::vcam_sink::VcamSink> = None;
     follow_vcam(&mut vcam_switch, &vcam, &mut vcam_sink, w, h);
+    // NDI output (S51): a tee like the camera's, but it never waits on the
+    // GPU or the NDI worker. A D3D failure turns NDI output off (reported in
+    // the stats line) and the stream carries on.
+    let mut ndi_video = crate::ndi::video::VideoProducer::new(ndi, 60);
 
     let mut pending: Option<AccessUnit> = Some(first);
     // Nothing is decoded until the first keyframe: see the gate in the loop.
@@ -638,6 +733,15 @@ fn video_thread(
         warn!(after = ?d, "TEST: the render thread will fail after the first keyframe");
     }
     let mut decoding_since: Option<std::time::Instant> = None;
+    // S49: the sender can step the stream's size mid-share. The decoder is
+    // rebuilt at the new size on the keyframe that starts it, and frames are
+    // scaled back to the size the window, swapchain and Relay Camera were
+    // made for — so nothing downstream ever sees the change, and a call app
+    // reading Relay Camera never sees its format move.
+    let mut dec_size = (w, h);
+    let mut scaler: Option<crate::encode::convert::Converter> = None;
+    // S49: hold each frame by the link's measured jitter (off on wired).
+    let mut playout = crate::transport::playout::Playout::new();
 
     let result: Result<()> = 'outer: loop {
         if let (Some(d), Some(t)) = (fail_after, decoding_since) {
@@ -655,7 +759,7 @@ fn video_thread(
         let gen = link.surface_gen();
         if gen != surface_gen {
             surface_gen = gen;
-            if let Err(e) = surface.recreate_swapchain() {
+            if let Err(e) = surface.recreate_swapchain(link.surface_size()) {
                 // Retry next frame rather than present into nothing.
                 warn!(error = %e, "could not recreate the swapchain; retrying");
                 surface_gen = gen.wrapping_sub(1);
@@ -728,11 +832,71 @@ fn video_thread(
             }
         }
 
+        if au.codec.is_keyframe(&au.data) {
+            let size = crate::decode::probe_dimensions(au.codec, &au.data);
+            if let Some(d) = size.filter(|d| *d != dec_size) {
+                info!(from = ?dec_size, to = ?d, window = ?(w, h), "stream size changed; decoder rebuilt");
+                decoder = match MfDecoder::new(&surface.device, au.codec, d.0, d.1) {
+                    Ok(dec) => dec,
+                    Err(e) => break Err(e),
+                };
+                dec_size = d;
+                scaler = if d == (w, h) {
+                    None
+                } else {
+                    match crate::encode::convert::Converter::new_on(
+                        &surface.device,
+                        &surface.context,
+                        d,
+                        (w, h),
+                    ) {
+                        Ok(mut c) => {
+                            // Only the picture, never the decoder's padding rows.
+                            c.set_source_rect(Some((0, 0, d.0, d.1)));
+                            Some(c)
+                        }
+                        Err(e) => break Err(e),
+                    }
+                };
+                println!(
+                    "{}",
+                    serde_json::json!({ "event": "stream_size", "width": d.0, "height": d.1 })
+                );
+            }
+        }
+
+        if let Some(cap) = au.capture_local_ns {
+            let release = playout.on_frame(au.arrival_local_ns as f64 / 1e6, cap as f64 / 1e6);
+            stats.playout_target_us.store((playout.target_ms() * 1e3) as u64, Ordering::Relaxed);
+            stats.playout_late.store(playout.stats.late, Ordering::Relaxed);
+            // Wait in short steps so a stop is never held up by the buffer.
+            loop {
+                let wait = release - signal_now_ns() as f64 / 1e6;
+                if wait < 0.5 || quit.load(Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs_f64(wait.min(5.0) / 1e3));
+            }
+        }
+
         let frames = match decoder.decode(&au.data, au.pts_or_zero()) {
             Ok(f) => f,
             Err(e) => break Err(e),
         };
         for frame in frames {
+            let frame = match scaler.as_mut() {
+                None => frame,
+                Some(s) => match s.convert_slice(&frame.texture, frame.subresource) {
+                    Ok(texture) => crate::decode::mf::DecodedFrame {
+                        texture,
+                        subresource: 0,
+                        pts_100ns: frame.pts_100ns,
+                        width: w,
+                        height: h,
+                    },
+                    Err(e) => break 'outer Err(e),
+                },
+            };
             // Diagnostics for B10, the freeze that logs no stall: `presented`
             // kept climbing at 30/s while the user watched a still picture, so
             // Present() is being called on something that is not changing.
@@ -758,6 +922,11 @@ fn video_thread(
                     vcam_sink = None;
                 }
             }
+            if let Err(e) = ndi_video.push(&surface.device, &surface.context, &frame) {
+                warn!(error = %e, "NDI video stopped; the stream carries on");
+                ndi_video.output().fail(format!("NDI video stopped: {e}"));
+                ndi_video.reset();
+            }
             // The first second of frames after a connect carries decoder
             // start-up and the wait for the first keyframe: the two-PC matrix
             // saw 100-290 ms there, then single digits. Reporting it put a
@@ -778,6 +947,7 @@ fn video_thread(
     // may need the window's thread to answer a message during release, so
     // that thread has to still be pumping here.
     drop(vcam_sink);
+    drop(ndi_video);
     drop(vp);
     drop(decoder);
     drop(surface);
@@ -851,6 +1021,18 @@ impl VideoPresent {
             let src =
                 RECT { left: 0, top: 0, right: frame.width as i32, bottom: frame.height as i32 };
             win.vp_context.VideoProcessorSetStreamSourceRect(&self.processor, 0, true, Some(&src));
+            // Into the whole back buffer when it is the stream's size; a
+            // clean feed's fixed buffer gets the picture letterboxed, with
+            // black bars rather than a stretch (S50).
+            let fit = placement::letterbox(win.target, (frame.width, frame.height));
+            let dst = RECT { left: fit.left, top: fit.top, right: fit.right, bottom: fit.bottom };
+            win.vp_context.VideoProcessorSetStreamDestRect(&self.processor, 0, true, Some(&dst));
+            let black = D3D11_VIDEO_COLOR {
+                Anonymous: D3D11_VIDEO_COLOR_0 {
+                    RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 },
+                },
+            };
+            win.vp_context.VideoProcessorSetOutputBackgroundColor(&self.processor, false, &black);
             let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
                 Enable: true.into(),
                 pInputSurface: std::mem::ManuallyDrop::new(in_view),
@@ -879,7 +1061,7 @@ impl VideoPresent {
 /// the sending PC captures itself (B9) — and the hosting mechanics (owner
 /// changes, affinity, z-order, the app positioning the window) are the part
 /// most likely to go wrong. Nothing here captures anything.
-pub async fn run_stub(host: Option<u64>) -> Result<()> {
+pub async fn run_stub(host: Option<u64>, local_share: Option<SourceTarget>) -> Result<()> {
     println!(
         "{}",
         serde_json::json!({ "event": "waiting", "name": "stub", "port": 0, "code": "000000" })
@@ -888,7 +1070,7 @@ pub async fn run_stub(host: Option<u64>) -> Result<()> {
     println!("{}", serde_json::json!({ "event": "codec", "codec": "h264" }));
 
     let quit = Arc::new(AtomicBool::new(false));
-    let link = HostLink::new();
+    let link = HostLink::new(local_share);
     let presented = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (q2, l2, p2) = (quit.clone(), link.clone(), presented.clone());
     let video_join = std::thread::Builder::new().name("relay-render".into()).spawn(move || {
@@ -923,7 +1105,10 @@ pub async fn run_stub(host: Option<u64>) -> Result<()> {
                 match line {
                     Ok(Some(l)) => match command::parse_line(&l) {
                         Some(EngineCmd::Stop) => break,
-                        Some(EngineCmd::Host { mode, owner }) => link.post(mode, owner),
+                        Some(EngineCmd::Host { mode, owner, feed }) => {
+                            link.post(mode, owner, feed.unwrap_or_default())
+                        }
+                        Some(EngineCmd::LocalShare { target }) => link.set_local_share(target),
                         _ => {}
                     },
                     _ if spawned_by_core => break,
@@ -948,7 +1133,8 @@ fn stub_thread(
     // SAFETY: balanced below.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
     let (w, h) = (1920u32, 1080u32);
-    let win = host::WindowThread::start(w, h, host, link.clone(), quit.clone())?;
+    let title = placement::window_title(Some("host-stub"));
+    let win = host::WindowThread::start(w, h, host, title, link.clone(), quit.clone())?;
     let mut surface = Surface::new(win.hwnd, w, h)?;
     let mut surface_gen = link.surface_gen();
     // `ClearView` (a rect-bounded clear) is on the 11.1 context.
@@ -967,7 +1153,7 @@ fn stub_thread(
         let gen = link.surface_gen();
         if gen != surface_gen {
             surface_gen = gen;
-            if let Err(e) = surface.recreate_swapchain() {
+            if let Err(e) = surface.recreate_swapchain(link.surface_size()) {
                 warn!(error = %e, "could not recreate the swapchain; retrying");
                 surface_gen = gen.wrapping_sub(1);
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -986,6 +1172,8 @@ fn stub_thread(
             surface.device.CreateRenderTargetView(&back, None, Some(&mut rtv))?;
             let rtv = rtv.context("render target view")?;
             surface.context.ClearRenderTargetView(&rtv, &[r * 0.25, g * 0.25, b * 0.25, 1.0]);
+            // The back buffer, which is a clean feed's size in that mode.
+            let (w, h) = surface.target;
             let x = ((t * 0.5).fract() * w as f32) as i32;
             let bar = RECT { left: x, top: 0, right: (x + 24).min(w as i32), bottom: h as i32 };
             ctx1.ClearView(&rtv, &[r, g, b, 1.0], Some(std::slice::from_ref(&bar)));

@@ -88,7 +88,10 @@ struct Slot {
     seq: AtomicU32,
     width: AtomicU32,
     height: AtomicU32,
-    _pad: u32,
+    /// Was padding in layout 1 (old writers and readers never touch it).
+    /// Slot 0's carries the reader's requested size (r54): see
+    /// [`FrameBlock::request_size`]. The other slots' stay zero.
+    aux: AtomicU32,
     pts_100ns: std::cell::UnsafeCell<i64>,
     data: std::cell::UnsafeCell<[u8; SLOT_BYTES]>,
 }
@@ -150,6 +153,42 @@ impl FrameBlock {
         let fps = self.hint_fps.load(Ordering::Relaxed);
         (w >= 2 && h >= 2 && w <= MAX_WIDTH && h <= MAX_HEIGHT && w % 2 == 0 && h % 2 == 0)
             .then_some((w, h, fps.clamp(1, 120)))
+    }
+
+    /// Reader side (r54): ask the writer for frames of this size, so the
+    /// GPU scales once on the producer instead of the camera scaling on the
+    /// CPU inside the call app. `(0, 0)` withdraws the request. One request
+    /// at a time: the camera last opened wins, and any other reader scales
+    /// whatever arrives itself, so a mismatch is only slower, never wrong.
+    /// Packed into one word (halved even sizes) so a writer never sees a
+    /// torn pair; stored in what layout 1 left as padding, so no version
+    /// bump and old writers simply ignore it.
+    pub fn request_size(&self, width: u32, height: u32) {
+        let v = if width >= 2
+            && height >= 2
+            && width <= MAX_WIDTH
+            && height <= MAX_HEIGHT
+            && width % 2 == 0
+            && height % 2 == 0
+        {
+            ((width / 2) << 16) | (height / 2)
+        } else {
+            0
+        };
+        self.slots[0].aux.store(v, Ordering::Release);
+    }
+
+    /// Withdraw the request, but only if it is still ours.
+    pub fn withdraw_request(&self, width: u32, height: u32) {
+        let mine = ((width / 2) << 16) | (height / 2);
+        let _ = self.slots[0].aux.compare_exchange(mine, 0, Ordering::AcqRel, Ordering::Relaxed);
+    }
+
+    /// Writer side: the size a reader asked for, if any.
+    pub fn requested_size(&self) -> Option<(u32, u32)> {
+        let v = self.slots[0].aux.load(Ordering::Acquire);
+        let (w, h) = ((v >> 16) * 2, (v & 0xFFFF) * 2);
+        (w >= 2 && h >= 2 && w <= MAX_WIDTH && h <= MAX_HEIGHT).then_some((w, h))
     }
 
     /// Total frames written so far (0 until the receiver produces one).
@@ -481,6 +520,31 @@ mod tests {
         assert_eq!(block.geometry_hint(), Some((1280, 720, 60)));
         block.set_geometry_hint(1281, 720, 60);
         assert_eq!(block.geometry_hint(), None, "odd width is not a usable hint");
+    }
+
+    #[test]
+    fn size_request_round_trip_and_layout_unchanged() {
+        let block = heap_block();
+        assert_eq!(block.requested_size(), None, "old readers leave the old padding zero");
+        block.request_size(1920, 1080);
+        assert_eq!(block.requested_size(), Some((1920, 1080)));
+        // Frames written meanwhile do not disturb it.
+        let f = test_frame(4, 2, 0);
+        let (y, uv) = f.split_at(8);
+        for _ in 0..5 {
+            assert!(block.write_frame(4, 2, 0, y, 4, uv, 4));
+        }
+        assert_eq!(block.requested_size(), Some((1920, 1080)));
+        // Someone else's request is not withdrawn by us.
+        block.withdraw_request(1280, 720);
+        assert_eq!(block.requested_size(), Some((1920, 1080)));
+        block.withdraw_request(1920, 1080);
+        assert_eq!(block.requested_size(), None);
+        block.request_size(1281, 720);
+        assert_eq!(block.requested_size(), None, "odd sizes are not a request");
+        // Layout 1: header 32 bytes, slot header 24 bytes.
+        assert_eq!(std::mem::offset_of!(FrameBlock, slots), 32);
+        assert_eq!(std::mem::offset_of!(Slot, pts_100ns), 16);
     }
 
     #[test]

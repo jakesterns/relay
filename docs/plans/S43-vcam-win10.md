@@ -212,3 +212,64 @@ Owed live: toggle the camera from Settings while a receive is waiting and
 while one is playing, and check ffmpeg picks the stream up with no respawn;
 reinstall then uninstall on PC2 and `reg query` that the category keys are
 gone (on a PC with no other DirectShow camera).
+
+## S43c: mirrored and blurry in Discord (r54)
+Live on PC2 (Win10) with a 2560x1440@60 ring: the friend in the Discord call
+saw Relay Camera mirrored left to right, and blurry and hard to read.
+
+**Mirror.** Every step of the pixel path was checked against its spec and
+none reverses x: the ring writer copies decoder rows in order, the ring is
+top-down NV12, the scaler and the YUY2/RGB24 converters index columns
+left to right, NV12 and YUY2 are delivered top-down with a positive
+`biHeight` (as the DirectShow docs require for YUV), and RGB24 is a bottom-up
+DIB with a positive `biHeight` (`BI_RGB`). New in-process tests pull a sample
+in every offered type (4 sizes x NV12/YUY2/RGB24 from a 1440p stream, and the
+Win11 source's three sizes) from an asymmetric picture — a bright block top
+left, a red block top right, text strokes — and read it back the way each
+format's spec says: left stays left and top stays top in all of them
+(`picture::testpat`, `dshow_inproc.rs` stage 7, `source_inproc.rs`). The
+parser now also accepts a negative `biHeight` for YUV (top-down either way,
+per the docs) and still refuses it for RGB24, which this pin does not write
+top-down. Nothing was flipped for one consumer. If the mirror shows again,
+the camera log (below) says which type Discord negotiated, so a consumer-side
+flip can be pinned to a format; note Discord mirrors your *own* preview tile
+by design, so the check has to be made on the other person's screen.
+
+**Blur.** Nearest-neighbour scaling dropped or doubled whole columns of 1-2 px
+UI text (2560 → 1280 keeps every other column). Now:
+- The pin asks the producer for its negotiated size (the ring's size request,
+  slot 0's old padding word, so the layout stays version 1 and old binaries
+  ignore it). The share engine scales on the GPU with the D3D11 video
+  processor (BT.709 limited in and out, aspect kept with black bars) and
+  writes the smaller frame; the call app's threads only copy. If the
+  processor cannot be made it falls back, once, to native frames.
+- Anything else that arrives (another camera holds the request, an old
+  engine) is area-averaged on the worker thread (`picture::Scaler`; bilinear
+  when growing), with the same fit rectangle as the GPU path.
+- A stream larger than 1080p offers 1080p first (then the native size, 720p,
+  360p), so an app that takes the first type gets 1080p. The Win11 source
+  offers NV12 at 1080p / native / 720p the same way and honours whichever
+  type the pipeline sets (it used to serve black for any other size).
+- Measured against the old nearest-neighbour baseline (2560x1440 source):
+  glyph text RMSE vs the ideal area average 0.02 (area) vs 5.4 / 4.5
+  (nearest) at 1080p / 720p; a 1 px grating, which should turn even grey,
+  has sd 44 (area) and 21 (GPU) vs 103 (nearest) at 1080p, and nearest turns
+  it into a solid wrong level (mean off by 110) at 720p; 4 px strokes keep
+  contrast 0.98-1.0 on every path.
+
+**Log.** `%LOCALAPPDATA%\Relay\logs\camera.log` (256 KB, one rotation; only
+when that folder exists) and `OutputDebugString`: the negotiated type once
+per connection (`connected: NV12 1920x1080 @ 60 fps (first offered ...)`),
+`ring up` / `vcam ring down → showing the waiting still` on each switch, and
+a ring size change when the producer starts honouring the request. Lines
+carry the host exe and PID. The Win11 source logs the same to the debugger
+stream (its service profile has no Relay folder).
+
+**UI.** Nothing tells the user to install VB-Cable any more. With no mic
+route, Receive and Settings say the call app can take the other PC's audio
+through its own screen share with audio; a VB-Cable that is already present
+is still detected and used.
+
+Owed live (PC2): the Discord call again, checked on the friend's screen:
+orientation, legibility of small text, and the camera log's `connected:`
+line.

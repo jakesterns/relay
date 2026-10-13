@@ -82,12 +82,18 @@ pub fn run(hmonitor: HMONITOR, fps: u32) -> Result<()> {
     }
 
     let stop = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
     {
         let stop = stop.clone();
+        let paused = paused.clone();
         std::thread::Builder::new().name("look-stdin".into()).spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 match line {
                     Ok(l) if l.trim() == "stop" => break,
+                    // Alt-Tab grace: the game is out of focus; sample nothing
+                    // until it comes back (the core resumes or stops us).
+                    Ok(l) if l.trim() == "pause" => paused.store(true, Ordering::SeqCst),
+                    Ok(l) if l.trim() == "resume" => paused.store(false, Ordering::SeqCst),
                     Ok(_) => {}
                     Err(_) => break,
                 }
@@ -116,6 +122,14 @@ pub fn run(hmonitor: HMONITOR, fps: u32) -> Result<()> {
         loop {
             if stop.load(Ordering::SeqCst) {
                 return Ok(());
+            }
+            if paused.load(Ordering::SeqCst) {
+                std::thread::sleep(interval);
+                next = Instant::now();
+                // Whatever is on screen now is not the game: no motion
+                // reference or content region carries across the pause.
+                analyser = Analyser::new();
+                continue;
             }
             let now = Instant::now();
             if now < next {

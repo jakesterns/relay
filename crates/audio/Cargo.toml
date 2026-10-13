@@ -13,7 +13,7 @@ publish.workspace = true
 # inside its 10 MB budget; the DSP loads on demand via the `relay-preview`
 # child (and later the APO).
 default = ["dsp"]
-dsp = ["dep:realfft", "dep:hound", "dep:serde_json"]
+dsp = ["dep:realfft", "dep:hound"]
 
 # Windows version resource; see build-support/versioninfo.rs.
 [build-dependencies]
@@ -22,7 +22,7 @@ embed-resource = "3"
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
-serde_json = { workspace = true, optional = true }
+serde_json.workspace = true
 realfft = { version = "3.4", optional = true }
 hound = { version = "3.5", optional = true }
 

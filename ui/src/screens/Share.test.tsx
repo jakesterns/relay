@@ -144,6 +144,39 @@ describe("while sharing", () => {
     h.expectClean();
   });
 
+  it("S49: on Wi-Fi the strip names the link and a calm note says what Relay is doing", async () => {
+    const h = await sharing();
+    await push(() =>
+      tauri.emit("core://share-stats", {
+        event: "stats", bitrate_mbps: 18,
+        link: { kind: "wi_fi", label: "Wi-Fi (5 GHz, 866 Mb/s)", wifi: true, band: "5", mbps: 866 },
+        peer_link: { kind: "wired", label: "Wired (1 Gb/s)", wifi: false, band: null, mbps: 1000 },
+        adapt: {
+          rung: "1440p60", top: "2160p60", width: 2560, height: 1440, fps: 60,
+          target_mbps: 18, cause: "queue", note: "Lowered to 1440p60 to stay smooth",
+        },
+      }),
+    );
+    expect(readout("Link")).toEqual({ value: "Wi-Fi (5 GHz, 866 Mb/s)", hint: "Other PC: Wired (1 Gb/s)" });
+    expect(screen.getByTestId("link-note")).toHaveTextContent(
+      "This PC is on Wi-Fi. For steady 4K60, Ethernet or Wi-Fi 6E holds up best. Lowered to 1440p60 to stay smooth.",
+    );
+    h.expectClean();
+  });
+
+  it("S49: on a wired share nothing about the link appears", async () => {
+    await sharing();
+    await push(() =>
+      tauri.emit("core://share-stats", {
+        event: "stats", bitrate_mbps: 40,
+        link: { kind: "wired", label: "Wired (1 Gb/s)", wifi: false, band: null, mbps: 1000 },
+        peer_link: { kind: "wired", label: "Wired (2.5 Gb/s)", wifi: false, band: null, mbps: 2500 },
+      }),
+    );
+    expect(screen.queryByTestId("link-cell")).toBeNull();
+    expect(screen.queryByTestId("link-note")).toBeNull();
+  });
+
   it("reads em-dashes, not zeroes, before the first stats line arrives", async () => {
     await mount();
     expect(readout("Bitrate").value).toBe("—Mb/s");
@@ -251,7 +284,7 @@ describe("the preset editor", () => {
     await settle();
 
     expect(core.presets.some((p) => p.name === "Game copy")).toBe(false);
-    expect(core.presets.map((p) => p.id)).toEqual(["game", "daw", "desktop"]);
+    expect(core.presets.map((p) => p.id)).toEqual(["game", "daw", "desktop", "discord", "discord-720"]);
     h.expectClean();
   });
 
@@ -300,6 +333,24 @@ describe("codec capability", () => {
 
 /* The overlay used to read "Up to 3840×2160 / 60 fps / HEVC" and the load
  * hint "NVENC" on every PC with every preset. */
+/* S50: presets sized for what call apps do with a picture. */
+describe("the call presets", () => {
+  it("offers Discord at 1080p60 and 720p30, and says what they are for", async () => {
+    const h = await mount();
+    expect(screen.queryByTestId("call-preset-note")).not.toBeInTheDocument();
+    await h.user.click(screen.getByRole("button", { name: "Discord" }));
+    expect(kv("Size")).toBe("1920×1080");
+    expect(kv("Frame rate")).toBe("60 fps");
+    expect(kv("Bitrate")).toBe("20 Mb/s");
+    expect(screen.getByTestId("call-preset-note").textContent).toMatch(/Discord, Zoom, Teams and Meet/);
+    await h.user.click(screen.getByRole("button", { name: "Discord 720p30" }));
+    expect(kv("Size")).toBe("1280×720");
+    expect(kv("Frame rate")).toBe("30 fps");
+    expect(kv("Bitrate")).toBe("8 Mb/s");
+    h.expectClean();
+  });
+});
+
 describe("the overlay and encoder labels", () => {
   const tags = () => [...screen.getByTestId("share-tags").querySelectorAll("span")].map((s) => s.textContent);
 

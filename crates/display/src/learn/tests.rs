@@ -103,7 +103,9 @@ fn flat_black_is_not_hidden_detail() {
     let mut an = Analyser::new();
     let f = |t: usize| {
         frame(move |x, y| {
-            if y < H / 2 {
+            // Black band in the middle of moving content (a static border
+            // would be cropped away as not-the-game).
+            if (H / 4..H * 3 / 4).contains(&y) {
                 (0, 0, 0)
             } else {
                 let v = 80 + ((x + t * 9) % 100) as u8;
@@ -194,8 +196,22 @@ fn short_buffers_are_outliers_not_panics() {
 fn classification_thresholds_are_the_named_constants() {
     let base = FrameStats { luma_std: 0.2, motion: 0.1, ..Default::default() };
     assert_eq!(classify(&base, false), FrameClass::Gameplay);
-    let s = FrameStats { luma_std: LOADING_MAX_STDDEV - 1e-4, ..base.clone() };
+    let s = FrameStats {
+        luma_std: LOADING_MAX_STDDEV - 1e-4,
+        mean_luma: 0.5,
+        detail: LOADING_MIN_DETAIL - 1e-4,
+        ..base.clone()
+    };
     assert_eq!(classify(&s, false), FrameClass::Loading);
+    // Same spread, but textured: gameplay.
+    let s = FrameStats { detail: LOADING_MIN_DETAIL, ..s };
+    assert_eq!(classify(&s, false), FrameClass::Gameplay);
+    // Low absolute spread but high relative to a dark mean: not uniform.
+    let night = FrameStats { luma_std: 0.02, mean_luma: 0.05, ..base.clone() };
+    assert!(!is_loading(&night));
+    // Almost every pixel at the median, no texture: a spinner field.
+    let field = FrameStats { uniform_frac: LOADING_UNIFORM_FRAC, detail: 0.001, ..base.clone() };
+    assert!(is_loading(&field));
     let s = FrameStats { letterbox: LETTERBOX_BAR_FRAC, ..base.clone() };
     assert_eq!(classify(&s, false), FrameClass::Cutscene);
     let s = FrameStats { clip_frac: OUTLIER_CLIP_FRAC + 0.01, ..base.clone() };
@@ -407,9 +423,9 @@ fn not_ready_without_enough_frames() {
 }
 
 #[test]
-fn not_ready_with_one_kind_of_scene() {
+fn one_kind_of_scene_needs_the_longer_one_scene_budget() {
     let mut l = Learner::new("b1");
-    for _ in 0..MIN_GAMEPLAY_FRAMES * 3 {
+    for _ in 0..MIN_FRAMES_ONE_SCENE_CONFIDENT - 1 {
         l.observe(&gameplay(0.3, 0.2));
     }
     assert_eq!(l.scenes(), 1);
@@ -515,10 +531,17 @@ fn learner_round_trips_through_json() {
 
 #[test]
 fn convergence_constants() {
-    assert_eq!(MIN_GAMEPLAY_FRAMES, 600);
+    assert_eq!(SAMPLE_FPS, 2);
+    assert_eq!(MIN_GAMEPLAY_FRAMES, 600, "5 min at 2 fps");
     assert_eq!(MIN_SCENES, 3);
-    assert_eq!(CHECKPOINT_FRAMES, 120);
-    assert_eq!(CONVERGE_CHECKPOINTS, 3);
+    assert_eq!(CHECKPOINT_FRAMES, 60, "30 s at 2 fps");
+    assert_eq!(CHECKPOINT_FRAMES / SAMPLE_FPS, 30);
+    assert_eq!(CONVERGE_CHECKPOINTS, 2);
+    assert_eq!(ROLLING_WINDOW_FRAMES, 3600.0 * SAMPLE_FPS as f64, "an hour");
+    assert_eq!((MIN_FRAMES_ONE_SCENE, MIN_FRAMES_ONE_SCENE_CONFIDENT), (900, 480));
+    assert_eq!((CONFIDENT_SE, DECORRELATION_FRAMES), (0.0125, 4.0));
+    const { assert!(MIN_FRAMES_ONE_SCENE_CONFIDENT < MIN_FRAMES_ONE_SCENE) };
+    const { assert!(CONFIDENT_SE < crate::learn::derive::LOOK_STEP / 2.0) };
     const { assert!(CONVERGE_TOLERANCE < MEANINGFUL_CHANGE) };
     assert!(ROLLING_WINDOW_FRAMES > MIN_GAMEPLAY_FRAMES as f64);
 }
@@ -575,4 +598,539 @@ fn no_input_for_the_idle_limit_is_not_gameplay() {
     let mut l = Learner::new("b1");
     l.observe(&with_input_idle(gameplay(0.3, 0.2), Some(30_000)));
     assert_eq!((l.agg.frames, l.excluded.idle), (0, 1));
+}
+
+// --- PC2 live findings (r49) ------------------------------------------------
+
+/// Tarkov-style night raid: near-black, low spread, faint texture, moving.
+fn night_raid(t: usize) -> Vec<u8> {
+    let mut rng = Lcg(t as u32 * 31 + 5);
+    frame(|x, y| {
+        let n = rng.next();
+        let wave = ((x + t * 7) / 6 + y / 9) % 5;
+        let v = 3 + wave as u8 * 2 + (n * 3.0) as u8;
+        (v, v + 1, v)
+    })
+}
+
+#[test]
+fn a_dark_moving_night_scene_is_gameplay_not_loading() {
+    let mut an = Analyser::new();
+    run(&mut an, &night_raid(0));
+    for t in 1..6 {
+        let r = run(&mut an, &night_raid(t));
+        assert!(r.stats.luma_std < LOADING_MAX_STDDEV, "the hard case: {:?}", r.stats);
+        assert_eq!(r.class, FrameClass::Gameplay, "{:?}", r.stats);
+    }
+}
+
+#[test]
+fn a_black_fade_is_loading() {
+    let mut an = Analyser::new();
+    for t in 0..6usize {
+        let v = (40 - t * 7) as u8;
+        let r = run(&mut an, &frame(|_, _| (v, v, v)));
+        assert_eq!(r.class, FrameClass::Loading, "step {t}: {:?}", r.stats);
+    }
+}
+
+#[test]
+fn a_loading_spinner_is_loading() {
+    let mut an = Analyser::new();
+    for t in 0..6usize {
+        // A small bright dot circling on a black field.
+        let (cx, cy) = (W / 2 + [0, 12, 0, 12][t % 4], H / 2 + [0, 0, 12, 12][t % 4]);
+        let r = run(
+            &mut an,
+            &frame(|x, y| {
+                if x.abs_diff(cx) < 4 && y.abs_diff(cy) < 4 {
+                    (200, 200, 200)
+                } else {
+                    (2, 2, 2)
+                }
+            }),
+        );
+        assert_eq!(r.class, FrameClass::Loading, "step {t}: {:?}", r.stats);
+    }
+}
+
+/// A game (or a video) in a window 40 % of the screen, inside a static page.
+fn windowed(t: usize, page: u8, content: impl Fn(usize, usize) -> (u8, u8, u8)) -> Vec<u8> {
+    let (x0, x1, y0, y1) = (W * 3 / 10, W * 7 / 10, H * 3 / 10, H * 7 / 10);
+    let _ = t;
+    frame(|x, y| {
+        if x >= x0 && x < x1 && y >= y0 && y < y1 {
+            content(x - x0, y - y0)
+        } else {
+            (page, page, page)
+        }
+    })
+}
+
+#[test]
+fn a_windowed_scene_in_a_static_frame_is_analysed_on_its_own_pixels() {
+    for page in [250u8, 15u8] {
+        let mut an = Analyser::new();
+        // Dark scene in the window.
+        let mut last = None;
+        for t in 0..4 {
+            last = Some(run(
+                &mut an,
+                &windowed(t, page, |x, y| {
+                    let v = 5 + ((x + y + t * 13) % 30) as u8;
+                    (v, v, v)
+                }),
+            ));
+        }
+        let dark = last.unwrap();
+        assert!(dark.stats.content_frac < 0.5, "{:?}", dark.stats);
+        assert_eq!(apl_bucket(dark.stats.mean_luma), 0, "page {page}: {:?}", dark.stats);
+        assert_eq!(dark.class, FrameClass::Gameplay);
+        // The content brightens: the bucket follows the content, not the page.
+        let mut last = None;
+        for t in 4..8 {
+            last = Some(run(
+                &mut an,
+                &windowed(t, page, |x, y| {
+                    let v = 200 + ((x + y + t * 13) % 50) as u8;
+                    (v, v, v)
+                }),
+            ));
+        }
+        let bright = last.unwrap();
+        assert_eq!(
+            apl_bucket(bright.stats.mean_luma),
+            APL_BUCKETS - 1,
+            "page {page}: {:?}",
+            bright.stats
+        );
+    }
+}
+
+#[test]
+fn scenes_accumulate_per_bucket_and_checkpoints_report_before_evidence() {
+    let mut l = Learner::new("b1");
+    for _ in 0..CHECKPOINT_FRAMES * 2 {
+        l.observe(&gameplay(0.3, 0.1));
+    }
+    let r = l.readiness();
+    assert_eq!(r.scenes, 1);
+    assert_eq!(r.checkpoints, 2, "checkpoints are taken with one scene");
+    assert_eq!(r.stable_checkpoints, 2);
+    assert_eq!(r.scene_frames[apl_bucket(0.3)], CHECKPOINT_FRAMES as u64 * 2);
+    for _ in 0..40 {
+        l.observe(&gameplay(0.05, 0.1));
+    }
+    let r = l.readiness();
+    assert_eq!(r.scenes, 2);
+    assert_eq!(r.scene_frames[0], 40);
+    assert_eq!(r.scene_frames[apl_bucket(0.3)], CHECKPOINT_FRAMES as u64 * 2, "not overwritten");
+    assert_eq!(l.phase(), Phase::Learning);
+}
+
+#[test]
+fn the_exclusion_breakdown_counts_warmup() {
+    let mut l = Learner::new("b1");
+    l.observe(&FrameReport { class: FrameClass::Warmup, ..gameplay(0.3, 0.1) });
+    l.observe(&FrameReport { class: FrameClass::Loading, ..gameplay(0.3, 0.1) });
+    assert_eq!((l.excluded.warmup, l.excluded.loading, l.excluded.total()), (1, 1, 2));
+}
+
+#[test]
+fn panel_type_is_guessed_from_the_model() {
+    assert_eq!(PanelKind::guess_from_model("AW2518H", "DEL40E0-x"), Some(PanelKind::Tn));
+    assert_eq!(PanelKind::guess_from_model("Dell AW2518HF", ""), Some(PanelKind::Tn));
+    assert_eq!(PanelKind::guess_from_model("LG ULTRAGEAR+", "GSM5C7C-abc"), Some(PanelKind::Oled));
+    assert_eq!(PanelKind::guess_from_model("Some QD-OLED 27", ""), Some(PanelKind::Oled));
+    assert_eq!(PanelKind::guess_from_model("Odyssey G7", ""), Some(PanelKind::Va));
+    assert_eq!(PanelKind::guess_from_model("Generic PnP Monitor", "ABC1234"), None);
+}
+
+/// Bright daylight sky over snow: lots of near-white, but a real scene.
+fn snow_and_sky(t: usize) -> Vec<u8> {
+    frame(|x, y| {
+        if y < H / 3 {
+            let v = 251 + (t % 3) as u8 * 2; // blown sky, drifting cloud light
+            (v, v, 255)
+        } else if y < H * 2 / 3 {
+            let v = 240 + ((x + t * 9) % 16) as u8; // snow field, some texture
+            (v, v, v)
+        } else {
+            let v = 90 + ((x * 2 + y + t * 13) % 80) as u8; // trees, player
+            (v / 2, v, v / 3)
+        }
+    })
+}
+
+#[test]
+fn bright_sky_and_snow_are_gameplay_not_outliers() {
+    let mut an = Analyser::new();
+    run(&mut an, &snow_and_sky(0));
+    for t in 1..5 {
+        let r = run(&mut an, &snow_and_sky(t));
+        assert!(r.stats.clip_frac > 0.3, "the hard case: {:?}", r.stats);
+        assert_eq!(r.class, FrameClass::Gameplay, "{:?}", r.stats);
+    }
+    assert_eq!(OUTLIER_CLIP_FRAC, 0.9);
+}
+
+#[test]
+fn agreement_is_judged_on_what_would_be_applied() {
+    let a = LookTargets { shadow: 0.30, saturation: 0.20, highlight: 0.0 };
+    // 0.10 apart in look units: two lift points, ~1 vibrance point: agrees.
+    let b = LookTargets { shadow: 0.40, saturation: 0.30, highlight: 0.0 };
+    let d = CheckpointDelta::between(&a, &b);
+    assert!(d.agrees(), "{d:?}");
+    // 0.30 apart: six lift points: does not.
+    let c = LookTargets { shadow: 0.60, ..a };
+    assert!(!CheckpointDelta::between(&a, &c).agrees());
+    assert_eq!((AGREE_GAMMA, AGREE_SHADOW_LIFT, AGREE_VIBRANCE), (0.02, 3, 2));
+}
+
+/// Minute-to-minute swings of real play: each interval is a different mix of
+/// night, indoor, daylight and snow, with crush and saturation jumping around.
+#[test]
+fn a_highly_varied_session_converges_within_the_frame_budget() {
+    let mut rng = Lcg(42);
+    let mut l = Learner::new("b1");
+    let mut frames = 0;
+    while l.phase() == Phase::Learning && frames < 2400 {
+        // A new "situation" every 40 s.
+        let apl = [0.04, 0.18, 0.35, 0.55, 0.8][(rng.next() * 5.0) as usize % 5];
+        let crush = rng.next() * 0.35;
+        let sat = 0.15 + rng.next() * 0.45;
+        for _ in 0..40 {
+            let mut r = gameplay(apl + rng.next() * 0.05, crush * (0.5 + rng.next()));
+            r.stats.sat_mean = sat * (0.7 + rng.next() * 0.6);
+            r.stats.sat_p90 = (r.stats.sat_mean + 0.2).min(0.84);
+            r.stats.clip_frac = rng.next() * 0.08;
+            l.observe(&r);
+            frames += 1;
+        }
+    }
+    assert_eq!(l.phase(), Phase::Converged, "{:?} after {frames}", l.readiness());
+    assert!(frames <= 1200, "converged only after {frames} frames");
+    let d = l.readiness().delta.unwrap();
+    assert!(d.agrees(), "{d:?}");
+}
+
+#[test]
+fn pc2_constants() {
+    assert_eq!(LOADING_MAX_CV, 0.25);
+    assert_eq!(LOADING_MIN_DETAIL, 0.005);
+    assert_eq!(ACTIVE_HISTORY, 8);
+    assert_eq!(ACTIVE_BLOCK_DELTA, 0.003);
+    assert_eq!((LOADING_UNIFORM_FRAC, LOADING_NEAR), (0.95, 0.02));
+    assert_eq!(MIN_ACTIVE_FRAC, 0.05);
+}
+
+// --- r51 ---------------------------------------------------------------------
+
+#[test]
+fn a_night_only_game_converges_and_asks_for_shadow() {
+    let mut l = Learner::new("b1");
+    let mut frames = 0;
+    while l.phase() == Phase::Learning && frames < 3000 {
+        l.observe(&gameplay(0.04 + (frames % 7) as f32 * 0.005, 0.2));
+        frames += 1;
+    }
+    assert!(l.single_scene());
+    assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
+    assert!(frames as u64 >= MIN_FRAMES_ONE_SCENE_CONFIDENT);
+    assert!(l.readiness().confident, "steady night frames take the confident budget");
+    assert!(l.converged.unwrap().shadow > 0.0);
+    assert_eq!(l.readiness().scenes_needed, 1);
+}
+
+#[test]
+fn varied_content_needs_three_scenes_until_the_longer_budget() {
+    let mut l = Learner::new("b1");
+    // 80 % night, 20 % daylight: not one scene, only two buckets. Before the
+    // limited-variety budget it still waits for a third scene ...
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 50) {
+        l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert!(!l.single_scene());
+    assert_eq!(l.readiness().scenes_needed, MIN_SCENES);
+    assert_eq!(l.readiness().frames_needed, MIN_FRAMES_ONE_SCENE);
+    assert_eq!(l.phase(), Phase::Learning);
+    // ... and past it, the two scenes it shows are the game (r62).
+    for i in 0..2000 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    assert_eq!(l.readiness().scenes_needed, 2);
+    assert_eq!(l.phase(), Phase::Converged);
+    assert_eq!((DOMINANT_SCENE_SHARE, MIN_FRAMES_ONE_SCENE), (0.9, 900));
+}
+
+#[test]
+fn an_unknown_build_adopts_the_first_fingerprint_without_relearning() {
+    let mut l = Learner::new("");
+    feed(&mut l, 300, 0.14);
+    assert!(!l.check_build("123-456"), "evidence kept");
+    assert_eq!((l.build.as_str(), l.agg.frames), ("123-456", 300));
+    // Stop, restart and resume with the same fingerprint: nothing lost.
+    let saved: Learner = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+    let mut resumed = saved;
+    assert!(!resumed.check_build("123-456"));
+    assert!(!resumed.check_build(""), "an unreadable path is not a new build");
+    feed(&mut resumed, 10, 0.14);
+    assert_eq!(resumed.agg.frames, 310);
+    // A real change still relearns.
+    assert!(resumed.check_build("999-1"));
+    assert_eq!(resumed.agg.frames, 0);
+}
+
+#[test]
+fn the_candidate_look_is_visible_before_convergence() {
+    let mut l = Learner::new("b1");
+    assert!(l.readiness().candidate.is_none());
+    for _ in 0..CHECKPOINT_FRAMES {
+        l.observe(&gameplay(0.3, 0.14));
+    }
+    assert_eq!(l.phase(), Phase::Learning);
+    assert_eq!(l.readiness().candidate.unwrap().shadow, 0.5);
+}
+
+// --- S48: faster learning ----------------------------------------------------
+
+/// The CPU side of one sample (analysis of a 480×270 frame), measured, so
+/// the 2 fps budget is a number: at 2 fps it must stay under 1 % of a core.
+/// (The GPU blt and ~190 KB readback are not CPU work.)
+#[test]
+fn analysis_cost_at_two_fps_is_under_one_percent_of_a_core() {
+    let frames: Vec<Vec<u8>> = (0..20).map(dark_crushed).collect();
+    let mut an = Analyser::new();
+    let mut l = Learner::new("b1");
+    let n = 200;
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let r = run(&mut an, &frames[i % frames.len()]);
+        l.observe(&r);
+    }
+    let per = t.elapsed().as_secs_f64() / n as f64;
+    let share = per * SAMPLE_FPS as f64 * 100.0;
+    eprintln!(
+        "S48 look analysis: {:.2} ms per sample = {share:.3} % of one core at {SAMPLE_FPS} fps",
+        per * 1e3
+    );
+    if !cfg!(debug_assertions) {
+        assert!(share < 1.0, "{share} %");
+    }
+}
+
+/// Gameplay seconds until the learner settles, sampling at [`SAMPLE_FPS`].
+fn settle_secs(mut next: impl FnMut(usize) -> FrameReport, max_frames: usize) -> Option<f32> {
+    let mut l = Learner::new("b1");
+    for i in 0..max_frames {
+        l.observe(&next(i));
+        if l.phase() == Phase::Converged {
+            return Some((i + 1) as f32 / SAMPLE_FPS as f32);
+        }
+    }
+    None
+}
+
+/// A steady, varied game (three scenes) settled no sooner than 600 s of
+/// gameplay with the S47 constants (600 frames at 1 fps, three agreeing
+/// checkpoints two minutes apart). At 2 fps with 30 s checkpoints it takes
+/// half that.
+#[test]
+fn a_steady_varied_game_settles_in_half_the_time() {
+    let s47_minimum_secs = 600.0;
+    let secs = settle_secs(|i| gameplay([0.05, 0.3, 0.7][i % 3], 0.14), 4000).expect("settles");
+    eprintln!("S48 steady varied game: settled after {secs} s of gameplay (S47: >= 600 s)");
+    assert!(secs <= 0.55 * s47_minimum_secs, "{secs} s");
+    assert!(secs >= MIN_GAMEPLAY_FRAMES as f32 / SAMPLE_FPS as f32);
+}
+
+/// A night-only game with tight statistics takes the confident one-scene
+/// budget (4 min instead of 7.5, and 15 under S47); a noisy one does not.
+#[test]
+fn a_tight_dark_only_game_needs_fewer_frames() {
+    let tight = settle_secs(|i| gameplay(0.04 + (i % 7) as f32 * 0.005, 0.2), 4000).unwrap();
+    let mut rng = Lcg(7);
+    let noisy = settle_secs(
+        |_| {
+            let mut r = gameplay(0.04 + rng.next() * 0.03, 0.05 + rng.next() * 0.5);
+            r.stats.sat_mean = 0.1 + rng.next() * 0.5;
+            r
+        },
+        6000,
+    );
+    eprintln!("S48 dark-only: tight {tight} s, noisy {noisy:?} s (S47: >= 900 s)");
+    assert!(tight <= (MIN_FRAMES_ONE_SCENE_CONFIDENT + CHECKPOINT_FRAMES as u64) as f32 / 2.0);
+    let noisy = noisy.expect("a noisy night game still settles, on the long budget");
+    assert!(noisy >= MIN_FRAMES_ONE_SCENE as f32 / SAMPLE_FPS as f32, "{noisy} s");
+}
+
+#[test]
+fn confidence_needs_squared_sums_and_tight_spread() {
+    let mut l = Learner::new("b1");
+    assert!(!l.confident(), "no evidence is not confident");
+    for _ in 0..400 {
+        l.observe(&gameplay(0.05, 0.2));
+    }
+    assert!(l.confident());
+    let se = l.agg.standard_errors(DECORRELATION_FRAMES).unwrap();
+    assert!(se.iter().all(|s| *s < 1e-3), "{se:?}");
+    // A pre-S48 record has no squared sums: unknown, never "confident".
+    let mut old = l.clone();
+    old.agg.crush_sq = 0.0;
+    old.agg.sat_sq = 0.0;
+    old.agg.clip_sq = 0.0;
+    assert!(!old.confident());
+    let json = serde_json::to_string(&old)
+        .unwrap()
+        .replace(",\"crush_sq\":0.0,\"sat_sq\":0.0,\"clip_sq\":0.0", "");
+    assert!(!json.contains("crush_sq"));
+    let back: Learner = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.agg.crush_sq, 0.0);
+}
+
+#[test]
+fn eta_counts_down_and_is_unknown_without_the_scenes() {
+    let mut l = Learner::new("b1");
+    assert_eq!(l.eta_secs(), None, "no scenes yet");
+    for i in 0..90 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let a = l.eta_secs().expect("three scenes seen");
+    assert_eq!(a, ((MIN_GAMEPLAY_FRAMES - 90) / SAMPLE_FPS as u64) as u32);
+    feed(&mut l, 200, 0.14);
+    let b = l.eta_secs().unwrap();
+    assert!(b < a, "{b} < {a}");
+    feed(&mut l, 2000, 0.14);
+    assert_eq!(l.phase(), Phase::Converged);
+    assert_eq!(l.eta_secs(), Some(0));
+    assert_eq!(l.readiness().eta_secs, Some(0));
+    // Two scenes, neither dominant: the limited-variety budget (r62).
+    let mut two = Learner::new("b1");
+    for i in 0..300 {
+        two.observe(&gameplay(if i % 4 == 0 { 0.7 } else { 0.05 }, 0.2));
+    }
+    let eta = two.eta_secs().expect("two scenes still have an ETA");
+    let budget = ((MIN_FRAMES_ONE_SCENE - 300) / SAMPLE_FPS as u64) as u32;
+    assert!(eta.abs_diff(budget) <= 2, "{eta} vs {budget}");
+    // A third scene seen but short (r58, Warzone): estimated at its rate.
+    // 10 of 310 frames so far -> 20 more needs ~620 gameplay frames.
+    for _ in 0..10 {
+        two.observe(&gameplay(0.3, 0.2));
+    }
+    let eta = two.eta_secs().expect("short scene estimated");
+    let want = ((MIN_FRAMES_PER_SCENE - 10.0) * 310.0 / 10.0 / SAMPLE_FPS as f64).ceil() as u32;
+    assert_eq!(eta, want);
+}
+
+/// r62 Tarkov night: two scenes, 19 % / 81 %, never a third. It converges on
+/// the limited-variety budget instead of waiting forever.
+#[test]
+fn two_scene_content_converges_on_the_longer_budget() {
+    let mut l = Learner::new("b1");
+    for i in 0..(MIN_FRAMES_ONE_SCENE as usize - 100) {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.scenes(), 2);
+    assert!(!l.single_scene());
+    assert_eq!(l.phase(), Phase::Learning, "not before the budget");
+    assert!(l.eta_secs().is_some());
+    for i in 0..1200 {
+        l.observe(&gameplay(if i % 5 == 0 { 0.4 } else { 0.05 }, 0.14));
+    }
+    assert_eq!(l.phase(), Phase::Converged, "{:?}", l.readiness());
+    assert_eq!(l.eta_secs(), Some(0));
+}
+
+/// r58 Tarkov: the ETA is wall-clock time, so frames that are not gameplay
+/// (static, loading, idle) slow it in proportion.
+#[test]
+fn eta_scales_with_the_gameplay_share() {
+    let mut l = Learner::new("b1");
+    for i in 0..90 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let all_gameplay = l.eta_secs().unwrap();
+    // An older record has no recent share: the whole run's share is used.
+    l.recent_gameplay_share = None;
+    l.excluded.static_frames = 90; // half of what was seen
+    let half = l.eta_secs().unwrap();
+    assert!((half as i64 - 2 * all_gameplay as i64).abs() <= 1, "{half} vs {all_gameplay}");
+    l.excluded.static_frames = 100_000; // floored, not hours
+    let floored = l.eta_secs().unwrap();
+    assert!(floored as f64 <= all_gameplay as f64 / MIN_GAMEPLAY_SHARE + 1.0);
+}
+
+/// r63: a static stretch slows the ETA within about a minute, not over the
+/// whole run, and it speeds back up when play resumes.
+#[test]
+fn eta_follows_the_recent_gameplay_share() {
+    let mut l = Learner::new("b1");
+    for i in 0..300 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let playing = l.eta_secs().unwrap();
+    let mut still = gameplay(0.3, 0.14);
+    still.class = FrameClass::Static;
+    for _ in 0..120 {
+        l.observe(&still);
+    }
+    let paused = l.eta_secs().unwrap();
+    // Same gameplay left; ~63 % of the last minute was static.
+    assert!(paused as f64 > 2.0 * playing as f64, "{paused} vs {playing}");
+    for i in 0..120 {
+        l.observe(&gameplay([0.05, 0.3, 0.7][i % 3], 0.14));
+    }
+    let resumed = l.eta_secs().unwrap();
+    assert!(resumed < paused, "{resumed} < {paused}");
+    l.relearn();
+    assert_eq!(l.recent_gameplay_share, None);
+}
+
+/// A video file's learner merged into a live one: the evidence adds,
+/// weighted by frames, and convergence still needs agreement.
+#[test]
+fn file_evidence_merges_weighted_by_frames() {
+    // From a file: 700 frames of a game with crush 0.14 (settles).
+    let mut file = Learner::new("");
+    feed(&mut file, 700, 0.14);
+    assert_eq!(file.phase(), Phase::Converged);
+    // Into an empty record: it is settled here too.
+    let mut fresh = Learner::new("b1");
+    fresh.merge(&file);
+    assert_eq!(fresh.agg.frames, 700);
+    assert_eq!(fresh.phase(), Phase::Converged);
+    assert_eq!(fresh.converged, file.converged);
+    assert!(!fresh.use_learned, "a merge never applies anything by itself");
+    // Into live evidence of a darker game (crush 0.24): the merged mean sits
+    // between, weighted by frames.
+    let mut live = Learner::new("b1");
+    feed(&mut live, 300, 0.24);
+    live.merge(&file);
+    let m = live.agg.summary().crush_frac;
+    let want = (300.0 * 0.24 + 700.0 * 0.14) / 1000.0;
+    assert!((m - want).abs() < 1e-4, "{m} vs {want}");
+    assert_eq!(live.agg.frames, 1000);
+    // The merged checkpoint has to agree with the live one before it: not
+    // settled from the merge alone.
+    assert_eq!(live.phase(), Phase::Learning, "{:?}", live.readiness());
+    // Live play then settles it under the usual rules.
+    feed(&mut live, 2 * CHECKPOINT_FRAMES as usize, 0.17);
+    assert_eq!(live.phase(), Phase::Converged);
+}
+
+#[test]
+fn a_merge_stays_inside_the_rolling_window() {
+    let mut a = Learner::new("b1");
+    feed(&mut a, ROLLING_WINDOW_FRAMES as usize, 0.1);
+    let mut b = Learner::new("");
+    feed(&mut b, ROLLING_WINDOW_FRAMES as usize, 0.3);
+    a.merge(&b);
+    assert!(a.agg.weight <= ROLLING_WINDOW_FRAMES + 1e-6);
+    let m = a.agg.summary().crush_frac;
+    assert!((m - 0.2).abs() < 0.01, "equal weights meet in the middle: {m}");
+    // Exclusions add.
+    let mut c = Learner::new("");
+    c.observe(&FrameReport { class: FrameClass::Cutscene, ..gameplay(0.3, 0.1) });
+    a.merge(&c);
+    assert_eq!(a.excluded.cutscene, 1);
 }

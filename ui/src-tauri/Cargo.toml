@@ -46,5 +46,11 @@ webview2-com = "0.38"
 windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # S51: ShellExecuteW for the two fixed NDI links (open_ndi_link).
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
+    # S48: the "choose a video" dialog (IFileOpenDialog).
+    "Win32_System_Com",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
 ] }

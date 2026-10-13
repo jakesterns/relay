@@ -109,7 +109,7 @@ impl ProfileStore {
 
 /// Write via a temp file + fsync + rename so a crash mid-write never leaves a
 /// torn file and the bytes are durable before the rename makes them visible.
-pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

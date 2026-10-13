@@ -203,6 +203,7 @@ describe("what keeps running after the window closes", () => {
       prefs: {
         close_action: "quit_relay", resilience: true, close_notice: true, audio_devices: {},
         auto_check_updates: true, auto_install_updates: false, prerelease_updates: false,
+        ndi_receive: false, ndi_share: false,
       },
     });
     expect(core.prefs.close_action).toBe("quit_relay");

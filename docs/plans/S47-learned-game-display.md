@@ -106,10 +106,15 @@ inert today: no quirks row is a `VerifiedCode` with a level range, so
 
 ### Confidence and convergence (`converge.rs`)
 
+> **S48** samples at 2 fps with 30 s checkpoints, two agreeing, and a
+> confident one-scene budget of 4 min; see `S48-fast-learning.md`. The S47
+> table below is kept for the record.
+
 | Constant | Value | Meaning |
 |---|---|---|
 | `MIN_GAMEPLAY_FRAMES` | 600 | 10 min of gameplay at 1 fps |
 | `MIN_SCENES` / `MIN_FRAMES_PER_SCENE` | 3 / 30 | APL buckets (edges 0.10, 0.25, 0.45, 0.65) visited |
+| (r62) fewer than `MIN_SCENES` | 900 frames | content that shows only one or two scenes without one dominating (Tarkov night, 19 % / 81 %) settles on the one-scene budget with the scenes it has, instead of never |
 | `CHECKPOINT_FRAMES` | 120 | a checkpoint every 2 min of gameplay |
 | `CONVERGE_CHECKPOINTS` / `CONVERGE_TOLERANCE` | 3 / 0.05 | three checkpoints within 0.05 on every axis |
 | `ROLLING_WINDOW_FRAMES` | 3600 | exponential window (~1 h) after that, to follow updates |

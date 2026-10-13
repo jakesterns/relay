@@ -225,13 +225,37 @@ pub fn forward_log_crate(debug: bool) {
 pub struct TunedRuntime {
     inner: Arc<dyn Runtime>,
     stats: Arc<NetStats>,
+    /// S49: a Wi-Fi model applied to arriving RTP/RTCP. Test only.
+    sim: Option<super::netsim::Profile>,
 }
 
 impl TunedRuntime {
     pub fn wrap(inner: Arc<dyn Runtime>) -> (Arc<dyn Runtime>, Arc<NetStats>) {
-        let stats = Arc::new(NetStats::default());
-        (Arc::new(Self { inner, stats: stats.clone() }), stats)
+        Self::wrap_with(inner, sim_from_env())
     }
+
+    /// As [`TunedRuntime::wrap`], with the link model chosen by the caller
+    /// rather than `RELAY_TEST_NET` (the in-process loopback tests run
+    /// several profiles in one process).
+    pub fn wrap_with(
+        inner: Arc<dyn Runtime>,
+        sim: Option<super::netsim::Profile>,
+    ) -> (Arc<dyn Runtime>, Arc<NetStats>) {
+        let stats = Arc::new(NetStats::default());
+        (Arc::new(Self { inner, stats: stats.clone(), sim }), stats)
+    }
+}
+
+/// `RELAY_TEST_NET=<profile>[,overrides]`: run this end's arriving media
+/// through [`super::netsim`]. Both ends of a loopback share set it, so both
+/// directions see the link (video one way, NACK/PLI/reports the other).
+pub fn sim_from_env() -> Option<super::netsim::Profile> {
+    let spec = std::env::var("RELAY_TEST_NET").ok()?;
+    let p = super::netsim::Profile::parse(&spec);
+    if p.is_none() {
+        tracing::warn!(%spec, "RELAY_TEST_NET not understood; no link model");
+    }
+    p
 }
 
 impl fmt::Debug for TunedRuntime {
@@ -277,7 +301,12 @@ impl Runtime for TunedRuntime {
 
         // A second handle to the same kernel socket, kept for FIONREAD.
         let probe = socket.try_clone()?;
-        let inner = self.inner.wrap_udp_socket(socket)?;
+        let mut inner = self.inner.wrap_udp_socket(socket)?;
+        if let Some(p) = self.sim.clone() {
+            tracing::warn!(profile = %p.name, "TEST: simulating a Wi-Fi link on arriving media");
+            let port = inner.local_addr().map(|a| a.port()).unwrap_or(0);
+            inner = Arc::new(SimSocket::new(inner, p, u64::from(port)));
+        }
         let loss = LossInjection::from_env();
         if let Some(l) = &loss {
             tracing::warn!(
@@ -328,6 +357,186 @@ impl Runtime for TunedRuntime {
 
     fn name(&self) -> &'static str {
         self.inner.name()
+    }
+}
+
+/// Arriving datagrams through a [`super::netsim::Link`]: held until the
+/// model says they arrive, or dropped. Only RTP and RTCP (first byte
+/// 0x80-0xBF) go through it; STUN and DTLS pass untouched, so the link model
+/// never decides whether a connection can be set up, only how media fares.
+///
+/// Poll-based: each receive first drains everything the real socket has into
+/// the model's queue (registering for more), then hands out whatever is due,
+/// or arms a timer for the head of the queue.
+struct SimSocket {
+    inner: Arc<dyn AsyncUdpSocket>,
+    state: std::sync::Mutex<SimState>,
+}
+
+type Held = (std::time::Instant, Vec<u8>, RecvMeta);
+
+struct SimState {
+    link: super::netsim::Link,
+    epoch: std::time::Instant,
+    queue: std::collections::VecDeque<Held>,
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    scratch: Vec<u8>,
+    logged_at: std::time::Instant,
+    /// So the model's millisecond delays are not rounded to 15.6 ms ticks.
+    _hires: Option<super::pacing::HiResTimer>,
+}
+
+impl SimSocket {
+    fn new(inner: Arc<dyn AsyncUdpSocket>, mut p: super::netsim::Profile, salt: u64) -> Self {
+        // Each end draws its own link from the same profile.
+        p.seed ^= salt.wrapping_mul(0x9E37_79B9);
+        let now = std::time::Instant::now();
+        Self {
+            inner,
+            state: std::sync::Mutex::new(SimState {
+                link: super::netsim::Link::new(p),
+                epoch: now,
+                queue: Default::default(),
+                timer: None,
+                scratch: vec![0u8; 65_536],
+                logged_at: now,
+                _hires: super::pacing::HiResTimer::acquire(),
+            }),
+        }
+    }
+}
+
+impl fmt::Debug for SimSocket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+/// RTP or RTCP, as opposed to STUN (0-3) and DTLS (20-63) — RFC 7983.
+fn is_rtp_or_rtcp(d: &[u8]) -> bool {
+    d.first().is_some_and(|b| (128..=191).contains(b))
+}
+
+impl AsyncUdpSocket for SimSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn poll_send(&self, cx: &mut Context<'_>, transmit: &Transmit<'_>) -> Poll<io::Result<usize>> {
+        self.inner.poll_send(cx, transmit)
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        use super::netsim::Fate;
+        let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let st = &mut *guard;
+        // 1. Everything the real socket has, into the model.
+        let mut error = None;
+        loop {
+            let mut m = [RecvMeta::default(); 1];
+            let r = {
+                let mut one = [IoSliceMut::new(&mut st.scratch)];
+                self.inner.poll_recv(cx, &mut one, &mut m)
+            };
+            match r {
+                Poll::Ready(Ok(n)) if n > 0 => {
+                    let now = std::time::Instant::now();
+                    let m = m[0];
+                    let stride = m.stride.max(1);
+                    let mut off = 0;
+                    while off < m.len {
+                        let end = (off + stride).min(m.len);
+                        let d = st.scratch[off..end].to_vec();
+                        off = end;
+                        let mut one = m;
+                        (one.len, one.stride) = (d.len(), d.len());
+                        if !is_rtp_or_rtcp(&d) {
+                            st.queue.push_back((now, d, one));
+                            continue;
+                        }
+                        match st.link.on_packet(now - st.epoch, d.len()) {
+                            Fate::Deliver(at) => {
+                                // FIFO: nothing is queued behind a later time.
+                                let at = (st.epoch + at).max(st.queue.back().map_or(now, |q| q.0));
+                                st.queue.push_back((at, d, one));
+                            }
+                            Fate::QueueDrop | Fate::RadioLoss => {}
+                        }
+                    }
+                }
+                Poll::Ready(Ok(_)) | Poll::Pending => break,
+                Poll::Ready(Err(e)) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+        if st.logged_at.elapsed() >= Duration::from_secs(5) {
+            st.logged_at = std::time::Instant::now();
+            let s = st.link.stats;
+            tracing::info!(
+                packets = s.packets,
+                queue_drops = s.queue_drops,
+                radio_losses = s.radio_losses,
+                stalls = s.stalls,
+                spikes = s.spikes,
+                max_added_ms = s.max_added.as_millis() as u64,
+                held = st.queue.len(),
+                "TEST: link model"
+            );
+        }
+        // 2. Hand out what is due.
+        let now = std::time::Instant::now();
+        let mut n = 0;
+        while n < bufs.len().min(meta.len()) {
+            let fits = match st.queue.front() {
+                Some((at, d, _)) if *at <= now => d.len() <= bufs[n].len(),
+                _ => break,
+            };
+            let Some((_, d, m)) = st.queue.pop_front() else { break };
+            if !fits {
+                // Cannot happen for one datagram into a receive buffer, but
+                // never wedge the socket on it.
+                continue;
+            }
+            bufs[n][..d.len()].copy_from_slice(&d);
+            meta[n] = m;
+            n += 1;
+        }
+        if n > 0 {
+            return Poll::Ready(Ok(n));
+        }
+        if let Some(e) = error {
+            return Poll::Ready(Err(e));
+        }
+        // 3. Nothing due: wake when the head is.
+        if let Some((at, _, _)) = st.queue.front() {
+            let at = tokio::time::Instant::from_std(*at);
+            match st.timer.as_mut() {
+                Some(t) => t.as_mut().reset(at),
+                None => st.timer = Some(Box::pin(tokio::time::sleep_until(at))),
+            }
+            if let Some(t) = st.timer.as_mut() {
+                if t.as_mut().poll(cx).is_ready() {
+                    cx.waker().wake_by_ref();
+                }
+            }
+        }
+        Poll::Pending
+    }
+
+    fn max_gso_segments(&self) -> usize {
+        self.inner.max_gso_segments()
+    }
+
+    fn max_gro_segments(&self) -> usize {
+        // Datagrams come out one per buffer, never coalesced.
+        1
     }
 }
 
