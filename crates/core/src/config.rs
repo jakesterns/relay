@@ -141,6 +141,11 @@ impl Paths {
         self.data_dir().join("original-state.json")
     }
 
+    /// S47: what Relay learned about each game's look, per monitor.
+    pub fn learned_display_file(&self) -> PathBuf {
+        self.data_dir().join("learned-display.json")
+    }
+
     /// Share presets and recording settings.
     pub fn presets_file(&self) -> PathBuf {
         self.data_dir().join("presets.json")

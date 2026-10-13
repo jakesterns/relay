@@ -25,6 +25,8 @@ pub mod decode;
 pub mod devices;
 #[cfg(windows)]
 pub mod encode;
+#[cfg(windows)]
+pub mod look;
 pub mod mixer;
 pub mod pace;
 #[cfg(windows)]

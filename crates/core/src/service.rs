@@ -154,6 +154,11 @@ struct Inner {
     recv_started: Option<std::time::Instant>,
     /// The update check and user-approved install (S45).
     update: crate::update::Updater,
+    /// S47: learned game looks (`learned-display.json`).
+    learn: crate::learned_display::LearnStore,
+    /// S47: the look sampler child, only while a learning-enabled game with
+    /// an active profile has focus. Dropping it kills it (by handle).
+    look: Option<crate::learned_display::Sampler>,
 }
 
 /// S45: why an update must wait right now, if anything is in the way.
@@ -360,6 +365,8 @@ impl Service {
             recv_vcam: None,
             recv_started: None,
             update: crate::update::Updater::load(&paths),
+            learn: crate::learned_display::LearnStore::load(paths.learned_display_file()),
+            look: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -408,6 +415,11 @@ impl Service {
 
         // Belt and braces: whatever happened, put the machine back.
         let mut g = service.inner.lock();
+        if g.look.take().is_some() {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json on exit");
+            }
+        }
         if let Err(e) = g.applier.restore() {
             warn!(error = %e, "restore on exit failed; will retry on next start");
         }
@@ -504,11 +516,60 @@ impl Service {
                     self.recheck_monitor();
                     self.supervise();
                     self.update_tick();
+                    self.learn_tick();
                 }
             }
         }
         winloop.stop();
         Ok(())
+    }
+
+    /// S47, on the 1 s tick: fold the sampler's frame reports into the
+    /// learner, persist at checkpoints, and re-apply when the look in use
+    /// changed (Apply happened elsewhere, or a meaningfully different result
+    /// settled). Idle cores never get past the first line.
+    fn learn_tick(&self) {
+        use crate::learned_display::SamplerLine;
+        let mut g = self.inner.lock();
+        let Some(s) = g.look.as_mut() else { return };
+        let exited = s.exited();
+        let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
+        let (exe, mon) = (s.exe.clone(), s.monitor.clone());
+        let before = g.learn.game(&exe).and_then(|r| r.effective(&mon));
+        let mut save = false;
+        for line in lines {
+            let rec = g.learn.game_mut(&exe).monitor_mut(&mon);
+            match line {
+                SamplerLine::Frame(r) => {
+                    rec.hdr_skipped = false;
+                    save |= rec.learner.observe(&r);
+                }
+                SamplerLine::Hdr => {
+                    info!(exe = %exe, "monitor is in HDR mode; not learning there");
+                    rec.hdr_skipped = true;
+                    save = true;
+                    stop = true;
+                }
+                SamplerLine::Error(e) => {
+                    warn!(error = %e, "look sampler stopped");
+                    stop = true;
+                }
+            }
+        }
+        if stop {
+            g.look = None;
+        }
+        if save {
+            if let Err(e) = g.learn.save() {
+                warn!(error = %e, "could not save learned-display.json");
+            }
+        }
+        if g.learn.game(&exe).and_then(|r| r.effective(&mon)) != before {
+            reapply_learned(&mut g);
+            let state = Box::new(g.state.clone());
+            drop(g);
+            let _ = self.events.send(Event::StateChanged { state });
+        }
     }
 
     /// S45, on the 1 s tick: start the daily check when it is due, and run a
@@ -910,6 +971,7 @@ impl Service {
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
         select_and_apply(&mut g, &fg);
+        sync_look(&mut g);
         let state = Box::new(g.state.clone());
         drop(g);
         let _ = self.events.send(Event::StateChanged { state });
@@ -950,6 +1012,7 @@ impl Service {
                     title: String::new(),
                     hmonitor: 0,
                     hwnd: 0,
+                    image: String::new(),
                 });
                 info!(exe = %fg.exe, pid = fg.pid, "the profiled app exited; re-evaluating");
                 self.on_foreground(fg);
@@ -1176,6 +1239,130 @@ fn resolve_target(g: &Inner, hmonitor: i64) -> Option<MonitorProbe> {
     Some(t)
 }
 
+/// S47: the profile with this game's learned (or imported) look folded into
+/// its display settings, fitted to the target monitor's panel. The result
+/// goes through the ordinary capture → apply → restore path, so restore
+/// covers it exactly like a hand-set value.
+fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
+    use crate::learned_display::{overlay, panel_caps};
+    let mut p = profile.clone();
+    let Some(t) = target else { return p };
+    if !p.display.follow_focus {
+        return p;
+    }
+    let Some(look) = g.learn.game(&p.game.exe).and_then(|r| r.effective(&t.id)) else {
+        return p;
+    };
+    let panel = g
+        .library
+        .monitors
+        .iter()
+        .find(|m| m.id == t.id)
+        .map(|m| m.panel.clone())
+        .unwrap_or_default();
+    let adj = relay_display::learn::realize(&look, &panel_caps(&panel));
+    overlay(&mut p.display, &adj);
+    p
+}
+
+/// S47: start, keep or stop the look sampler so it runs exactly while a
+/// learning-enabled game whose profile is applied has focus.
+fn sync_look(g: &mut Inner) {
+    use crate::learned_display::{build_fingerprint, key, Sampler};
+    let want = g
+        .state
+        .foreground
+        .clone()
+        .filter(|fg| {
+            g.state.active_profile.as_ref().is_some_and(|p| p.exe.eq_ignore_ascii_case(&fg.exe))
+        })
+        .filter(|fg| g.learn.is_enabled(&fg.exe))
+        .and_then(|fg| resolve_target(g, fg.hmonitor).map(|t| (fg, t)));
+    if let (Some(s), Some((fg, t))) = (&g.look, &want) {
+        if s.exe == key(&fg.exe) && s.monitor == t.id {
+            return;
+        }
+    }
+    if g.look.take().is_some() {
+        // Keep the evidence gathered since the last checkpoint.
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    let Some((fg, t)) = want else { return };
+    let build = build_fingerprint(std::path::Path::new(&fg.image));
+    let rec = g.learn.game_mut(&fg.exe).monitor_mut(&t.id);
+    if !build.is_empty() && rec.learner.check_build(&build) {
+        info!(exe = %fg.exe, "game build is new to the learner; learning its look afresh");
+        if let Err(e) = g.learn.save() {
+            warn!(error = %e, "could not save learned-display.json");
+        }
+    }
+    match Sampler::start(&fg.exe, t.id.clone(), t.hmonitor) {
+        Ok(s) => g.look = Some(s),
+        Err(e) => warn!(error = %e, "could not start the look sampler"),
+    }
+}
+
+/// S47: the look in use changed while a profile is applied: put the
+/// original back and apply again with the new look.
+fn reapply_learned(g: &mut Inner) {
+    let Some(active) = g.state.active_profile.clone() else { return };
+    if g.pinned {
+        // A profile applied by hand stays applied regardless of focus:
+        // re-apply that same profile so the screen updates now.
+        let Some(profile) = g.store.get(active.id).cloned() else { return };
+        if let Err(e) = g.applier.restore() {
+            warn!(error = %e, "restore before re-apply failed");
+            return;
+        }
+        let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
+        let target = resolve_target(g, hmon);
+        let correction = correction_for(g, &profile);
+        let to_apply = learned_profile(g, &profile, target.as_ref());
+        match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
+            Ok(applied) => {
+                g.state.display_state = applied.display;
+                g.state.display_via = applied.via;
+            }
+            Err(e) => {
+                warn!(error = %e, "re-applying the pinned profile failed");
+                g.pinned = false;
+                g.state.active_profile = None;
+                g.state.display_state = DisplayState::Default;
+                g.state.display_via = DisplayVia::default();
+            }
+        }
+        return;
+    }
+    let Some(fg) = g.state.foreground.clone() else { return };
+    if let Err(e) = g.applier.restore() {
+        warn!(error = %e, "restore before re-apply failed");
+        return;
+    }
+    select_and_apply(g, &fg);
+}
+
+fn learn_reply(g: &Inner, exe: &str) -> Reply {
+    let names = |id: &crate::types::MonitorId| {
+        let lib = g.library.monitors.iter().find(|m| &m.id == id);
+        let probe = g.last_report.monitors.iter().find(|m| &m.id == id);
+        let name = lib
+            .map(|m| m.name.clone())
+            .or_else(|| probe.map(|m| m.name.clone()))
+            .unwrap_or_default();
+        (name, lib.map(|m| m.panel.clone()).unwrap_or_default())
+    };
+    let sampling = g.look.as_ref().is_some_and(|s| s.exe == crate::learned_display::key(exe));
+    Reply::LearnDisplay {
+        view: Box::new(crate::learned_display::view(&g.learn, exe, sampling, &names)),
+    }
+}
+
+fn save_learn(g: &Inner) -> Option<Reply> {
+    g.learn.save().err().map(|e| Reply::Error { message: format!("{e:#}") })
+}
+
 /// Pick and apply (or restore) for one foreground window, using the cached
 /// AutoEQ files live under `<source>/<rig> in-ear/...`, `over-ear`, `earbud`,
 /// so the catalogue path says what kind of thing this is without asking.
@@ -1212,7 +1399,8 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
             g.pinned = false;
             let target = resolve_target(g, fg.hmonitor);
             let correction = correction_for(g, &profile);
-            match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+            let to_apply = learned_profile(g, &profile, target.as_ref());
+            match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                 Ok(applied) => {
                     g.state.active_profile = Some(profile.summary());
                     g.state.audio_chain = applied.audio;
@@ -2100,7 +2288,8 @@ impl IpcHandler {
                 let hmon = g.state.foreground.as_ref().map(|f| f.hmonitor).unwrap_or(0);
                 let target = resolve_target(&g, hmon);
                 let correction = correction_for(&g, &profile);
-                match g.applier.apply(&profile, target.as_ref(), correction.as_deref()) {
+                let to_apply = learned_profile(&g, &profile, target.as_ref());
+                match g.applier.apply(&to_apply, target.as_ref(), correction.as_deref()) {
                     Ok(applied) => {
                         g.pinned = true;
                         g.state.active_profile = Some(profile.summary());
@@ -2120,6 +2309,79 @@ impl IpcHandler {
             },
             Method::ListProcesses => {
                 Reply::Processes { processes: crate::processes::list_windowed_and_audible() }
+            }
+            Method::LearnDisplayStatus { ref exe }
+            | Method::LearnDisplaySet { ref exe, .. }
+            | Method::LearnDisplayApply { ref exe }
+            | Method::LearnDisplayRelearn { ref exe }
+            | Method::LearnDisplayReset { ref exe }
+            | Method::LearnDisplayExport { ref exe, .. }
+            | Method::LearnDisplayImport { ref exe, .. }
+                if crate::learned_display::valid_exe(exe).is_err() =>
+            {
+                Reply::Error { message: "the game must be an exe file name like game.exe".into() }
+            }
+            Method::LearnDisplayStatus { exe } => learn_reply(&g, &exe),
+            Method::LearnDisplaySet { exe, enabled } => {
+                g.learn.game_mut(&exe).enabled = enabled;
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayApply { exe } => {
+                let rec = g.learn.game_mut(&exe);
+                let mut any = false;
+                for m in rec.monitors.values_mut() {
+                    any |= m.learner.apply();
+                }
+                if !any {
+                    return Reply::Error {
+                        message: "this game's look has not settled yet; keep playing".into(),
+                    };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayRelearn { exe } => {
+                for m in g.learn.game_mut(&exe).monitors.values_mut() {
+                    m.learner.relearn();
+                    m.hdr_skipped = false;
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayReset { exe } => {
+                g.learn.file.games.remove(&crate::learned_display::key(&exe));
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayExport { exe, name, note } => {
+                match crate::learned_display::export(&g.learn, &exe, name, &note) {
+                    Ok(json) => Reply::GameDisplayFile { json },
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
+            Method::LearnDisplayImport { exe, json } => {
+                if let Err(e) = crate::learned_display::import(&mut g.learn, &exe, &json) {
+                    return Reply::Error { message: format!("{e:#}") };
+                }
+                if let Some(r) = save_learn(&g) {
+                    return r;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
+                learn_reply(&g, &exe)
             }
             Method::GetUiPrefs => Reply::UiPrefs { prefs: g.prefs.get() },
             Method::SetUiPrefs { prefs } => match g.prefs.set(prefs) {
