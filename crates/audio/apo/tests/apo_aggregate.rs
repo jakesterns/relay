@@ -123,12 +123,16 @@ fn aggregated_apo_delegates_to_the_outer_and_works() {
         release(rt);
         assert_eq!(refs(&outer), 1);
 
-        // Marshaling is the outer's job: the inner never answers IMarshal
-        // or IAgileObject (answering IMarshal made audiodg rebuild the
-        // pipeline every ~2 s).
+        // Marshaling: the inner answers IMarshal only through the FTM aggregated
+        // on the outer; the windows object's own IAgileObject is not exposed.
         const IID_IMARSHAL: GUID = GUID::from_u128(0x00000003_0000_0000_c000_000000000046);
         const IID_IAGILE: GUID = GUID::from_u128(0x94ea2b94_e9cc_49e0_c0ff_ee64ca8f5b90);
-        assert_eq!(qi(obj, &IID_IMARSHAL).unwrap_err(), E_NOINTERFACE);
+        // IMarshal: the free-threaded marshaler, aggregated on the outer, so
+        // its reference is the outer's (what audiodg needs after Lock).
+        let m = qi(obj, &IID_IMARSHAL).expect("IMarshal answered");
+        assert_eq!(refs(&outer), 2);
+        release(m);
+        assert_eq!(refs(&outer), 1);
         assert_eq!(qi(obj, &IID_IAGILE).unwrap_err(), E_NOINTERFACE);
         assert_eq!(refs(&outer), 1, "a refused QI leaves the outer alone");
 

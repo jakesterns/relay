@@ -39,6 +39,9 @@ use windows::Win32::Foundation::{E_NOINTERFACE, E_POINTER};
 
 type Raw = *mut core::ffi::c_void;
 
+/// `IMarshal`.
+const IID_IMARSHAL: GUID = GUID::from_u128(0x00000003_0000_0000_c000_000000000046);
+
 /// Interface pointer -> its outer object, for every patched slot.
 fn outers() -> &'static Mutex<HashMap<usize, usize>> {
     static M: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
@@ -157,6 +160,12 @@ struct Inner {
     outer: Raw,
     /// Its patched interface pointers.
     ifaces: Vec<Raw>,
+    /// The free-threaded marshaler, aggregated on the *outer*, as the SDK's
+    /// CBaseAudioProcessingObject does. audiodg QIs IMarshal right after
+    /// LockForProcess; with no answer it unlocks and rebuilds without ever
+    /// calling APOProcess (2026-10-14: 0 calls across 10 lock/unlock
+    /// cycles). Its interfaces delegate to the outer by construction.
+    ftm: Option<IUnknown>,
 }
 
 static INNER_VTBL: IUnknown_Vtbl =
@@ -178,6 +187,12 @@ unsafe extern "system" fn inner_qi(
             inner.refs.fetch_add(1, Ordering::AcqRel);
             *out = this;
             return HRESULT(0);
+        }
+        if *iid == IID_IMARSHAL {
+            return match inner.ftm.as_ref() {
+                Some(f) => f.query(iid, out),
+                None => E_NOINTERFACE,
+            };
         }
         let Some(apo) = inner.apo.as_ref() else { return E_NOINTERFACE };
         let hr = apo.query(iid, out);
@@ -218,6 +233,7 @@ unsafe extern "system" fn inner_release(this: Raw) -> u32 {
             for &p in &inner.ifaces {
                 unpatch(p);
             }
+            inner.ftm = None;
             inner.apo = None;
         }
         left
@@ -252,12 +268,18 @@ pub unsafe fn create(apo: IUnknown, outer: Raw, ifaces: &[Iface]) -> Raw {
             }
         }
     }
+    // SAFETY: `outer` is the live controlling unknown, borrowed for the call.
+    let ftm = unsafe {
+        IUnknown::from_raw_borrowed(&outer)
+            .and_then(|o| windows::Win32::System::Com::CoCreateFreeThreadedMarshaler(o).ok())
+    };
     let inner = Box::new(Inner {
         vtbl: &INNER_VTBL,
         refs: AtomicU32::new(1),
         apo: Some(apo),
         outer,
         ifaces: patched,
+        ftm,
     });
     Box::into_raw(inner) as Raw
 }
