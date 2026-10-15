@@ -123,6 +123,15 @@ fn aggregated_apo_delegates_to_the_outer_and_works() {
         release(rt);
         assert_eq!(refs(&outer), 1);
 
+        // Marshaling is the outer's job: the inner never answers IMarshal
+        // or IAgileObject (answering IMarshal made audiodg rebuild the
+        // pipeline every ~2 s).
+        const IID_IMARSHAL: GUID = GUID::from_u128(0x00000003_0000_0000_c000_000000000046);
+        const IID_IAGILE: GUID = GUID::from_u128(0x94ea2b94_e9cc_49e0_c0ff_ee64ca8f5b90);
+        assert_eq!(qi(obj, &IID_IMARSHAL).unwrap_err(), E_NOINTERFACE);
+        assert_eq!(qi(obj, &IID_IAGILE).unwrap_err(), E_NOINTERFACE);
+        assert_eq!(refs(&outer), 1, "a refused QI leaves the outer alone");
+
         // The APO itself works through the delegating pointer.
         let typed = IAudioProcessingObject::from_raw_borrowed(&apo).unwrap();
         assert!(typed.GetLatency().is_ok());

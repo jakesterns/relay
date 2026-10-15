@@ -187,9 +187,14 @@ unsafe extern "system" fn inner_qi(
         }
         let p = *out;
         if !inner.ifaces.contains(&p) {
-            // Not one of the slots we patched (an interface added later):
-            // hand it out as the APO gave it rather than half-delegated.
-            return hr;
+            // Anything else the `windows` object answers (IMarshal,
+            // IAgileObject, its own identity) is not ours to give an
+            // aggregate: marshaling is the outer's job. Answering IMarshal
+            // made audiodg tear the pipeline down after every
+            // LockForProcess and build it again, every ~2 s (2026-10-14).
+            ((*vtbl(p)).Release)(p);
+            *out = std::ptr::null_mut();
+            return E_NOINTERFACE;
         }
         // The reference belongs to the outer: put the APO's back.
         ((*generated(p)).Release)(p);
