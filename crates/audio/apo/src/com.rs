@@ -992,6 +992,7 @@ pub fn answers(obj: &windows::core::IUnknown, id: &GUID) -> bool {
 
 impl Drop for RelayApo {
     fn drop(&mut self) {
+        crate::diag!("RelayApo dropped");
         // Normally UnlockForProcess ran; make release-order explicit anyway:
         // stop the control thread before the shm mapping goes away.
         self.shared.stop.store(true, Ordering::Release);

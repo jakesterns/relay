@@ -181,6 +181,7 @@ unsafe extern "system" fn inner_qi(
         }
         let Some(apo) = inner.apo.as_ref() else { return E_NOINTERFACE };
         let hr = apo.query(iid, out);
+        crate::diag!("inner QI {:?} -> {:#010x}", *iid, hr.0 as u32);
         if hr.is_err() {
             return hr;
         }
@@ -206,6 +207,7 @@ unsafe extern "system" fn inner_release(this: Raw) -> u32 {
     // SAFETY: an Inner we allocated with Box::into_raw; freed once, at zero.
     unsafe {
         let left = (*(this as *const Inner)).refs.fetch_sub(1, Ordering::AcqRel) - 1;
+        crate::diag!("inner Release -> {left}");
         if left == 0 {
             let mut inner = Box::from_raw(this as *mut Inner);
             for &p in &inner.ifaces {
