@@ -363,14 +363,12 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
         Ok(e) => e,
         Err(e) => return vec![format!("No output to install on: {e:#}")],
     };
-    let dll = std::env::current_exe()
+    let built = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
         .filter(|p| p.exists());
-    let dll_text = dll
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| r"<install dir>\relay_apo.dll (not built yet)".into());
+    let staged = staged_dll_path();
+    let dll_text = staged.display().to_string();
 
     let mut lines = Vec::new();
     match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
@@ -389,8 +387,94 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
         "backup: {} (written before anything is changed)",
         backup_file(backup_dir, &endpoint).display()
     ));
-    lines.push(format!("file: {dll_text} (stays in place; only registered)"));
+    lines.push(match built {
+        Some(src) => format!(
+            "file: {} copied to {dll_text} (Windows audio cannot read your user folder, \
+             and only administrators can change that one); removed with the last output",
+            src.display()
+        ),
+        None => r"file: relay_apo.dll not found next to Relay (not built yet)".into(),
+    });
     lines
+}
+
+/// Where Windows audio loads the APO from (S44c).
+///
+/// audiodg runs as LOCAL SERVICE, which cannot read `%LOCALAPPDATA%`: an
+/// APO registered at the install folder never loads, and the endpoint goes
+/// silent (owner's main PC, 2026-10-14: Microsoft's own GFX loaded, Relay's
+/// DLL did not, no sound on the RODECaster). Loading a DLL the user can
+/// rewrite into a service would also hand that user the service's account.
+/// So the elevated helper copies it under Program Files, which only
+/// administrators can write and every service can read, and registers that.
+#[cfg(windows)]
+pub fn staged_dll_path() -> PathBuf {
+    let base = std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    base.join("Relay").join("audio").join("relay_apo.dll")
+}
+
+/// Copy `src` to [`staged_dll_path`] unless an identical copy is there.
+/// A copy Windows audio still has loaded cannot be overwritten, but it can
+/// be renamed: it goes aside as `relay_apo.dll.oldN` and the new one takes
+/// its name (the next audio restart loads it; the aside copy is removed by
+/// [`remove_staged_dll`] or the next stage).
+#[cfg(windows)]
+fn stage_dll(src: &Path) -> Result<PathBuf> {
+    use anyhow::Context;
+
+    let dst = staged_dll_path();
+    let dir = dst.parent().expect("a parent").to_path_buf();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    sweep_aside(&dir);
+    let new = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    if std::fs::read(&dst).is_ok_and(|old| old == new) {
+        return Ok(dst);
+    }
+    let tmp = dir.join("relay_apo.dll.tmp");
+    std::fs::write(&tmp, &new).with_context(|| format!("writing {}", tmp.display()))?;
+    if dst.exists() && std::fs::remove_file(&dst).is_err() {
+        let aside = (1..1000)
+            .map(|n| dir.join(format!("relay_apo.dll.old{n}")))
+            .find(|p| !p.exists())
+            .context("no free name to move the loaded APO aside")?;
+        std::fs::rename(&dst, &aside).context("moving the loaded APO aside")?;
+    }
+    std::fs::rename(&tmp, &dst).with_context(|| format!("placing {}", dst.display()))?;
+    Ok(dst)
+}
+
+/// Delete aside copies nothing has loaded any more.
+#[cfg(windows)]
+fn sweep_aside(dir: &Path) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.starts_with("relay_apo.dll.old") || name == "relay_apo.dll.tmp" {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// With the last output restored: remove the staged copy (aside if Windows
+/// audio still has it loaded) and its folders when empty.
+#[cfg(windows)]
+fn remove_staged_dll() {
+    let dst = staged_dll_path();
+    let Some(dir) = dst.parent().map(Path::to_path_buf) else { return };
+    if dst.exists() && std::fs::remove_file(&dst).is_err() {
+        let aside = dir.join("relay_apo.dll.old1");
+        let _ = std::fs::remove_file(&aside);
+        let _ = std::fs::rename(&dst, &aside);
+    }
+    sweep_aside(&dir);
+    let _ = std::fs::remove_dir(&dir);
+    if let Some(relay) = dir.parent() {
+        let _ = std::fs::remove_dir(relay);
+    }
 }
 
 #[cfg(not(windows))]
@@ -416,11 +500,12 @@ pub fn install_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<String>
     if backup_path.exists() {
         bail!("a backup for {endpoint} already exists — the APO looks installed; uninstall first");
     }
-    let dll = std::env::current_exe()
+    let built = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
         .filter(|p| p.exists())
         .context("relay_apo.dll not found next to the running binary")?;
+    let dll = stage_dll(&built)?;
 
     let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
         .with_context(|| format!("reading FX store of {endpoint}"))?;
@@ -487,6 +572,9 @@ pub fn uninstall_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<Strin
     relay_apo::livereg::LiveRegistry::restore(&restore_backup_for(&backup, others))
         .context("restoring the FX property store (RELAY_APO_ALLOW_LIVE_WRITE gate)")?;
     let _ = std::fs::rename(&backup_path, backup_path.with_extension("json.restored"));
+    if !others {
+        remove_staged_dll();
+    }
     info!(%endpoint, "FX property store restored to the pre-install state");
     Ok(endpoint)
 }
