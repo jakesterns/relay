@@ -388,6 +388,9 @@ impl RelayApo {
             name
         };
         let r = SharedParams::create(&name);
+        if crate::diag::enabled() {
+            crate::diag!("host token: {}", host_token_summary());
+        }
         crate::diag!(
             "shm create {name}: {}",
             match &r {
@@ -1009,6 +1012,63 @@ impl Drop for RelayApo {
         self.unlock_child();
         self.shared.publish(std::ptr::null_mut());
         self.shared.block.store(std::ptr::null_mut(), Ordering::Release);
+    }
+}
+
+/// For the diag log only: what kind of process hosts us. An AppContainer or
+/// a non-zero session redirects `Global\` names, which is the difference
+/// between "section created" and "the core cannot find it" (2026-10-14).
+fn host_token_summary() -> String {
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenIntegrityLevel, TokenIsAppContainer, TokenSessionId,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: our own process token, queried into correctly sized buffers.
+    unsafe {
+        let mut tok = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok).is_err() {
+            return "token unreadable".into();
+        }
+        let mut n = 0u32;
+        let mut appc = 0u32;
+        let _ = GetTokenInformation(
+            tok,
+            TokenIsAppContainer,
+            Some(&mut appc as *mut u32 as *mut _),
+            4,
+            &mut n,
+        );
+        let mut session = 0u32;
+        let _ = GetTokenInformation(
+            tok,
+            TokenSessionId,
+            Some(&mut session as *mut u32 as *mut _),
+            4,
+            &mut n,
+        );
+        let mut buf = [0u8; 64];
+        let rid = if GetTokenInformation(
+            tok,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            buf.len() as u32,
+            &mut n,
+        )
+        .is_ok()
+        {
+            let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *windows::Win32::Security::GetSidSubAuthorityCount(sid);
+            format!(
+                "{:#x}",
+                *windows::Win32::Security::GetSidSubAuthority(sid, u32::from(count) - 1)
+            )
+        } else {
+            "?".into()
+        };
+        let _ = windows::Win32::Foundation::CloseHandle(tok);
+        format!("app_container={} session={session} integrity_rid={rid}", appc != 0)
     }
 }
 
