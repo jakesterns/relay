@@ -41,7 +41,9 @@
 #![allow(unsafe_code)]
 #![allow(non_snake_case)] // COM method names come from the interfaces.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -749,6 +751,10 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
     }
 
     fn UnlockForProcess(&self) -> windows::core::Result<()> {
+        crate::diag!(
+            "UnlockForProcess (APOProcess calls so far {})",
+            PROCESS_CALLS.load(Ordering::Relaxed)
+        );
         let Some(locked) = self.locked.lock().unwrap().take() else {
             return Err(windows::core::Error::from_hresult(APOERR_ALREADY_UNLOCKED));
         };
@@ -783,6 +789,8 @@ impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
         num_out: u32,
         out_conn: *mut *mut APO_CONNECTION_PROPERTY,
     ) {
+        // Lock-free count for the diag log (read at Unlock / drop only).
+        PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
         if num_in < 1 || num_out < 1 || in_conn.is_null() || out_conn.is_null() {
             return;
         }
@@ -990,9 +998,15 @@ pub fn answers(obj: &windows::core::IUnknown, id: &GUID) -> bool {
     }
 }
 
+/// APOProcess calls in this process, all instances (diag only).
+static PROCESS_CALLS: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for RelayApo {
     fn drop(&mut self) {
-        crate::diag!("RelayApo dropped");
+        crate::diag!(
+            "RelayApo dropped (APOProcess calls so far {})",
+            PROCESS_CALLS.load(Ordering::Relaxed)
+        );
         // Normally UnlockForProcess ran; make release-order explicit anyway:
         // stop the control thread before the shm mapping goes away.
         self.shared.stop.store(true, Ordering::Release);
