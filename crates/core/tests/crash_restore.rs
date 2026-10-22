@@ -230,3 +230,58 @@ async fn editing_the_applied_profile_takes_effect_at_once() {
     core.shutdown().await;
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The Games-screen tuning (gun / footstep sliders, the dynamics switch) is
+/// a profile edit: on the applied profile it re-applies at once. Live, the
+/// slider did nothing until the next focus change (apo-e2e, 2026-10-22).
+#[tokio::test]
+async fn tuning_the_applied_game_eq_takes_effect_at_once() {
+    use relay_core::game_eq::GameEqAction;
+
+    let root: PathBuf = std::env::temp_dir().join(format!("relay-tune-{}", Uuid::new_v4()));
+    let rec = root.join("recording.log");
+    std::fs::create_dir_all(&root).unwrap();
+    let instance = format!("tunetest-{}", Uuid::new_v4().simple());
+
+    let mut core = Core::spawn(&root, &rec, &instance);
+    let mut c = core.connect().await;
+    let exe = "relay-tune-test.exe";
+    let mut profile = Profile::new("Tune test", GameMatch::exe(exe));
+    profile.status = ProfileStatus::Ready;
+    let id = profile.id;
+    assert!(matches!(
+        c.call(Method::SaveProfile { profile: Box::new(profile) }).await.unwrap(),
+        Reply::Ok
+    ));
+    let file = serde_json::json!({
+        "format": "relay-game-eq", "schema": 2,
+        "game": { "exe": exe, "name": "Tune test" },
+        "dynamics": { "bands": [{ "mode": "tame", "freq_hz": 1000, "q": 1.0,
+            "threshold_db": -66, "ratio": 4, "range_db": 6, "attack_ms": 2, "release_ms": 100 }] },
+    });
+    let action = GameEqAction::Import { text: file.to_string() };
+    let r = c.call(Method::GameEq { id, action }).await.unwrap();
+    assert!(matches!(r, Reply::GameEq { .. }), "{r:?}");
+    assert!(matches!(c.call(Method::ApplyProfile { id }).await.unwrap(), Reply::Ok));
+    let count = |what: &str| recording(&rec).iter().filter(|l| *l == what).count();
+    assert_eq!(count("audio.apply"), 1, "{:?}", recording(&rec));
+
+    for action in [
+        GameEqAction::SetDynamics { enabled: None, tame: Some(0.5), lift: None },
+        GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None },
+    ] {
+        let r = c.call(Method::GameEq { id, action }).await.unwrap();
+        assert!(matches!(r, Reply::GameEq { .. }), "{r:?}");
+    }
+    assert_eq!(count("audio.restore"), 2, "{:?}", recording(&rec));
+    assert_eq!(count("audio.apply"), 3, "{:?}", recording(&rec));
+    match c.call(Method::Status).await.unwrap() {
+        Reply::Status { state } => {
+            assert_eq!(state.active_profile.map(|p| p.id), Some(id), "still applied")
+        }
+        other => panic!("unexpected reply {other:?}"),
+    }
+    drop(c);
+    core.shutdown().await;
+    let _ = std::fs::remove_dir_all(&root);
+}
