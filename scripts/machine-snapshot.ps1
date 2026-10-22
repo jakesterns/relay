@@ -97,6 +97,9 @@ $reg = @()
 
 # The one autostart value Relay is allowed to create.
 $reg += Get-RegValues 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+# The uninstaller's next-sign-in cleanup of a DLL another app still held
+# (RelayCleanup): it must not be there once that cleanup has run.
+$reg += Get-RegValues 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
 
 # Add/Remove Programs (per-user; a per-user install must never appear in HKLM).
 $reg += Get-RegTree 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Relay'
