@@ -47,8 +47,12 @@ pub const MAX_SAFE_RATIO: f32 = 8.0;
 /// A tame threshold never sits this far under the program loudness (so a
 /// band can never be held down all the time).
 pub const MIN_TAME_THRESHOLD_DB: f32 = DYN_REF_DB - 20.0;
-/// A lift threshold never sits above the program loudness.
-pub const MAX_LIFT_THRESHOLD_DB: f32 = DYN_REF_DB;
+/// A lift threshold never sits more than this over the program loudness.
+/// In a quiet stretch the steps *are* the program, so a threshold at the
+/// loudness (the first cut of S49) never lifted them; 10 dB over lets a
+/// step at the loudness come up by the full range while anything clearly
+/// louder than the program is left alone (and the limiter follows a lift).
+pub const MAX_LIFT_THRESHOLD_DB: f32 = DYN_REF_DB + 10.0;
 /// Loud gunshots (not distant ones) a gun tame needs.
 pub const MIN_GUN_EVENTS: u64 = 8;
 pub const MIN_BOOM_EVENTS: u64 = 5;
@@ -190,7 +194,9 @@ fn tame_band(
 }
 
 fn lift_band(stats: &Stats, (range, ratio): (f32, f32)) -> Option<DynBandParams> {
-    let q = 1.0;
+    // About an octave and a half wide: a step's click spreads over 2-5 kHz,
+    // and a narrower bell lifted only the slice at its centre.
+    let q = 0.7;
     let added = pct(stats, SoundClass::Footsteps, 0.5);
     let low_bed = bed(stats, 0.25);
     let f0 = stand_out(&added, &low_bed, 1000.0, 5000.0)?;
@@ -549,5 +555,96 @@ mod tests {
             let up = gain(d, w, 0.0, 1.0);
             assert!(up <= 0.5, "the bed is not raised: {up:.2} dB");
         }
+    }
+}
+
+#[cfg(all(test, feature = "dsp"))]
+mod footstep_lift {
+    use super::*;
+    use crate::learn::analyzer::Analyzer;
+    use crate::learn::synth::{Segment, Synth, FS};
+
+    /// Steps in the 2-5 kHz region, `step` amplitude, over the standard bed.
+    fn walk(step: f32, secs: f32, seed: u64, mut feed: impl FnMut(&[f32])) {
+        let mut s = Synth::new(FS, seed);
+        s.step = step;
+        s.render(Segment::Footsteps, secs, |b| feed(b));
+    }
+
+    /// A shooter whose footsteps sit clearly above the bed (a quiet map).
+    fn learned(step: f32) -> Stats {
+        let mut a = Analyzer::new(FS);
+        let mut s = Synth::new(FS, 0xBEEF);
+        s.step = step;
+        for _ in 0..2 {
+            for (seg, secs) in [
+                (Segment::Footsteps, 30.0),
+                (Segment::Gunfire, 30.0),
+                (Segment::Gameplay, 30.0),
+                (Segment::Explosions, 20.0),
+                (Segment::Ambience, 10.0),
+            ] {
+                s.render(seg, secs, |b| a.push(b));
+            }
+        }
+        a.into_stats()
+    }
+
+    /// In-band (2-5 kHz) power gain of the step frames (loudest 30 % of
+    /// 10 ms frames), dB, after `warm` seconds of settling.
+    fn step_rise(dyns: &DynamicsParams, step: f32) -> f64 {
+        use crate::dsp::{Chain, ChainParams};
+        let mut chain =
+            Chain::new(ChainParams { dynamics: Some(dyns.clone()), ..Default::default() });
+        chain.prepare(FS, 4800).unwrap();
+        let band = |x: &[f32]| {
+            let c = crate::coeffs::Coeffs::design(
+                crate::params::FilterKind::HighPass,
+                FS as f64,
+                2000.0,
+                0.0,
+                0.707,
+            )
+            .unwrap();
+            let mut hp = crate::dsp::biquad::Biquad::new(c);
+            let mut v: Vec<f32> = x.to_vec();
+            hp.process(&mut v);
+            v
+        };
+        let (mut dry, mut wet) = (Vec::new(), Vec::new());
+        let mut t = 0usize;
+        walk(step, 20.0, 0x5EED, |b| {
+            let inter: Vec<f32> = b.iter().flat_map(|&x| [x, x]).collect();
+            let mut out = vec![0.0; inter.len()];
+            chain.process(&inter, &mut out);
+            if t >= FS as usize * 5 {
+                dry.extend_from_slice(b);
+                wet.extend(out.iter().step_by(2));
+            }
+            t += b.len();
+        });
+        let (d, w) = (band(&dry), band(&wet));
+        let frame = FS as usize / 100;
+        let p = |x: &[f32]| x.iter().map(|s| (*s as f64).powi(2)).sum::<f64>();
+        let mut fr: Vec<(f64, f64)> =
+            d.chunks(frame).zip(w.chunks(frame)).map(|(a, b)| (p(a), p(b))).collect();
+        fr.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let top = &fr[..fr.len() * 3 / 10];
+        10.0 * (top.iter().map(|f| f.1).sum::<f64>() / top.iter().map(|f| f.0).sum::<f64>()).log10()
+    }
+
+    #[test]
+    fn quiet_footsteps_clearly_above_the_bed_are_lifted_audibly() {
+        let st = learned(0.15);
+        let dyns = derive_dynamics(&st, Goal::Awareness).expect("awareness stage");
+        let typical = step_rise(&dyns, 0.15);
+        let distant = step_rise(&dyns, 0.08);
+        eprintln!("typical {typical:.2} dB, distant {distant:.2} dB; {dyns:?}");
+        assert!(distant >= 2.5, "distant steps up only {distant:.2} dB");
+        assert!(distant <= MAX_LIFT_DB as f64 + 0.5);
+        assert!(typical >= 1.5 && typical <= distant + 0.5, "louder steps get less lift");
+        // The bed alone (no steps): its loudest stretches are not lifted.
+        let bed = step_rise(&dyns, 0.0);
+        assert!(bed <= 1.0, "the bed alone rose {bed:.2} dB");
     }
 }

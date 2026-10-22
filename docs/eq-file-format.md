@@ -76,8 +76,10 @@ scale Relay's learned statistics use, so a file works at any volume.
 
 At most four bands. On import the stage is passed through the same safety
 guard as learned ones (ranges and ratios above, tame thresholds no lower
-than −70, lift thresholds no higher than −50, so nothing is lifted past the
-game's own level); anything changed is reported, as for the curve. Unknown
+than −70, lift thresholds no higher than −40: a sound at the game's own
+running level can still be lifted (in a quiet stretch the footsteps *are*
+that level), anything clearly louder never is, and the limiter follows any
+lift); anything changed is reported, as for the curve. Unknown
 fields inside `dynamics`, its bands and its tuning are refused.
 
 ## Validation (all refusals say why)
