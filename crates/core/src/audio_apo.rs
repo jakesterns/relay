@@ -132,6 +132,10 @@ pub struct ApoStatus {
     /// APO at all (S42b).
     #[serde(default)]
     pub audio_engine: AudioEngineRegistration,
+    /// An installed output runs (or will next load) another Relay build's
+    /// APO: Settings offers Update, which is an install over the install.
+    #[serde(default)]
+    pub update_needed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -373,7 +377,11 @@ pub fn apo_status(backup_dir: &Path) -> ApoStatus {
     let endpoints =
         merge_endpoints(&active, &recorded, fx_has_relay, |g| open_endpoint(g).is_some());
     let default = endpoints.iter().find(|e| e.is_default);
+    let update_needed = endpoints.iter().any(|e| e.installed)
+        && (staged_dll_stale()
+            || endpoints.iter().any(|e| e.installed && loaded_other_build(&e.endpoint)));
     ApoStatus {
+        update_needed,
         installed: default.is_some_and(|e| e.installed),
         endpoint: default.map(|e| e.endpoint.clone()),
         running: default.is_some_and(|e| e.running),
@@ -392,6 +400,7 @@ pub fn apo_status(_backup_dir: &Path) -> ApoStatus {
         running: false,
         endpoints: Vec::new(),
         audio_engine: AudioEngineRegistration::Missing,
+        update_needed: false,
     }
 }
 
@@ -419,14 +428,33 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
         Ok(e) => e,
         Err(e) => return vec![format!("No output to install on: {e:#}")],
     };
-    let built = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
-        .filter(|p| p.exists());
+    let built = shipped_dll();
     let staged = staged_dll_path();
     let dll_text = staged.display().to_string();
 
     let mut lines = Vec::new();
+    if fx_has_relay(&endpoint) {
+        // Installed already: the only thing an install does is bring the
+        // copy Windows audio loads up to this Relay's build (an update).
+        if apo_update_needed(&endpoint) {
+            if staged_dll_stale() {
+                if let Some(src) = &built {
+                    lines.push(format!(
+                        "file: {} replaces {dll_text} (it is from another Relay build)",
+                        src.display()
+                    ));
+                }
+            }
+            lines.push(
+                "Windows audio restarts so it loads the new one: a few seconds of silence. \
+                 No registry value changes."
+                    .into(),
+            );
+        } else {
+            lines.push(format!("Already installed on {endpoint} and up to date: nothing to do."));
+        }
+        return lines;
+    }
     match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
         Ok(current) => match relay_apo::fxstore::plan_install_with(
             &current,
@@ -502,6 +530,51 @@ fn stage_dll(src: &Path) -> Result<PathBuf> {
     Ok(dst)
 }
 
+/// The APO DLL this Relay ships, next to the running binary.
+#[cfg(windows)]
+fn shipped_dll() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
+        .filter(|p| p.exists())
+}
+
+/// The staged copy is not the DLL this Relay ships: a Relay update left the
+/// previous build's APO under Program Files (the installer runs unelevated
+/// and cannot replace it).
+#[cfg(windows)]
+pub fn staged_dll_stale() -> bool {
+    let (Some(src), dst) = (shipped_dll(), staged_dll_path()) else { return false };
+    match (std::fs::read(src), std::fs::read(dst)) {
+        (Ok(new), Ok(old)) => new != old,
+        _ => false,
+    }
+}
+
+/// Windows audio runs another build's APO on this output: its parameter
+/// section is there but carries another layout, so the core will not steer
+/// it. Covers a staged copy already updated but not yet loaded.
+#[cfg(windows)]
+pub fn loaded_other_build(endpoint: &str) -> bool {
+    open_endpoint(endpoint).is_some_and(|s| !s.block().is_valid())
+}
+
+/// An installed output needs the APO brought up to this Relay's build.
+#[cfg(windows)]
+pub fn apo_update_needed(endpoint: &str) -> bool {
+    staged_dll_stale() || loaded_other_build(endpoint)
+}
+
+/// The update half of an install over an install: refresh the staged copy
+/// (a loaded one goes aside, see [`stage_dll`]). The registry is untouched;
+/// the caller restarts Windows audio so the new one loads.
+#[cfg(windows)]
+pub fn update_staged_dll() -> Result<()> {
+    use anyhow::Context;
+    let built = shipped_dll().context("relay_apo.dll not found next to the running binary")?;
+    stage_dll(&built).map(|_| ())
+}
+
 /// Delete aside copies nothing has loaded any more.
 #[cfg(windows)]
 fn sweep_aside(dir: &Path) {
@@ -556,11 +629,7 @@ pub fn install_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<String>
     if backup_path.exists() {
         bail!("a backup for {endpoint} already exists — the APO looks installed; uninstall first");
     }
-    let built = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
-        .filter(|p| p.exists())
-        .context("relay_apo.dll not found next to the running binary")?;
+    let built = shipped_dll().context("relay_apo.dll not found next to the running binary")?;
     let dll = stage_dll(&built)?;
 
     let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
@@ -916,6 +985,7 @@ mod tests {
             running: false,
             endpoints: merge_endpoints(&[(A.into(), "X".into(), true)], &[], |_| true, |_| false),
             audio_engine: AudioEngineRegistration::Registered,
+            update_needed: false,
         })
         .unwrap();
         assert_eq!(v["endpoints"][0]["endpoint"], A);

@@ -842,8 +842,30 @@ mod imp {
             return OpOutcome::Refused { reason };
         }
         if crate::audio_apo::fx_has_relay(&endpoint) {
-            return OpOutcome::Skipped {
-                reason: format!("the APO is already registered on {endpoint}"),
+            // Install over an install is the update path: a Relay update
+            // cannot replace the copy under Program Files unelevated, so it
+            // is brought up to this build here and Windows audio restarted
+            // to load it. No registry value changes.
+            if !crate::audio_apo::apo_update_needed(&endpoint) {
+                return OpOutcome::Skipped {
+                    reason: format!("the APO is already registered on {endpoint} and up to date"),
+                };
+            }
+            if crate::audio_apo::staged_dll_stale() {
+                if let Err(e) = crate::audio_apo::update_staged_dll() {
+                    return OpOutcome::Failed { error: format!("updating the APO: {e:#}") };
+                }
+            }
+            return match crate::audiodg::restart_audio() {
+                Ok(()) => OpOutcome::Done {
+                    detail: "APO updated to this Relay build; Windows audio restarted".into(),
+                },
+                Err(e) => OpOutcome::Done {
+                    detail: format!(
+                        "APO updated to this Relay build; Windows audio did not restart \
+                         ({e:#}) — takes effect after a restart"
+                    ),
+                },
             };
         }
         // `install_live` re-derives the plan and the DLL path from this
