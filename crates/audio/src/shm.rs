@@ -294,14 +294,20 @@ impl ParamBlock {
         self.bypass.store(on as u32, Ordering::Release);
     }
 
-    /// Publish new parameters (single-writer: the core).
-    pub fn write_params(&self, p: &ChainParams) {
+    /// Publish new parameters (single-writer: the core). Refused (false) on
+    /// a block another build created: its layout is not ours, and an APO of
+    /// that build would read our bytes as its own parameters.
+    pub fn write_params(&self, p: &ChainParams) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
         let pod = encode(p);
         let s = self.seq.load(Ordering::Relaxed);
         self.seq.store(s.wrapping_add(1), Ordering::Release); // odd: in progress
                                                               // SAFETY: single writer; readers seeing an odd/changed seq discard.
         unsafe { std::ptr::write_volatile(self.params.get(), pod) };
         self.seq.store(s.wrapping_add(2), Ordering::Release);
+        true
     }
 
     /// Seqlock read. Returns `None` when a writer is mid-update after a few
@@ -591,6 +597,11 @@ mod tests {
         block.version.store(1, Ordering::Release);
         assert!(!block.is_valid());
         assert!(block.read_params().is_none(), "mismatched layouts mean pass-through");
+        // And this build never writes into it: that APO would read our
+        // layout as its own.
+        let seq = block.sequence();
+        assert!(!block.write_params(&sample_params()));
+        assert_eq!(block.sequence(), seq, "nothing written");
     }
 
     #[test]

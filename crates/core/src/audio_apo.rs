@@ -82,13 +82,17 @@ impl std::fmt::Debug for HeldSection {
 }
 
 /// Write `params` and un-bypass unless the block already carries our last
-/// write. Returns true when it wrote.
+/// write. Returns true when it wrote. A block of another build (an APO DLL
+/// older or newer than this core) is never touched: not even un-bypassed.
 #[cfg(windows)]
 fn reassert(
     block: &relay_audio::shm::ParamBlock,
     params: &relay_audio::params::ChainParams,
     written_seq: &mut Option<u32>,
 ) -> bool {
+    if !block.is_valid() {
+        return false;
+    }
     if !block.bypass() && *written_seq == Some(block.sequence()) {
         return false;
     }
@@ -727,6 +731,11 @@ impl AudioControl for ApoAudioControl {
         // Reachability is the truth: the APO's parameter section exists only
         // while the effect is loaded on this endpoint. Without it, say why.
         let state = match open_endpoint(&guid) {
+            // Another build's APO: nothing it can be told safely.
+            Some(s) if !s.block().is_valid() => {
+                info!(endpoint = %guid, "APO of another Relay build is loaded; reinstall it");
+                AudioChainState::NotLoaded
+            }
             Some(s) => {
                 reassert(s.block(), &held.params, &mut held.written_seq);
                 s.notify();
