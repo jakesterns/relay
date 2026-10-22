@@ -14,7 +14,11 @@ Phases, each a fresh render stream (so audiodg builds a new APO instance):
   1. applied while nothing plays -> the core's keep-alive activates the chain
      on the stream's new instance;
   2. a second stream -> the held section means the chain is live at once;
-  3. restore all -> flat again, section released.
+  3. restore all -> flat again, section released;
+  4. S49 sharing + sliders: a second profile with no EQ of its own imports
+     a game EQ file whose only content is a dynamic stage (a tame band on
+     the 1 kHz tone); applied, the tone comes down by the band's range;
+     the gun-strength slider at 0.5 halves the cut; switched off, flat.
 
 Usage: python scripts/apo-e2e.py [--bin target/debug]
 Exit 0 when every phase passes; the JSON summary goes to stdout.
@@ -72,6 +76,36 @@ def observe(bin_dir, secs, settle):
     return json.loads(out.stdout)
 
 
+def judge_mid(obs, lo, hi):
+    """The 1 kHz tone moved by lo..hi dB, the outer tones stayed put."""
+    lv = obs["levels_db"]
+    d = [lv[0] - REF, lv[1] - REF, lv[2] - REF]
+    ok = lo <= d[1] <= hi and abs(d[0]) <= 1.5 and abs(d[2]) <= 1.5
+    return ok, [round(x, 2) for x in d]
+
+
+DYN_EXE = "relay-apo-e2e-dyn.exe"
+DYN_FILE = {
+    "format": "relay-game-eq",
+    "schema": 2,
+    "game": {"exe": DYN_EXE, "name": "APO e2e dynamics"},
+    "dynamics": {
+        "bands": [
+            {"mode": "tame", "freq_hz": 1000, "q": 1.0, "threshold_db": -66,
+             "ratio": 4, "range_db": 6, "attack_ms": 2, "release_ms": 100}
+        ],
+        "duck_lift": False,
+    },
+    "note": "apo-e2e: tame the 1 kHz tone by 6 dB",
+}
+
+
+def game_eq(pid, action):
+    r = call("game_eq", {"id": pid, "action": action})
+    assert r.get("result", {}).get("type") != "error", r
+    return r
+
+
 def judge(obs, want_eq):
     lv = obs["levels_db"]
     d = [lv[0] - REF, lv[1] - REF, lv[2] - REF]
@@ -119,9 +153,9 @@ def main():
             "status": "ready",
         }
         r = call("save_profile", {"profile": profile})
-        assert r.get("type") != "error", r
+        assert r.get("result", {}).get("type") != "error", r
         r = call("apply_profile", {"id": pid})
-        assert r.get("type") != "error", r
+        assert r.get("result", {}).get("type") != "error", r
         # The core's tick runs every second: settle past it on the first run.
         o = observe(a.bin, 4.0, 1.5)
         ok, d = judge(o, True)
@@ -134,6 +168,34 @@ def main():
         ok, d = judge(o, False)
         results.append({"phase": "after restore", "pass": ok, "delta_db": d, **o})
         call("delete_profile", {"id": pid})
+
+        # 4. A shared file with a dynamic stage, then the sliders.
+        did = str(uuid.uuid4())
+        dyn_profile = {
+            "id": did,
+            "name": "APO e2e dynamics",
+            "game": {"exe": DYN_EXE},
+            "audio": {"bands": [], "headset_correction": False, "learn_game_eq": False},
+            "status": "ready",
+        }
+        r = call("save_profile", {"profile": dyn_profile})
+        assert r.get("result", {}).get("type") != "error", r
+        game_eq(did, {"kind": "import", "text": json.dumps(DYN_FILE)})
+        r = call("apply_profile", {"id": did})
+        assert r.get("result", {}).get("type") != "error", r
+        o = observe(a.bin, 4.0, 1.5)
+        ok, d = judge_mid(o, -7.0, -4.0)
+        results.append({"phase": "imported dynamics file", "pass": ok, "delta_db": d, **o})
+        game_eq(did, {"kind": "set_dynamics", "tame": 0.5})
+        o = observe(a.bin, 4.0, 1.5)
+        ok, d = judge_mid(o, -4.0, -1.5)
+        results.append({"phase": "gun slider at 0.5", "pass": ok, "delta_db": d, **o})
+        game_eq(did, {"kind": "set_dynamics", "enabled": False})
+        o = observe(a.bin, 3.0, 1.5)
+        ok, d = judge(o, False)
+        results.append({"phase": "dynamics switched off", "pass": ok, "delta_db": d, **o})
+        call("restore_all")
+        call("delete_profile", {"id": did})
     finally:
         try:
             call("shutdown")
