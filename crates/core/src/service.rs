@@ -1245,6 +1245,14 @@ impl Service {
                 }
             };
             let mut g = self.inner.lock();
+            // S44e: the APO's section lives only while audiodg has an
+            // instance; re-assert the chain when a stream (re)builds it.
+            if !exclusive {
+                if let Some(now) = g.applier.audio_keep_alive() {
+                    info!(?now, "APO chain re-asserted");
+                    g.applied_audio = now;
+                }
+            }
             let desired =
                 if exclusive { AudioChainState::ExclusiveBypassed } else { g.applied_audio };
             if g.state.audio_chain != desired {

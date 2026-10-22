@@ -16,9 +16,15 @@
 //! default render endpoint — and restore bypasses both that endpoint and any
 //! endpoint an earlier apply wrote to (the default can change mid-game).
 //!
-//! The connection is per-call: applies happen on focus changes, and an open
-//! is one `OpenFileMappingW`. Holding a mapping in the always-on core would
-//! buy microseconds and cost resident pages.
+//! S44e: while an apply is in force the core *holds* the endpoint's section
+//! (one page). audiodg creates and drops APO instances whenever it rebuilds
+//! the endpoint's graph; the instance that dropped the last handle used to
+//! take the parameters with it, and the next one came up in bypass. Held,
+//! the name survives the rebuild and the new instance opens the same block.
+//! [`AudioControl::keep_alive`] (the 1 s service tick) re-asserts the chain
+//! when the section appears late (nothing was playing at apply time), when
+//! the default output moved, or when anything else rewrote the block. The
+//! hold is dropped on restore, so an idle core maps nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +46,56 @@ pub struct ApoAudioControl {
     /// even when the default output has changed since.
     #[allow(dead_code)]
     applied: std::sync::Mutex<Option<String>>,
+    /// The chain in force and the section held for it (S44e).
+    #[allow(dead_code)]
+    held: std::sync::Mutex<Option<Held>>,
+}
+
+/// What `keep_alive` re-asserts.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Held {
+    endpoint: String,
+    params: relay_audio::params::ChainParams,
+    #[cfg(windows)]
+    section: Option<HeldSection>,
+    /// The block sequence our last write left; anything else means the block
+    /// was rewritten (or recreated) under us.
+    written_seq: Option<u32>,
+}
+
+/// A mapped section owned by the control's mutex.
+#[cfg(windows)]
+struct HeldSection(SharedParams);
+
+// SAFETY: the mapping and event handles are process-wide kernel objects;
+// the view is only touched through `ParamBlock`'s atomics and seqlock, and
+// the wrapper is only ever reached through `ApoAudioControl::held`'s mutex.
+#[cfg(windows)]
+unsafe impl Send for HeldSection {}
+
+#[cfg(windows)]
+impl std::fmt::Debug for HeldSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HeldSection")
+    }
+}
+
+/// Write `params` and un-bypass unless the block already carries our last
+/// write. Returns true when it wrote.
+#[cfg(windows)]
+fn reassert(
+    block: &relay_audio::shm::ParamBlock,
+    params: &relay_audio::params::ChainParams,
+    written_seq: &mut Option<u32>,
+) -> bool {
+    if !block.bypass() && *written_seq == Some(block.sequence()) {
+        return false;
+    }
+    block.write_params(params);
+    block.set_bypass(false);
+    *written_seq = Some(block.sequence());
+    true
 }
 
 /// One render endpoint as the Settings APO card lists it.
@@ -628,6 +684,23 @@ fn target_endpoint() -> Option<String> {
 }
 
 #[cfg(windows)]
+impl ApoAudioControl {
+    /// Bypass and unmap the held section, if any.
+    fn release_held(&self) {
+        let held = self.held.lock().ok().and_then(|mut h| h.take());
+        if let Some(s) = held.and_then(|h| h.section) {
+            s.0.block().set_bypass(true);
+            s.0.notify();
+        }
+    }
+
+    /// True while a section is held (tests and status).
+    pub fn holds_section(&self) -> bool {
+        self.held.lock().ok().is_some_and(|h| h.as_ref().is_some_and(|h| h.section.is_some()))
+    }
+}
+
+#[cfg(windows)]
 impl AudioControl for ApoAudioControl {
     fn capture(&self) -> Result<AudioState> {
         // The APO's resting state is bypass by construction (the block is
@@ -645,32 +718,87 @@ impl AudioControl for ApoAudioControl {
     ) -> Result<AudioChainState> {
         let params = crate::audio_bridge::chain_params_with(settings, correction);
         if params.bands.is_empty() && params.limiter.is_none() && !params.hrtf {
+            // Nothing to process: let go of any chain still held.
+            self.release_held();
             return Ok(AudioChainState::Bypass);
         }
         let Some(guid) = target_endpoint() else { return Ok(AudioChainState::Bypass) };
+        let mut held = Held { endpoint: guid.clone(), params, section: None, written_seq: None };
         // Reachability is the truth: the APO's parameter section exists only
         // while the effect is loaded on this endpoint. Without it, say why.
-        let Some(s) = open_endpoint(&guid) else {
-            return Ok(if fx_has_relay(&guid) {
-                // Registered, but audiodg has not loaded it (the S42 case).
+        let state = match open_endpoint(&guid) {
+            Some(s) => {
+                reassert(s.block(), &held.params, &mut held.written_seq);
+                s.notify();
+                held.section = Some(HeldSection(s));
+                if let Ok(mut a) = self.applied.lock() {
+                    *a = Some(guid.clone());
+                }
+                info!(
+                    endpoint = %guid,
+                    bands = held.params.bands.len(),
+                    hrtf = held.params.hrtf,
+                    "APO chain active"
+                );
+                AudioChainState::Active
+            }
+            // Registered, but audiodg has no instance yet (nothing playing,
+            // or the S42 case): keep_alive activates it when one appears.
+            None if fx_has_relay(&guid) => AudioChainState::NotLoaded,
+            None => return Ok(AudioChainState::NotInstalled),
+        };
+        if let Ok(mut h) = self.held.lock() {
+            *h = Some(held);
+        }
+        Ok(state)
+    }
+
+    fn keep_alive(&self) -> Option<AudioChainState> {
+        let mut g = self.held.lock().ok()?;
+        let h = g.as_mut()?;
+        // The game's audio follows the default output; so does the chain.
+        if let Some(d) = target_endpoint() {
+            if !d.eq_ignore_ascii_case(&h.endpoint) {
+                if let Some(s) = h.section.take() {
+                    s.0.block().set_bypass(true);
+                    s.0.notify();
+                }
+                info!(from = %h.endpoint, to = %d, "default output moved; APO chain follows");
+                h.endpoint = d;
+                h.written_seq = None;
+            }
+        }
+        // A block of another version (the DLL was updated under a held
+        // section) is never steered: let it go so the new APO recreates it.
+        if h.section.as_ref().is_some_and(|s| !s.0.block().is_valid()) {
+            h.section = None;
+            h.written_seq = None;
+        }
+        if h.section.is_none() {
+            h.section = open_endpoint(&h.endpoint).map(HeldSection);
+            h.written_seq = None;
+        }
+        let Some(s) = h.section.as_ref() else {
+            return Some(if fx_has_relay(&h.endpoint) {
                 AudioChainState::NotLoaded
             } else {
                 AudioChainState::NotInstalled
             });
         };
-        s.block().write_params(&params);
-        s.block().set_bypass(false);
-        s.notify();
-        if let Ok(mut a) = self.applied.lock() {
-            *a = Some(guid.clone());
+        if reassert(s.0.block(), &h.params, &mut h.written_seq) {
+            s.0.notify();
+            info!(endpoint = %h.endpoint, "APO chain re-asserted");
+            if let Ok(mut a) = self.applied.lock() {
+                *a = Some(h.endpoint.clone());
+            }
         }
-        info!(endpoint = %guid, bands = params.bands.len(), hrtf = params.hrtf, "APO chain active");
-        Ok(AudioChainState::Active)
+        Some(AudioChainState::Active)
     }
 
     fn restore(&self, _original: &AudioState) -> Result<()> {
         // Restore = bypass, regardless of what was captured, on the endpoint
         // the last apply wrote to and on the current default.
+        self.release_held();
         let applied = self.applied.lock().ok().and_then(|mut a| a.take());
         let mut targets: Vec<String> = applied.into_iter().collect();
         if let Some(d) = target_endpoint() {
@@ -756,7 +884,11 @@ mod tests {
     #[test]
     fn params_sections_are_per_endpoint() {
         assert_eq!(params_section(A, "", false), format!("Global\\Relay.APO.{A}"));
-        assert_eq!(params_section(B, "", false), format!("Global\\Relay.APO.{B}"));
+        // Upper-cased: the APO names it from audiodg's `{FE54...}` spelling.
+        assert_eq!(
+            params_section(B, "", false),
+            format!("Global\\Relay.APO.{}", B.to_ascii_uppercase())
+        );
         assert_eq!(params_section(A, "t1", true), format!("Local\\Relay.APO.t1.{A}"));
         assert_ne!(params_section(A, "", false), params_section(B, "", false));
     }
