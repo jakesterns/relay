@@ -44,6 +44,10 @@ pub struct VdeviceStatus {
     /// This process can write HKLM (an install attempt would not be
     /// rejected by ACLs). Display-only.
     pub elevated: bool,
+    /// The bundled VB-CABLE: pack, presence, Relay's record, the opt-in.
+    /// Absent from cores older than the bundle plumbing.
+    #[serde(default)]
+    pub vbcable: Option<crate::vbcable::Status>,
 }
 
 fn load(paths: &Paths) -> Result<InstalledFile> {
@@ -70,6 +74,7 @@ pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
         mic_targets: detect::mic_targets().unwrap_or_default(),
         consent: file.consent,
         elevated: crate::processes::is_elevated(),
+        vbcable: Some(crate::vbcable::status(paths)),
     })
 }
 
@@ -85,13 +90,17 @@ pub fn status(paths: &Paths) -> Result<VdeviceStatus> {
         mic_targets: Vec::new(),
         consent: file.consent,
         elevated: false,
+        vbcable: None,
     })
 }
 
 /// Record the first-run decision. Never installs anything by itself.
 pub fn set_consent(paths: &Paths, apo: bool, camera: bool, microphone: bool) -> Result<Consent> {
     let mut file = load(paths)?;
-    let consent = Consent { decided_at: installed::iso_now(), apo, camera, microphone };
+    // The VB-CABLE install opt-in has its own switch (`vbcable::set_consent`);
+    // this answer leaves it as it was.
+    let vbcable = file.consent.as_ref().is_some_and(|c| c.vbcable);
+    let consent = Consent { decided_at: installed::iso_now(), apo, camera, microphone, vbcable };
     file.consent = Some(consent.clone());
     save(paths, &file)?;
     Ok(consent)
@@ -390,13 +399,19 @@ pub fn receive_routing(paths: &Paths) -> (bool, Option<String>) {
     let camera = file.consent.as_ref().is_some_and(|c| c.camera)
         && file.component(component_for(relay_vdevice::detect::camera_path())).is_some();
     let mic = if file.consent.as_ref().is_some_and(|c| c.microphone) {
-        let mut targets = relay_vdevice::detect::mic_targets().unwrap_or_default();
-        targets.sort_by_key(|t| t.kind != relay_vdevice::detect::MicTargetKind::VbCable);
-        targets.into_iter().next().map(|t| t.endpoint_id)
+        pick_mic_route(relay_vdevice::detect::mic_targets().unwrap_or_default())
     } else {
         None
     };
     (camera, mic)
+}
+
+/// The virtual-mic route among the detected inputs: VB-CABLE first (the one
+/// Relay bundles), VoiceMeeter otherwise, enumeration order within a kind.
+#[cfg(windows)]
+pub fn pick_mic_route(mut targets: Vec<relay_vdevice::detect::MicTarget>) -> Option<String> {
+    targets.sort_by_key(|t| t.kind != relay_vdevice::detect::MicTargetKind::VbCable);
+    targets.into_iter().next().map(|t| t.endpoint_id)
 }
 
 #[cfg(not(windows))]
@@ -600,6 +615,39 @@ mod tests {
         let err =
             uninstall_dshow_with(&paths, |_| panic!("tree"), |_| panic!("empty")).unwrap_err();
         assert!(err.to_string().contains("refusing"), "{err}");
+        let _ = std::fs::remove_dir_all(paths.root());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn mic_route_prefers_vb_cable() {
+        use relay_vdevice::detect::{MicTarget, MicTargetKind};
+        let t = |id: &str, kind| MicTarget { endpoint_id: id.into(), name: id.into(), kind };
+        assert_eq!(pick_mic_route(vec![]), None);
+        assert_eq!(
+            pick_mic_route(vec![
+                t("vm1", MicTargetKind::VoiceMeeter),
+                t("cable", MicTargetKind::VbCable),
+                t("vm2", MicTargetKind::VoiceMeeter),
+            ]),
+            Some("cable".into())
+        );
+        assert_eq!(
+            pick_mic_route(vec![
+                t("vm1", MicTargetKind::VoiceMeeter),
+                t("vm2", MicTargetKind::VoiceMeeter)
+            ]),
+            Some("vm1".into())
+        );
+    }
+
+    #[test]
+    fn first_run_answer_keeps_the_vbcable_opt_in() {
+        let paths = temp_paths("vbckeep");
+        crate::vbcable::set_consent(&paths, true).unwrap();
+        set_consent(&paths, false, false, true).unwrap();
+        let c = load(&paths).unwrap().consent.unwrap();
+        assert!(c.vbcable, "the first-run screen does not reset the VB-CABLE opt-in");
         let _ = std::fs::remove_dir_all(paths.root());
     }
 

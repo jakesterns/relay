@@ -845,6 +845,14 @@ async fn set_vdevice_consent(apo: bool, camera: bool, microphone: bool) -> CmdRe
 }
 
 #[tauri::command]
+async fn set_vbcable_consent(on: bool) -> CmdResult<()> {
+    match call(Method::SetVbcableConsent { on }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn vdevice_dry_run() -> CmdResult<Vec<String>> {
     match call(Method::VdeviceDryRun).await? {
         Reply::DryRun { lines } => Ok(lines),
@@ -1401,6 +1409,7 @@ pub fn run() {
             ndi_status,
             open_ndi_link,
             set_vdevice_consent,
+            set_vbcable_consent,
             vdevice_dry_run,
             install_vcam,
             uninstall_vcam,

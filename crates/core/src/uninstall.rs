@@ -10,6 +10,7 @@
 //! 2. shut the core down                (it restores audio/display on the way out)
 //! 3. restore the endpoint FX store     (from apo-backup\<endpoint>.json, byte-for-byte)
 //! 4. delete the camera COM keys        (exactly the keys in installed.json)
+//! 4b. uninstall VB-CABLE               (only if installed.json says Relay installed it)
 //! 5. remove the firewall rule          (the one rule named in firewall.json)
 //! 6. remove the Run key value          (HKCU, the one value)
 //! 7. delete the program files          (NSIS owns this; listed for the diff)
@@ -58,6 +59,9 @@ pub enum StepKind {
     /// Delete the per-user DirectShow camera filter registration (the
     /// Windows 10 path, S43). HKCU only, so no elevation.
     RemoveVcamFilter,
+    /// Uninstall the VB-CABLE driver Relay installed from its bundle. A
+    /// VB-CABLE the user installed themselves has no record and stays.
+    RemoveVbcable,
     /// Remove the inbound Windows Firewall rule for `relay-share.exe`.
     RemoveFirewallRule,
     /// Remove `HKCU\...\Run\Relay`.
@@ -76,6 +80,7 @@ impl StepKind {
             StepKind::RestoreApo
                 | StepKind::RestoreAudioProtection
                 | StepKind::RemoveVcam
+                | StepKind::RemoveVbcable
                 | StepKind::RemoveFirewallRule
         )
     }
@@ -89,6 +94,7 @@ impl StepKind {
             StepKind::RestoreAudioProtection => "Put Windows audio protection back",
             StepKind::RemoveVcam => "Unregister the virtual camera",
             StepKind::RemoveVcamFilter => "Unregister the virtual camera (per-user filter)",
+            StepKind::RemoveVbcable => "Remove the virtual microphone Relay installed (VB-CABLE)",
             StepKind::RemoveFirewallRule => "Remove the Windows Firewall rule",
             StepKind::RemoveRunKey => "Remove the start-at-login entry",
             StepKind::RemoveFiles => "Delete the program files",
@@ -183,6 +189,9 @@ pub struct MachineState {
     /// Per-user (HKCU) camera filter keys recorded in `installed.json`,
     /// deepest first and vetted.
     pub vcam_user_keys: Vec<String>,
+    /// `installed.json` records that Relay installed VB-CABLE. Carries the
+    /// staged setup program the record names.
+    pub vbcable: Option<String>,
     /// Relay's firewall rule is on the machine, or `firewall.json` records
     /// that we added one. Carries the rule name, which is the handle the
     /// removal uses.
@@ -281,6 +290,15 @@ pub fn plan_from(state: &MachineState, keep_data: bool) -> Plan {
             });
         }
     }
+
+    steps.push(Step {
+        kind: StepKind::RemoveVbcable,
+        target: match &state.vbcable {
+            Some(setup) => format!("VB-Audio Virtual Cable (via {setup} -u -h)"),
+            None => "not installed by Relay".into(),
+        },
+        present: state.vbcable.is_some(),
+    });
 
     steps.push(Step {
         kind: StepKind::RemoveFirewallRule,
@@ -413,6 +431,10 @@ mod imp {
             vcam_keys,
             audio_protection: audio_protection_target(paths),
             vcam_user_keys: crate::vdevice::recorded_dshow_keys(paths),
+            vbcable: relay_vdevice::installed::load(&paths.installed_file())
+                .ok()
+                .and_then(|f| f.component(relay_vdevice::installed::VBCABLE_DRIVER).cloned())
+                .map(|c| c.dll_path),
             firewall_rule: firewall_rule(paths),
             run_key: crate::autostart::is_enabled().unwrap_or(false),
             install_dir: std::env::current_exe()
@@ -522,6 +544,27 @@ mod imp {
                             other => other,
                         })
                     }
+                    StepKind::RemoveVbcable => elevated_step(|| {
+                        use crate::vbcable::{self as vb, LiveOutcome};
+                        // SAFETY: the uninstaller runs its steps in order on
+                        // one thread; the gate is armed for this one call.
+                        unsafe { std::env::set_var(vb::LIVE_RUN_GATE, "1") };
+                        let out = vb::uninstall_with(
+                            &paths.installed_file(),
+                            &vb::payload_dir(),
+                            &vb::staging_dir(),
+                            vb::MANIFEST,
+                            &mut vb::LiveMachine,
+                        );
+                        // SAFETY: as above.
+                        unsafe { std::env::remove_var(vb::LIVE_RUN_GATE) };
+                        match out {
+                            LiveOutcome::Done(_) | LiveOutcome::Skipped(_) => Ok(()),
+                            LiveOutcome::Refused(e) | LiveOutcome::Failed(e) => {
+                                Err(anyhow::anyhow!(e))
+                            }
+                        }
+                    }),
                     StepKind::RemoveFirewallRule => {
                         elevated_step(|| crate::firewall::uninstall_live(paths).map(|_| ()))
                     }
@@ -747,6 +790,7 @@ mod tests {
                 r"Software\Classes\CLSID\{5E0B7C1F}\InprocServer32".into(),
                 r"Software\Classes\CLSID\{5E0B7C1F}".into(),
             ],
+            vbcable: Some(r"C:\Program Files\Relay\drivers\vbcable\VBCABLE_Setup_x64.exe".into()),
             firewall_rule: Some(r"Relay (relay-share) — C:\d\Relay\relay-share.exe".into()),
             run_key: true,
             install_dir: Some(PathBuf::from(r"C:\d\Relay")),
@@ -800,6 +844,20 @@ mod tests {
     }
 
     #[test]
+    fn vbcable_is_removed_only_when_relay_installed_it() {
+        let plan = plan_from(&everything_installed(), false);
+        let step = plan.steps.iter().find(|s| s.kind == StepKind::RemoveVbcable).unwrap();
+        assert!(step.present && step.target.contains("VBCABLE_Setup_x64.exe -u -h"));
+        assert!(StepKind::RemoveVbcable.needs_elevation());
+        // The user's own VB-CABLE has no record: listed, nothing to do.
+        let state = MachineState { vbcable: None, ..everything_installed() };
+        let plan = plan_from(&state, false);
+        let step = plan.steps.iter().find(|s| s.kind == StepKind::RemoveVbcable).unwrap();
+        assert!(!step.present);
+        assert_eq!(step.target, "not installed by Relay");
+    }
+
+    #[test]
     fn every_recorded_vcam_key_gets_its_own_step() {
         let state = everything_installed();
         let plan = plan_from(&state, false);
@@ -832,6 +890,7 @@ mod tests {
             StepKind::RestoreAudioProtection,
             StepKind::RemoveVcam,
             StepKind::RemoveVcamFilter,
+            StepKind::RemoveVbcable,
             StepKind::RemoveFirewallRule,
             StepKind::RemoveRunKey,
             StepKind::RemoveFiles,
