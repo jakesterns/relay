@@ -194,7 +194,7 @@ fn build_chain(shared: &RtShared, rate: u32, max_block: usize) -> *mut RtChain {
         return std::ptr::null_mut();
     };
     shared.built_seq.store(seq, Ordering::Release);
-    if params.bands.is_empty() && params.limiter.is_none() && !params.hrtf {
+    if params.is_passthrough() {
         return std::ptr::null_mut();
     }
     if params.hrtf && !matches!(rate, 44100 | 48000 | 96000) {

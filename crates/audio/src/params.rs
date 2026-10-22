@@ -237,3 +237,45 @@ pub struct ChainParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamics: Option<DynamicsParams>,
 }
+
+impl ChainParams {
+    /// True when the chain would do nothing: no bands, limiter, HRTF or a
+    /// dynamic stage that acts. The APO and the core both skip such a chain.
+    pub fn is_passthrough(&self) -> bool {
+        self.bands.is_empty()
+            && self.limiter.is_none()
+            && !self.hrtf
+            && self.dynamics.as_ref().is_none_or(|d| d.is_inert())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passthrough_counts_an_acting_dynamic_stage() {
+        assert!(ChainParams::default().is_passthrough());
+        let band = DynBandParams {
+            mode: DynMode::Tame,
+            freq_hz: 1000.0,
+            q: 1.0,
+            threshold_db: -30.0,
+            ratio: 4.0,
+            range_db: 6.0,
+            floor_db: -100.0,
+            attack_ms: 2.0,
+            release_ms: 100.0,
+            enabled: true,
+        };
+        let mut p = ChainParams {
+            dynamics: Some(DynamicsParams { bands: vec![band], duck_lift: false }),
+            ..ChainParams::default()
+        };
+        assert!(!p.is_passthrough(), "dynamics alone is a chain");
+        p.dynamics.as_mut().unwrap().bands[0].enabled = false;
+        assert!(p.is_passthrough(), "a disabled stage is not");
+        p.hrtf = true;
+        assert!(!p.is_passthrough());
+    }
+}

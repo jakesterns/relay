@@ -261,10 +261,8 @@ fn apo_end_to_end_in_process() {
             }],
             duck_lift: false,
         }),
-        // A flat band, as a learned layer always brings a curve. (The APO's
-        // build_chain still treats a chain with no bands, limiter or HRTF
-        // as empty: a dynamics-only chain needs it to check `dynamics` too.)
-        bands: vec![BandParams::peaking(1_000.0, 0.0, 1.0)],
+        // Dynamics only: no EQ band. build_chain must still build it (a
+        // dynamics-only import, or a tame-only stage with no curve).
         ..ChainParams::default()
     };
     core_side.block().write_params(&params3);

@@ -717,7 +717,7 @@ impl AudioControl for ApoAudioControl {
         correction: Option<&[(f32, f32)]>,
     ) -> Result<AudioChainState> {
         let params = crate::audio_bridge::chain_params_with(settings, correction);
-        if params.bands.is_empty() && params.limiter.is_none() && !params.hrtf {
+        if params.is_passthrough() {
             // Nothing to process: let go of any chain still held.
             self.release_held();
             return Ok(AudioChainState::Bypass);
