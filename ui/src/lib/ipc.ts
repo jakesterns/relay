@@ -36,7 +36,20 @@ export type LearnStatus = "off" | "learning" | "ready" | "applied" | "needs_rele
 export interface GameEqLayer {
   curve: [number, number][]; source: LayerSource; exe_version?: string; note?: string;
   base?: [number, number][];
+  /** S49: the dynamic stage as learned or imported, and the player's tuning. */
+  dynamics?: DynamicsParams; dynamics_tuning?: DynamicsTuning;
 }
+/* ---- S49: the dynamic stage. Mirror of crates/audio/src/params.rs
+ *      (DynamicsParams) and crates/audio/src/learn/dynamics.rs. ---- */
+export type DynMode = "tame" | "lift";
+export interface DynBandParams {
+  mode: DynMode; freq_hz: number; q: number; threshold_db: number; ratio: number;
+  range_db: number; floor_db?: number; attack_ms?: number; release_ms?: number; enabled?: boolean;
+}
+export interface DynamicsParams { bands: DynBandParams[]; duck_lift?: boolean }
+/** Strengths 0..2 (1 = as learned / imported). */
+export interface DynamicsTuning { enabled: boolean; tame: number; lift: number }
+export const MAX_DYN_STRENGTH = 2;
 export interface GameEqStatus {
   exe: string; state: LearnStatus;
   learning_on: boolean; needs_goal: boolean; learning_now: boolean;
@@ -59,6 +72,11 @@ export interface GameEqStatus {
   convergence?: { agreeing: number; needed: number; max_delta_db: number } | null;
   /** S48: seconds of active play still needed (null = not known yet; 0 = ready). */
   eta_secs?: number | null;
+  /** S49: the applied layer has a dynamic stage to tune. */
+  dynamics_available?: boolean;
+  dynamics_tuning?: DynamicsTuning;
+  /** What runs now (tuned); null when off or none. */
+  dynamics?: DynamicsParams | null;
 }
 
 /* ---- S48: learn from a video file. Mirror of crates/core/src/learn_file.rs. ---- */
@@ -93,7 +111,8 @@ export type GameEqAction =
   | { kind: "relearn" }
   | { kind: "reset" }
   | { kind: "import"; text: string }
-  | { kind: "export"; note: string };
+  | { kind: "export"; note: string }
+  | { kind: "set_dynamics"; enabled?: boolean; tame?: number; lift?: number };
 export interface GameEqExport { text: string; path: string }
 export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
 
@@ -1473,6 +1492,15 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
   if (action.kind === "set_goal") a.game_eq_goal = action.goal;
   if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
   if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
+  if (action.kind === "set_dynamics") {
+    if (!a.game_eq?.dynamics) throw new Error("there is no dynamic stage to tune yet");
+    const t = { enabled: true, tame: 1, lift: 1, ...a.game_eq.dynamics_tuning };
+    const clamp = (x: number) => Math.min(MAX_DYN_STRENGTH, Math.max(0, x));
+    if (action.enabled !== undefined) t.enabled = action.enabled;
+    if (action.tame !== undefined) t.tame = clamp(action.tame);
+    if (action.lift !== undefined) t.lift = clamp(action.lift);
+    a.game_eq.dynamics_tuning = t;
+  }
   if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
     throw new Error("needs the Relay core");
   }
@@ -1486,6 +1514,9 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
       source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
       targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
       exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
+      dynamics_available: !!a.game_eq?.dynamics,
+      dynamics_tuning: { enabled: true, tame: 1, lift: 1, ...a.game_eq?.dynamics_tuning },
+      dynamics: a.game_eq?.dynamics ?? null,
     },
   };
 }

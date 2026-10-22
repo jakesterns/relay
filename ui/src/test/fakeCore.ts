@@ -14,7 +14,7 @@ import type {
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
 import type { NdiRuntime } from "../lib/ipc";
-import type { EndpointApo, GameEqAction, GameEqExport, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
+import type { EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
 import { LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
@@ -103,6 +103,21 @@ function profile(
   if (headset) p.headset = headset;
   if (monitor) p.monitor = monitor;
   return p;
+}
+
+/** S49 status fields from a layer, scaling ranges by the tuning (and the
+ *  core's caps: 12 dB tame, 8 dB lift) as the core does. */
+function fakeDynamics(l: GameEqLayer | undefined): Pick<GameEqStatus, "dynamics_available" | "dynamics_tuning" | "dynamics"> {
+  const t = { enabled: true, tame: 1, lift: 1, ...l?.dynamics_tuning };
+  const d = l?.dynamics;
+  const run = d && t.enabled ? {
+    ...d,
+    bands: d.bands.map((b) => ({
+      ...b,
+      range_db: Math.min(b.mode === "tame" ? 12 : 8, b.range_db * (b.mode === "tame" ? t.tame : t.lift)),
+    })),
+  } : null;
+  return { dynamics_available: !!d, dynamics_tuning: t, dynamics: run };
 }
 
 export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {}): FakeCore {
@@ -312,6 +327,16 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           if (!rec.candidate) throw new Error("there is no learned curve to apply yet");
           au.game_eq = { curve: rec.candidate, source: au.game_eq && au.game_eq.source !== "learned" ? "tuned" : "learned" };
           break;
+        case "set_dynamics": {
+          if (!au.game_eq?.dynamics) throw new Error("there is no dynamic stage to tune yet");
+          const t = { enabled: true, tame: 1, lift: 1, ...au.game_eq.dynamics_tuning };
+          const clamp = (x: number) => Math.min(2, Math.max(0, x));
+          if (action.enabled !== undefined) t.enabled = action.enabled;
+          if (action.tame !== undefined) t.tame = clamp(action.tame);
+          if (action.lift !== undefined) t.lift = clamp(action.lift);
+          au.game_eq = { ...au.game_eq, dynamics_tuning: t };
+          break;
+        }
         case "relearn": rec.candidate = null; rec.progress = 0; break;
         case "reset": delete au.game_eq; delete au.learn_game_eq; rec.candidate = null; rec.progress = 0; break;
         case "import": {
@@ -352,6 +377,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
         targets: 120, maskers: 20, min_targets: 300, min_maskers: 60, distinct_voices: 2,
         exe_version: "1.0.0.0", applied, offer, note: "", last_error: null,
         eta_secs: offer ? 0 : core.gameEqEta,
+        ...fakeDynamics(au.game_eq),
       };
       return { status, ...(exported ? { export: exported } : {}) };
     },

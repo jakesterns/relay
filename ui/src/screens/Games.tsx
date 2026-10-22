@@ -6,7 +6,9 @@ import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
   api, GOALS, isTauri, presetAudioLabel,
-  type ApoStatus, type ColorInfo, type EqBand, type GameEqAction, type GameEqExport, type GameEqStatus,
+  MAX_DYN_STRENGTH,
+  type ApoStatus, type ColorInfo, type DynamicsTuning, type EqBand, type GameEqAction,
+  type GameEqExport, type GameEqStatus,
   type Goal, type GpuColor, type Limiter, type Preview, type Profile,
   type SharePreset, type SharePresetDef,
 } from "../lib/ipc";
@@ -382,6 +384,10 @@ function GameEqCard({ profileId, onChanged }: {
           {goalLabel && status.goal === "dialogue" && status.distinct_voices > 0 && (
             <Kv k="Voices" v={`${status.distinct_voices} distinct`} />
           )}
+          {status.dynamics_available && (
+            <DynamicsControls status={status} disabled={off}
+              onTune={(t) => void act({ kind: "set_dynamics", ...t })} />
+          )}
           <div className="ab">
             <button className="btn acc" disabled={off || status.state !== "ready"}
               onClick={() => void act({ kind: "apply" })}>Apply</button>
@@ -423,6 +429,55 @@ function GameEqCard({ profileId, onChanged }: {
       )}
       <p className="note">Listens only to this game's own audio, keeps statistics — never a recording — and nothing leaves this PC. Voice chat in other apps is never heard; in-game player chat is left out.</p>
     </Card>
+  );
+}
+
+/** How long a strength slider waits after the last move before telling the
+ *  core (a drag is one change, not dozens). */
+export const DYN_TUNE_DEBOUNCE_MS = 250;
+
+/** S49: the learned dynamic stage's two strengths and its switch. The stage
+ *  itself is learned (or imported); these only scale it, within the core's
+ *  caps. */
+function DynamicsControls({ status, disabled, onTune }: {
+  status: GameEqStatus;
+  disabled: boolean;
+  onTune: (t: Partial<DynamicsTuning>) => void;
+}) {
+  const tuning = status.dynamics_tuning ?? { enabled: true, tame: 1, lift: 1 };
+  const [tame, setTame] = useState(tuning.tame);
+  const [lift, setLift] = useState(tuning.lift);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { setTame(tuning.tame); setLift(tuning.lift); }, [tuning.tame, tuning.lift]);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const send = (t: Partial<DynamicsTuning>) => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => onTune(t), DYN_TUNE_DEBOUNCE_MS);
+  };
+  const bands = status.dynamics?.bands ?? [];
+  const most = (mode: "tame" | "lift") =>
+    bands.filter((b) => b.mode === mode && b.enabled !== false)
+      .reduce((m, b) => Math.max(m, b.range_db), 0);
+  const hasLift = bands.some((b) => b.mode === "lift") || tuning.lift !== 1;
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const on = tuning.enabled;
+  return (
+    <div className="dyn" role="group" aria-label="Loud bursts and footsteps">
+      <Toggle on={on} label="Tame loud bursts, lift quiet footsteps"
+        sub={on
+          ? `Acts only while it happens: guns and explosions down by up to ${most("tame").toFixed(0)} dB` +
+            (hasLift ? `, footsteps up by up to ${most("lift").toFixed(0)} dB.` : ".")
+          : "Off: the learned curve still applies."}
+        onChange={disabled ? undefined : (v) => onTune({ enabled: v })} />
+      <Slider label="Gunshots & explosions" value={tame} min={0} max={MAX_DYN_STRENGTH} step={0.05}
+        format={pct} disabled={disabled || !on}
+        onChange={(v) => { setTame(v); send({ tame: v }); }} />
+      {hasLift && (
+        <Slider label="Footsteps" value={lift} min={0} max={MAX_DYN_STRENGTH} step={0.05}
+          format={pct} disabled={disabled || !on}
+          onChange={(v) => { setLift(v); send({ lift: v }); }} />
+      )}
+    </div>
   );
 }
 
