@@ -41,7 +41,9 @@
 #![allow(unsafe_code)]
 #![allow(non_snake_case)] // COM method names come from the interfaces.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering,
+};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -388,6 +390,9 @@ impl RelayApo {
             name
         };
         let r = SharedParams::create(&name);
+        if crate::diag::enabled() {
+            crate::diag!("host token: {}", host_token_summary());
+        }
         crate::diag!(
             "shm create {name}: {}",
             match &r {
@@ -746,6 +751,10 @@ impl IAudioProcessingObjectConfiguration_Impl for RelayApo_Impl {
     }
 
     fn UnlockForProcess(&self) -> windows::core::Result<()> {
+        crate::diag!(
+            "UnlockForProcess (APOProcess calls so far {})",
+            PROCESS_CALLS.load(Ordering::Relaxed)
+        );
         let Some(locked) = self.locked.lock().unwrap().take() else {
             return Err(windows::core::Error::from_hresult(APOERR_ALREADY_UNLOCKED));
         };
@@ -780,6 +789,8 @@ impl IAudioProcessingObjectRT_Impl for RelayApo_Impl {
         num_out: u32,
         out_conn: *mut *mut APO_CONNECTION_PROPERTY,
     ) {
+        // Lock-free count for the diag log (read at Unlock / drop only).
+        PROCESS_CALLS.fetch_add(1, Ordering::Relaxed);
         if num_in < 1 || num_out < 1 || in_conn.is_null() || out_conn.is_null() {
             return;
         }
@@ -987,8 +998,15 @@ pub fn answers(obj: &windows::core::IUnknown, id: &GUID) -> bool {
     }
 }
 
+/// APOProcess calls in this process, all instances (diag only).
+static PROCESS_CALLS: AtomicU64 = AtomicU64::new(0);
+
 impl Drop for RelayApo {
     fn drop(&mut self) {
+        crate::diag!(
+            "RelayApo dropped (APOProcess calls so far {})",
+            PROCESS_CALLS.load(Ordering::Relaxed)
+        );
         // Normally UnlockForProcess ran; make release-order explicit anyway:
         // stop the control thread before the shm mapping goes away.
         self.shared.stop.store(true, Ordering::Release);
@@ -1012,6 +1030,63 @@ impl Drop for RelayApo {
     }
 }
 
+/// For the diag log only: what kind of process hosts us. An AppContainer or
+/// a non-zero session redirects `Global\` names, which is the difference
+/// between "section created" and "the core cannot find it" (2026-10-14).
+fn host_token_summary() -> String {
+    use windows::Win32::Security::{
+        GetTokenInformation, TokenIntegrityLevel, TokenIsAppContainer, TokenSessionId,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    // SAFETY: our own process token, queried into correctly sized buffers.
+    unsafe {
+        let mut tok = windows::Win32::Foundation::HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok).is_err() {
+            return "token unreadable".into();
+        }
+        let mut n = 0u32;
+        let mut appc = 0u32;
+        let _ = GetTokenInformation(
+            tok,
+            TokenIsAppContainer,
+            Some(&mut appc as *mut u32 as *mut _),
+            4,
+            &mut n,
+        );
+        let mut session = 0u32;
+        let _ = GetTokenInformation(
+            tok,
+            TokenSessionId,
+            Some(&mut session as *mut u32 as *mut _),
+            4,
+            &mut n,
+        );
+        let mut buf = [0u8; 64];
+        let rid = if GetTokenInformation(
+            tok,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            buf.len() as u32,
+            &mut n,
+        )
+        .is_ok()
+        {
+            let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+            let sid = label.Label.Sid;
+            let count = *windows::Win32::Security::GetSidSubAuthorityCount(sid);
+            format!(
+                "{:#x}",
+                *windows::Win32::Security::GetSidSubAuthority(sid, u32::from(count) - 1)
+            )
+        } else {
+            "?".into()
+        };
+        let _ = windows::Win32::Foundation::CloseHandle(tok);
+        format!("app_container={} session={session} integrity_rid={rid}", appc != 0)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Class factory + DLL exports
 // ---------------------------------------------------------------------------
@@ -1031,20 +1106,8 @@ impl IClassFactory_Impl for Factory_Impl {
         }
         // SAFETY: iid checked non-null.
         crate::diag!("CreateInstance iid={:?} outer={}", unsafe { *iid }, outer.is_some());
-        if outer.is_some() {
-            crate::diag!("CreateInstance -> CLASS_E_NOAGGREGATION");
-            return Err(windows::core::Error::from_hresult(CLASS_E_NOAGGREGATION));
-        }
-        let apo: IAudioProcessingObject = RelayApo::default().into();
-        if crate::diag::enabled() {
-            let unk: windows::core::IUnknown = apo.cast()?;
-            for (name, id) in expected_iids() {
-                let ok = answers(&unk, &id);
-                crate::diag!("  QI {name} -> {}", if ok { "S_OK" } else { "E_NOINTERFACE" });
-            }
-        }
         // SAFETY: iid/object checked non-null above.
-        let hr = unsafe { apo.query(iid, object) };
+        let hr = unsafe { create_instance(outer.as_ref().map(|o| o.as_raw()), iid, object) };
         crate::diag!("CreateInstance -> {:#010x}", hr.0 as u32);
         hr.ok()
     }
@@ -1052,6 +1115,77 @@ impl IClassFactory_Impl for Factory_Impl {
     fn LockServer(&self, _lock: windows::core::BOOL) -> windows::core::Result<()> {
         Ok(())
     }
+}
+
+/// The interfaces aggregation delegates, with their exact vtable lengths.
+fn aggregated_ifaces() -> [crate::aggregate::Iface; 5] {
+    use crate::aggregate::Iface;
+    const W: usize = std::mem::size_of::<usize>();
+    use windows::Win32::Media::Audio::Apo::{
+        IAudioProcessingObjectConfiguration_Vtbl, IAudioProcessingObjectRT_Vtbl,
+        IAudioProcessingObject_Vtbl, IAudioSystemEffects2_Vtbl, IAudioSystemEffects_Vtbl,
+    };
+    [
+        Iface {
+            iid: IAudioProcessingObject::IID,
+            slots: std::mem::size_of::<IAudioProcessingObject_Vtbl>() / W,
+        },
+        Iface {
+            iid: IAudioProcessingObjectRT::IID,
+            slots: std::mem::size_of::<IAudioProcessingObjectRT_Vtbl>() / W,
+        },
+        Iface {
+            iid: IAudioProcessingObjectConfiguration::IID,
+            slots: std::mem::size_of::<IAudioProcessingObjectConfiguration_Vtbl>() / W,
+        },
+        Iface {
+            iid: IAudioSystemEffects::IID,
+            slots: std::mem::size_of::<IAudioSystemEffects_Vtbl>() / W,
+        },
+        Iface {
+            iid: IAudioSystemEffects2::IID,
+            slots: std::mem::size_of::<IAudioSystemEffects2_Vtbl>() / W,
+        },
+    ]
+}
+
+/// The class factory's work, callable in-process (tests drive it with a
+/// fake outer). With `outer`, only `IID_IUnknown` may be asked for (the COM
+/// aggregation rule) and the inner IUnknown comes back (S44d).
+///
+/// # Safety
+/// `iid`/`object` are valid; `outer`, when given, is a live IUnknown.
+pub unsafe fn create_instance(
+    outer: Option<*mut core::ffi::c_void>,
+    iid: *const GUID,
+    object: *mut *mut core::ffi::c_void,
+) -> HRESULT {
+    if object.is_null() || iid.is_null() {
+        return E_POINTER;
+    }
+    // SAFETY: per the contract.
+    unsafe {
+        *object = std::ptr::null_mut();
+        if let Some(outer) = outer {
+            if *iid != windows::core::IUnknown::IID {
+                return CLASS_E_NOAGGREGATION;
+            }
+            let apo: windows::core::IUnknown = RelayApo::default().into();
+            *object = crate::aggregate::create(apo, outer, &aggregated_ifaces());
+            crate::diag!("CreateInstance: aggregated");
+            return S_OK;
+        }
+    }
+    let apo: IAudioProcessingObject = RelayApo::default().into();
+    if crate::diag::enabled() {
+        let Ok(unk) = apo.cast::<windows::core::IUnknown>() else { return E_POINTER };
+        for (name, id) in expected_iids() {
+            let ok = answers(&unk, &id);
+            crate::diag!("  QI {name} -> {}", if ok { "S_OK" } else { "E_NOINTERFACE" });
+        }
+    }
+    // SAFETY: iid/object checked non-null above.
+    unsafe { apo.query(iid, object) }
 }
 
 /// audiodg keeps APO DLLs loaded for the life of the engine process; we never

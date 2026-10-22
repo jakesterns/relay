@@ -95,3 +95,7 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# apo_check tests run the real DSP chain over the stimulus.
+relay-audio = { path = "../audio", features = ["dsp"] }

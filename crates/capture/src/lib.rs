@@ -14,6 +14,7 @@
 //! NV12 with the D3D11 video processor and handed to the encoder as a DXGI
 //! surface. No frame ever crosses to system memory on the send path.
 
+pub mod apo_check;
 #[cfg(windows)]
 pub mod audio;
 pub mod codec;

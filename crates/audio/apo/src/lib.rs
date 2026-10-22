@@ -19,6 +19,8 @@ pub mod ids;
 pub mod regfile;
 
 #[cfg(all(windows, feature = "com"))]
+pub mod aggregate;
+#[cfg(all(windows, feature = "com"))]
 pub mod com;
 #[cfg(all(windows, feature = "com"))]
 pub mod diag;

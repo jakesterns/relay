@@ -142,6 +142,27 @@ fn run() -> Result<()> {
                 None => bench_audio(secs, relay_capture::audio::AudioSource::Desktop),
             }
         }
+        // Automated proof the endpoint APO's EQ reaches the playing graph:
+        // a quiet tone stimulus, loopback, bypass vs test cascade. Exit 0
+        // on pass, 2 on fail; the JSON report goes to stdout.
+        #[cfg(windows)]
+        "apo-check" if args.get(1).map(String::as_str) == Some("observe") => {
+            let secs: f64 = args.get(2).map(|s| s.parse()).transpose()?.unwrap_or(4.0);
+            let settle: f64 = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(1.5);
+            let o = relay_capture::apo_check::observe(secs, settle)?;
+            println!("{}", serde_json::to_string_pretty(&o)?);
+            Ok(())
+        }
+        #[cfg(windows)]
+        "apo-check" => {
+            let secs: f64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(2.0);
+            let report = relay_capture::apo_check::run(secs)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.pass {
+                std::process::exit(2);
+            }
+            Ok(())
+        }
         #[cfg(windows)]
         "bench-capture" => {
             let secs: u64 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(10);
