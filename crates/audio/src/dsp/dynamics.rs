@@ -12,7 +12,10 @@
 //! - **Detection** is stereo-linked: the level of `(bpL + bpR) / 2` (the
 //!   band-pass of the mono downmix, which is what the learner measured), so
 //!   both channels always get the same gain and the image never shifts. A
-//!   one-pole power envelope with the band's attack and release.
+//!   The power is first averaged symmetrically over ~[`MEAN_MS`] (the
+//!   learner's 10 ms frames measure mean power; an attack/release follower
+//!   straight on a noisy power reads its peaks, several dB high), then
+//!   followed with the band's attack and release.
 //! - **Levels are relative** to the program loudness, tracked the way the
 //!   learner tracks it (10 ms frames of the mono downmix, dB-domain average
 //!   with a ~30 s time constant, re-based after a sustained volume change,
@@ -53,6 +56,8 @@ pub const DUCK_FULL_DB: f64 = 3.0;
 /// How long Lift stays held back after the Tame bands let go.
 pub const DUCK_RELEASE_MS: f64 = 300.0;
 const DENORMAL_FLOOR: f64 = 1e-25;
+/// Mean-power averaging time constant ahead of the attack/release, ms.
+pub const MEAN_MS: f64 = 5.0;
 
 struct Band {
     mode: DynMode,
@@ -62,7 +67,11 @@ struct Band {
     slope: f64,
     range: f64,
     bp: [Biquad; 2],
-    /// Power envelope of the linked band-pass.
+    /// Mean power of the linked band-pass, then its envelope.
+    mean: f64,
+    /// Per-sample coefficient of the mean: [`MEAN_MS`], or the attack when
+    /// that is faster (a fast tame band should not wait on the average).
+    mean_k: f64,
     env: f64,
     att: f64,
     rel: f64,
@@ -125,6 +134,8 @@ impl Dynamics {
                 slope: 1.0 - 1.0 / b.ratio as f64,
                 range: b.range_db as f64,
                 bp: [Biquad::new(bp), Biquad::new(bp)],
+                mean: 0.0,
+                mean_k: coef(b.attack_ms.clamp(1.0, MEAN_MS as f32)),
                 env: 0.0,
                 att: coef(b.attack_ms),
                 rel: coef(b.release_ms),
@@ -155,6 +166,15 @@ impl Dynamics {
     /// The gain each band is heading for, dB (cut negative, lift positive).
     pub fn band_gains_db(&self) -> impl Iterator<Item = f64> + '_ {
         self.bands.iter().map(|b| b.gain_db)
+    }
+
+    /// The relative level each band's detector reads now (see
+    /// [`DYN_REF_DB`]); `None` before the loudness is known or while silent.
+    pub fn band_levels_db(&self) -> impl Iterator<Item = Option<f64>> + '_ {
+        let offset = DYN_REF_DB as f64 - self.lt_db;
+        self.bands
+            .iter()
+            .map(move |b| (self.primed && b.env > 0.0).then(|| 10.0 * b.env.log10() + offset))
     }
 
     /// The tracked program loudness, dBFS (`None` before the first
@@ -250,7 +270,9 @@ impl Dynamics {
                 let br = b.bp[1].process_sample(y);
                 let pm = 0.5 * (bl + br);
                 let p = pm * pm;
-                b.env += if p > b.env { b.att } else { b.rel } * (p - b.env);
+                b.mean += b.mean_k * (p - b.mean);
+                let m = b.mean;
+                b.env += if m > b.env { b.att } else { b.rel } * (m - b.env);
                 b.g += b.g_step;
                 let k = b.g - 1.0;
                 x += k * bl;
@@ -271,13 +293,18 @@ impl Dynamics {
             if b.env < DENORMAL_FLOOR {
                 b.env = 0.0;
             }
+            if b.mean < DENORMAL_FLOOR {
+                b.mean = 0.0;
+            }
         }
     }
 
     pub fn state_is_denormal_free(&self) -> bool {
-        self.bands
-            .iter()
-            .all(|b| b.bp.iter().all(|q| q.state_is_denormal_free()) && !b.env.is_subnormal())
+        self.bands.iter().all(|b| {
+            b.bp.iter().all(|q| q.state_is_denormal_free())
+                && !b.env.is_subnormal()
+                && !b.mean.is_subnormal()
+        })
     }
 }
 

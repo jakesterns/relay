@@ -207,6 +207,10 @@ pub struct LearnRecord {
     pub needs_relearn: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// S49: the dynamic stage derived with the candidate (same evidence,
+    /// same moment), `None` when the evidence asks for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_dynamics: Option<crate::params::DynamicsParams>,
 }
 
 impl LearnRecord {
@@ -224,6 +228,7 @@ impl LearnRecord {
             candidate_gains: None,
             needs_relearn: false,
             last_error: None,
+            candidate_dynamics: None,
         }
     }
 
@@ -243,6 +248,9 @@ impl LearnRecord {
                 *c = g;
             }
         }
+        if let Some(d) = r.candidate_dynamics.as_mut() {
+            *d = super::dynamics::guard_dynamics(d);
+        }
         Some(r)
     }
 
@@ -257,6 +265,7 @@ impl LearnRecord {
                 self.reset_evidence();
                 self.candidate = None;
                 self.candidate_gains = None;
+                self.candidate_dynamics = None;
                 self.needs_relearn = true;
                 self.exe_version = Some(new.to_owned());
                 true
@@ -284,6 +293,7 @@ impl LearnRecord {
         self.reset_evidence();
         self.candidate = None;
         self.candidate_gains = None;
+        self.candidate_dynamics = None;
         self.needs_relearn = false;
     }
 
@@ -393,6 +403,7 @@ impl LearnRecord {
             Ok(d) => {
                 self.candidate = Some(d.curve());
                 self.candidate_gains = Some(d.gains.to_vec());
+                self.candidate_dynamics = super::dynamics::derive_dynamics(&self.window(), goal);
                 true
             }
             Err(e) => {
@@ -453,7 +464,7 @@ impl LearnRecord {
             Err(super::derive::DeriveError::Malformed)
         };
         let goal = self.goal;
-        let d = match window.and_then(|w| derive_checked(&w, limits, goal)) {
+        let d = match window.and_then(|w| derive_checked(&w, limits, goal).map(|d| (d, w))) {
             Ok(d) => d,
             Err(e) => {
                 self.last_error = Some(e.to_string());
@@ -461,6 +472,7 @@ impl LearnRecord {
             }
         };
         self.last_error = None;
+        let (d, w) = d;
         let gains = d.gains.to_vec();
         self.checkpoints.push(gains.clone());
         let keep = th.converge_checkpoints.max(1);
@@ -477,6 +489,7 @@ impl LearnRecord {
         };
         self.candidate = Some(d.curve());
         self.candidate_gains = Some(gains);
+        self.candidate_dynamics = super::dynamics::derive_dynamics(&w, goal);
         self.needs_relearn = false;
         outcome
     }
@@ -1113,6 +1126,64 @@ mod tests {
             r.active_minutes() <= (th.segment_secs * th.window_segments as u64) as f32 / 60.0 + 0.1
         );
         assert!(r.total_active_frames >= 390 * 100);
+    }
+
+    #[test]
+    fn the_dynamics_follow_the_candidate_and_go_with_it() {
+        let th = quick();
+        let mut r = LearnRecord::new("game.exe", Some("1.0.0.0"));
+        assert!(r.candidate_dynamics.is_none());
+        Rig::new(1).play(&mut r, 240, &th);
+        assert!(r.candidate.is_some());
+        // Derived with the candidate (frozen with it: the window has moved on
+        // a little since, so today's derivation is close, not equal).
+        let want = crate::learn::dynamics::derive_dynamics(&r.window(), r.goal).unwrap();
+        let got = r.candidate_dynamics.clone().expect("explosions and steps were heard");
+        assert_eq!(got.bands.len(), want.bands.len());
+        for (g, w) in got.bands.iter().zip(&want.bands) {
+            assert_eq!((g.mode, g.freq_hz), (w.mode, w.freq_hz));
+            assert!((g.threshold_db - w.threshold_db).abs() < 1.0, "{got:?} vs {want:?}");
+        }
+        // A goal change re-derives both.
+        assert!(r.set_goal(Goal::Dialogue, &Limits::default()));
+        assert_eq!(
+            r.candidate_dynamics,
+            crate::learn::dynamics::derive_dynamics(&r.window(), Goal::Dialogue)
+        );
+        // Relearn and a new exe version drop both.
+        let mut again = r.clone();
+        again.relearn();
+        assert!(again.candidate.is_none() && again.candidate_dynamics.is_none());
+        assert!(r.begin_session(Some("2.0.0.0")));
+        assert!(r.candidate_dynamics.is_none());
+    }
+
+    #[test]
+    fn a_wild_dynamics_record_on_disk_is_guarded_on_load() {
+        let mut r = LearnRecord::new("game.exe", None);
+        r.candidate_dynamics = Some(crate::params::DynamicsParams {
+            bands: vec![crate::params::DynBandParams {
+                mode: crate::params::DynMode::Lift,
+                freq_hz: 3000.0,
+                q: 1.0,
+                threshold_db: 0.0,
+                ratio: 20.0,
+                range_db: 24.0,
+                floor_db: -80.0,
+                attack_ms: 3.0,
+                release_ms: 80.0,
+                enabled: true,
+            }],
+            duck_lift: false,
+        });
+        let back = LearnRecord::from_json(&serde_json::to_string(&r).unwrap(), "game.exe").unwrap();
+        let d = back.candidate_dynamics.unwrap();
+        assert!(crate::learn::dynamics::is_guarded(&d));
+        assert!(d.bands[0].range_db <= crate::learn::dynamics::MAX_LIFT_DB);
+        // An older record (no field) still loads.
+        let old = serde_json::to_string(&LearnRecord::new("game.exe", None)).unwrap();
+        assert!(!old.contains("candidate_dynamics"));
+        assert!(LearnRecord::from_json(&old, "game.exe").is_some());
     }
 
     #[test]

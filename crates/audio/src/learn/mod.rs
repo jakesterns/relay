@@ -15,6 +15,10 @@
 //! - [`derive`] aggregates + goal → target curve via a per-band masking
 //!   matrix, within hard limits (caps, smoothness, no boost below 80 Hz, a
 //!   speech-band guard, never louder overall).
+//! - [`dynamics`] (S49) the same aggregates + goal → the dynamic stage that
+//!   turns loud gunshot / explosion bursts down and quiet footsteps up while
+//!   they happen, which a static curve cannot do without cutting the steps
+//!   with the guns. Derived with the curve, under the same gate.
 //! - [`state`] the confidence gate and the per-game learning record that is
 //!   persisted between sessions (aggregates only — never audio).
 //! - [`file`] the versioned import/export format (`docs/eq-file-format.md`).
@@ -29,6 +33,7 @@
 
 pub mod analyzer;
 pub mod derive;
+pub mod dynamics;
 pub mod file;
 pub mod state;
 #[cfg(test)]
@@ -36,6 +41,7 @@ pub(crate) mod synth;
 
 pub use analyzer::{Analyzer, SoundClass, Stats, NCLASSES};
 pub use derive::{derive, derive_checked, Derived, Goal, Limits};
+pub use dynamics::{derive_dynamics, DynamicsTuning};
 pub use file::{GameEqFile, GameEqLayer, LayerSource};
 pub use state::{status, LearnRecord, LearnStatus, Outcome, Thresholds};
 
