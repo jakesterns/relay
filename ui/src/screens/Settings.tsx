@@ -355,7 +355,7 @@ function ApoConsentRow({ effects }: { effects: AudioEffectsStatus | null }) {
   const effectsOn = effects?.allowed === true;
   const [status, setStatus] = useState<ApoStatus | null>(null);
   // One open panel at a time: which output, and which direction.
-  const [open, setOpen] = useState<{ endpoint: string; mode: "install" | "remove" } | null>(null);
+  const [open, setOpen] = useState<{ endpoint: string; mode: "install" | "remove" | "update" } | null>(null);
 
   const refreshStatus = () => {
     api.apoStatus().then(setStatus).catch(() => setStatus(null));
@@ -369,6 +369,11 @@ function ApoConsentRow({ effects }: { effects: AudioEffectsStatus | null }) {
       installed: status.installed, backed_up: status.installed, running: status.running,
     }] : []);
   const carrying = endpoints.filter((e) => e.installed);
+  // The update runs against one connected output that carries the APO; the
+  // copy it refreshes is shared by every output.
+  const updateOn = status?.update_needed
+    ? carrying.find((e) => e.is_default) ?? carrying.find((e) => e.name !== "Disconnected output")
+    : undefined;
   const sub = status === null
     ? (offline && !mock ? "Relay is not running — status unknown." : "Per-game EQ and spatial audio, per output.")
     : carrying.length > 0
@@ -380,6 +385,33 @@ function ApoConsentRow({ effects }: { effects: AudioEffectsStatus | null }) {
       <div className="tog">
         <div><b>Endpoint audio processor (APO)</b><small>{sub}</small></div>
       </div>
+      {updateOn && (
+        <div className="apo-ep">
+          <div className="tog">
+            <div>
+              <b>Update available</b>
+              <small>Windows audio is still running the processor from your previous Relay version,
+                so per-game EQ is paused until it is updated.</small>
+            </div>
+            <button className="btn q" aria-label="Update the audio processor"
+              onClick={() => setOpen(open?.mode === "update" ? null : { endpoint: updateOn.endpoint, mode: "update" })}>
+              Update…
+            </button>
+          </div>
+          {open?.mode === "update" && (
+            <ElevatedPanel
+              op={installApoOp(updateOn.endpoint)}
+              onDone={() => { refreshStatus(); }}
+              onClose={() => setOpen(null)}
+              verb="Update"
+              blurb={
+                <p className="p"><b>What this updates:</b> the audio-effect DLL Windows loads is replaced with
+                  the one from this Relay version, then Windows audio restarts — sound cuts out for a few
+                  seconds. No registry value, output or other app is changed.</p>
+              } />
+          )}
+        </div>
+      )}
       {!effectsOn && endpoints.some((e) => !e.installed && !e.backed_up) && (
         <p className="p small apo-gated">Install is unavailable until audio effects are turned on above —
           Windows would not load it, so installing it now would change your PC for nothing.</p>
@@ -392,7 +424,7 @@ function ApoConsentRow({ effects }: { effects: AudioEffectsStatus | null }) {
           ? `Installed${e.running ? " · active" : ""}`
           : e.backed_up ? "Backup on disk — remove to restore it" : "Not installed";
         const mode = removable ? "remove" : "install";
-        const isOpen = open?.endpoint === e.endpoint;
+        const isOpen = open?.endpoint === e.endpoint && open.mode !== "update";
         return (
           <div key={e.endpoint} className="apo-ep">
             <div className="tog">

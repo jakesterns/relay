@@ -132,21 +132,26 @@ async fn the_apo_listing_names_the_real_endpoint_and_our_clsid() {
     // The listing depends on this machine's default output (free slot,
     // chained vendor effect, or one Relay cannot host); assert on whichever
     // plan it produced rather than on the dev PC's audio state.
-    if text.contains("Slot taken") {
+    let guid = relay_audio::sessions::default_render_endpoint_guid().unwrap();
+    if relay_core::audio_apo::fx_has_relay(&guid) {
+        // Already installed on this output (a live dev PC): an install over
+        // the install is the update path, which touches no registry value.
+        assert!(
+            text.contains("up to date: nothing to do")
+                || text.contains("Windows audio restarts so it loads the new one"),
+            "{text}"
+        );
+        assert!(!text.contains("HKLM"), "{text}");
+    } else if text.contains("Slot taken") {
         assert!(text.contains("Nothing on your PC was changed"), "{text}");
     } else {
         assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
-        // Already installed on this output (a live dev PC): the plan has no
-        // FX-store change left to list, only the COM keys it re-asserts.
-        let guid = relay_audio::sessions::default_render_endpoint_guid().unwrap();
-        if !relay_core::audio_apo::fx_has_relay(&guid) {
-            assert!(text.contains("FxProperties"), "{text}");
-        }
+        assert!(text.contains("FxProperties"), "{text}");
         if text.contains(relay_apo::ids::PKEY_RELAY_CHILD_MFX) {
             assert!(text.contains("chain:"), "{text}");
         }
+        assert!(text.contains("written before anything is changed"), "{text}");
     }
-    assert!(text.contains("written before anything is changed"), "{text}");
 
     let _ = client.call(Method::Shutdown).await;
     let _ = std::fs::remove_dir_all(&root);

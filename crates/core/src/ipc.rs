@@ -1112,6 +1112,7 @@ mod tests {
                     running: false,
                 }],
                 audio_engine: crate::audio_apo::AudioEngineRegistration::Registered,
+                update_needed: false,
             },
         })
         .unwrap();

@@ -591,6 +591,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       const ep = opEndpoint(op) ?? DAC;
       switch (opKind(op)) {
         case "install_apo":
+          if (core.apo.update_needed) {
+            return [
+              "file: %LOCALAPPDATA%\\Relay\\relay_apo.dll replaces C:\\Program Files\\Relay\\audio\\relay_apo.dll (it is from another Relay build)",
+              "Windows audio restarts so it loads the new one: a few seconds of silence. No registry value changes.",
+              ...tail,
+            ];
+          }
           return [
             "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\\Render\\" + ep + "\\FxProperties :: {d04e05a6-594b-4fb6-a80d-01af5eed7d1d},15",
             "HKLM\SOFTWARE\Classes\CLSID\{5A8E9C3B-1F6D-4B0A-9C41-7E2D83A6F0B4}",
