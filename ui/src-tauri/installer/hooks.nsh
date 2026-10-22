@@ -252,7 +252,35 @@
   Delete "$INSTDIR\Processing.NDI.Lib.x64.dll.old*"
 !macroend
 
+; A DLL another program still has loaded (the camera DLL inside Discord or
+; the Claude desktop app, the APO inside audiodg, the NDI runtime) survives
+; the template's Delete: PC2's r67 uninstall left relay_vdevice.dll behind
+; because an app that had used the Relay Camera still held it. Try once more
+; (the app may have let go), then schedule it: one HKCU RunOnce value that
+; deletes exactly these files at the next sign-in and removes the folder only
+; if it is then empty (a kept data folder stays). HKCU because a per-user
+; uninstall has no admin rights for a reboot-time move; Windows deletes the
+; RunOnce value itself after running it. $R6 = 1 when anything was left.
+!macro RELAY_LEFT_LOCKED NAME
+  Delete "$INSTDIR\${NAME}"
+  Delete "$INSTDIR\${NAME}.old*"
+  ${If} ${FileExists} "$INSTDIR\${NAME}"
+  ${OrIf} ${FileExists} "$INSTDIR\${NAME}.old*"
+    DetailPrint "${NAME} is still in use by another program; it is removed at your next sign-in."
+    StrCpy $R6 1
+  ${EndIf}
+!macroend
+
 !macro NSIS_HOOK_POSTUNINSTALL
+  StrCpy $R6 0
+  !insertmacro RELAY_LEFT_LOCKED "relay_vdevice.dll"
+  !insertmacro RELAY_LEFT_LOCKED "relay_apo.dll"
+  !insertmacro RELAY_LEFT_LOCKED "Processing.NDI.Lib.x64.dll"
+  ${If} $R6 == 1
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\RunOnce" "RelayCleanup" '"$SYSDIR\cmd.exe" /c del /f /q "$INSTDIR\relay_vdevice.dll*" "$INSTDIR\relay_apo.dll*" "$INSTDIR\Processing.NDI.Lib.x64.dll*" & rmdir "$INSTDIR"'
+    MessageBox MB_ICONINFORMATION|MB_OK "Relay is uninstalled. One of its files is still loaded by another program (an app that used the Relay Camera, for example), so Windows removes it the next time you sign in.$\r$\n$\r$\nNothing else of Relay is left." /SD IDOK
+  ${EndIf}
+
   ; Tauri's template records the install location under
   ; ${MANUPRODUCTKEY} (publisher\product: Software\Relay contributors\Relay
   ; since the publisher rename; Software\Relay\Relay before it) so a
