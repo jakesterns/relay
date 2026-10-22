@@ -8,10 +8,17 @@
 use serde::{Deserialize, Serialize};
 
 use super::derive::Goal;
-use crate::params::{BandParams, FilterKind};
+use super::dynamics::{guard_dynamics, DynamicsTuning};
+use crate::params::{
+    BandParams, DynBandParams, DynMode, DynamicsParams, FilterKind, MAX_DYN_BANDS,
+};
 
 pub const FORMAT: &str = "relay-game-eq";
-pub const SCHEMA: u32 = 1;
+/// The newest schema this Relay writes and reads. 2 (S49) adds `dynamics`;
+/// a file without it is still written as 1, so older Relays read it.
+pub const SCHEMA: u32 = 2;
+/// The oldest schema still read.
+pub const MIN_SCHEMA: u32 = 1;
 /// Largest file accepted, bytes.
 pub const MAX_FILE_BYTES: usize = 64 * 1024;
 pub const MAX_CURVE_POINTS: usize = 64;
@@ -56,12 +63,44 @@ pub struct GameEqLayer {
     /// always blends from the original rather than drifting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<Vec<(f32, f32)>>,
+    /// S49: the dynamic stage as learned or imported (before the player's
+    /// tuning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics: Option<DynamicsParams>,
+    /// The player's adjustments to it; kept across relearns and new offers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics_tuning: Option<DynamicsTuning>,
 }
 
 impl GameEqLayer {
     /// A learned layer.
     pub fn learned(curve: Vec<(f32, f32)>, exe_version: Option<String>) -> Self {
-        Self { curve, source: LayerSource::Learned, exe_version, note: String::new(), base: None }
+        Self {
+            curve,
+            source: LayerSource::Learned,
+            exe_version,
+            note: String::new(),
+            base: None,
+            dynamics: None,
+            dynamics_tuning: None,
+        }
+    }
+
+    /// The same layer carrying `dynamics` (learned or imported).
+    pub fn with_dynamics(mut self, dynamics: Option<DynamicsParams>) -> Self {
+        self.dynamics = dynamics.map(|d| guard_dynamics(&d));
+        self
+    }
+
+    /// The player's tuning, or the default (on, as learned).
+    pub fn tuning(&self) -> DynamicsTuning {
+        self.dynamics_tuning.unwrap_or_default().clamped()
+    }
+
+    /// What the dynamic stage runs with: the stored stage, tuned and
+    /// guarded. `None` when there is none, it is off, or it is inert.
+    pub fn effective_dynamics(&self) -> Option<DynamicsParams> {
+        super::dynamics::effective(self.dynamics.as_ref()?, &self.tuning())
     }
 
     /// Imported or tuned: the learned result blends into this one.
@@ -106,6 +145,88 @@ pub struct GameIdentity {
     pub version: Option<String>,
 }
 
+/// One dynamic band in a file (S49): [`DynBandParams`], strict.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileDynBand {
+    pub mode: DynMode,
+    pub freq_hz: f32,
+    pub q: f32,
+    pub threshold_db: f32,
+    pub ratio: f32,
+    pub range_db: f32,
+    #[serde(default = "no_floor")]
+    pub floor_db: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    #[serde(default = "on")]
+    pub enabled: bool,
+}
+
+fn no_floor() -> f32 {
+    -100.0
+}
+fn on() -> bool {
+    true
+}
+
+impl From<&DynBandParams> for FileDynBand {
+    fn from(b: &DynBandParams) -> Self {
+        let r = |x: f32| (x * 100.0).round() / 100.0;
+        Self {
+            mode: b.mode,
+            freq_hz: r(b.freq_hz),
+            q: r(b.q),
+            threshold_db: r(b.threshold_db),
+            ratio: r(b.ratio),
+            range_db: r(b.range_db),
+            floor_db: r(b.floor_db),
+            attack_ms: r(b.attack_ms),
+            release_ms: r(b.release_ms),
+            enabled: b.enabled,
+        }
+    }
+}
+
+impl From<&FileDynBand> for DynBandParams {
+    fn from(b: &FileDynBand) -> Self {
+        Self {
+            mode: b.mode,
+            freq_hz: b.freq_hz,
+            q: b.q,
+            threshold_db: b.threshold_db,
+            ratio: b.ratio,
+            range_db: b.range_db,
+            floor_db: b.floor_db,
+            attack_ms: b.attack_ms,
+            release_ms: b.release_ms,
+            enabled: b.enabled,
+        }
+    }
+}
+
+/// The dynamic stage in a file (S49): the stage as learned or imported, and
+/// the creator's tuning on top, so whoever imports it hears what they heard
+/// and can still re-tune from the same base.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileDynamics {
+    pub bands: Vec<FileDynBand>,
+    #[serde(default)]
+    pub duck_lift: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<DynamicsTuning>,
+}
+
+impl FileDynamics {
+    fn params(&self) -> DynamicsParams {
+        DynamicsParams {
+            bands: self.bands.iter().map(Into::into).collect(),
+            duck_lift: self.duck_lift,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileBand {
@@ -132,6 +253,9 @@ pub struct GameEqFile {
     /// Creator's note.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
+    /// S49 (schema 2): the dynamic stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics: Option<FileDynamics>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -142,7 +266,7 @@ pub enum FileError {
     Parse(String),
     #[error("not a Relay game EQ file (format is {0:?})")]
     Format(String),
-    #[error("made by a newer Relay (schema {0}); this one reads schema {SCHEMA}")]
+    #[error("made by a newer Relay (schema {0}); this one reads up to schema {SCHEMA}")]
     Schema(u32),
     #[error("{0}")]
     Invalid(String),
@@ -208,8 +332,11 @@ impl GameEqFile {
         if self.format != FORMAT {
             return Err(FileError::Format(self.format.chars().take(40).collect()));
         }
-        if self.schema != SCHEMA {
+        if !(MIN_SCHEMA..=SCHEMA).contains(&self.schema) {
             return Err(FileError::Schema(self.schema));
+        }
+        if self.dynamics.is_some() && self.schema < 2 {
+            return Err(invalid("dynamics need schema 2"));
         }
         if !valid_exe(&self.game.exe) {
             return Err(invalid("game.exe must be a plain .exe file name"));
@@ -225,8 +352,21 @@ impl GameEqFile {
         if !text_ok(&self.note, MAX_NOTE) {
             return Err(invalid("note is too long or has control characters"));
         }
-        if self.curve.is_none() && self.bands.is_none() {
-            return Err(invalid("the file has neither a curve nor bands"));
+        if self.curve.is_none() && self.bands.is_none() && self.dynamics.is_none() {
+            return Err(invalid("the file has no curve, bands or dynamics"));
+        }
+        if let Some(d) = &self.dynamics {
+            if d.bands.is_empty() || d.bands.len() > MAX_DYN_BANDS {
+                return Err(invalid(format!("dynamics needs 1 to {MAX_DYN_BANDS} bands")));
+            }
+            if let Err(e) = d.params().check() {
+                return Err(invalid(e));
+            }
+            if let Some(t) = d.tuning {
+                if !(t.tame.is_finite() && t.lift.is_finite()) {
+                    return Err(invalid("dynamics tuning is not numeric"));
+                }
+            }
         }
         if let Some(c) = &self.curve {
             check_curve(c)?;
@@ -272,20 +412,28 @@ impl GameEqFile {
     /// True when the import had to be changed to meet the safety guard
     /// (clamp-and-warn: the caller tells the user).
     pub fn adjusted(&self) -> bool {
-        !super::derive::is_guarded(&self.raw_curve())
+        let curve = self.raw_curve();
+        (!curve.is_empty() && !super::derive::is_guarded(&curve))
+            || self.dynamics.as_ref().is_some_and(|d| {
+                !super::dynamics::is_guarded(&d.params())
+                    || d.tuning.is_some_and(|t| t.clamped() != t)
+            })
     }
 
     /// The layer to store: the file's curve passed through
     /// [`super::derive::guard_curve`], so no file can boost the sub-bass, cut
     /// the speech band, step sharply or make the game louder.
     pub fn to_layer(&self) -> GameEqLayer {
-        let curve = super::derive::guard_curve(&self.raw_curve());
+        let raw = self.raw_curve();
+        let curve = if raw.is_empty() { raw } else { super::derive::guard_curve(&raw) };
         GameEqLayer {
             base: Some(curve.clone()),
             curve,
             source: LayerSource::Imported,
             exe_version: self.game.version.clone(),
             note: self.note.clone(),
+            dynamics: self.dynamics.as_ref().map(|d| guard_dynamics(&d.params())),
+            dynamics_tuning: self.dynamics.as_ref().and_then(|d| d.tuning).map(|t| t.clamped()),
         }
     }
 
@@ -298,17 +446,28 @@ impl GameEqFile {
         goal: Option<Goal>,
         note: &str,
     ) -> Self {
-        let bands = super::fit_game_layer(&layer.curve, super::GAME_BUDGET);
+        let bands = if layer.curve.len() >= 2 {
+            super::fit_game_layer(&layer.curve, super::GAME_BUDGET)
+        } else {
+            Vec::new()
+        };
         let round = |x: f32| (x * 100.0).round() / 100.0;
+        let dynamics =
+            layer.dynamics.as_ref().filter(|d| !d.bands.is_empty()).map(|d| FileDynamics {
+                bands: d.bands.iter().map(Into::into).collect(),
+                duck_lift: d.duck_lift,
+                tuning: layer.dynamics_tuning.map(|t| t.clamped()),
+            });
         Self {
             format: FORMAT.into(),
-            schema: SCHEMA,
+            schema: if dynamics.is_some() { SCHEMA } else { 1 },
             game: GameIdentity {
                 exe: exe.to_owned(),
                 name: name.chars().take(MAX_NAME).collect(),
                 version: layer.exe_version.clone(),
             },
-            curve: Some(layer.curve.iter().map(|&(h, d)| (round(h), round(d))).collect()),
+            curve: (layer.curve.len() >= 2)
+                .then(|| layer.curve.iter().map(|&(h, d)| (round(h), round(d))).collect()),
             bands: if bands.is_empty() {
                 None
             } else {
@@ -326,6 +485,7 @@ impl GameEqFile {
             },
             goal,
             note: note.chars().take(MAX_NOTE).collect(),
+            dynamics,
         }
     }
 
@@ -373,6 +533,8 @@ mod tests {
             exe_version: Some("1.2.3.4".into()),
             note: String::new(),
             base: None,
+            dynamics: None,
+            dynamics_tuning: None,
         }
     }
 
@@ -424,7 +586,8 @@ mod tests {
         assert_eq!(rejects(&" ".repeat(MAX_FILE_BYTES + 1)), FileError::TooLarge);
         assert!(matches!(rejects("not json"), FileError::Parse(_)));
         assert!(matches!(rejects(&ok.replace("relay-game-eq", "other")), FileError::Format(_)));
-        assert_eq!(rejects(&ok.replace("\"schema\":1", "\"schema\":2")), FileError::Schema(2));
+        assert_eq!(rejects(&ok.replace("\"schema\":1", "\"schema\":3")), FileError::Schema(3));
+        assert_eq!(rejects(&ok.replace("\"schema\":1", "\"schema\":0")), FileError::Schema(0));
         // Unknown fields are refused, not ignored.
         assert!(matches!(
             rejects(&ok.replace("\"schema\":1", "\"schema\":1,\"extra\":1")),
@@ -527,6 +690,126 @@ mod tests {
         assert!(!GameEqFile::parse(&again).unwrap().adjusted());
         // Non-finite numbers are still refused outright.
         assert!(GameEqFile::parse(&text.replace("[1000,-9]", "[1000,1e999]")).is_err());
+    }
+
+    fn stage() -> DynamicsParams {
+        DynamicsParams {
+            bands: vec![
+                DynBandParams {
+                    mode: DynMode::Tame,
+                    freq_hz: 1000.0,
+                    q: 0.6,
+                    threshold_db: -44.0,
+                    ratio: 6.0,
+                    range_db: 9.0,
+                    floor_db: -100.0,
+                    attack_ms: 1.0,
+                    release_ms: 120.0,
+                    enabled: true,
+                },
+                DynBandParams {
+                    mode: DynMode::Lift,
+                    freq_hz: 4000.0,
+                    q: 1.0,
+                    threshold_db: -50.0,
+                    ratio: 2.5,
+                    range_db: 6.0,
+                    floor_db: -58.0,
+                    attack_ms: 3.0,
+                    release_ms: 80.0,
+                    enabled: true,
+                },
+            ],
+            duck_lift: true,
+        }
+    }
+
+    #[test]
+    fn dynamics_and_tuning_round_trip_as_schema_2() {
+        let tuning = DynamicsTuning { enabled: true, tame: 1.5, lift: 0.5 };
+        let mut l = layer().with_dynamics(Some(stage()));
+        l.dynamics_tuning = Some(tuning);
+        let f = GameEqFile::export("g.exe", "G", &l, Some(Goal::Awareness), "louder steps");
+        assert_eq!(f.schema, 2);
+        let text = f.to_json();
+        let back = GameEqFile::parse(&text).unwrap();
+        assert_eq!(back, f);
+        assert!(!back.adjusted());
+        let imported = back.to_layer();
+        assert_eq!(imported.dynamics.as_ref(), Some(&stage()));
+        assert_eq!(imported.dynamics_tuning, Some(tuning));
+        // The importer hears what the creator heard.
+        assert_eq!(imported.effective_dynamics(), l.effective_dynamics());
+        assert!(l.effective_dynamics().unwrap().bands[0].range_db > 9.0, "tame turned up");
+    }
+
+    #[test]
+    fn a_layer_without_dynamics_still_exports_schema_1_for_older_relays() {
+        let f = GameEqFile::export("g.exe", "", &layer(), None, "");
+        assert_eq!(f.schema, 1);
+        assert!(!f.to_json().contains("dynamics"));
+        // A schema 1 file as an older Relay wrote it still imports.
+        let v1 = r#"{"format":"relay-game-eq","schema":1,"game":{"exe":"g.exe","name":"G"},
+            "curve":[[20,-2],[100,-2],[1000,0],[3150,2],[16000,0]],"goal":"awareness"}"#;
+        let l = GameEqFile::parse(v1).unwrap().to_layer();
+        assert!(l.dynamics.is_none() && l.effective_dynamics().is_none());
+        // But dynamics under schema 1 are refused (an older reader would
+        // reject the field; a file must say what it needs).
+        let lying = v1.replace("\"goal\":\"awareness\"", "\"dynamics\":{\"bands\":[]}");
+        assert!(matches!(GameEqFile::parse(&lying), Err(FileError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_dynamics_only_file_imports_with_no_curve() {
+        let l = GameEqLayer::learned(Vec::new(), None).with_dynamics(Some(stage()));
+        let f = GameEqFile::export("g.exe", "", &l, None, "");
+        assert!(f.curve.is_none() && f.bands.is_none());
+        let back = GameEqFile::parse(&f.to_json()).unwrap().to_layer();
+        assert!(back.curve.is_empty());
+        assert_eq!(back.dynamics, Some(stage()));
+    }
+
+    #[test]
+    fn hostile_or_broken_dynamics_are_clamped_or_refused() {
+        let base = r#"{"format":"relay-game-eq","schema":2,"game":{"exe":"g.exe"},
+            "dynamics":{"bands":[BAND],"duck_lift":false TUNING}}"#;
+        let band = r#"{"mode":"lift","freq_hz":3000,"q":1,"threshold_db":-20,"ratio":20,
+            "range_db":24,"floor_db":-70,"attack_ms":3,"release_ms":80}"#;
+        let text = base.replace("BAND", band).replace("TUNING", "");
+        let f = GameEqFile::parse(&text).unwrap();
+        assert!(f.adjusted(), "past the caps: clamp and say so");
+        let d = f.to_layer().dynamics.unwrap();
+        assert!(crate::learn::dynamics::is_guarded(&d));
+        let b = d.bands[0];
+        assert!(b.range_db <= crate::learn::dynamics::MAX_LIFT_DB);
+        assert!(b.ratio <= crate::learn::dynamics::MAX_SAFE_RATIO);
+        assert!(b.threshold_db <= crate::learn::dynamics::MAX_LIFT_THRESHOLD_DB);
+        // Out-of-range tuning is clamped and flagged.
+        let t = base.replace("BAND", band).replace("TUNING", r#","tuning":{"tame":9,"lift":1}"#);
+        let f = GameEqFile::parse(&t).unwrap();
+        assert!(f.adjusted());
+        assert_eq!(
+            f.to_layer().dynamics_tuning.unwrap().tame,
+            crate::learn::dynamics::MAX_STRENGTH
+        );
+        // Refused outright: non-numeric, impossible, unknown fields, too many.
+        for bad in [
+            band.replace("\"q\":1", "\"q\":0"),
+            band.replace("\"ratio\":20", "\"ratio\":0.5"),
+            band.replace("\"floor_db\":-70", "\"floor_db\":0"),
+            band.replace("\"mode\":\"lift\"", "\"mode\":\"boost\""),
+            band.replace("\"q\":1", "\"q\":1,\"extra\":1"),
+            band.replace("\"range_db\":24", "\"range_db\":1e999"),
+        ] {
+            let t = base.replace("BAND", &bad).replace("TUNING", "");
+            assert!(GameEqFile::parse(&t).is_err(), "{bad}");
+        }
+        let sneaky =
+            base.replace("BAND", band).replace("TUNING", r#","tuning":{"tame":1,"who":"me"}"#);
+        assert!(GameEqFile::parse(&sneaky).is_err(), "unknown tuning field");
+        let five = [band; 5].join(",");
+        assert!(GameEqFile::parse(&base.replace("BAND", &five).replace("TUNING", "")).is_err());
+        assert!(GameEqFile::parse(&base.replace("BAND", "").replace("TUNING", "")).is_err());
     }
 
     #[test]

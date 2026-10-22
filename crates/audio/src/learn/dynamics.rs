@@ -248,6 +248,7 @@ pub fn derive_dynamics(stats: &Stats, goal: Goal) -> Option<DynamicsParams> {
 /// The player's adjustments, kept apart from what was learned or imported so
 /// a relearn never loses them.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DynamicsTuning {
     /// The stage on at all.
     #[serde(default = "yes")]
