@@ -24,7 +24,7 @@
 //!
 //! # What keeps this honest
 //!
-//! 1. **A closed op set.** [`ElevatedOp`] has seven variants and no free-form
+//! 1. **A closed op set.** [`ElevatedOp`] is a short fixed list with no free-form
 //!    "run this key" escape hatch. A request that does not deserialise into
 //!    one of them is refused before anything is touched.
 //! 2. **The helper re-derives the work; the request never carries it.** No
@@ -48,6 +48,12 @@
 //!    it never exports them to children and never leaves them set. Nothing
 //!    else in the product arms them, so an accidental call anywhere else
 //!    still fails loudly.
+//!
+//!    The VB-CABLE ops are the one place the helper *runs* a program, so
+//!    they get one more rule: it runs only files pinned in
+//!    `vbcable::MANIFEST`, hashed from bytes it holds in memory and written
+//!    to an administrators-only staging folder before the launch
+//!    (`crate::vbcable`). The request names no file at all.
 //! 5. **Elevation is the user's, every time.** The core cannot suppress the
 //!    prompt, and a declined prompt is reported as [`Declined`] — a distinct
 //!    outcome, not an error — because "nothing happened" needs saying plainly.
@@ -67,7 +73,8 @@ pub const HELPER_EXE: &str = "relay-elevate.exe";
 /// request left by an older build can never be replayed against a new one.
 /// v2 (S42): the two APO ops carry the target endpoint GUID.
 /// v3 (S44): `set_audio_effects_allowed`.
-pub const REQUEST_VERSION: u32 = 3;
+/// v4: `install_vbcable` / `uninstall_vbcable` (the bundled virtual mic).
+pub const REQUEST_VERSION: u32 = 4;
 
 /// How long a request stays actionable. Long enough for a slow UAC prompt,
 /// short enough that a file left behind by a crash is dead on arrival.
@@ -113,6 +120,13 @@ pub enum ElevatedOp {
         #[serde(default)]
         restart_audio: bool,
     },
+    /// Install the bundled VB-CABLE (the virtual microphone) with VB-Audio's
+    /// own silent setup. The request carries nothing: the helper finds the
+    /// pack beside itself and checks it against the pinned manifest.
+    InstallVbcable,
+    /// Uninstall VB-CABLE — only when `installed.json` records that Relay
+    /// installed it.
+    UninstallVbcable,
 }
 
 impl ElevatedOp {
@@ -131,6 +145,8 @@ impl ElevatedOp {
             ElevatedOp::SetAudioEffectsAllowed { on: false, .. } => {
                 "Put Windows audio protection back"
             }
+            ElevatedOp::InstallVbcable => "Install the virtual microphone (VB-CABLE by VB-Audio)",
+            ElevatedOp::UninstallVbcable => "Remove the virtual microphone Relay installed",
         }
     }
 
@@ -145,6 +161,8 @@ impl ElevatedOp {
             ElevatedOp::RemoveFirewall => "remove-firewall",
             ElevatedOp::SetAudioEffectsAllowed { on: true, .. } => "allow-audio-effects",
             ElevatedOp::SetAudioEffectsAllowed { on: false, .. } => "disallow-audio-effects",
+            ElevatedOp::InstallVbcable => "install-vbcable",
+            ElevatedOp::UninstallVbcable => "uninstall-vbcable",
         }
     }
 
@@ -175,6 +193,8 @@ impl ElevatedOp {
             "disallow-audio-effects" => {
                 Some(ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false })
             }
+            "install-vbcable" => Some(ElevatedOp::InstallVbcable),
+            "uninstall-vbcable" => Some(ElevatedOp::UninstallVbcable),
             _ => None,
         }
     }
@@ -476,6 +496,17 @@ pub fn plan_lines(paths: &Paths, op: &ElevatedOp) -> Vec<String> {
             let rec = crate::audiodg::load_record(&record).ok().flatten();
             crate::audiodg::plan_lines(*on, current, rec.as_ref(), *restart_audio)
         }
+        ElevatedOp::InstallVbcable => {
+            use crate::vbcable as vb;
+            vb::plan_lines(
+                &vb::check_payload(&vb::payload_dir(), vb::MANIFEST),
+                vb::vbcable_present(),
+                &vb::staging_dir(),
+            )
+        }
+        ElevatedOp::UninstallVbcable => {
+            uninstall_step_lines(paths, crate::uninstall::StepKind::RemoveVbcable)
+        }
     };
     lines.push(String::new());
     lines.push(
@@ -739,6 +770,42 @@ mod imp {
             ElevatedOp::SetAudioEffectsAllowed { on, restart_audio } => {
                 set_audio_effects(paths, *on, *restart_audio)
             }
+            ElevatedOp::InstallVbcable => vbcable_op(paths, true),
+            ElevatedOp::UninstallVbcable => vbcable_op(paths, false),
+        }
+    }
+
+    /// Install or remove the bundled VB-CABLE. The pack is found beside this
+    /// helper (never named by the request) and only pinned, verified bytes
+    /// run, from the administrators-only staging folder.
+    fn vbcable_op(paths: &Paths, install: bool) -> OpOutcome {
+        use crate::vbcable::{self as vb, LiveOutcome};
+        let (payload, staging) = (vb::payload_dir(), vb::staging_dir());
+        let mut machine = vb::LiveMachine;
+        let out = armed(vb::LIVE_RUN_GATE, || {
+            if install {
+                vb::install_with(
+                    &paths.installed_file(),
+                    &payload,
+                    &staging,
+                    vb::MANIFEST,
+                    &mut machine,
+                )
+            } else {
+                vb::uninstall_with(
+                    &paths.installed_file(),
+                    &payload,
+                    &staging,
+                    vb::MANIFEST,
+                    &mut machine,
+                )
+            }
+        });
+        match out {
+            LiveOutcome::Done(detail) => OpOutcome::Done { detail },
+            LiveOutcome::Skipped(reason) => OpOutcome::Skipped { reason },
+            LiveOutcome::Refused(reason) => OpOutcome::Refused { reason },
+            LiveOutcome::Failed(error) => OpOutcome::Failed { error },
         }
     }
 
@@ -974,6 +1041,8 @@ mod tests {
             ElevatedOp::RemoveFirewall,
             ElevatedOp::SetAudioEffectsAllowed { on: true, restart_audio: false },
             ElevatedOp::SetAudioEffectsAllowed { on: false, restart_audio: false },
+            ElevatedOp::InstallVbcable,
+            ElevatedOp::UninstallVbcable,
         ] {
             assert_eq!(ElevatedOp::parse(op.as_str()), Some(op));
         }
@@ -987,6 +1056,27 @@ mod tests {
         let raw = r#"{"version":1,"nonce":"a","created_at":0,"data_dir":"C:\\x",
                       "ops":["run_this_command"]}"#;
         assert!(serde_json::from_str::<Request>(raw).is_err());
+    }
+
+    /// The VB-CABLE ops carry nothing: a request that tries to hand the
+    /// helper a program, a folder or arguments does not even deserialise.
+    #[test]
+    fn vbcable_ops_cannot_carry_a_path() {
+        for raw in [r#""install_vbcable""#, r#""uninstall_vbcable""#] {
+            assert!(serde_json::from_str::<ElevatedOp>(raw).is_ok(), "{raw}");
+        }
+        for raw in [
+            r#"{"install_vbcable":{"path":"C:\\Users\\x\\evil.exe"}}"#,
+            r#"{"install_vbcable":{"args":["-i"]}}"#,
+            r#"{"uninstall_vbcable":"C:\\evil"}"#,
+        ] {
+            assert!(serde_json::from_str::<ElevatedOp>(raw).is_err(), "{raw}");
+        }
+        assert_eq!(
+            ElevatedOp::InstallVbcable.label(),
+            "Install the virtual microphone (VB-CABLE by VB-Audio)"
+        );
+        assert_eq!(ElevatedOp::InstallVbcable.endpoint(), None);
     }
 
     #[test]

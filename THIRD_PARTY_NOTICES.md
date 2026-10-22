@@ -79,6 +79,24 @@ https://ndi.video/
 
 Details and sources: `docs/dev/ndi-licensing.md`.
 
+## 5. VB-CABLE (optional virtual microphone) — PENDING PERMISSION
+
+**Not included in any build yet.** This entry is the template for the day
+VB-Audio Software agrees in writing to Relay bundling VB-CABLE; until then
+Relay ships no VB-Audio file and only *uses* a VB-CABLE the user installed.
+
+- VB-CABLE Virtual Audio Device: Copyright (C) VB-Audio Software, Vincent
+  Burel. VB-CABLE is donationware: https://vb-cable.com. It is proprietary
+  software of VB-Audio Software, not MIT, and is redistributed unmodified
+  under the terms of VB-Audio's written permission (to be quoted here).
+- Relay installs it only after the user opts in to "Install the virtual
+  microphone (VB-CABLE by VB-Audio)" and approves the Windows administrator
+  prompt, using VB-Audio's own installer. Relay's uninstaller removes it
+  only if Relay installed it.
+- Relay is not a product of, and is not endorsed by, VB-Audio Software.
+
+Details: `docs/dev/vbcable-bundle.md`.
+
 ---
 
 ## Apache License 2.0

@@ -201,6 +201,12 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       // want the first-run screen set this back to null.
       consent: { decided_at: "2026-09-14T00:00:00Z", apo: false, camera: false, microphone: false },
       elevated: false,
+      // As shipped until VB-Audio agrees: no pack in the build. The fake PC
+      // already has a VB-CABLE of the user's own (mic_targets above).
+      vbcable: {
+        payload: { state: "not_bundled" }, present: true, installed_by_relay: false, consent: false,
+        credit: "VB-CABLE by VB-Audio Software — donationware", credit_url: "https://vb-cable.com",
+      },
     },
     capabilities: {
       can_share: true, can_receive: true, adapters: ["NVIDIA GeForce RTX 3090"],
@@ -606,6 +612,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
             ...tail,
           ];
         }
+        case "install_vbcable":
+          return [
+            core.vdevice.vbcable?.present
+              ? "VB-CABLE is already installed — Relay uses it and installs nothing."
+              : core.vdevice.vbcable?.payload.state === "ready"
+                ? "run C:\\Program Files\\Relay\\drivers\\vbcable\\VBCABLE_Setup_x64.exe -i -h (VB-Audio's own silent installer; adds \"CABLE Input\" / \"CABLE Output\")"
+                : "VB-CABLE is not bundled in this build — nothing would be installed.",
+            ...tail,
+          ];
+        case "uninstall_vbcable":
+          return ["[x] Remove the virtual microphone Relay installed (VB-CABLE) — VB-Audio Virtual Cable (needs admin)", ...tail];
         default:
           return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
       }
@@ -628,6 +645,16 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           : { value: null, allowed: false, changed_by_relay: false, set_elsewhere: false, unknown: false };
       }
       if (op === "uninstall_camera") core.vdevice.camera_registered = false;
+      const vb = core.vdevice.vbcable;
+      if (op === "install_vbcable" && vb) {
+        if (!vb.consent) return { declined: false, ok: false, lines: ["Install the virtual microphone (VB-CABLE by VB-Audio): REFUSED: no recorded opt-in"] };
+        if (vb.present) return { declined: false, ok: true, lines: ["Install the virtual microphone (VB-CABLE by VB-Audio): nothing to do — VB-CABLE is already installed"] };
+        if (vb.payload.state !== "ready") return { declined: false, ok: true, lines: ["Install the virtual microphone (VB-CABLE by VB-Audio): nothing to do — VB-CABLE is not bundled in this build"] };
+        core.vdevice.vbcable = { ...vb, present: true, installed_by_relay: true };
+      }
+      if (op === "uninstall_vbcable" && vb?.installed_by_relay) {
+        core.vdevice.vbcable = { ...vb, present: false, installed_by_relay: false };
+      }
       if (op === "allow_firewall") {
         core.firewall = {
           ...core.firewall, state: "allowed", rule_present: true, blocking_rules: 0,
@@ -657,7 +684,16 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       core.vdevice.consent = {
         decided_at: "2026-09-14T00:00:00Z",
         apo: a.apo as boolean, camera: a.camera as boolean, microphone: a.microphone as boolean,
+        vbcable: core.vdevice.consent?.vbcable ?? false,
       };
+    },
+    set_vbcable_consent: (a) => {
+      const on = a.on as boolean;
+      const c = core.vdevice.consent ?? { decided_at: "", apo: false, camera: false, microphone: false };
+      core.vdevice.consent = {
+        ...c, decided_at: "2026-09-14T00:00:00Z", vbcable: on, microphone: on || c.microphone,
+      };
+      if (core.vdevice.vbcable) core.vdevice.vbcable = { ...core.vdevice.vbcable, consent: on };
     },
     vdevice_dry_run: () => core.vdevice.camera_path === "direct_show" ? [
       "HKCU\\Software\\Classes\\CLSID\\{5E0B7C1F-8A34-4D62-9B1E-C47A2F90D835}",
@@ -758,7 +794,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "audio_effects_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",
-  "vdevice_status", "set_vdevice_consent", "vdevice_dry_run", "install_vcam",
+  "vdevice_status", "set_vdevice_consent", "set_vbcable_consent", "vdevice_dry_run", "install_vcam",
   "ndi_status", "open_ndi_link",
   "uninstall_vcam", "search_catalog", "add_headset_from_catalog", "uninstall_plan",
   "launch_uninstaller", "discover_receivers",

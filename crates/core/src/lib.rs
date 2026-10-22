@@ -49,6 +49,7 @@ pub mod uiprefs;
 pub mod uninstall;
 pub mod update;
 pub mod update_files;
+pub mod vbcable;
 pub mod vdevice;
 pub mod winloop;
 

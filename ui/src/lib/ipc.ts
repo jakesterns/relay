@@ -551,7 +551,8 @@ export type ElevatedOp =
   | { uninstall_apo: { endpoint: string | null } }
   | "install_camera" | "uninstall_camera"
   | "allow_firewall" | "remove_firewall"
-  | { set_audio_effects_allowed: { on: boolean; restart_audio: boolean } };
+  | { set_audio_effects_allowed: { on: boolean; restart_audio: boolean } }
+  | "install_vbcable" | "uninstall_vbcable";
 
 /** S44: let Windows load unsigned audio effects (on) or put its protection
  *  back to the state recorded before Relay changed it (off). */
@@ -616,7 +617,29 @@ export interface ApoStatus {
   audio_engine?: "registered" | "mismatch" | "missing";
 }
 /** Mirror of relay-vdevice's `installed::Consent`. */
-export interface VdeviceConsent { decided_at: string; apo: boolean; camera: boolean; microphone: boolean }
+export interface VdeviceConsent {
+  decided_at: string; apo: boolean; camera: boolean; microphone: boolean;
+  /** "Install the virtual microphone (VB-CABLE by VB-Audio)". Absent in old files. */
+  vbcable?: boolean;
+}
+/** Mirror of relay-core's `vbcable::Payload`: the VB-CABLE pack this build
+ *  carries. `not_bundled` until VB-Audio grants permission. */
+export type VbcablePayload =
+  | { state: "not_bundled" }
+  | { state: "ready" }
+  | { state: "incomplete"; missing: string }
+  | { state: "mismatch"; file: string };
+/** Mirror of relay-core's `vbcable::Status`. */
+export interface VbcableStatus {
+  payload: VbcablePayload;
+  /** A VB-CABLE input endpoint exists right now. */
+  present: boolean;
+  /** Relay installed it, so the uninstaller removes it. */
+  installed_by_relay: boolean;
+  consent: boolean;
+  credit: string;
+  credit_url: string;
+}
 export type MicTargetKind = "vb_cable" | "voice_meeter";
 export interface MicTarget { endpoint_id: string; name: string; kind: MicTargetKind }
 /** Mirror of relay-core's `vdevice::VdeviceStatus`. */
@@ -634,6 +657,8 @@ export interface VdeviceStatus {
   mic_targets: MicTarget[];
   consent: VdeviceConsent | null;
   elevated: boolean;
+  /** The bundled VB-CABLE. Absent from older cores. */
+  vbcable?: VbcableStatus | null;
 }
 /** Mirror of `crates/core/src/uiprefs.rs`. */
 export type CloseAction = "keep_running" | "quit_relay";
@@ -856,6 +881,10 @@ const mockVdevice: VdeviceStatus = {
   ],
   consent: null,
   elevated: false,
+  vbcable: {
+    payload: { state: "not_bundled" }, present: true, installed_by_relay: false, consent: false,
+    credit: "VB-CABLE by VB-Audio Software — donationware", credit_url: "https://vb-cable.com",
+  },
 };
 
 /** Browser-only stand-in for the audio-effects switch: off, as shipped. */
@@ -896,6 +925,10 @@ function mockElevationPlan(op: ElevatedOp): string[] {
         ...tail,
       ];
     }
+    case "install_vbcable":
+      return ["VB-CABLE is not bundled in this build — nothing would be installed.", ...tail];
+    case "uninstall_vbcable":
+      return ["[ ] Remove the virtual microphone Relay installed (VB-CABLE) — not installed by Relay", ...tail];
     default:
       return ["[x] Unregister the virtual camera — " + cam + " (needs admin)", ...tail];
   }
@@ -1263,6 +1296,12 @@ export const api = {
     if (!isTauri()) {
       if (op === "install_camera") mockVdevice.camera_registered = true;
       if (op === "uninstall_camera") mockVdevice.camera_registered = false;
+      if (op === "install_vbcable" && mockVdevice.vbcable?.payload.state === "ready") {
+        Object.assign(mockVdevice.vbcable, { present: true, installed_by_relay: true });
+      }
+      if (op === "uninstall_vbcable" && mockVdevice.vbcable?.installed_by_relay) {
+        Object.assign(mockVdevice.vbcable, { present: false, installed_by_relay: false });
+      }
       if (typeof op !== "string" && "set_audio_effects_allowed" in op) {
         const on = op.set_audio_effects_allowed.on;
         Object.assign(mockAudioEffects, on
@@ -1297,6 +1336,15 @@ export const api = {
       return;
     }
     return invoke<void>("set_vdevice_consent", { apo, camera, microphone });
+  },
+  /** Record (or withdraw) the VB-CABLE install opt-in. Installs nothing by
+   *  itself; the install is the elevated `install_vbcable` op. */
+  async setVbcableConsent(on: boolean): Promise<void> {
+    if (!isTauri()) {
+      if (mockVdevice.vbcable) mockVdevice.vbcable.consent = on;
+      return;
+    }
+    return invoke<void>("set_vbcable_consent", { on });
   },
   /** Exactly what a camera install would create (registry keys + the DLL). */
   async vdeviceDryRun(): Promise<string[]> {

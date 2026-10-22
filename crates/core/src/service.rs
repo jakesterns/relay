@@ -3579,6 +3579,17 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
+            Method::SetVbcableConsent { on } => {
+                let paths = g.paths.clone();
+                drop(g);
+                match crate::vbcable::set_consent(&paths, on) {
+                    Ok(()) => {
+                        sync_receive_vcam(&self.inner);
+                        Reply::Ok
+                    }
+                    Err(e) => Reply::Error { message: format!("{e:#}") },
+                }
+            }
             Method::VdeviceDryRun => {
                 drop(g);
                 Reply::DryRun { lines: crate::vdevice::camera_dry_run() }

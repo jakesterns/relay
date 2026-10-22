@@ -248,6 +248,12 @@ pub enum Method {
         camera: bool,
         microphone: bool,
     },
+    /// Record (or withdraw) "Install the virtual microphone (VB-CABLE by
+    /// VB-Audio)". Installs nothing by itself: the install is the elevated
+    /// `install_vbcable` op, which refuses without this.
+    SetVbcableConsent {
+        on: bool,
+    },
     /// The dry-run listing for the consent screen: exactly what a camera
     /// install would create. Read-only.
     VdeviceDryRun,

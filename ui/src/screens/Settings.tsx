@@ -161,6 +161,7 @@ export function Settings() {
           <p className="p">Relay works at the OS and hardware layer only. It never injects into games, reads their memory, or changes your default devices. Two optional components need your explicit consent:</p>
           <AudioEffectsSection />
           <VdeviceConsentRow />
+          <VbcableRow />
         </Card>
         <Card title="Recording">
           {recording === null
@@ -588,6 +589,70 @@ function VdeviceConsentRow() {
           ) : (
             <p className="p"><b>What this removes</b> — exactly the keys recorded in
               <span className="mono"> %LOCALAPPDATA%\Relay\installed.json</span>, and nothing else:</p>
+          )} />
+      )}
+    </>
+  );
+}
+
+/** What the VB-CABLE row says, from the core's status. Exported for tests. */
+export function vbcableNote(vb: NonNullable<VdeviceStatus["vbcable"]>): string {
+  if (vb.installed_by_relay) return "Installed by Relay. Removing Relay removes it too.";
+  if (vb.present) return "VB-CABLE is already on this PC. Relay uses it as the virtual microphone and installs nothing.";
+  switch (vb.payload.state) {
+    case "not_bundled":
+      return "Not included in this build yet: Relay is waiting on VB-Audio's permission to bundle it. You can install VB-CABLE yourself from vb-cable.com and Relay will use it.";
+    case "ready":
+      return "Not installed. Off until you choose to install it.";
+    default:
+      return "The bundled VB-CABLE failed its integrity check, so Relay will not run it. Reinstall Relay to repair it.";
+  }
+}
+
+/** The bundled VB-CABLE (the virtual microphone). Off by default, credited,
+ *  and only removable when Relay installed it — a VB-CABLE the user put on
+ *  the PC themselves is never touched. */
+function VbcableRow() {
+  const { offline } = useCore();
+  const [vb, setVb] = useState<VdeviceStatus["vbcable"]>(null);
+  const [mode, setMode] = useState<"idle" | "install" | "remove">("idle");
+  const refresh = () => {
+    api.vdeviceStatus().then((s) => setVb(s.vbcable ?? null)).catch(() => setVb(null));
+  };
+  useEffect(refresh, [offline]);
+  if (!vb) return null;
+  const canInstall = vb.payload.state === "ready" && !vb.present;
+  const canRemove = vb.installed_by_relay;
+  return (
+    <>
+      <div className="tog">
+        <div>
+          <b>Install the virtual microphone (VB-CABLE by VB-Audio)</b>
+          <small>{vbcableNote(vb)} {vb.credit} — <a href={vb.credit_url} target="_blank" rel="noreferrer">vb-cable.com</a></small>
+        </div>
+        {(canInstall || canRemove) && (
+          <button className="btn q"
+            onClick={() => setMode(mode === "idle" ? (canRemove ? "remove" : "install") : "idle")}>
+            {canRemove ? "Remove…" : "Install…"}
+          </button>
+        )}
+      </div>
+      {mode !== "idle" && (
+        <ElevatedPanel
+          op={mode === "install" ? "install_vbcable" : "uninstall_vbcable"}
+          verb={mode === "install" ? "Install" : "Remove"}
+          onClose={() => setMode("idle")}
+          onDone={refresh}
+          // The opt-in is recorded before the prompt (the helper refuses
+          // without it) and withdrawn only after a removal really happened.
+          before={mode === "install" ? async () => { await api.setVbcableConsent(true); } : undefined}
+          after={mode === "remove" ? async () => { await api.setVbcableConsent(false); } : undefined}
+          blurb={mode === "install" ? (
+            <p className="p"><b>What this installs</b> — VB-Audio's own signed VB-CABLE driver, run
+              silently from Relay's checked copy. It adds "CABLE Input" / "CABLE Output":</p>
+          ) : (
+            <p className="p"><b>What this removes</b> — the VB-CABLE Relay installed, with VB-Audio's
+              own uninstaller, and nothing else:</p>
           )} />
       )}
     </>
