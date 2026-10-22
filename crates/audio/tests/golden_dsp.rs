@@ -209,6 +209,7 @@ fn bypass_is_bit_exact() {
         bands: vec![BandParams::peaking(1000.0, 6.0, 1.0)],
         limiter: Some(LimiterParams::new(120.0, -10.0)),
         hrtf: true,
+        dynamics: None,
     };
     let mut chain = Chain::new(params);
     chain.prepare(48_000, 512).unwrap();
@@ -230,6 +231,7 @@ fn chain_response_equals_its_stages() {
         bands: bands.clone(),
         limiter: Some(LimiterParams::new(100.0, 40.0)),
         hrtf: false,
+        dynamics: None,
     };
     let mut chain = Chain::new(params);
     chain.prepare(FS, 4096).unwrap();
@@ -274,6 +276,7 @@ fn denormals_are_flushed_from_all_state() {
         bands: vec![BandParams::peaking(60.0, 10.0, 0.5), BandParams::peaking(8000.0, -10.0, 4.0)],
         limiter: Some(LimiterParams::new(120.0, -10.0)),
         hrtf: false,
+        dynamics: None,
     };
     let mut chain = Chain::new(params);
     chain.prepare(FS, 480).unwrap();
@@ -297,6 +300,7 @@ fn rejects_more_than_16_bands() {
         bands: (0..17).map(|i| BandParams::peaking(100.0 + i as f32 * 100.0, 1.0, 1.0)).collect(),
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     let mut chain = Chain::new(params);
     assert!(chain.prepare(FS, 256).is_err());

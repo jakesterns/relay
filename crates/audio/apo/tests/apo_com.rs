@@ -153,6 +153,7 @@ fn apo_end_to_end_in_process() {
         bands: vec![BandParams::peaking(1_000.0, 6.0, 1.0)],
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     core_side.block().write_params(&params);
     core_side.block().set_bypass(false);
@@ -223,6 +224,7 @@ fn apo_end_to_end_in_process() {
         bands: vec![BandParams::peaking(1_000.0, -6.0, 1.0)],
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     core_side.block().write_params(&params2);
     core_side.notify();

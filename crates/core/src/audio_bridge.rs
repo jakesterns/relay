@@ -90,6 +90,7 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
             None => None,
         },
         hrtf: audio.hrtf,
+        dynamics: None,
     }
 }
 
