@@ -2909,8 +2909,16 @@ impl IpcHandler {
                         return Reply::Error { message: e.to_string() };
                     }
                 }
-                let restart = changed || action.touches_record();
-                if restart {
+                if changed {
+                    // A profile edit like any other: the applied profile is
+                    // restored and re-applied now, so a slider is heard at
+                    // once (reselect treats the same profile as applied).
+                    if after_profile_edit(&mut g, id, false) {
+                        let _ = self
+                            .events
+                            .send(Event::StateChanged { state: Box::new(g.state.clone()) });
+                    }
+                } else if action.touches_record() {
                     drop(g);
                     reselect(&self.inner, &self.events);
                     g = self.inner.lock();
