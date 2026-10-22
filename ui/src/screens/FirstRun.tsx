@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, ErrorNote, Toggle } from "../components/Controls";
 import { errText } from "../lib/err";
-import { api } from "../lib/ipc";
+import { api, type VdeviceStatus } from "../lib/ipc";
 
 /** First-run consent: the two optional components, exactly what each one
  *  installs (dry-run listing from the core), and how to remove them. Records
@@ -11,19 +11,25 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
   const [apo, setApo] = useState(false);
   const [camMic, setCamMic] = useState(false);
   const [autostart, setAutostart] = useState(false);
+  const [vbcable, setVbcable] = useState(false);
+  const [vb, setVb] = useState<VdeviceStatus["vbcable"]>(null);
   const [dryRun, setDryRun] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api.vdeviceDryRun().then(setDryRun).catch(() => setDryRun([]));
+    api.vdeviceStatus().then((s) => setVb(s.vbcable ?? null)).catch(() => setVb(null));
   }, []);
 
   const save = async () => {
     setBusy(true);
     setError(null);
     try {
-      await api.setVdeviceConsent(apo, camMic, camMic);
+      await api.setVdeviceConsent(apo, camMic, camMic || vbcable);
+      // Records the opt-in only; the install itself is Settings' explicit,
+      // administrator-prompted step.
+      if (vbcable) await api.setVbcableConsent(true);
       // Asked here rather than in the installer: the installer's job is to
       // copy files, and a checkbox buried in a setup wizard is a poor place
       // to ask for the one registry value Relay ever writes on its own.
@@ -71,6 +77,25 @@ export function FirstRun({ onDone }: { onDone: () => void }) {
             exactly that list.</p>
         </div>
       </Card>
+
+      {vb && (
+        <Card title="Virtual microphone (VB-CABLE)">
+          <Toggle on={vbcable} onChange={setVbcable}
+            label="Install the virtual microphone (VB-CABLE by VB-Audio)"
+            sub={vb.present
+              ? "VB-CABLE is already on this PC — Relay will use it and install nothing."
+              : vb.payload.state === "not_bundled"
+                ? "Not included in this build yet (waiting on VB-Audio's permission). Saying yes records your choice for when it is."
+                : "Lets call apps on this PC pick up the other PC's sound as a microphone."} />
+          <div className="consent">
+            <p className="p"><b>What it installs:</b> VB-Audio's own signed VB-CABLE driver ("CABLE
+              Input" / "CABLE Output"), run from Relay's checked copy only after an administrator
+              prompt in Settings. {vb.credit} — <a href={vb.credit_url} target="_blank" rel="noreferrer">vb-cable.com</a>.</p>
+            <p className="p"><b>How to remove:</b> Settings, or Relay's uninstaller — which removes
+              VB-CABLE only if Relay installed it.</p>
+          </div>
+        </Card>
+      )}
 
       <Card title="Start at login">
         <Toggle on={autostart} onChange={setAutostart} label="Start Relay when I sign in"
