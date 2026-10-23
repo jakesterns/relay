@@ -180,7 +180,14 @@ struct Inner {
     /// S48: the "learn from a video file" helper, while one runs (and its
     /// final status after, for the UI).
     file_job: Option<crate::learn_file::FileJob>,
+    /// The sound learner's progress for the tray, refreshed from its record
+    /// when it offers a curve or every [`TRAY_SOUND_REFRESH`], not per tick.
+    tray_sound: Option<(uuid::Uuid, crate::tray::Progress)>,
+    tray_sound_at: Option<std::time::Instant>,
 }
+
+/// How often the tray re-reads the sound learner's record while it runs.
+const TRAY_SOUND_REFRESH: Duration = Duration::from_secs(10);
 
 /// S45: why an update must wait right now, if anything is in the way.
 fn update_busy(g: &Inner) -> Option<&'static str> {
@@ -414,6 +421,8 @@ impl Service {
             learn,
             look: None,
             file_job: None,
+            tray_sound: None,
+            tray_sound_at: None,
         }));
         let (events, _) = broadcast::channel(64);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -590,7 +599,12 @@ impl Service {
             }
             // After every event and tick: the icon follows the state (a
             // comparison when nothing changed).
-            let status = crate::tray::TrayStatus::from_state(&self.inner.lock().state);
+            let status = {
+                let g = self.inner.lock();
+                let mut s = crate::tray::TrayStatus::from_state(&g.state);
+                s.learning = tray_learning(&g);
+                s
+            };
             crate::winloop::tray_status(status);
         }
         winloop.stop();
@@ -612,17 +626,35 @@ impl Service {
             stop_learner(&mut g);
             return;
         }
-        if !l.take_fresh() {
+        let (id, fresh) = (l.profile, l.take_fresh());
+        let due = g.tray_sound_at.is_none_or(|t| t.elapsed() >= TRAY_SOUND_REFRESH);
+        if fresh || due || g.tray_sound.is_none_or(|(p, _)| p != id) {
+            if let Some(p) = g.store.get(id) {
+                let st = crate::game_eq::status(&g.paths, p, true);
+                g.tray_sound = Some((id, sound_progress(&st)));
+            }
+            g.tray_sound_at = Some(std::time::Instant::now());
+        }
+        if !fresh {
             return;
         }
-        let id = l.profile;
         let Some(mut profile) = g.store.get(id).cloned() else { return };
         if !profile.audio.game_eq_auto_apply {
+            crate::winloop::balloon(
+                &format!("{}: sound EQ ready", profile.name),
+                "Relay has learned this game's sound for your headset. Open Relay → Games → \
+                 Audio and press Apply.",
+            );
             return;
         }
         let Some(rec) = crate::game_eq::load_record(&g.paths, &profile.game.exe) else { return };
         if crate::game_eq::take_offer(&mut profile, &rec) {
             info!(exe = %profile.game.exe, "auto-applied the newly learned game EQ");
+            crate::winloop::balloon(
+                &format!("{}: new sound EQ applied", profile.name),
+                "Relay applied the sound it learned for your headset. Undo or Reset is in \
+                 Games → Audio.",
+            );
             g.store.upsert(profile);
             if let Err(e) = g.store.save() {
                 warn!(error = %e, "saving the auto-applied game EQ failed");
@@ -663,11 +695,26 @@ impl Service {
                 SamplerLine::Frame(r, hdr) => {
                     g.learn.game_mut(&exe).monitor_mut(&sdr_key).hdr_skipped = false;
                     let key = record_key(&mon, hdr);
+                    let had_offer = g.learn.game(&exe).and_then(|r| r.offer(&key)).is_some();
                     let rec = g.learn.game_mut(&exe).monitor_mut(&key);
                     if rec.learner.observe(&r) {
                         save = true;
+                        let name = profile_name_for(&g, &exe);
                         if g.learn.game_mut(&exe).take_offer_if_auto(&key) {
                             info!(exe = %exe, hdr, "auto-applied the newly settled look");
+                            crate::winloop::balloon(
+                                &format!("{name}: new look applied"),
+                                "Relay applied the look it learned for this monitor. Undo or \
+                                 Reset is in Games → Display.",
+                            );
+                        } else if !had_offer
+                            && g.learn.game(&exe).and_then(|r| r.offer(&key)).is_some()
+                        {
+                            crate::winloop::balloon(
+                                &format!("{name}: look ready"),
+                                "Relay has learned this game's look for your monitor. Open \
+                                 Relay → Games → Display and press Apply.",
+                            );
                         }
                     }
                 }
@@ -717,6 +764,10 @@ impl Service {
         if state != crate::learn_file::FileJobState::Done {
             return;
         }
+        crate::winloop::balloon(
+            &format!("{}: learned from the video", profile_name_for(&g, &exe)),
+            "Open Relay → Games to see what it learned for the sound and the look.",
+        );
         let monitors: Vec<crate::types::MonitorId> =
             g.last_report.monitors.iter().map(|m| m.id.clone()).collect();
         if let Some(look) = look {
@@ -1559,6 +1610,85 @@ fn fg_reconcile_step(now: u64, known: u64, count: u8) -> (u8, FgStep) {
     } else {
         (0, FgStep::CatchUp)
     }
+}
+
+/// The name of the profile for `exe` (the exe itself if there is none), for
+/// what the user reads in the tray.
+fn profile_name_for(g: &Inner, exe: &str) -> String {
+    g.store
+        .all()
+        .iter()
+        .find(|p| p.game.exe.eq_ignore_ascii_case(exe))
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| exe.to_string())
+}
+
+/// The sound learner's state in tray terms.
+fn sound_progress(st: &crate::game_eq::GameEqStatus) -> crate::tray::Progress {
+    use relay_audio::learn::LearnStatus;
+    match st.state {
+        LearnStatus::Ready | LearnStatus::Applied if st.offer.is_some() => {
+            crate::tray::Progress::Ready
+        }
+        _ => crate::tray::Progress::Pct(st.progress.min(100)),
+    }
+}
+
+/// How far the look has got on `monitor` (SDR or HDR, whichever is further).
+fn look_progress(
+    store: &crate::learned_display::LearnStore,
+    exe: &str,
+    monitor: &crate::types::MonitorId,
+) -> crate::tray::Progress {
+    use crate::learned_display::record_key;
+    use crate::tray::Progress;
+    let Some(rec) = store.game(exe) else { return Progress::Pct(0) };
+    let mut best = 0u8;
+    for key in [record_key(monitor, false), record_key(monitor, true)] {
+        let Some(m) = rec.monitors.get(&key.0) else { continue };
+        if m.learner.converged.is_some() {
+            return Progress::Ready;
+        }
+        best = best.max((m.learner.readiness().progress * 100.0).round().clamp(0.0, 100.0) as u8);
+    }
+    Progress::Pct(best)
+}
+
+/// What Relay is learning now, for the tray icon: a video job, or the live
+/// sound and look learners of the game in front (paused when it is not).
+fn tray_learning(g: &Inner) -> Option<crate::tray::TrayLearning> {
+    use crate::tray::{Progress, TrayLearning};
+    if let Some(j) = g.file_job.as_ref() {
+        if j.status.state == crate::learn_file::FileJobState::Running {
+            let name = g
+                .store
+                .get(j.status.profile)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| j.status.exe.clone());
+            let pct = j.status.progress.map(|p| (p * 100.0).round().clamp(0.0, 100.0) as u8);
+            return Some(TrayLearning {
+                game: name,
+                video: Some(pct.unwrap_or(0)),
+                ..Default::default()
+            });
+        }
+    }
+    let sound = g.learner.as_ref().map(|l| (l.profile, l.paused_since.is_some()));
+    let look = g.look.as_ref().map(|s| (s.exe.as_str(), &s.monitor, s.paused_since.is_some()));
+    if sound.is_none() && look.is_none() {
+        return None;
+    }
+    let game = sound
+        .and_then(|(id, _)| g.store.get(id).map(|p| p.name.clone()))
+        .or_else(|| look.map(|(exe, _, _)| profile_name_for(g, exe)))
+        .unwrap_or_default();
+    let sound_p = sound.map(|(id, _)| match g.tray_sound {
+        Some((p, prog)) if p == id => prog,
+        _ => Progress::Pct(0),
+    });
+    let look_p = look.map(|(exe, mon, _)| look_progress(&g.learn, exe, mon));
+    let paused = sound.is_none_or(|(_, p)| p) && look.is_none_or(|(_, _, p)| p);
+    Some(TrayLearning { game, sound: sound_p, look: look_p, video: None, paused })
 }
 
 /// S47: the profile with this game's learned (or imported) look folded into
@@ -4055,5 +4185,35 @@ mod fg_reconcile_tests {
     fn a_match_resets() {
         assert_eq!(fg_reconcile_step(5, 5, 1), (0, FgStep::Same));
         assert_eq!(fg_reconcile_step(7, 5, 0).1, FgStep::Wait);
+    }
+}
+
+#[cfg(test)]
+mod tray_learning_tests {
+    use super::*;
+    use crate::learned_display::{record_key, LearnStore, MonitorRecord};
+    use crate::tray::Progress;
+    use crate::types::MonitorId;
+
+    fn store() -> LearnStore {
+        let dir = std::env::temp_dir().join(format!("relay-tray-learn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        LearnStore::load(dir.join("learned-display.json"))
+    }
+
+    #[test]
+    fn look_progress_reads_the_monitor_and_its_hdr_record() {
+        let mon = MonitorId("LG-1".into());
+        let mut s = store();
+        assert_eq!(look_progress(&s, "mw4.exe", &mon), Progress::Pct(0), "nothing yet");
+        s.game_mut("mw4.exe").monitors.insert(mon.0.clone(), MonitorRecord::default());
+        assert_eq!(look_progress(&s, "MW4.exe", &mon), Progress::Pct(0));
+        // A settled HDR look counts for the monitor.
+        let mut hdr = MonitorRecord::default();
+        hdr.learner.converged = Some(relay_display::learn::LookTargets::default());
+        s.game_mut("mw4.exe").monitors.insert(record_key(&mon, true).0, hdr);
+        assert_eq!(look_progress(&s, "mw4.exe", &mon), Progress::Ready);
+        // Another monitor's record does not.
+        assert_eq!(look_progress(&s, "mw4.exe", &MonitorId("OTHER".into())), Progress::Pct(0));
     }
 }
