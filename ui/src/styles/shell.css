@@ -101,7 +101,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    ran straight into its label ("CameraNeeds Windows 11 22H2+..."). */
 .kv { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); color: var(--mute); }
 .kv > span { flex: none; }
-.kv strong { text-align: right; }
+.kv strong { text-align: right; min-width: 0; }
+/* A path has no spaces to wrap at: let a mono value break anywhere rather
+   than run past the card (Settings: data folder, log file). */
+.kv strong.m { overflow-wrap: anywhere; }
+/* A lone button between a card's text and its settings rows: room above
+   and below, so it neither touches the sentence nor the next row's rule. */
+.card-act { margin: 10px 0 12px; }
 .kv:first-of-type { border-top: 0; padding-top: 0; }
 .kv strong { color: var(--ink); font-weight: 450; }
 .kv strong.m { font-family: GeistMono; font-size: 12px; font-variant-numeric: tabular-nums; }

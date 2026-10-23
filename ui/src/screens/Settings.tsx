@@ -227,7 +227,7 @@ export function Settings() {
           </p>
         </Card>
         <p className="note">Uninstalling removes every component listed here, the startup entry, and restores the audio chain. Nothing is left behind.</p>
-        <p className="note">Relay is installed for your user account only — it writes nothing to Program Files and installs no drivers unless you opt in above.</p>
+        <p className="note">Relay is installed for your user account only. Anything machine-wide — the audio processor (one DLL under Program Files, where Windows audio can load it), the audio-effects switch, the virtual camera and microphone, the firewall rule — happens only when you choose it, behind a Windows permission prompt.</p>
       </aside>
     </>
   );
