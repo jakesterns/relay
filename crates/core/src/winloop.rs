@@ -76,6 +76,15 @@ pub fn balloon(title: &str, text: &str) {
     let _ = (title, text);
 }
 
+/// Show what the applied profile is doing on the notification-area icon.
+/// Cheap when nothing changed; safe to call from any thread.
+pub fn tray_status(status: crate::tray::TrayStatus) {
+    #[cfg(windows)]
+    imp::tray_status(status);
+    #[cfg(not(windows))]
+    let _ = status;
+}
+
 impl Drop for WinLoop {
     fn drop(&mut self) {
         self.request_stop();
@@ -271,6 +280,31 @@ mod imp {
     /// `WM_APP + 1` is the tray's callback.
     const WM_BALLOON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
 
+    /// Thread message: "show `TRAY_STATUS` on the icon". `WM_APP + 3`.
+    const WM_TRAY_STATUS: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 3;
+
+    /// The icon state waiting for the loop thread, and the last one posted
+    /// (so an unchanged state costs a comparison, not a message).
+    static TRAY_STATUS: Mutex<Option<crate::tray::TrayStatus>> = Mutex::new(None);
+    static TRAY_POSTED: Mutex<Option<crate::tray::TrayStatus>> = Mutex::new(None);
+
+    pub fn tray_status(status: crate::tray::TrayStatus) {
+        let thread = LOOP_THREAD.load(Ordering::Relaxed);
+        if thread == 0 {
+            return; // not up yet; the next call retries
+        }
+        let mut posted = TRAY_POSTED.lock();
+        if posted.as_ref() == Some(&status) {
+            return;
+        }
+        *posted = Some(status.clone());
+        *TRAY_STATUS.lock() = Some(status);
+        // SAFETY: posting a message to our own loop thread; no pointers cross.
+        unsafe {
+            let _ = PostThreadMessageW(thread, WM_TRAY_STATUS, WPARAM(0), LPARAM(0));
+        }
+    }
+
     pub fn balloon(title: &str, text: &str) {
         let thread = LOOP_THREAD.load(Ordering::Relaxed);
         if thread == 0 {
@@ -376,6 +410,17 @@ mod imp {
                             TRAY.with(|t| {
                                 if let Some(tray) = t.borrow().as_ref() {
                                     tray.balloon(&title, &text);
+                                }
+                            });
+                        }
+                        continue;
+                    }
+                    if msg.message == WM_TRAY_STATUS {
+                        if let Some(status) = TRAY_STATUS.lock().take() {
+                            // This thread owns the window and the icon.
+                            TRAY.with(|t| {
+                                if let Some(tray) = t.borrow_mut().as_mut() {
+                                    tray.set_status(status);
                                 }
                             });
                         }

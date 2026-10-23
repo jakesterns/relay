@@ -588,6 +588,10 @@ impl Service {
                     self.file_tick();
                 }
             }
+            // After every event and tick: the icon follows the state (a
+            // comparison when nothing changed).
+            let status = crate::tray::TrayStatus::from_state(&self.inner.lock().state);
+            crate::winloop::tray_status(status);
         }
         winloop.stop();
         Ok(())
