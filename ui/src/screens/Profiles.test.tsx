@@ -290,6 +290,20 @@ describe("the hardware library", () => {
     h.expectClean();
   });
 
+  it("lights the icon of what is in use: the plugged headset and the output playing now", async () => {
+    core.hardware.connected.headset = "hd560s";
+    await mount();
+    const on = (row: HTMLElement) => row.querySelector(".ic")!.classList.contains("on");
+    expect(on(hwRow("Headsets & IEMs", "HD 560S"))).toBe(true);
+    const others = core.hardware.headsets.filter((x) => x.id !== "hd560s");
+    for (const x of others) expect(on(hwRow("Headsets & IEMs", x.name))).toBe(false);
+    // "What are you listening on?": only the default output is lit.
+    const outputs = [...document.querySelectorAll<HTMLElement>("[data-testid=output-state]")];
+    expect(outputs.length).toBeGreaterThan(0);
+    const lit = outputs.filter((i) => i.classList.contains("on")).map((i) => i.closest(".listen")?.getAttribute("data-output"));
+    expect(lit).toEqual([core.hardware.connected.endpoints.find((e) => e.default)!.name]);
+  });
+
   it("edits a saved headset in place and keeps its measured curve", async () => {
     const before = structuredClone(core.hardware.headsets.find((x) => x.id === "hd560s")!);
     const h = await mount();

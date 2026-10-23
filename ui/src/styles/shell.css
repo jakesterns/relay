@@ -267,6 +267,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .hwl span { color: var(--dim); font-size: 11.5px; }
 .hwl .ic { width: 22px; height: 16px; border: 1.25px solid var(--mute); border-radius: 3px; flex: none; }
 .hwl .ic.r { border-radius: 50%; width: 18px; height: 18px; }
+/* In use (the plugged headset, the output playing now, a connected
+   monitor): the outline turns brass and fills, so the shape reads as the
+   state it looks like rather than as an empty checkbox. */
+.hwl .ic.on { border-color: var(--brass); position: relative; }
+.hwl .ic.on:after {
+  content: ""; position: absolute; inset: 3px; border-radius: inherit; background: var(--brass);
+}
 .hwl .pill { margin-left: auto; }
 /* The text column takes the row's free width; the library rows keep their
    pill and buttons on a line beneath (.hwa), so a long model name ("KZ ZS10

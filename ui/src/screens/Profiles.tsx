@@ -188,7 +188,8 @@ export function Profiles() {
             <div className="empty">Library is empty</div>
           ) : hardware.headsets.map((h) => (
             <div className="hwl" key={h.id}>
-              <div className="ic r" />
+              <div className={hardware.connected.headset === h.id ? "ic r on" : "ic r"}
+                data-testid="headset-state" aria-hidden />
               {/* The side panel is narrow: the name gets the full width and
                   the pill and buttons sit on their own line beneath it. */}
               <div className="hwt">
@@ -215,7 +216,7 @@ export function Profiles() {
             const plugged = hardware.connected.monitors.find((c) => c.id === m.id);
             return (
               <div className="hwl" key={m.id}>
-                <div className="ic" />
+                <div className={plugged ? "ic on" : "ic"} data-testid="monitor-state" aria-hidden />
                 <div className="hwt">
                   <b>{m.name}</b>
                   <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
