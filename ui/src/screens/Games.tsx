@@ -1,11 +1,11 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Card, Chips, ConfirmButton, ErrorNote, Kv, Live, Slider, Toggle } from "../components/Controls";
+import { Card, Chips, ConfirmButton, ErrorNote, HdrTag, Kv, Live, Slider, Toggle } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { useCore } from "../lib/core";
 import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
-  api, GOALS, isTauri, presetAudioLabel,
+  api, GOALS, isHdrTuned, isTauri, presetAudioLabel,
   MAX_DYN_STRENGTH,
   type ApoStatus, type ColorInfo, type DynamicsTuning, type EqBand, type GameEqAction,
   type GameEqExport, type GameEqStatus,
@@ -104,7 +104,7 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
     <>
       <section className="main">
         <div className="hdr">
-          <h1>{draft?.name ?? subject?.name ?? "No game"} <em>— {sectionLabel}</em></h1>
+          <h1>{draft?.name ?? subject?.name ?? "No game"}{subject && isHdrTuned(subject, state) && <HdrTag />} <em>— {sectionLabel}</em></h1>
           <Live on={!!active} text={active ? "Active · in focus" : "Not in focus"} />
         </div>
         <OfflineBanner />

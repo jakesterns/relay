@@ -119,6 +119,12 @@ export function ChipSet<T extends string>({ label, values, options, onToggle }: 
   );
 }
 
+/** "This profile is tuned for HDR", next to its name wherever a profile is
+ *  picked, so an HDR tune is never chosen by surprise. */
+export function HdrTag() {
+  return <span className="tag hdr" title="Tuned for HDR: this profile uses HDR, or its game has a learned HDR look">HDR</span>;
+}
+
 export function Live({ on, text }: { on: boolean; text: string }) {
   return <div className={"live" + (on ? "" : " off")}><i />{text}</div>;
 }

@@ -425,6 +425,10 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    it has to read as the row's text, not as a control. */
 .tbl .rowname { display: block; text-align: left; width: 100%; }
 .tbl .rowname:focus-visible { outline-offset: 1px; }
+/* "Tuned for HDR" beside a profile name. */
+.tag.hdr { display: inline-block; margin-left: 8px; padding: 0 5px; border: 1px solid var(--brass2);
+  border-radius: 3px; color: var(--brass); font: 500 10px/15px GeistMono, monospace;
+  letter-spacing: .06em; vertical-align: 2px; }
 .tbl td .go { color: var(--mute); font-size: 11.5px; padding: 4px 8px; border-radius: 5px; border: 1px solid transparent; }
 .tbl tr:hover td .go, .tbl td .go:focus-visible { border-color: var(--line2); color: var(--ink); }
 .tbl td .go:disabled { opacity: 0; pointer-events: none; }
@@ -486,6 +490,7 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    question needs no rule above it. */
 .warnbanner.offer { align-items: flex-start; }
 .warnbanner.offer .goals { border-top: 0; padding: 0; }
+.warnbanner.hdrask { margin: 4px 0 10px; align-items: flex-start; }
 .warnbanner.offer .tn { display: block; margin-top: 6px; color: var(--mute); }
 .start .steps { margin: 6px 0 0; padding: 0; list-style: none; counter-reset: step; }
 .start .steps li {

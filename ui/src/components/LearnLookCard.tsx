@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Toggle } from "./Controls";
 import { errText } from "../lib/err";
 import { etaText } from "../lib/eta";
-import { api, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
+import { api, HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
 
 /**
  * Display → "Learn this game's look" (S47).
@@ -11,6 +11,10 @@ import { api, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type LookStatus, 
  * works out how much shadow recovery and saturation help it wants. The look
  * belongs to the game; each monitor gets it fitted to what that panel can do.
  * No presets: a new game or a game update is learned the same way.
+ *
+ * HDR (owner 2026-10-23): an HDR screen is skipped until the user reads
+ * what HDR tuning is and chooses "Learn in HDR". The HDR look is its own
+ * row per monitor, kept apart from the SDR one.
  */
 export function LearnLookCard({ exe }: { exe: string | null }) {
   const [view, setView] = useState<LearnView | null>(null);
@@ -84,6 +88,8 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
   const imported = view?.imported ?? null;
   const enabled = view?.enabled ?? false;
   const anyReady = view?.monitors.some((m) => m.converged !== null) ?? false;
+  const hdrOk = view?.hdr_ok ?? false;
+  const hdrSeen = (view?.monitors.some((m) => m.hdr_skipped) ?? false) || view?.status === "hdr_skipped";
   return (
     <Card title="Learn this game's look">
       <p className="p" data-testid="look-status">{statusLine(view?.status ?? "off", view?.sampling ?? false)}</p>
@@ -99,8 +105,20 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
         onChange={view === null ? undefined : (v) => void run(() => api.learnDisplayAutoApply(exe, v))}
         label="Apply new looks automatically"
         sub="Off: a settled look waits for you to press Apply." />
+      {hdrSeen && !hdrOk && (
+        <div className="warnbanner hdrask" data-testid="hdr-offer" role="status">
+          <i />
+          <span className="msg"><b>This game is running in HDR, so Relay is not learning its look yet.</b> {view?.hdr_notice ?? HDR_NOTICE}</span>
+          <button type="button" className="btn acc"
+            onClick={() => void run(() => api.learnDisplayHdr(exe, true), "Learning in HDR. Keep playing with HDR on.")}>Learn in HDR</button>
+        </div>
+      )}
+      {hdrOk && (
+        <Toggle on onChange={(v) => void run(() => api.learnDisplayHdr(exe, v), v ? undefined : "HDR learning is off. The HDR look is kept but no longer applied.")}
+          label="Learn in HDR" sub={view?.hdr_notice ?? HDR_NOTICE} />
+      )}
       {view?.monitors.map((m) => (
-        <MonitorRow key={m.monitor} m={m} onPanel={(p) => void setPanel(m.monitor, p)} />
+        <MonitorRow key={m.monitor + (m.hdr ? "#hdr" : "")} m={m} hdrOk={hdrOk} onPanel={(p) => void setPanel(m.monitor, p)} />
       ))}
       {imported && (
         <Kv k="Imported" v={imported.note ? `"${imported.note}"` : "No note"} />
@@ -137,7 +155,7 @@ function statusLine(s: LookStatus, sampling: boolean): string {
     case "ready": return "A look is ready — Apply to use it.";
     case "applied": return "Applied. Relay keeps watching for game updates and only changes it if the look clearly moves.";
     case "applied_imported": return "Applied (imported).";
-    case "hdr_skipped": return "This monitor was in HDR mode, so nothing was learned there.";
+    case "hdr_skipped": return "This monitor is in HDR mode, so nothing was learned there yet.";
   }
 }
 
@@ -153,13 +171,13 @@ function pct(v: number): string { return `${Math.round(v * 100)}%`; }
 
 const PANELS = ["OLED", "IPS", "VA", "TN"] as const;
 
-function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: string) => void }) {
+function MonitorRow({ m, hdrOk, onPanel }: { m: MonitorLearnView; hdrOk: boolean; onPanel: (panel: string) => void }) {
   const r = m.readiness;
   const lit = Math.round(r.progress * 10);
   const a = m.adjustments;
   return (
     <div className="look-monitor" data-testid="look-monitor">
-      <Kv k={m.monitor_name || "Monitor"}
+      <Kv k={(m.monitor_name || "Monitor") + (m.hdr ? " · HDR" : "")}
         v={m.panel === "unknown" ? "Panel type unknown"
           : m.panel_guessed ? `${m.panel.toUpperCase()} (guessed from the model)` : m.panel.toUpperCase()} />
       {(m.panel === "unknown" || m.panel_guessed) && (
@@ -174,7 +192,7 @@ function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: stri
         </label>
       )}
       {m.hdr_skipped ? (
-        <p className="p small">HDR was on. Relay only learns from SDR; turn HDR off for this game to learn its look.</p>
+        <p className="p small">HDR was on. Choose Learn in HDR above, or turn HDR off for this game to learn its SDR look.</p>
       ) : (
         <>
           <div className="bars" role="progressbar" aria-label={`Learning progress on ${m.monitor_name || "this monitor"}`}
@@ -220,8 +238,9 @@ function MonitorRow({ m, onPanel }: { m: MonitorLearnView; onPanel: (panel: stri
         <Kv k="Ready to apply" v={`shadows ${pct(m.offer.shadow)} · colour ${pct(m.offer.saturation)}${m.offer_adjustments ? ` → gamma ${m.offer_adjustments.gamma.toFixed(2)} · lift ${m.offer_adjustments.shadow_lift} · vibrance ${m.offer_adjustments.vibrance}` : ""}`} mono />
       )}
       {a && (
-        <Kv k="On this panel" v={`gamma ${a.gamma.toFixed(2)} · lift ${a.shadow_lift} · vibrance ${a.vibrance}${a.black_equalizer !== undefined ? ` · black eq ${a.black_equalizer}` : ""}`} mono />
+        <Kv k="On this panel" v={m.hdr ? `vibrance ${a.vibrance}` : `gamma ${a.gamma.toFixed(2)} · lift ${a.shadow_lift} · vibrance ${a.vibrance}${a.black_equalizer !== undefined ? ` · black eq ${a.black_equalizer}` : ""}`} mono />
       )}
+      {m.hdr && !hdrOk && <p className="p small">Not applied while Learn in HDR is off.</p>}
       {a?.notes.map((n) => <p key={n} className="p small">{n}</p>)}
     </div>
   );

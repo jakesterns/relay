@@ -41,7 +41,7 @@ export function fakeDisplayOptions(): DisplayOptions {
   };
 }
 import type { EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
-import { LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import { HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -302,7 +302,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     let v = core.learn.get(key);
     if (!v) {
       v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
-        privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+        privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE, hdr_ok: false, hdr_notice: HDR_NOTICE };
       core.learn.set(key, v);
     }
     return v;
@@ -462,6 +462,13 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       v.enabled = Boolean(a.enabled);
       if (v.status === "off" && v.enabled) v.status = "learning";
       else if (v.status === "learning" && !v.enabled) v.status = "off";
+      return structuredClone(v);
+    },
+    learn_display_hdr: (a) => {
+      const v = learnView(String(a.exe));
+      v.hdr_ok = Boolean(a.enabled);
+      for (const m of v.monitors) m.hdr_skipped = false;
+      if (v.status === "hdr_skipped") v.status = v.enabled ? "learning" : "off";
       return structuredClone(v);
     },
     learn_display_apply: (a) => {
@@ -832,7 +839,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "game_eq",
   "list_learn_videos", "pick_video_file", "learn_from_file", "learn_file_status", "learn_file_cancel",
-  "learn_display_status", "learn_display_set", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
+  "learn_display_status", "learn_display_set", "learn_display_hdr", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
   "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",

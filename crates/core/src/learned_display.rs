@@ -28,6 +28,36 @@ use crate::types::{DisplaySettings, MonitorId};
 /// in half the time; the cost per sample is unchanged (measured in S48).
 pub const SAMPLE_FPS: u32 = relay_display::learn::converge::SAMPLE_FPS;
 
+/// Shown with the "Learn in HDR" choice: what HDR tuning is, before the
+/// user opts in (owner 2026-10-23).
+pub const HDR_NOTICE: &str = "HDR tuning works differently. In HDR, Relay adjusts colour \
+vibrance only and gives tips for the game's own HDR settings; shadows and brightness are left \
+to the game. Relay keeps the HDR look separate from the SDR one and uses whichever matches \
+your screen.";
+
+/// Store key suffix for a monitor's HDR record. SDR and HDR are learned and
+/// kept apart, so switching HDR never mixes the two looks.
+pub const HDR_SUFFIX: &str = "#hdr";
+
+/// The record key for `monitor` in SDR or HDR.
+pub fn record_key(monitor: &MonitorId, hdr: bool) -> MonitorId {
+    if hdr {
+        MonitorId(format!("{}{HDR_SUFFIX}", base_id(&monitor.0)))
+    } else {
+        MonitorId(base_id(&monitor.0).to_string())
+    }
+}
+
+/// Is this record key an HDR record?
+pub fn is_hdr_key(key: &str) -> bool {
+    key.ends_with(HDR_SUFFIX)
+}
+
+/// The monitor id a record key belongs to.
+pub fn base_id(key: &str) -> &str {
+    key.strip_suffix(HDR_SUFFIX).unwrap_or(key)
+}
+
 /// Exact wording the owner chose for the tournament notice (S47). A notice
 /// only: no confirmation, no responsibility taken.
 pub const TOURNAMENT_NOTICE: &str = "Relay's visual enhancements may not be allowed in some \
@@ -72,6 +102,10 @@ pub struct GameRecord {
     /// user presses Apply.
     #[serde(default)]
     pub auto_apply: bool,
+    /// The user chose "Learn in HDR" for this game, having read
+    /// [`HDR_NOTICE`]. Without it an HDR screen is skipped.
+    #[serde(default)]
+    pub hdr_ok: bool,
 }
 
 impl GameRecord {
@@ -101,8 +135,11 @@ impl GameRecord {
     ///    re-fits it to the new panel ([`realize`]), with no relearn;
     /// 3. else an imported look.
     ///
-    /// `None` = the profile as written.
+    /// An HDR key ([`record_key`]) only ever finds HDR looks, and an SDR key
+    /// only SDR ones: the two are measured on different scales. Imports are
+    /// SDR. `None` = the profile as written.
     pub fn effective(&self, monitor: &MonitorId) -> Option<LookTargets> {
+        let hdr = is_hdr_key(&monitor.0);
         let applied =
             |m: &MonitorRecord| m.learner.use_learned.then_some(m.learner.applied).flatten();
         if let Some(look) = self.monitors.get(&monitor.0).and_then(applied) {
@@ -110,11 +147,22 @@ impl GameRecord {
         }
         let other = self
             .monitors
-            .values()
-            .filter_map(|m| applied(m).map(|l| (l, m.learner.agg.frames)))
+            .iter()
+            .filter(|(k, _)| is_hdr_key(k) == hdr)
+            .filter_map(|(_, m)| applied(m).map(|l| (l, m.learner.agg.frames)))
             .max_by_key(|(_, frames)| *frames)
             .map(|(l, _)| l);
+        if hdr {
+            return other;
+        }
         other.or(self.imported.as_ref().map(|i| i.look))
+    }
+
+    /// An HDR look is in use for this game on some monitor.
+    pub fn has_hdr_look(&self) -> bool {
+        self.monitors
+            .iter()
+            .any(|(k, m)| is_hdr_key(k) && m.learner.use_learned && m.learner.applied.is_some())
     }
 
     /// The record for `monitor`, created on first use. A new record for a
@@ -135,14 +183,15 @@ impl GameRecord {
     /// What the user sees for this game on `monitor`.
     pub fn status(&self, monitor: Option<&MonitorId>) -> LookStatus {
         let m = monitor.and_then(|id| self.monitors.get(&id.0));
-        if m.is_some_and(|m| m.hdr_skipped) {
+        if m.is_some_and(|m| m.hdr_skipped) && !self.hdr_ok {
             return LookStatus::HdrSkipped;
         }
+        let hdr = monitor.is_some_and(|id| is_hdr_key(&id.0));
         let in_use = monitor
             .and_then(|id| self.effective(id))
-            .or_else(|| self.imported.as_ref().map(|i| i.look));
+            .or_else(|| self.imported.as_ref().filter(|_| !hdr).map(|i| i.look));
         if let Some(look) = in_use {
-            let from_import = self.imported.as_ref().is_some_and(|i| i.look == look);
+            let from_import = !hdr && self.imported.as_ref().is_some_and(|i| i.look == look);
             return if from_import { LookStatus::AppliedImported } else { LookStatus::Applied };
         }
         match m {
@@ -209,6 +258,16 @@ impl LearnStore {
         self.file.games.entry(key(exe)).or_default()
     }
 
+    /// Games with an HDR look in use, sorted.
+    pub fn hdr_exes(&self) -> Vec<String> {
+        self.file
+            .games
+            .iter()
+            .filter(|(_, g)| g.hdr_ok && g.has_hdr_look())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
     pub fn is_enabled(&self, exe: &str) -> bool {
         self.game(exe).is_some_and(|g| g.enabled)
     }
@@ -240,6 +299,15 @@ pub fn panel_kind(label: &str, name: &str, id: &str) -> (PanelKind, bool) {
 
 pub fn caps_for(label: &str, name: &str, id: &str) -> PanelCaps {
     PanelCaps { kind: panel_kind(label, name, id).0, black_equalizer_max: None }
+}
+
+/// Look × panel → adjustments, by the rules of the mode it was learned in.
+pub fn realize_for(look: &LookTargets, caps: &PanelCaps, hdr: bool) -> Adjustments {
+    if hdr {
+        relay_display::learn::hdr::realize_hdr(look, caps)
+    } else {
+        realize(look, caps)
+    }
 }
 
 /// Fold learned adjustments into a profile's display settings. The profile
@@ -288,7 +356,11 @@ pub fn build_fingerprint(image: &Path) -> String {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorLearnView {
+    /// The monitor (never the record key: HDR is the `hdr` flag).
     pub monitor: MonitorId,
+    /// This row is the monitor's HDR look.
+    #[serde(default)]
+    pub hdr: bool,
     pub monitor_name: String,
     pub panel: PanelKind,
     /// The panel type was guessed from the model, not set by the user.
@@ -331,6 +403,12 @@ pub struct LearnView {
     /// New settled looks apply without asking.
     #[serde(default)]
     pub auto_apply: bool,
+    /// The user chose HDR learning for this game.
+    #[serde(default)]
+    pub hdr_ok: bool,
+    /// What HDR tuning is, for the choice.
+    #[serde(default)]
+    pub hdr_notice: String,
     /// The sampler is running for this game right now.
     pub sampling: bool,
     pub monitors: Vec<MonitorLearnView>,
@@ -373,15 +451,21 @@ pub fn view(
     let monitors = rec
         .monitors
         .iter()
-        .map(|(id, m)| {
-            let id = MonitorId(id.clone());
-            let (name, panel) = names(&id);
-            let (kind, guessed) = panel_kind(&panel, &name, &id.0);
+        .map(|(key, m)| {
+            let hdr = is_hdr_key(key);
+            let id = MonitorId(key.clone());
+            let base = MonitorId(base_id(key).to_string());
+            let (name, panel) = names(&base);
+            let (kind, guessed) = panel_kind(&panel, &name, &base.0);
+            let fit = |look: &LookTargets| {
+                realize_for(look, &PanelCaps { kind, ..panel_caps(&panel) }, hdr)
+            };
             let caps = PanelCaps { kind, ..panel_caps(&panel) };
             let l = &m.learner;
             let ex = l.excluded;
             MonitorLearnView {
-                monitor: id.clone(),
+                monitor: base.clone(),
+                hdr,
                 monitor_name: name,
                 panel: caps.kind,
                 panel_guessed: guessed,
@@ -392,10 +476,10 @@ pub fn view(
                 use_learned: l.use_learned,
                 hdr_skipped: m.hdr_skipped,
                 status: rec.status(Some(&id)),
-                adjustments: rec.effective(&id).map(|look| realize(&look, &caps)),
-                candidate_adjustments: l.readiness().candidate.map(|c| realize(&c, &caps)),
+                adjustments: rec.effective(&id).map(|look| fit(&look)),
+                candidate_adjustments: l.readiness().candidate.map(|c| fit(&c)),
                 offer: rec.offer(&id),
-                offer_adjustments: rec.offer(&id).map(|o| realize(&o, &caps)),
+                offer_adjustments: rec.offer(&id).map(|o| fit(&o)),
                 excluded: ex.total(),
                 excluded_by: ex,
             }
@@ -405,6 +489,8 @@ pub fn view(
         exe: key(exe),
         enabled: rec.enabled,
         auto_apply: rec.auto_apply,
+        hdr_ok: rec.hdr_ok,
+        hdr_notice: HDR_NOTICE.into(),
         status: overall_status(&rec, &monitors),
         sampling,
         monitors,
@@ -555,17 +641,15 @@ pub fn export(store: &LearnStore, exe: &str, name: Option<String>, note: &str) -
     let note = clean_text(note, NOTE_MAX_CHARS, "the note")?;
     let rec = store.game(exe).context("nothing has been learned for this game yet")?;
     let evidence = |l: &Learner| FileEvidence { frames: l.agg.frames, scenes: l.scenes() as u32 };
-    let applied = rec
-        .monitors
-        .values()
+    // The file format is the SDR look; HDR looks are not exported.
+    let sdr = || rec.monitors.iter().filter(|(k, _)| !is_hdr_key(k)).map(|(_, m)| m);
+    let applied = sdr()
         .filter(|m| m.learner.use_learned)
         .filter_map(|m| m.learner.applied.map(|a| (a, &m.learner)))
         .max_by_key(|(_, l)| l.agg.frames)
         .map(|(a, l)| (a, evidence(l)));
     let imported = rec.imported.as_ref().map(|i| (i.look, FileEvidence::default()));
-    let settled = rec
-        .monitors
-        .values()
+    let settled = sdr()
         .filter_map(|m| m.learner.converged.map(|c| (c, &m.learner)))
         .max_by_key(|(_, l)| l.agg.frames)
         .map(|(c, l)| (c, evidence(l)));
@@ -591,7 +675,8 @@ pub fn import(store: &mut LearnStore, exe: &str, text: &str) -> Result<()> {
     let g = store.game_mut(exe);
     g.imported = Some(ImportedLook { look, note: f.note });
     g.enabled = false;
-    for m in g.monitors.values_mut() {
+    // An imported file is an SDR look; HDR records keep their own.
+    for (_, m) in g.monitors.iter_mut().filter(|(k, _)| !is_hdr_key(k)) {
         m.learner.relearn();
         m.learner.use_learned = true;
         m.learner.applied = Some(look);
@@ -606,7 +691,8 @@ pub fn import(store: &mut LearnStore, exe: &str, text: &str) -> Result<()> {
 /// One decoded line from `relay-share look`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SamplerLine {
-    Frame(Box<FrameReport>),
+    /// A frame's statistics; `true` = measured in HDR.
+    Frame(Box<FrameReport>, bool),
     Hdr,
     Error(String),
 }
@@ -614,9 +700,10 @@ pub enum SamplerLine {
 pub fn decode_line(line: &str) -> Option<SamplerLine> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
     match v.get("event")?.as_str()? {
-        "look" => serde_json::from_value(v.get("report")?.clone())
-            .ok()
-            .map(|r| SamplerLine::Frame(Box::new(r))),
+        "look" => serde_json::from_value(v.get("report")?.clone()).ok().map(|r| {
+            let hdr = v.get("hdr").and_then(|h| h.as_bool()).unwrap_or(false);
+            SamplerLine::Frame(Box::new(r), hdr)
+        }),
         "look_hdr" => Some(SamplerLine::Hdr),
         "error" => Some(SamplerLine::Error(
             v.get("message").and_then(|m| m.as_str()).unwrap_or("sampler error").to_string(),
@@ -649,8 +736,18 @@ pub fn drain(rx: &Receiver<SamplerLine>, exited: bool) -> (Vec<SamplerLine>, boo
 }
 
 /// `relay-share look --hmonitor N --fps F`.
-pub fn sampler_args(hmonitor: i64, fps: u32) -> Vec<String> {
-    vec!["look".into(), "--hmonitor".into(), hmonitor.to_string(), "--fps".into(), fps.to_string()]
+pub fn sampler_args(hmonitor: i64, fps: u32, hdr: bool) -> Vec<String> {
+    let mut a: Vec<String> = vec![
+        "look".into(),
+        "--hmonitor".into(),
+        hmonitor.to_string(),
+        "--fps".into(),
+        fps.to_string(),
+    ];
+    if hdr {
+        a.push("--hdr".into());
+    }
+    a
 }
 
 /// The running sampler. Dropping it stops and reaps the child (its own PID,
@@ -696,11 +793,12 @@ impl Sampler {
         }
     }
 
-    pub fn start(exe: &str, monitor: MonitorId, hmonitor: i64) -> Result<Self> {
+    /// `hdr`: the user chose HDR learning, so an HDR screen is read, not skipped.
+    pub fn start(exe: &str, monitor: MonitorId, hmonitor: i64, hdr: bool) -> Result<Self> {
         let bin = crate::share::share_binary()?;
         anyhow::ensure!(bin.exists(), "sampler not found at {}", bin.display());
         let mut cmd = Command::new(&bin);
-        cmd.args(sampler_args(hmonitor, SAMPLE_FPS));
+        cmd.args(sampler_args(hmonitor, SAMPLE_FPS, hdr));
         cmd.env("RELAY_SPAWNED", "1");
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]

@@ -344,6 +344,13 @@ pub enum Method {
         exe: String,
         enabled: bool,
     },
+    /// "Learn in HDR" on/off for one game (owner 2026-10-23): the user has
+    /// read the HDR notice. Off = HDR screens are skipped again and no HDR
+    /// look is applied.
+    LearnDisplayHdr {
+        exe: String,
+        enabled: bool,
+    },
     /// S47: use the settled look (every monitor that has one).
     LearnDisplayApply {
         exe: String,

@@ -9,10 +9,12 @@
 //! - [`analyse`] — per-frame statistics and frame classification.
 //! - [`derive`] — aggregates → panel-neutral look → panel-aware adjustments.
 //! - [`converge`] — readiness, convergence, rolling window, freeze rule.
+//! - [`hdr`] — HDR frames → analyser codes, and the HDR-only realisation.
 
 pub mod analyse;
 pub mod converge;
 pub mod derive;
+pub mod hdr;
 
 pub use analyse::{with_input_idle, Analyser, Frame, FrameClass, FrameReport, FrameStats, Order};
 pub use converge::{Learner, Phase, Readiness, SAMPLE_FPS};
@@ -20,8 +22,8 @@ pub use derive::{realize, Adjustments, LookTargets, PanelCaps, PanelKind};
 
 /// DXGI colour space of an output in HDR (PQ / BT.2020) mode:
 /// `DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020` = 12. A desktop duplicated in
-/// that mode is not SDR display code values, so the sampler skips it and says
-/// so instead of learning from the wrong space.
+/// that mode is not SDR display code values: the sampler skips it, or, once
+/// the user has chosen HDR learning for the game, reads it through [`hdr`].
 pub const DXGI_COLOR_SPACE_HDR_PQ: i32 = 12;
 
 pub fn is_hdr_color_space(cs: i32) -> bool {

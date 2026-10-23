@@ -118,7 +118,7 @@ pub struct FrameStats {
     pub mean_luma: f32,
     pub median_luma: f32,
     pub luma_std: f32,
-    /// Fraction of pixels below [`LUMA_CRUSH`].
+    /// Fraction of pixels below [`LUMA_CRUSH`] (the HDR line in HDR).
     pub crush_frac: f32,
     /// Fraction of pixels at or above [`LUMA_CLIP`].
     pub clip_frac: f32,
@@ -167,6 +167,10 @@ pub struct FrameReport {
 #[derive(Debug, Default)]
 pub struct Analyser {
     grids: std::collections::VecDeque<Vec<f32>>,
+    /// The crush line when it is not [`LUMA_CRUSH`]: HDR frames are encoded
+    /// relative to the panel's peak, where 5 % is far too bright a shadow
+    /// (see [`super::hdr::crush_threshold`]).
+    crush: Option<f32>,
 }
 
 /// Block rectangle `[x0, x1) × [y0, y1)` in grid units.
@@ -175,6 +179,11 @@ type BlockRect = (usize, usize, usize, usize);
 impl Analyser {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An analyser for HDR display codes with this crush line.
+    pub fn with_crush(crush: f32) -> Self {
+        Self { crush: Some(crush), ..Self::default() }
     }
 
     pub fn analyse(&mut self, f: &Frame) -> FrameReport {
@@ -210,7 +219,7 @@ impl Analyser {
         let crop = Frame { width: cw, height: ch, data: &data, order: f.order };
 
         let bar = letterbox_rows(&cl, cw, ch);
-        let mut stats = stats_for(&crop, &cl, bar);
+        let mut stats = stats_for(&crop, &cl, bar, self.crush.unwrap_or(LUMA_CRUSH));
         stats.motion = motion.max(0.0);
         // Static black bars are cropped away with the rest of the border, so
         // look for them on the whole frame too.
@@ -362,7 +371,7 @@ fn letterbox_rows(luma: &[f32], w: usize, h: usize) -> usize {
     top.min(bottom)
 }
 
-fn stats_for(f: &Frame, luma: &[f32], bar: usize) -> FrameStats {
+fn stats_for(f: &Frame, luma: &[f32], bar: usize, crush_line: f32) -> FrameStats {
     let (w, h) = (f.width, f.height);
     // Analyse the picture area only: bars would read as crushed shadow.
     let (y0, y1) = (bar, h - bar);
@@ -388,7 +397,7 @@ fn stats_for(f: &Frame, luma: &[f32], bar: usize) -> FrameStats {
             let down = if y + 1 < y1 { luma[i + w] } else { l };
             let grad = (l - right).abs() + (l - down).abs();
             all_grad += grad;
-            if l < LUMA_CRUSH {
+            if l < crush_line {
                 crush += 1;
                 crush_grad += grad;
             }

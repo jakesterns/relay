@@ -364,8 +364,10 @@ impl Service {
         let mut hardware = HardwareView::from_report(report.clone(), &library);
         hardware.other_processing = crate::hardware::other_processing::scan(&report);
         crate::tray::set_listening_menu(tray_listening(&hardware, &library));
+        let learn = crate::learned_display::LearnStore::load(paths.learned_display_file());
         let state = CoreState {
             hardware,
+            hdr_looks: learn.hdr_exes(),
             build: crate::types::BuildInfo {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 data_dir: paths.root().display().to_string(),
@@ -409,7 +411,7 @@ impl Service {
             recv_started: None,
             update: crate::update::Updater::load(&paths),
             learner: None,
-            learn: crate::learned_display::LearnStore::load(paths.learned_display_file()),
+            learn,
             look: None,
             file_job: None,
         }));
@@ -631,7 +633,7 @@ impl Service {
     /// changed (Apply happened elsewhere, or a meaningfully different result
     /// settled). Idle cores never get past the first line.
     fn learn_tick(&self) {
-        use crate::learned_display::SamplerLine;
+        use crate::learned_display::{record_key, SamplerLine};
         let mut g = self.inner.lock();
         let Some(s) = g.look.as_mut() else { return };
         if crate::learned_display::grace_expired(s.paused_since, std::time::Instant::now()) {
@@ -645,23 +647,29 @@ impl Service {
         let exited = s.exited();
         let (lines, mut stop) = crate::learned_display::drain(&s.rx, exited);
         let (exe, mon) = (s.exe.clone(), s.monitor.clone());
-        let before = g.learn.game(&exe).and_then(|r| r.effective(&mon));
+        let (sdr_key, hdr_key) = (record_key(&mon, false), record_key(&mon, true));
+        let looks = |g: &Inner| {
+            let r = g.learn.game(&exe);
+            (r.and_then(|r| r.effective(&sdr_key)), r.and_then(|r| r.effective(&hdr_key)))
+        };
+        let before = looks(&g);
         let mut save = false;
         for line in lines {
-            let rec = g.learn.game_mut(&exe).monitor_mut(&mon);
             match line {
-                SamplerLine::Frame(r) => {
-                    rec.hdr_skipped = false;
+                SamplerLine::Frame(r, hdr) => {
+                    g.learn.game_mut(&exe).monitor_mut(&sdr_key).hdr_skipped = false;
+                    let key = record_key(&mon, hdr);
+                    let rec = g.learn.game_mut(&exe).monitor_mut(&key);
                     if rec.learner.observe(&r) {
                         save = true;
-                        if g.learn.game_mut(&exe).take_offer_if_auto(&mon) {
-                            info!(exe = %exe, "auto-applied the newly settled look");
+                        if g.learn.game_mut(&exe).take_offer_if_auto(&key) {
+                            info!(exe = %exe, hdr, "auto-applied the newly settled look");
                         }
                     }
                 }
                 SamplerLine::Hdr => {
                     info!(exe = %exe, "monitor is in HDR mode; not learning there");
-                    rec.hdr_skipped = true;
+                    g.learn.game_mut(&exe).monitor_mut(&sdr_key).hdr_skipped = true;
                     save = true;
                     stop = true;
                 }
@@ -678,8 +686,9 @@ impl Service {
             if let Err(e) = g.learn.save() {
                 warn!(error = %e, "could not save learned-display.json");
             }
+            g.state.hdr_looks = g.learn.hdr_exes();
         }
-        if g.learn.game(&exe).and_then(|r| r.effective(&mon)) != before {
+        if looks(&g) != before {
             reapply_learned(&mut g);
             let state = Box::new(g.state.clone());
             drop(g);
@@ -1553,13 +1562,18 @@ fn fg_reconcile_step(now: u64, known: u64, count: u8) -> (u8, FgStep) {
 /// goes through the ordinary capture → apply → restore path, so restore
 /// covers it exactly like a hand-set value.
 fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
-    use crate::learned_display::{caps_for, overlay};
+    use crate::learned_display::{caps_for, overlay, realize_for, record_key};
     let mut p = profile.clone();
     let Some(t) = target else { return p };
     if !p.display.follow_focus {
         return p;
     }
-    let Some(look) = g.learn.game(&p.game.exe).and_then(|r| r.effective(&t.id)) else {
+    let Some(rec) = g.learn.game(&p.game.exe) else { return p };
+    // The look for the mode the screen will be in: the profile's own HDR
+    // choice when it makes one, else what Windows says now. An HDR look is
+    // used only while the user still has HDR learning chosen.
+    let hdr = rec.hdr_ok && p.display.hdr.unwrap_or_else(|| screen_is_hdr(&t.gdi_name));
+    let Some(look) = rec.effective(&record_key(&t.id, hdr)) else {
         return p;
     };
     let panel = g
@@ -1576,9 +1590,22 @@ fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) 
         .find(|m| m.id == t.id)
         .map(|m| m.name.clone())
         .unwrap_or_else(|| t.name.clone());
-    let adj = relay_display::learn::realize(&look, &caps_for(&panel, &name, &t.id.0));
+    let adj = realize_for(&look, &caps_for(&panel, &name, &t.id.0), hdr);
     overlay(&mut p.display, &adj);
     p
+}
+
+/// Windows HDR is on for this display now. Read-only.
+fn screen_is_hdr(gdi_name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        relay_display::mode::io::hdr_state(gdi_name).is_some_and(|h| h.enabled)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = gdi_name;
+        false
+    }
 }
 
 /// S47: start, keep or stop the look sampler so it runs exactly while a
@@ -1639,14 +1666,23 @@ fn sync_look(g: &mut Inner) {
     }
     let Some((fg, t)) = want else { return };
     let build = build_fingerprint(std::path::Path::new(&fg.image));
-    let rec = g.learn.game_mut(&fg.exe).monitor_mut(&t.id);
-    if !build.is_empty() && rec.learner.check_build(&build) {
+    let game = g.learn.game_mut(&fg.exe);
+    let hdr_ok = game.hdr_ok;
+    let mut fresh = false;
+    if !build.is_empty() {
+        fresh |= game.monitor_mut(&t.id).learner.check_build(&build);
+        let hdr_key = crate::learned_display::record_key(&t.id, true);
+        if let Some(m) = game.monitors.get_mut(&hdr_key.0) {
+            fresh |= m.learner.check_build(&build);
+        }
+    }
+    if fresh {
         info!(exe = %fg.exe, "game build is new to the learner; learning its look afresh");
         if let Err(e) = g.learn.save() {
             warn!(error = %e, "could not save learned-display.json");
         }
     }
-    match Sampler::start(&fg.exe, t.id.clone(), t.hmonitor) {
+    match Sampler::start(&fg.exe, t.id.clone(), t.hmonitor, hdr_ok) {
         Ok(s) => g.look = Some(s),
         Err(e) => warn!(error = %e, "could not start the look sampler"),
     }
@@ -1707,7 +1743,8 @@ fn learn_reply(g: &Inner, exe: &str) -> Reply {
     }
 }
 
-fn save_learn(g: &Inner) -> Option<Reply> {
+fn save_learn(g: &mut Inner) -> Option<Reply> {
+    g.state.hdr_looks = g.learn.hdr_exes();
     g.learn.save().err().map(|e| Reply::Error { message: format!("{e:#}") })
 }
 
@@ -3010,6 +3047,7 @@ impl IpcHandler {
             }
             Method::LearnDisplayStatus { ref exe }
             | Method::LearnDisplaySet { ref exe, .. }
+            | Method::LearnDisplayHdr { ref exe, .. }
             | Method::LearnDisplayApply { ref exe }
             | Method::LearnDisplayRelearn { ref exe }
             | Method::LearnDisplayAutoApply { ref exe, .. }
@@ -3023,10 +3061,30 @@ impl IpcHandler {
             Method::LearnDisplayStatus { exe } => learn_reply(&g, &exe),
             Method::LearnDisplaySet { exe, enabled } => {
                 g.learn.game_mut(&exe).enabled = enabled;
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 sync_look(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayHdr { exe, enabled } => {
+                // "Learn in HDR": the user read HDR_NOTICE and chose it.
+                let rec = g.learn.game_mut(&exe);
+                rec.hdr_ok = enabled;
+                for m in rec.monitors.values_mut() {
+                    m.hdr_skipped = false;
+                }
+                if let Some(r) = save_learn(&mut g) {
+                    return r;
+                }
+                g.state.hdr_looks = g.learn.hdr_exes();
+                // A sampler that refused HDR has exited, and one running now
+                // was started with the old choice: start afresh.
+                if g.look.as_ref().is_some_and(|s| s.exe == crate::learned_display::key(&exe)) {
+                    g.look = None;
+                }
+                sync_look(&mut g);
+                reapply_learned(&mut g);
                 learn_reply(&g, &exe)
             }
             Method::LearnDisplayApply { exe } => {
@@ -3040,7 +3098,7 @@ impl IpcHandler {
                         message: "this game's look has not settled yet; keep playing".into(),
                     };
                 }
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 reapply_learned(&mut g);
@@ -3054,7 +3112,7 @@ impl IpcHandler {
                 for id in ids {
                     took |= rec.take_offer_if_auto(&crate::types::MonitorId(id));
                 }
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 if took {
@@ -3067,14 +3125,14 @@ impl IpcHandler {
                     m.learner.relearn();
                     m.hdr_skipped = false;
                 }
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 learn_reply(&g, &exe)
             }
             Method::LearnDisplayReset { exe } => {
                 g.learn.file.games.remove(&crate::learned_display::key(&exe));
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 sync_look(&mut g);
@@ -3091,7 +3149,7 @@ impl IpcHandler {
                 if let Err(e) = crate::learned_display::import(&mut g.learn, &exe, &json) {
                     return Reply::Error { message: format!("{e:#}") };
                 }
-                if let Some(r) = save_learn(&g) {
+                if let Some(r) = save_learn(&mut g) {
                     return r;
                 }
                 sync_look(&mut g);

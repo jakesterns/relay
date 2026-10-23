@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Chips, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Pill } from "../components/Controls";
+import { Card, Chips, ConfirmButton, DoneNote, ErrorNote, HdrTag, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
 import { GettingStarted, ProfileOffer } from "../components/Onboarding";
 import { takeNav, usePendingNav } from "../lib/onboarding";
@@ -7,7 +7,7 @@ import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import {
-  api, catalogKind, fmtMb, fmtMode, newProfile, sameMode,
+  api, catalogKind, isHdrTuned, fmtMb, fmtMode, newProfile, sameMode,
   type DisplayMode, type DisplayOptions,
   type CatalogEntry, type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
   type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
@@ -173,7 +173,7 @@ export function Profiles() {
                         clickable for the mouse. */}
                     <td onClick={() => void startEdit(p.id)}>
                       <button type="button" className="rowname" onClick={() => void startEdit(p.id)}>
-                        <b>{p.name}</b><span>{p.note || p.exe}</span>
+                        <b>{p.name}{isHdrTuned(p, state) && <HdrTag />}</b><span>{p.note || p.exe}</span>
                       </button>
                     </td>
                     <td onClick={() => void startEdit(p.id)}>{headsetName(p.headset)}</td>

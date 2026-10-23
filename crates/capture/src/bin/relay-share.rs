@@ -172,10 +172,11 @@ fn run() -> Result<()> {
         // statistics (never pixels). Spawned by the core while learning.
         #[cfg(windows)]
         "look" => {
-            let (hmonitor, fps) = parse_look_args(&args[1..])?;
+            let (hmonitor, fps, hdr) = parse_look_args(&args[1..])?;
             relay_capture::look::run(
                 windows::Win32::Graphics::Gdi::HMONITOR(hmonitor as *mut _),
                 fps,
+                hdr,
             )
         }
         #[cfg(windows)]
@@ -297,17 +298,19 @@ fn parse_codec(s: &str) -> Result<relay_capture::codec::VideoCodec> {
 
 /// `look --hmonitor N [--fps 1|2]`.
 #[cfg(windows)]
-fn parse_look_args(args: &[String]) -> Result<(isize, u32)> {
-    let (mut hmonitor, mut fps) = (None, 1u32);
+fn parse_look_args(args: &[String]) -> Result<(isize, u32, bool)> {
+    let (mut hmonitor, mut fps, mut hdr) = (None, 1u32, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--hmonitor" => hmonitor = Some(it.next().context("--hmonitor N")?.parse()?),
             "--fps" => fps = it.next().context("--fps N")?.parse()?,
+            // The user chose HDR learning for this game.
+            "--hdr" => hdr = true,
             other => bail!("unknown look argument `{other}`"),
         }
     }
-    Ok((hmonitor.context("look needs --hmonitor")?, fps))
+    Ok((hmonitor.context("look needs --hmonitor")?, fps, hdr))
 }
 
 /// Parse `relay-share send` flags into [`SendOpts`].
@@ -913,8 +916,9 @@ mod tests {
 
     #[test]
     fn look_args() {
-        assert_eq!(parse_look_args(&s(&["--hmonitor", "65537"])).unwrap(), (65537, 1));
-        assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--fps", "2"])).unwrap(), (1, 2));
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "65537"])).unwrap(), (65537, 1, false));
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--fps", "2"])).unwrap(), (1, 2, false));
+        assert_eq!(parse_look_args(&s(&["--hmonitor", "1", "--hdr"])).unwrap(), (1, 1, true));
         assert!(parse_look_args(&s(&[])).is_err());
         assert!(parse_look_args(&s(&["--hmonitor", "1", "--save-frames"])).is_err());
     }

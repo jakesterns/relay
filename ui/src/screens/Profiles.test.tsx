@@ -403,3 +403,29 @@ describe("the hardware library", () => {
     expect(kv("Foreground")).toBe("cod.exe");
   });
 });
+
+describe("HDR-tuned profiles are flagged (owner 2026-10-23)", () => {
+  const cod = () => [...core.profiles.values()].find((p) => p.game.exe === "cod.exe")!;
+  const nameCell = () => [...document.querySelectorAll<HTMLElement>(".tbl .rowname")]
+    .find((b) => b.textContent?.includes(cod().name))!;
+
+  it("is not shown on an SDR profile", async () => {
+    renderScreen(<Profiles />);
+    await settle();
+    expect(within(nameCell()).queryByText("HDR")).toBeNull();
+  });
+
+  it("tags a profile whose game has a learned HDR look", async () => {
+    core.state.hdr_looks = ["cod.exe"];
+    renderScreen(<Profiles />);
+    await settle();
+    expect(within(nameCell()).getByText("HDR")).toHaveAttribute("title", expect.stringMatching(/Tuned for HDR/));
+  });
+
+  it("tags a profile that turns Windows HDR on", async () => {
+    cod().display.hdr = true;
+    renderScreen(<Profiles />);
+    await settle();
+    expect(within(nameCell()).getByText("HDR")).toBeInTheDocument();
+  });
+});
