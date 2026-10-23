@@ -12,7 +12,7 @@ import { useState } from "react";
 import { ErrorNote } from "./Controls";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
-import { api, GOALS, newProfile, type Goal, type Suggestion } from "../lib/ipc";
+import { api, GOALS, newProfile, TOURNAMENT_NOTICE, type Goal, type Suggestion } from "../lib/ipc";
 import { offerName, requestNav, setSelected } from "../lib/onboarding";
 
 /** Make a Ready profile for an offered app and select it. Returns its id. */
@@ -24,7 +24,7 @@ async function makeFromOffer(s: Suggestion): Promise<string> {
   return p.id;
 }
 
-type Made = { id: string; name: string; goal: Goal | null };
+type Made = { id: string; exe: string; name: string; goal: Goal | null };
 
 /** "<Game> is open — make a profile for it?" A quiet banner, never a modal.
  *  After the click: the goal question, then one line saying what happened. */
@@ -43,7 +43,7 @@ export function ProfileOffer() {
 
   const make = (s: Suggestion) => run(async () => {
     const id = await makeFromOffer(s);
-    setMade({ id, name: offerName(s), goal: null });
+    setMade({ id, exe: s.exe, name: offerName(s), goal: null });
     await refresh();
   });
   const decline = (s: Suggestion) => run(async () => {
@@ -53,6 +53,8 @@ export function ProfileOffer() {
   const choose = (m: Made, goal: Goal) => run(async () => {
     await api.gameEq(m.id, { kind: "set_goal", goal });
     await api.gameEq(m.id, { kind: "set_learning", enabled: true });
+    // Owner 2026-10-23: one profile setup learns both the sound and the look.
+    await api.learnDisplaySet(m.exe, true);
     setMade({ ...m, goal });
   });
 
@@ -64,8 +66,10 @@ export function ProfileOffer() {
         <div className="msg">
           {made.goal ? (
             <>
-              <b>{made.name}</b> has a profile, learning for <b>{label}</b>. Play with the game in front
-              for 5–15 minutes; nothing about your sound changes until you press Apply on the Audio screen.
+              <b>{made.name}</b> has a profile, learning its sound for <b>{label}</b> and its look for your
+              monitor. Play with the game in front for 5–15 minutes; nothing changes until you press Apply
+              on the Audio and Display screens. Look learning waits while Windows HDR is on.
+              <small className="tn" data-testid="tournament-notice">{TOURNAMENT_NOTICE}</small>
             </>
           ) : (
             <div role="group" aria-label="Choose a goal" className="goals">

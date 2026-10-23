@@ -486,6 +486,7 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    question needs no rule above it. */
 .warnbanner.offer { align-items: flex-start; }
 .warnbanner.offer .goals { border-top: 0; padding: 0; }
+.warnbanner.offer .tn { display: block; margin-top: 6px; color: var(--mute); }
 .start .steps { margin: 6px 0 0; padding: 0; list-style: none; counter-reset: step; }
 .start .steps li {
   counter-increment: step; position: relative; display: flex; flex-wrap: wrap; align-items: center;
