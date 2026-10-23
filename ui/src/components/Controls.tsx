@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 
 export function Card({ title, action, onAction, children }: {
   title?: string; action?: string; onAction?: () => void; children: ReactNode;
@@ -15,8 +15,15 @@ export function Card({ title, action, onAction, children }: {
 
 export function Kv({ k, v, mono }: { k: string; v: string; mono?: boolean }) {
   return (
-    <div className="kv"><span>{k}</span><strong className={mono ? "m" : ""}>{v}</strong></div>
+    <div className="kv"><span>{k}</span><strong className={mono ? "m" : ""}>{mono ? breakable(v) : v}</strong></div>
   );
+}
+
+/** A path wraps after a separator ("…\Local\" / "Relay"), not mid-word. <wbr>
+ *  adds no character, so the copied text is unchanged. */
+function breakable(v: string): ReactNode {
+  const parts = v.split(/(?<=[\\/])/);
+  return parts.length < 2 ? v : parts.map((p, i) => <Fragment key={i}>{p}{i < parts.length - 1 && <wbr />}</Fragment>);
 }
 
 /**

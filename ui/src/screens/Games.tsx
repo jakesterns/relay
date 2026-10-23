@@ -388,7 +388,7 @@ function GameEqCard({ profileId, onChanged }: {
             </p>
           )}
           {(status.state === "learning" || status.state === "needs_relearn") && !status.needs_goal && (
-            <div className="meter" role="progressbar" aria-label="Learning progress"
+            <div className="progbar" role="progressbar" aria-label="Learning progress"
               aria-valuemin={0} aria-valuemax={100} aria-valuenow={status.progress}>
               <i style={{ width: `${status.progress}%` }} />
             </div>

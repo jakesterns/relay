@@ -5,6 +5,9 @@
 @font-face { font-family: GeistMono; src: url(/fonts/geistmono.woff2) format("woff2"); font-weight: 100 900; }
 
 :root {
+  /* Dark native controls: scrollbars, select popups and any input without
+     its own rule would otherwise render light on the warm black. */
+  color-scheme: dark;
   --bg: #0E0D0C; --surface: #151312; --raised: #1C1917;
   --line: rgba(255,255,255,.07); --line2: rgba(255,255,255,.12);
   --ink: #ECE6DC; --mute: #8B8378; --dim: #5A544C;
@@ -87,6 +90,9 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 
 .main { padding: 22px; display: flex; flex-direction: column; gap: 14px; min-height: 0; overflow: auto; }
 .hdr { display: flex; align-items: baseline; justify-content: space-between; }
+/* A long game name wraps; the status beside it never does. */
+.hdr h1 { min-width: 0; }
+.hdr .live { flex: none; white-space: nowrap; margin-left: 16px; }
 .hdr h1 { font-size: 20px; font-weight: 500; letter-spacing: -.01em; }
 .hdr h1 em { font-style: normal; color: var(--mute); font-weight: 400; }
 .hdr .live { display: flex; align-items: center; gap: 8px; color: var(--ok); font-weight: 500; }
@@ -105,10 +111,18 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 /* A path has no spaces to wrap at: let a mono value break anywhere rather
    than run past the card (Settings: data folder, log file). */
 .kv strong.m { overflow-wrap: anywhere; }
+/* ...and first drop under its label, so it breaks only when the path is
+   wider than the whole row ("C:\Users\you\AppDat" / "a\Local\Relay"). */
+.kv:has(> strong.m) { flex-wrap: wrap; row-gap: 2px; }
+.kv:has(> strong.m) > strong.m { margin-left: auto; }
 /* A lone button between a card's text and its settings rows: room above
    and below, so it neither touches the sentence nor the next row's rule. */
 .card-act { margin: 10px 0 12px; }
 .kv:first-of-type { border-top: 0; padding-top: 0; }
+/* :first-of-type counts every div, so a kv list that follows a sentence lost
+   its rule and sat on the sentence (Receive: the call guide). */
+.card > .note + .kv { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 10px; }
+.card > .kv + .note { margin-top: 10px; }
 .kv strong { color: var(--ink); font-weight: 450; }
 .kv strong.m { font-family: GeistMono; font-size: 12px; font-variant-numeric: tabular-nums; }
 
@@ -135,6 +149,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 
 .side { border-left: 1px solid var(--line); padding: 22px 20px; display: flex; flex-direction: column; gap: 14px; overflow: auto; }
 .note { color: var(--dim); font-size: 11.5px; line-height: 1.55; margin-top: auto; }
+/* Only the first note in the side panel is pushed to the bottom; with every
+   note on margin-top:auto they spread out down the panel (Settings). */
+.side > .note ~ .note { margin-top: 0; }
+/* The plain text box outside a .field (Share: pairing code). */
+.in { width: 100%; font: inherit; color: var(--ink); background: var(--raised); border: 1px solid var(--line2); border-radius: 6px; padding: 8px 10px; outline: none; transition: border-color .25s var(--ease); }
+.in:focus { border-color: rgba(201,169,106,.5); }
+.in::placeholder { color: var(--dim); }
 /* S51: an inline link that opens the browser through the shell (the two NDI
    links the licence asks for). A button, not an <a>: the webview never
    navigates. Same size as the note it sits in; a hairline underline. */
@@ -165,6 +186,14 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .tbl { width: 100%; border-collapse: collapse; }
 .tbl th { text-align: left; color: var(--mute); font-weight: 450; padding: 6px 0 10px; font-size: 12px; border-bottom: 1px solid var(--line2); }
 .tbl td { padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: middle; }
+/* A gutter between columns: without it a long game or monitor name ran
+   straight into the next cell ("HD 560SLG ULTRAGEAR+Game"). */
+.tbl th:not(:last-child), .tbl td:not(:last-child) { padding-right: 14px; }
+.tbl td { overflow-wrap: break-word; }
+/* The game column takes the slack, so a long game name wraps instead of
+   breaking "HD 560S" over two lines. */
+.tbl th:first-child { width: 38%; }
+.tbl td:not(:first-child) b, .tbl td:not(:first-child) { overflow-wrap: normal; }
 .tbl td b { font-weight: 500; }
 .tbl td span { color: var(--dim); display: block; font-size: 11.5px; }
 .tbl td.r { text-align: right; color: var(--mute); }
@@ -212,7 +241,9 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 @keyframes chip-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .preview .healthchip { animation: none; } }
 
-.meter { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1.2fr 1.1fr; border: 1px solid var(--line2); border-radius: 8px; background: var(--surface); }
+/* flex: none -- in the Share column the preview takes the free height, and
+   the strip was squashed to its border on a short window. */
+.meter { flex: none; display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1.2fr 1.1fr; border: 1px solid var(--line2); border-radius: 8px; background: var(--surface); }
 .meter > div { padding: 14px 18px 12px; border-right: 1px solid var(--line); }
 .meter > div:last-child { border-right: 0; }
 .meter label { display: block; color: var(--mute); font-size: 12px; margin-bottom: 6px; }
@@ -327,6 +358,9 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .ab { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .ab .btn { flex: 1; }
 .p { color: var(--mute); line-height: 1.55; }
+/* A sentence in a card is followed by rows whose first one drops its top
+   padding (.tog:first-child, .kv:first-of-type): give the sentence the room. */
+.card .p:not(:last-child) { margin-bottom: 10px; }
 
 /* Display compare */
 .cmp { position: relative; border-radius: 8px; border: 1px solid var(--line2); overflow: hidden; height: 300px; display: grid; grid-template-columns: 1fr 1fr; flex: none; }
@@ -436,6 +470,9 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .devsel option { background: var(--raised); color: var(--ink); }
 .devrow { display: flex; align-items: center; gap: 10px; }
 .devrow > span { flex: 1; color: var(--mute); font-size: 12px; }
+/* In a device row the picker may shrink: at 190px it ran past the side
+   panel card's padding (Receive: Mixer > Output). */
+.devrow .devsel { flex: 0 1 auto; }
 
 /* S41: per-output listening devices. Spacing only; colours come from the tokens. */
 .listen { padding: 8px 0; border-bottom: 1px solid var(--line); }
@@ -467,8 +504,10 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .note.tip b { color: var(--mute); font-weight: 500; }
 .goals .btn { text-align: left; display: flex; flex-direction: column; gap: 2px; }
 .goals .btn small { color: var(--mute); font-weight: 400; }
-.meter { height: 3px; background: var(--line2); border-radius: 2px; margin: 4px 0 8px; overflow: hidden; }
-.meter i { display: block; height: 100%; background: var(--brass); transition: width .6s var(--ease); }
+/* Learning progress. Not .meter: that is the Share instrument strip, and
+   sharing the name squashed the strip to this 3px bar (since S46). */
+.progbar { height: 3px; background: var(--line2); border-radius: 2px; margin: 4px 0 8px; overflow: hidden; }
+.progbar i { display: block; height: 100%; background: var(--brass); transition: width .6s var(--ease); }
 .import { display: flex; flex-direction: column; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 .import textarea { width: 100%; resize: vertical; background: var(--raised); color: var(--ink); border: 1px solid var(--line2); border-radius: 6px; padding: 8px; font-family: "Geist Mono", monospace; font-size: 12px; }
 /* S52: a recommendation under its control — quiet text, the value in ink,
@@ -476,5 +515,29 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .note.rec { margin: 2px 0 10px; color: var(--mute); }
 .note.rec b { color: var(--ink); font-weight: 500; }
 .note.rec .m { color: var(--brass); margin-left: 4px; }
+/* Output & HDR: one column with even spacing; a recommendation sits close
+   under the control it is about. The three NVIDIA selects share a row. */
+.dout { display: flex; flex-direction: column; gap: 10px; }
+.dout > .note { margin: 0; }
+.dout > .note.rec { margin: -4px 0 4px; }
+.dout .three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.dout .recs { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.dout .recs .note.rec { margin: 0; }
 .btn.sm { padding: 2px 9px; font-size: 11.5px; margin-left: 6px; vertical-align: baseline; }
 .recs { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+
+/* Scrollbars: hairline-quiet, on the surface colours, not the system grey. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2A2622; border: 3px solid transparent; background-clip: padding-box; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background-color: #3a3531; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+/* The strip's six readouts need ~130px each. Below that (a 1100-1400px
+   window with the side panel open) they wrapped to three-line labels, so go
+   to two rows of three. */
+@media (max-width: 1400px) {
+  .meter { grid-template-columns: repeat(3, 1fr); }
+  .meter > div:nth-child(3n) { border-right: 0; }
+  .meter > div:nth-child(n+4) { border-top: 1px solid var(--line); }
+}
