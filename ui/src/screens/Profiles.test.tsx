@@ -84,18 +84,59 @@ describe("the headphone catalogue", () => {
     expect(await screen.findByText("No match in the catalogue")).toBeInTheDocument();
   });
 
+  it("picking a model fills the form and saves nothing until Add", async () => {
+    const h = await mount();
+    const dialog = await openHeadsetDialog(h);
+    await h.user.type(screen.getByPlaceholderText(/HD 560S, Blessing 3/), "blessing");
+    const hit = (await screen.findByText("Measured by crinacle on 711")).closest(".hwl") as HTMLElement;
+    await h.user.click(within(hit).getByRole("button", { name: /^Use Moondrop Blessing 3/ }));
+    await settle();
+
+    // Still open, nothing downloaded, the rest of the form to fill in.
+    expect(tauri.lastCall("add_headset_from_catalog")).toBeUndefined();
+    expect(within(dialog).getByTestId("catalog-picked")).toHaveTextContent("Moondrop Blessing 3");
+    expect(field("Name", dialog)).toHaveValue("Moondrop Blessing 3");
+    expect(within(dialog).getByRole("combobox")).toHaveValue("ep:dac");
+    // The catalogue fills the curve: no curve fields to confuse it with.
+    expect(within(dialog).queryByText("Curve source")).not.toBeInTheDocument();
+
+    // Rename it and bind it nowhere, then add: the core gets both.
+    await h.user.clear(field("Name", dialog));
+    await h.user.type(field("Name", dialog), "My Blessing");
+    await h.user.selectOptions(within(dialog).getByRole("combobox"), "");
+    await h.user.click(within(dialog).getByRole("button", { name: "Add to library" }));
+    await settle();
+    expect(tauri.lastCall("add_headset_from_catalog")?.args).toEqual({
+      entry: { name: "Moondrop Blessing 3", source: "crinacle", rig: "711", path: "crinacle/711%20in-ear/Moondrop%20Blessing%203" },
+      endpoint: null, name: "My Blessing", kind: "iem",
+    });
+    expect(inCard("Headsets & IEMs").getByText("My Blessing")).toBeInTheDocument();
+  });
+
+  it("Change goes back to the search without adding anything", async () => {
+    const h = await mount();
+    const dialog = await openHeadsetDialog(h);
+    await h.user.type(screen.getByPlaceholderText(/HD 560S, Blessing 3/), "blessing");
+    const hit = (await screen.findByText("Measured by crinacle on 711")).closest(".hwl") as HTMLElement;
+    await h.user.click(within(hit).getByRole("button", { name: /^Use / }));
+    await h.user.click(within(dialog).getByRole("button", { name: "Change" }));
+    expect(screen.getByPlaceholderText(/HD 560S, Blessing 3/)).toBeInTheDocument();
+    expect(tauri.lastCall("add_headset_from_catalog")).toBeUndefined();
+  });
+
   it("imports the picked model against the default endpoint and shows it plugged in", async () => {
     const h = await mount();
-    await openHeadsetDialog(h);
+    const dialog = await openHeadsetDialog(h);
     await h.user.type(screen.getByPlaceholderText(/HD 560S, Blessing 3/), "blessing");
     const hit = (await screen.findByText("Measured by crinacle on 711")).closest(".hwl") as HTMLElement;
 
-    await h.user.click(within(hit).getByRole("button", { name: "Add" }));
+    await h.user.click(within(hit).getByRole("button", { name: /^Use / }));
+    await h.user.click(within(dialog).getByRole("button", { name: "Add to library" }));
     await settle();
 
     expect(tauri.lastCall("add_headset_from_catalog")?.args).toEqual({
       entry: { name: "Moondrop Blessing 3", source: "crinacle", rig: "711", path: "crinacle/711%20in-ear/Moondrop%20Blessing%203" },
-      endpoint: "ep:dac",
+      endpoint: "ep:dac", name: "Moondrop Blessing 3", kind: "iem",
     });
     // The dialog closes and the library reloads from the core.
     expect(screen.queryByRole("heading", { name: /Add headset/ })).not.toBeInTheDocument();
@@ -109,11 +150,12 @@ describe("the headphone catalogue", () => {
   it("reports a failed download instead of adding a headset with no curve", async () => {
     core.fail.set("add_headset_from_catalog", "could not reach the measurement host");
     const h = await mount();
-    await openHeadsetDialog(h);
+    const dialog = await openHeadsetDialog(h);
     await h.user.type(screen.getByPlaceholderText(/HD 560S, Blessing 3/), "hd 600");
     const hit = (await screen.findByText("Sennheiser HD 600")).closest(".hwl") as HTMLElement;
     expect(hit).toBeTruthy();
-    await h.user.click(within(hit).getByRole("button", { name: "Add" }));
+    await h.user.click(within(hit).getByRole("button", { name: /^Use / }));
+    await h.user.click(within(dialog).getByRole("button", { name: "Add to library" }));
     await settle();
 
     expect(screen.getByText("could not reach the measurement host")).toBeInTheDocument();
@@ -125,7 +167,7 @@ describe("the headphone catalogue", () => {
     const h = await mount();
     const dialog = await openHeadsetDialog(h);
     expect(within(dialog).getByText(/Measurements come from the/)).toHaveTextContent(
-      /Relay ships only the list of names; the curve itself is downloaded when you pick a model, cached on this PC, and never redistributed\./,
+      /Relay ships only the list of names; the curve itself is downloaded when you add the model you picked, cached on this PC, and never redistributed\./,
     );
   });
 
@@ -237,13 +279,40 @@ describe("the hardware library", () => {
     // Armed, not fired. (`window.confirm` throws in this harness, so a native
     // dialog here would fail the test rather than pass it silently.)
     expect(tauri.lastCall("delete_hardware")).toBeUndefined();
-    expect(row().getByRole("button", { name: "Remove HD 560S?" })).toBeInTheDocument();
+    // Short, so it fits the row whatever the model is called: the row
+    // already names it.
+    expect(row().getByRole("button", { name: "Remove?" })).toBeInTheDocument();
 
-    await h.user.click(row().getByRole("button", { name: "Remove HD 560S?" }));
+    await h.user.click(row().getByRole("button", { name: "Remove?" }));
     await settle();
     expect(tauri.lastCall("delete_hardware")?.args).toEqual({ id: "hd560s" });
     expect(core.hardware.headsets.map((x) => x.id)).toEqual(["blessing3"]);
     h.expectClean();
+  });
+
+  it("edits a saved headset in place and keeps its measured curve", async () => {
+    const before = structuredClone(core.hardware.headsets.find((x) => x.id === "hd560s")!);
+    const h = await mount();
+    await h.user.click(within(hwRow("Headsets & IEMs", "HD 560S")).getByRole("button", { name: "Edit HD 560S" }));
+    await settle();
+    const dialog = card("Edit headset");
+    expect(field("Name", dialog)).toHaveValue("HD 560S");
+    // Editing is not adding: no catalogue search, no duplicate entry.
+    expect(within(dialog).queryByPlaceholderText(/HD 560S, Blessing 3/)).not.toBeInTheDocument();
+
+    await h.user.clear(field("Name", dialog));
+    await h.user.type(field("Name", dialog), "HD 560S (desk)");
+    await h.user.click(within(dialog).getByRole("button", { name: "IEM" }));
+    await h.user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await settle();
+
+    const saved = tauri.lastCall("save_hardware")?.args as { item: { value: Record<string, unknown> } };
+    expect(saved.item.value).toMatchObject({ id: "hd560s", name: "HD 560S (desk)", kind: "iem" });
+    expect(saved.item.value.curve).toEqual(before.curve);
+    expect(tauri.lastCall("import_curve")).toBeUndefined();
+    expect(core.hardware.headsets.filter((x) => x.id === "hd560s")).toHaveLength(1);
+    expect(screen.queryByRole("heading", { name: /Edit headset/ })).not.toBeInTheDocument();
+    expect(inCard("Headsets & IEMs").getByText("HD 560S (desk)")).toBeInTheDocument();
   });
 
   it("re-probes DDC/CI capabilities on demand, not on every refresh", async () => {

@@ -9,7 +9,7 @@
  */
 import type {
   ApoStatus, AudioEffectsStatus, CatalogEntry, CoreState, HardwareItem, HardwareReply, ListeningDevice, PresetsReply, Preview,
-  ElevatedOp, FirewallStatus, Peer,
+  ElevatedOp, FirewallStatus, HeadsetKind, Peer,
   ProbeReport, ProcessInfo, Profile, ProfileSummary, RecordingSettings, ShareCapabilities,
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
@@ -723,8 +723,8 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       const endpoint = a.endpoint as string | null;
       core.hardware.headsets.push({
         id: `${e.name}-${e.source}`.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-        name: e.name,
-        kind: e.path.includes("in-ear") ? "iem" : "headphone",
+        name: (a.name as string | null)?.trim() || e.name,
+        kind: (a.kind as HeadsetKind | null) ?? (e.path.includes("in-ear") ? "iem" : "headphone"),
         curve: [[20, 6], [1000, 0], [20000, -3]],
         source: e.source,
         endpoints: endpoint ? [endpoint] : [],

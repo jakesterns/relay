@@ -3441,7 +3441,7 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: format!("{e:#}") },
                 }
             }
-            Method::AddHeadsetFromCatalog { entry, endpoint } => {
+            Method::AddHeadsetFromCatalog { entry, endpoint, name, kind } => {
                 let cache = g.paths.curves_dir();
                 drop(g);
                 // Fetch outside the lock: this is the one request that can
@@ -3462,8 +3462,13 @@ impl IpcHandler {
 
                 let headset = crate::hardware::Headset {
                     id: crate::types::HeadsetId(entry.slug()),
-                    name: entry.name.clone(),
-                    kind: kind_from_path(&entry.path),
+                    name: name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or(&entry.name)
+                        .to_string(),
+                    kind: kind.unwrap_or_else(|| kind_from_path(&entry.path)),
                     curve: Some(points),
                     source: entry.source.clone(),
                     endpoints: endpoint.into_iter().collect(),
