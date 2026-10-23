@@ -77,9 +77,11 @@ export function UpdatesCard({ prefs, setPref }: {
         </div>
       )}
       {phaseLine && <p className="note" role="status">{phaseLine}</p>}
-      <button className="btn" disabled={busy || status === null} onClick={() => void run(api.checkForUpdates)}>
-        Check now
-      </button>
+      <div className="card-act">
+        <button className="btn" disabled={busy || status === null} onClick={() => void run(api.checkForUpdates)}>
+          Check now
+        </button>
+      </div>
       {status?.last_result && (status.last_result.ok
         ? <DoneNote text={status.last_result.message} />
         : <ErrorNote text={status.last_result.message} />)}

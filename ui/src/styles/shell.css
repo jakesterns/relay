@@ -101,7 +101,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
    ran straight into its label ("CameraNeeds Windows 11 22H2+..."). */
 .kv { display: flex; justify-content: space-between; gap: 14px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); color: var(--mute); }
 .kv > span { flex: none; }
-.kv strong { text-align: right; }
+.kv strong { text-align: right; min-width: 0; }
+/* A path has no spaces to wrap at: let a mono value break anywhere rather
+   than run past the card (Settings: data folder, log file). */
+.kv strong.m { overflow-wrap: anywhere; }
+/* A lone button between a card's text and its settings rows: room above
+   and below, so it neither touches the sentence nor the next row's rule. */
+.card-act { margin: 10px 0 12px; }
 .kv:first-of-type { border-top: 0; padding-top: 0; }
 .kv strong { color: var(--ink); font-weight: 450; }
 .kv strong.m { font-family: GeistMono; font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -267,6 +273,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .hwl span { color: var(--dim); font-size: 11.5px; }
 .hwl .ic { width: 22px; height: 16px; border: 1.25px solid var(--mute); border-radius: 3px; flex: none; }
 .hwl .ic.r { border-radius: 50%; width: 18px; height: 18px; }
+/* In use (the plugged headset, the output playing now, a connected
+   monitor): the outline turns brass and fills, so the shape reads as the
+   state it looks like rather than as an empty checkbox. */
+.hwl .ic.on { border-color: var(--brass); position: relative; }
+.hwl .ic.on:after {
+  content: ""; position: absolute; inset: 3px; border-radius: inherit; background: var(--brass);
+}
 .hwl .pill { margin-left: auto; }
 /* The text column takes the row's free width; the library rows keep their
    pill and buttons on a line beneath (.hwa), so a long model name ("KZ ZS10

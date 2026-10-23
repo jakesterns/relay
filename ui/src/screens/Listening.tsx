@@ -103,7 +103,7 @@ function Output({ ep, devices, active, processors, library, nameOf, onSet, onUse
   return (
     <div className="listen" data-output={ep.name}>
       <div className="hwl">
-        <div className="ic" />
+        <div className={ep.default ? "ic on" : "ic"} data-testid="output-state" aria-hidden />
         <div><b>{ep.name}</b><span>{ep.default ? "Playing now" : "Output"}</span></div>
         {ep.default && <Pill kind="on" text="Default" />}
       </div>

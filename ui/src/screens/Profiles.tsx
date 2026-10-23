@@ -45,6 +45,7 @@ export function Profiles() {
   const [isNew, setIsNew] = useState(false);
   const [adding, setAdding] = useState<"headset" | "monitor" | null>(null);
   const [editingHs, setEditingHs] = useState<Headset | null>(null);
+  const [editingMon, setEditingMon] = useState<HardwareMonitor | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hwError, setHwError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -138,8 +139,10 @@ export function Profiles() {
             onClose={() => { setAdding(null); setEditingHs(null); }}
             onSaved={async () => { setAdding(null); setEditingHs(null); await refresh(); }} />
         )}
-        {adding === "monitor" && (
-          <MonitorDialog onClose={() => setAdding(null)} onSaved={async () => { setAdding(null); await refresh(); }} />
+        {(adding === "monitor" || editingMon) && (
+          <MonitorDialog key={editingMon?.id ?? "new"} editing={editingMon ?? undefined}
+            onClose={() => { setAdding(null); setEditingMon(null); }}
+            onSaved={async () => { setAdding(null); setEditingMon(null); await refresh(); }} />
         )}
         <Card title="Game profiles" action="New profile" onAction={startNew}>
           {profiles.length === 0 ? (
@@ -188,7 +191,8 @@ export function Profiles() {
             <div className="empty">Library is empty</div>
           ) : hardware.headsets.map((h) => (
             <div className="hwl" key={h.id}>
-              <div className="ic r" />
+              <div className={hardware.connected.headset === h.id ? "ic r on" : "ic r"}
+                data-testid="headset-state" aria-hidden />
               {/* The side panel is narrow: the name gets the full width and
                   the pill and buttons sit on their own line beneath it. */}
               <div className="hwt">
@@ -208,20 +212,22 @@ export function Profiles() {
           ))}
         </Card>
         <ListeningCard />
-        <Card title="Monitors" action="Add" onAction={() => setAdding("monitor")}>
+        <Card title="Monitors" action="Add" onAction={() => { setEditingMon(null); setAdding("monitor"); }}>
           {hardware.monitors.length === 0 ? (
             <div className="empty">Library is empty</div>
           ) : hardware.monitors.map((m) => {
             const plugged = hardware.connected.monitors.find((c) => c.id === m.id);
             return (
               <div className="hwl" key={m.id}>
-                <div className="ic" />
+                <div className={plugged ? "ic on" : "ic"} data-testid="monitor-state" aria-hidden />
                 <div className="hwt">
                   <b>{m.name}</b>
                   <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
                   {m.color && <span className="mono" style={{ fontSize: 11 }}>{colorSummary(m.color)}</span>}
                   <div className="hwa">
                     {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
+                    <button type="button" className="ed" aria-label={`Edit ${m.name}`}
+                      onClick={() => { setAdding(null); setEditingMon(m); }}>Edit</button>
                     <ConfirmButton className="rm" confirmClassName="rm btn danger"
                       label="Remove" confirm="Remove?"
                       title={`Remove ${m.name} from the library. Profiles that use it stay, but stop matching on it.`}
@@ -478,20 +484,33 @@ function HeadsetDialog({ editing, onClose, onSaved }: {
   );
 }
 
-/** Add a monitor: pick a detected panel (EDID identity prefilled) or type one in. */
-function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
+/** Panel technologies offered as suggestions; the field stays free text
+ *  (EDID does not report the technology, so this is the user's to say). */
+export const PANEL_TYPES = [
+  "IPS", "Fast IPS", "Nano IPS", "VA", "TN", "WOLED", "QD-OLED",
+  "Mini-LED (IPS)", "Mini-LED (VA)",
+];
+
+/** Add a monitor: pick a detected panel (EDID identity prefilled) or type
+ *  one in. Edit: rename it or set its panel type; the id and what a scan
+ *  measured (DDC/CI codes, EDID colour) are kept. */
+function MonitorDialog({ editing, onClose, onSaved }: {
+  editing?: HardwareMonitor;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
   const { hardware } = useCore();
   const detected = hardware.connected.monitors;
-  const [pick, setPick] = useState(detected[0]?.id ?? "");
+  const [pick, setPick] = useState(editing?.id ?? detected[0]?.id ?? "");
   const picked = detected.find((m) => m.id === pick);
-  const [name, setName] = useState(detected[0]?.name ?? "");
-  const [panel, setPanel] = useState("");
+  const [name, setName] = useState(editing?.name ?? detected[0]?.name ?? "");
+  const [panel, setPanel] = useState(editing?.panel ?? "");
   const [error, setError] = useState<string | null>(null);
-  const valid = (picked ? true : pick.trim().length > 0) && name.trim().length > 0;
+  const valid = (picked || editing ? true : pick.trim().length > 0) && name.trim().length > 0;
 
   const save = async () => {
     if (!valid) return;
-    const m: HardwareMonitor = { id: pick.trim(), name: name.trim(), panel: panel.trim() };
+    const m: HardwareMonitor = { ...editing, id: pick.trim(), name: name.trim(), panel: panel.trim() };
     try {
       await api.saveHardware({ kind: "monitor", value: m });
       await onSaved();
@@ -499,8 +518,11 @@ function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
   };
 
   return (
-    <Card title="Add monitor" action="Cancel" onAction={onClose}>
+    <Card title={editing ? "Edit monitor" : "Add monitor"} action="Cancel" onAction={onClose}>
       <div className="form">
+        {editing ? (
+          <Kv k="Monitor id" v={editing.id} mono />
+        ) : (
         <label className="field">
           <span>Detected</span>
           <select value={picked ? pick : ""} onChange={(e) => {
@@ -516,7 +538,8 @@ function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
             ))}
           </select>
         </label>
-        {!picked && (
+        )}
+        {!picked && !editing && (
           <label className="field">
             <span>Monitor id</span>
             <input value={pick} className="mono" placeholder="mon:GSM5C7C:402NTCZ9E219"
@@ -530,13 +553,16 @@ function MonitorDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
           </label>
           <label className="field">
             <span>Panel</span>
-            <input value={panel} placeholder="Nano IPS" onChange={(e) => setPanel(e.target.value)} />
+            <input value={panel} placeholder="Nano IPS" list="relay-panel-types" onChange={(e) => setPanel(e.target.value)} />
+            <datalist id="relay-panel-types">
+              {PANEL_TYPES.map((t) => <option key={t} value={t} />)}
+            </datalist>
           </label>
         </div>
-        <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. DDC/CI controls are filled in the first time a display profile probes this panel.</p>
+        <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. Windows does not report the panel type, so set it here; DDC/CI controls are filled in by Scan monitor controls{editing ? " and are kept when you save" : ""}.</p>
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         <div className="actions">
-          <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
+          <button className="btn acc" disabled={!valid} onClick={() => void save()}>{editing ? "Save changes" : "Add to library"}</button>
           <button className="btn q" onClick={onClose}>Cancel</button>
         </div>
       </div>
