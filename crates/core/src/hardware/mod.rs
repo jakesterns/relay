@@ -395,9 +395,21 @@ impl HardwareStore {
         }
     }
 
-    pub fn upsert_monitor(&mut self, monitor: Monitor) {
+    /// Insert or replace by id. What Relay measured from the panel itself —
+    /// the DDC/CI codes and the EDID colour data — is kept when the incoming
+    /// entry does not carry it: a rename or a panel-type edit from the UI
+    /// (or re-adding the same detected monitor) must not throw away a scan.
+    pub fn upsert_monitor(&mut self, mut monitor: Monitor) {
         match self.monitors.iter_mut().find(|m| m.id == monitor.id) {
-            Some(slot) => *slot = monitor,
+            Some(slot) => {
+                if monitor.ddcci.is_none() {
+                    monitor.ddcci = slot.ddcci.take();
+                }
+                if monitor.color.is_none() {
+                    monitor.color = slot.color.take();
+                }
+                *slot = monitor;
+            }
             None => self.monitors.push(monitor),
         }
     }
@@ -603,6 +615,32 @@ mod tests {
             monitors: vec![],
         };
         assert_eq!(store.connected(&report2).headset, None);
+    }
+
+    /// A UI edit sends name and panel only: the scan's DDC/CI codes survive
+    /// it (live, 2026-10-22: a scanned LG showed "controls not scanned").
+    /// A save that does carry codes still replaces them.
+    #[test]
+    fn saving_a_monitor_without_its_scan_keeps_the_scan() {
+        let path = std::env::temp_dir()
+            .join(format!("relay-hwkeep-{}", uuid::Uuid::new_v4()))
+            .join("hardware.json");
+        let mut store = HardwareStore::load(&path).unwrap();
+        let id = MonitorId("mon:GSM5C7C:402NTCZ9E219".into());
+        let mon = |panel: &str, ddcci: Option<Vec<u8>>| Monitor {
+            id: id.clone(),
+            name: "LG ULTRAGEAR+".into(),
+            panel: panel.into(),
+            ddcci,
+            color: None,
+        };
+        store.upsert_monitor(mon("", Some(vec![0x10, 0x12])));
+        store.upsert_monitor(mon("Nano IPS", None));
+        assert_eq!(store.monitors[0].panel, "Nano IPS");
+        assert_eq!(store.monitors[0].ddcci, Some(vec![0x10, 0x12]));
+        store.upsert_monitor(mon("Nano IPS", Some(vec![0x10])));
+        assert_eq!(store.monitors[0].ddcci, Some(vec![0x10]));
+        assert_eq!(store.monitors.len(), 1);
     }
 
     #[test]

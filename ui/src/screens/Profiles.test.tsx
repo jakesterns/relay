@@ -304,6 +304,24 @@ describe("the hardware library", () => {
     expect(lit).toEqual([core.hardware.connected.endpoints.find((e) => e.default)!.name]);
   });
 
+  it("edits a saved monitor: name and panel type, id and scan kept", async () => {
+    const m = core.hardware.monitors[0];
+    m.ddcci = [0x10, 0x12];
+    const h = await mount();
+    await h.user.click(within(hwRow("Monitors", m.name)).getByRole("button", { name: `Edit ${m.name}` }));
+    await settle();
+    const dialog = card("Edit monitor");
+    expect(dialog).toHaveTextContent(m.id);
+    await h.user.clear(field("Panel", dialog));
+    await h.user.type(field("Panel", dialog), "Nano IPS");
+    await h.user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await settle();
+    const saved = tauri.lastCall("save_hardware")?.args as { item: { kind: string; value: Record<string, unknown> } };
+    expect(saved.item.kind).toBe("monitor");
+    expect(saved.item.value).toMatchObject({ id: m.id, name: m.name, panel: "Nano IPS", ddcci: [0x10, 0x12] });
+    expect(screen.queryByRole("heading", { name: /Edit monitor/ })).not.toBeInTheDocument();
+  });
+
   it("edits a saved headset in place and keeps its measured curve", async () => {
     const before = structuredClone(core.hardware.headsets.find((x) => x.id === "hd560s")!);
     const h = await mount();
