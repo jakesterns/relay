@@ -46,6 +46,42 @@ pub fn test_params() -> relay_audio::params::ChainParams {
     }
 }
 
+/// The dynamics phase (S49): one Tame band on the middle tone with its
+/// threshold far below it, so the tone sits in the band's full range.
+pub const DYN_RANGE_DB: f32 = 6.0;
+
+pub fn test_dynamics() -> relay_audio::params::ChainParams {
+    use relay_audio::params::{ChainParams, DynBandParams, DynMode, DynamicsParams};
+    ChainParams {
+        dynamics: Some(DynamicsParams {
+            bands: vec![DynBandParams {
+                mode: DynMode::Tame,
+                freq_hz: TONES_HZ[1] as f32,
+                q: 1.0,
+                threshold_db: -60.0,
+                ratio: 4.0,
+                range_db: DYN_RANGE_DB,
+                floor_db: -100.0,
+                attack_ms: 2.0,
+                release_ms: 100.0,
+                enabled: true,
+            }],
+            duck_lift: false,
+        }),
+        ..Default::default()
+    }
+}
+
+/// The dynamics phase passes when the middle tone comes down by most of the
+/// band's range and the outer tones stay put.
+pub fn dynamics_ok(bypass: [f64; 3], dynamic: [f64; 3]) -> bool {
+    let d = [dynamic[0] - bypass[0], dynamic[1] - bypass[1], dynamic[2] - bypass[2]];
+    d[1] <= -(DYN_RANGE_DB as f64) * MIN_FRACTION
+        && d[1] >= -(DYN_RANGE_DB as f64) - 1.0
+        && d[0].abs() <= MID_TOLERANCE_DB
+        && d[2].abs() <= MID_TOLERANCE_DB
+}
+
 /// Level of `freq` in one channel of interleaved audio, dBFS (Goertzel,
 /// Hann-windowed so neighbouring tones do not leak in).
 pub fn tone_db(samples: &[f32], channels: usize, rate: u32, freq: f64) -> f64 {
@@ -85,6 +121,9 @@ pub struct Report {
     pub eq_db: [f64; 3],
     /// eq - bypass, per tone.
     pub delta_db: [f64; 3],
+    /// The dynamics phase's levels, when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dynamics_db: Option<[f64; 3]>,
     pub pass: bool,
     pub verdict: String,
 }
@@ -113,6 +152,7 @@ pub fn judge(endpoint: String, reachable: bool, bypass: [f64; 3], eq: [f64; 3]) 
         bypass_db: bypass,
         eq_db: eq,
         delta_db: delta,
+        dynamics_db: None,
         pass,
         verdict,
     }
@@ -313,6 +353,12 @@ mod win {
                 return Ok(judge(endpoint.clone(), false, lv, lv));
             };
             let block = shm.block();
+            if !block.is_valid() {
+                let lv = measure(&cap, phase_secs);
+                let mut r = judge(endpoint.clone(), true, lv, lv);
+                r.verdict = "the loaded APO is another Relay build: reinstall it".into();
+                return Ok(r);
+            }
             let prior_bypass = block.bypass();
             let prior = block.read_params().map(|(_, p)| p);
             block.set_bypass(true);
@@ -322,13 +368,25 @@ mod win {
             block.set_bypass(false);
             shm.notify();
             let eq = measure(&cap, phase_secs);
+            block.write_params(&test_dynamics());
+            shm.notify();
+            let dynamic = measure(&cap, phase_secs);
             // Put back exactly what was there.
             if let Some(p) = prior {
                 block.write_params(&p);
             }
             block.set_bypass(prior_bypass);
             shm.notify();
-            Ok(judge(endpoint.clone(), true, bypass, eq))
+            let mut r = judge(endpoint.clone(), true, bypass, eq);
+            r.dynamics_db = Some(dynamic);
+            if r.pass && !dynamics_ok(bypass, dynamic) {
+                r.pass = false;
+                r.verdict = format!(
+                    "EQ applied, but the dynamic stage did not tame the 1 kHz tone: {:.1?}",
+                    [dynamic[0] - bypass[0], dynamic[1] - bypass[1], dynamic[2] - bypass[2]]
+                );
+            }
+            Ok(r)
         })();
         stop.store(true, Ordering::Release);
         let _ = play.join();
@@ -387,6 +445,22 @@ mod tests {
         }
         let r = judge("x".into(), true, levels(&input, 2, 48_000), levels(&out, 2, 48_000));
         assert!(r.pass, "{r:?}");
+    }
+
+    #[test]
+    fn the_dynamics_phase_passes_through_the_real_chain() {
+        let input = stimulus([0.0; 3], 2.0);
+        let mut chain = relay_audio::dsp::Chain::new(test_dynamics());
+        chain.prepare(48_000, 480).unwrap();
+        let mut out = vec![0.0; input.len()];
+        for (i, o) in input.chunks(960).zip(out.chunks_mut(960)) {
+            chain.process(i, o);
+        }
+        // Second half: past attack and the loudness tracker settling.
+        let half = input.len() / 2;
+        let (b, d) = (levels(&input[half..], 2, 48_000), levels(&out[half..], 2, 48_000));
+        assert!(dynamics_ok(b, d), "{b:?} -> {d:?}");
+        assert!(!dynamics_ok(b, b), "no change is a failure");
     }
 
     #[test]

@@ -303,6 +303,7 @@ fn chained_child_runs_after_relay_and_alone_in_bypass() {
         bands: vec![BandParams::peaking(1_000.0, 6.0, 1.0)],
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     core_side.block().write_params(&params);
     core_side.block().set_bypass(false);

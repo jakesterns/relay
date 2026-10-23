@@ -1,4 +1,5 @@
-//! The real-time signal chain: EQ cascade → band-split soft limiter → HRTF.
+//! The real-time signal chain: EQ cascade → dynamic EQ → band-split soft
+//! limiter → HRTF.
 //!
 //! Contract:
 //! - `prepare(sample_rate, max_block)` may allocate; `process` never does.
@@ -9,11 +10,16 @@
 //!   fading tail cannot blow up CPU on x87/SSE without FTZ.
 
 pub mod biquad;
+pub mod dynamics;
 pub mod hrtf;
 pub mod limiter;
 
-pub use crate::params::{BandParams, ChainParams, FilterKind, LimiterParams, MAX_BANDS};
+pub use crate::params::{
+    BandParams, ChainParams, DynBandParams, DynMode, DynamicsParams, FilterKind, LimiterParams,
+    MAX_BANDS, MAX_DYN_BANDS,
+};
 pub use biquad::{Coeffs, EqCascade};
+pub use dynamics::Dynamics;
 pub use hrtf::Hrtf;
 pub use limiter::Limiter;
 
@@ -46,6 +52,8 @@ pub struct Chain {
 
 struct Prepared {
     eq: [EqCascade; 2],
+    /// `None` when the profile has no dynamics or they are inert.
+    dynamics: Option<Dynamics>,
     limiter: Option<[Limiter; 2]>,
     hrtf: Option<Hrtf>,
     /// De-interleave scratch, `max_block` frames per channel.
@@ -99,6 +107,10 @@ impl Chain {
             EqCascade::design(&self.params.bands, sample_rate)?,
             EqCascade::design(&self.params.bands, sample_rate)?,
         ];
+        let dynamics = match &self.params.dynamics {
+            Some(d) => Dynamics::prepare(d, sample_rate)?,
+            None => None,
+        };
         let limiter = match &self.params.limiter {
             Some(lp) => {
                 Some([Limiter::prepare(lp, sample_rate)?, Limiter::prepare(lp, sample_rate)?])
@@ -112,6 +124,7 @@ impl Chain {
         };
         self.prepared = Some(Prepared {
             eq,
+            dynamics,
             limiter,
             hrtf,
             left: vec![0.0; max_block],
@@ -145,6 +158,9 @@ impl Chain {
         }
         p.eq[0].process(&mut p.left[..frames]);
         p.eq[1].process(&mut p.right[..frames]);
+        if let Some(d) = p.dynamics.as_mut() {
+            d.process(&mut p.left[..frames], &mut p.right[..frames]);
+        }
         if let Some(l) = p.limiter.as_mut() {
             l[0].process(&mut p.left[..frames]);
             l[1].process(&mut p.right[..frames]);
@@ -172,6 +188,9 @@ impl Chain {
 
         p.eq[0].flush_denormals();
         p.eq[1].flush_denormals();
+        if let Some(d) = p.dynamics.as_mut() {
+            d.flush_denormals();
+        }
         if let Some(l) = p.limiter.as_mut() {
             l[0].flush_denormals();
             l[1].flush_denormals();
@@ -185,6 +204,7 @@ impl Chain {
             None => true,
             Some(p) => {
                 p.eq.iter().all(|c| c.state_is_denormal_free())
+                    && p.dynamics.as_ref().is_none_or(|d| d.state_is_denormal_free())
                     && p.limiter
                         .as_ref()
                         .is_none_or(|l| l.iter().all(|x| x.state_is_denormal_free()))

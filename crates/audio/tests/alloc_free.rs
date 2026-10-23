@@ -47,6 +47,27 @@ fn process_is_allocation_free_after_prepare() {
             .collect(),
         limiter: Some(LimiterParams::new(120.0, -10.0)),
         hrtf: true,
+        dynamics: Some(relay_audio::params::DynamicsParams {
+            bands: (0..relay_audio::params::MAX_DYN_BANDS)
+                .map(|i| relay_audio::params::DynBandParams {
+                    mode: if i % 2 == 0 {
+                        relay_audio::params::DynMode::Tame
+                    } else {
+                        relay_audio::params::DynMode::Lift
+                    },
+                    freq_hz: 200.0 * (i + 1) as f32,
+                    q: 1.0,
+                    threshold_db: -50.0,
+                    ratio: 3.0,
+                    range_db: 8.0,
+                    floor_db: -80.0,
+                    attack_ms: 5.0,
+                    release_ms: 120.0,
+                    enabled: true,
+                })
+                .collect(),
+            duck_lift: true,
+        }),
     };
     let mut chain = Chain::new(params);
     chain.prepare(48_000, 480).unwrap();

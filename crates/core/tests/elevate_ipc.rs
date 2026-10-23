@@ -146,7 +146,12 @@ async fn the_apo_listing_names_the_real_endpoint_and_our_clsid() {
         assert!(text.contains("Nothing on your PC was changed"), "{text}");
     } else {
         assert!(text.contains(relay_apo::ids::APO_CLSID), "{text}");
-        assert!(text.contains("FxProperties"), "{text}");
+        // Already installed on this output (a live dev PC): the plan has no
+        // FX-store change left to list, only the COM keys it re-asserts.
+        let guid = relay_audio::sessions::default_render_endpoint_guid().unwrap();
+        if !relay_core::audio_apo::fx_has_relay(&guid) {
+            assert!(text.contains("FxProperties"), "{text}");
+        }
         if text.contains(relay_apo::ids::PKEY_RELAY_CHILD_MFX) {
             assert!(text.contains("chain:"), "{text}");
         }

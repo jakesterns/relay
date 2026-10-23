@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use relay_audio::learn::state::same_curve;
 use relay_audio::learn::{
-    GameEqFile, GameEqLayer, Goal, LayerSource, LearnRecord, LearnStatus, Limits, Thresholds,
+    DynamicsTuning, GameEqFile, GameEqLayer, Goal, LayerSource, LearnRecord, LearnStatus, Limits,
+    Thresholds,
 };
+use relay_audio::params::DynamicsParams;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -59,6 +61,16 @@ pub enum GameEqAction {
     Export {
         #[serde(default)]
         note: String,
+    },
+    /// S49: the player's tuning of the dynamic stage. Each field that is set
+    /// changes; strengths are 0 – 2 (1 = as learned or imported).
+    SetDynamics {
+        #[serde(default)]
+        enabled: Option<bool>,
+        #[serde(default)]
+        tame: Option<f32>,
+        #[serde(default)]
+        lift: Option<f32>,
     },
 }
 
@@ -116,6 +128,15 @@ pub struct GameEqStatus {
     /// (`None` while unknown; 0 once a curve is ready).
     #[serde(default)]
     pub eta_secs: Option<u64>,
+    /// S49: the applied layer has a dynamic stage to tune.
+    #[serde(default)]
+    pub dynamics_available: bool,
+    /// The player's tuning of it (the default when none was set).
+    #[serde(default)]
+    pub dynamics_tuning: DynamicsTuning,
+    /// What the stage runs with right now (tuned; `None` when off or none).
+    #[serde(default)]
+    pub dynamics: Option<DynamicsParams>,
 }
 
 /// Frames the learner did not learn from, by reason. Music is not here: it
@@ -353,24 +374,47 @@ pub fn status_with(
         excluded,
         convergence,
         eta_secs,
+        dynamics_available: layer.is_some_and(|l| l.dynamics.is_some()),
+        dynamics_tuning: layer.map(|l| l.tuning()).unwrap_or_default(),
+        dynamics: layer.and_then(|l| l.effective_dynamics()),
     }
+}
+
+/// The dynamic stage that goes with the record's candidate: as derived with
+/// it, or (a record from before S49) derived now from the same window.
+fn offered_dynamics(rec: &LearnRecord) -> Option<DynamicsParams> {
+    rec.candidate.as_ref()?;
+    rec.candidate_dynamics
+        .clone()
+        .or_else(|| relay_audio::learn::derive_dynamics(&rec.window(), rec.goal))
 }
 
 /// Take the offer into the profile. Returns false when there is none.
 pub fn take_offer(profile: &mut Profile, rec: &LearnRecord) -> bool {
     let Some(candidate) = rec.candidate.as_deref() else { return false };
+    let learned_dynamics = offered_dynamics(rec);
     let layer = match profile.audio.game_eq.take() {
+        // An imported layer keeps the stage it came with (the creator's); it
+        // takes the learned one only if it had none.
         Some(l) if l.is_imported() => GameEqLayer {
             curve: l.offer(candidate),
             source: LayerSource::Tuned,
             exe_version: rec.exe_version.clone().or(l.exe_version),
             note: l.note,
             base: l.base.or(Some(l.curve)),
-        },
-        _ => GameEqLayer::learned(
-            relay_audio::learn::derive::guard_curve(candidate),
-            rec.exe_version.clone(),
-        ),
+            dynamics_tuning: l.dynamics_tuning,
+            dynamics: None,
+        }
+        .with_dynamics(l.dynamics.or(learned_dynamics)),
+        // A learned layer follows what was learned; the player's tuning stays.
+        old => GameEqLayer {
+            dynamics_tuning: old.and_then(|l| l.dynamics_tuning),
+            ..GameEqLayer::learned(
+                relay_audio::learn::derive::guard_curve(candidate),
+                rec.exe_version.clone(),
+            )
+        }
+        .with_dynamics(learned_dynamics),
     };
     profile.audio.game_eq = Some(layer);
     true
@@ -462,8 +506,12 @@ pub fn apply_action(
             // Nothing applied yet but a curve on offer: export the offer.
             let offered = match profile.audio.game_eq.as_ref() {
                 Some(_) => None,
-                None => load_record_at(&file, &exe).and_then(|r| r.candidate).map(|c| {
-                    GameEqLayer::learned(relay_audio::learn::derive::guard_curve(&c), None)
+                None => load_record_at(&file, &exe).and_then(|r| {
+                    let dynamics = offered_dynamics(&r);
+                    r.candidate.map(|c| {
+                        GameEqLayer::learned(relay_audio::learn::derive::guard_curve(&c), None)
+                            .with_dynamics(dynamics)
+                    })
                 }),
             };
             let layer = offered
@@ -483,6 +531,31 @@ pub fn apply_action(
                 export: Some(GameEqExport { text, path: path.display().to_string() }),
                 ..Default::default()
             })
+        }
+        GameEqAction::SetDynamics { enabled, tame, lift } => {
+            let layer = profile
+                .audio
+                .game_eq
+                .as_mut()
+                .filter(|l| l.dynamics.is_some())
+                .context("there is no dynamic stage to tune yet")?;
+            for x in [tame, lift].into_iter().flatten() {
+                if !x.is_finite() {
+                    bail!("a strength must be a number");
+                }
+            }
+            let mut t = layer.tuning();
+            if let Some(e) = enabled {
+                t.enabled = *e;
+            }
+            if let Some(x) = tame {
+                t.tame = *x;
+            }
+            if let Some(x) = lift {
+                t.lift = *x;
+            }
+            layer.dynamics_tuning = Some(t.clamped());
+            done(true)
         }
     }
 }
@@ -809,6 +882,159 @@ mod tests {
         let l = p.audio.game_eq.as_ref().unwrap();
         assert_eq!(l.source, LayerSource::Tuned);
         assert_eq!(l.base.as_deref(), Some(&curve(4.0)[..]), "still anchored to the import");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn stage(lift_range: f32) -> DynamicsParams {
+        use relay_audio::params::{DynBandParams, DynMode};
+        DynamicsParams {
+            bands: vec![
+                DynBandParams {
+                    mode: DynMode::Tame,
+                    freq_hz: 1000.0,
+                    q: 0.6,
+                    threshold_db: -44.0,
+                    ratio: 6.0,
+                    range_db: 9.0,
+                    floor_db: -100.0,
+                    attack_ms: 1.0,
+                    release_ms: 120.0,
+                    enabled: true,
+                },
+                DynBandParams {
+                    mode: DynMode::Lift,
+                    freq_hz: 4000.0,
+                    q: 1.0,
+                    threshold_db: -50.0,
+                    ratio: 2.5,
+                    range_db: lift_range,
+                    floor_db: -58.0,
+                    attack_ms: 3.0,
+                    release_ms: 80.0,
+                    enabled: true,
+                },
+            ],
+            duck_lift: true,
+        }
+    }
+
+    fn ready_with_stage(exe: &str, lift_range: f32) -> LearnRecord {
+        let mut r = ready_record(exe, curve(2.0));
+        r.candidate_dynamics = Some(stage(lift_range));
+        r
+    }
+
+    #[test]
+    fn apply_takes_the_learned_stage_and_tuning_survives_new_offers() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
+            .unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let s = status(&paths, &p, false);
+        assert!(s.dynamics_available);
+        assert_eq!(s.dynamics, Some(stage(6.0)));
+        assert_eq!(s.dynamics_tuning, DynamicsTuning::default());
+
+        // The player turns the lift down and the bursts up.
+        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(1.5), lift: Some(0.5) };
+        assert!(apply_action(&paths, &mut p, &tune).unwrap().changed);
+        let s = status(&paths, &p, false);
+        assert_eq!((s.dynamics_tuning.tame, s.dynamics_tuning.lift), (1.5, 0.5));
+        let d = s.dynamics.unwrap();
+        assert_eq!(d.bands[0].range_db, 12.0, "9 dB x 1.5 = 13.5, capped at 12");
+        assert_eq!(d.bands[1].range_db, 3.0);
+        // The chain the APO gets carries the tuned stage.
+        assert_eq!(crate::audio_bridge::chain_params(&p.audio).dynamics, Some(d));
+
+        // A new learned offer replaces the stage, not the tuning.
+        save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 4.0))
+            .unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let s = status(&paths, &p, false);
+        assert_eq!(s.dynamics_tuning.lift, 0.5);
+        assert_eq!(s.dynamics.unwrap().bands[1].range_db, 2.0);
+
+        // Off: the stage stays stored but nothing runs.
+        let off = GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None };
+        apply_action(&paths, &mut p, &off).unwrap();
+        let s = status(&paths, &p, false);
+        assert!(s.dynamics_available && s.dynamics.is_none());
+        assert_eq!(crate::audio_bridge::chain_params(&p.audio).dynamics, None);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn tuning_needs_a_stage_and_numbers() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        let tune = GameEqAction::SetDynamics { enabled: Some(true), tame: None, lift: None };
+        assert!(apply_action(&paths, &mut p, &tune).is_err(), "nothing to tune");
+        p.audio.game_eq =
+            Some(GameEqLayer::learned(curve(1.0), None).with_dynamics(Some(stage(6.0))));
+        let nan = GameEqAction::SetDynamics { enabled: None, tame: Some(f32::NAN), lift: None };
+        assert!(apply_action(&paths, &mut p, &nan).is_err());
+        let wild = GameEqAction::SetDynamics { enabled: None, tame: Some(-3.0), lift: Some(50.0) };
+        apply_action(&paths, &mut p, &wild).unwrap();
+        let t = p.audio.game_eq.as_ref().unwrap().tuning();
+        assert_eq!((t.tame, t.lift), (0.0, relay_audio::learn::dynamics::MAX_STRENGTH));
+        // Wire form, as the UI sends it.
+        let a: GameEqAction =
+            serde_json::from_str(r#"{"kind":"set_dynamics","lift":0.25}"#).unwrap();
+        assert_eq!(a, GameEqAction::SetDynamics { enabled: None, tame: None, lift: Some(0.25) });
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_shared_file_carries_the_stage_and_the_creators_tuning() {
+        let (maker_paths, dir) = paths();
+        let (paths2, dir2) = paths();
+        let paths = maker_paths;
+        let mut maker = profile();
+        save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
+            .unwrap();
+        apply_action(&paths, &mut maker, &GameEqAction::Apply).unwrap();
+        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(0.5), lift: Some(1.5) };
+        apply_action(&paths, &mut maker, &tune).unwrap();
+        let out = apply_action(&paths, &mut maker, &GameEqAction::Export { note: "x".into() })
+            .unwrap()
+            .export
+            .unwrap();
+        assert!(out.text.contains("\"dynamics\"") && out.text.contains("\"schema\": 2"));
+
+        let mut friend = profile();
+        apply_action(&paths2, &mut friend, &GameEqAction::Import { text: out.text }).unwrap();
+        assert_eq!(
+            status(&paths2, &friend, false).dynamics,
+            status(&paths, &maker, false).dynamics
+        );
+        // The friend can re-tune from the creator's base.
+        let mine = GameEqAction::SetDynamics { enabled: None, tame: Some(1.0), lift: None };
+        apply_action(&paths2, &mut friend, &mine).unwrap();
+        let d = status(&paths2, &friend, false).dynamics.unwrap();
+        assert_eq!(d.bands[0].range_db, 9.0);
+        // Fine-tuning an imported layer keeps the creator's stage.
+        save_record_at(&record_file(&paths2, "Game.exe"), &ready_with_stage("Game.exe", 2.0))
+            .unwrap();
+        apply_action(&paths2, &mut friend, &GameEqAction::SetLearning { enabled: true }).unwrap();
+        apply_action(&paths2, &mut friend, &GameEqAction::Apply).unwrap();
+        let l = friend.audio.game_eq.as_ref().unwrap();
+        assert_eq!(l.source, LayerSource::Tuned);
+        assert_eq!(l.dynamics, Some(stage(6.0)));
+        std::fs::remove_dir_all(dir).ok();
+        std::fs::remove_dir_all(dir2).ok();
+    }
+
+    #[test]
+    fn export_before_apply_carries_the_offered_stage() {
+        let (paths, dir) = paths();
+        let mut p = profile();
+        save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
+            .unwrap();
+        let out =
+            apply_action(&paths, &mut p, &GameEqAction::Export { note: String::new() }).unwrap();
+        let f = GameEqFile::parse(&out.export.unwrap().text).unwrap();
+        assert_eq!(f.to_layer().dynamics, Some(stage(6.0)));
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -73,6 +73,158 @@ impl LimiterParams {
     }
 }
 
+/// Upper bound on dynamic-EQ bands in one stage.
+pub const MAX_DYN_BANDS: usize = 4;
+
+/// Reference the dynamic stage's levels are expressed against, dB: a level
+/// `L` means "band level − program loudness + `DYN_REF_DB`". The learned
+/// game statistics use the same scale (`learn::analyzer::REL_REF_DB`), so a
+/// threshold read off a learned histogram drops straight in, and turning the
+/// game or Windows volume up or down never moves where a band triggers.
+pub const DYN_REF_DB: f32 = -50.0;
+
+/// What a dynamic band does when its detector crosses the threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DynMode {
+    /// Downward: above `threshold_db` the band is cut by
+    /// `(level − threshold) × (1 − 1/ratio)`, at most `range_db`
+    /// (gunshots, explosions).
+    Tame,
+    /// Upward: between `floor_db` and `threshold_db` the band is lifted by
+    /// `(threshold − level) × (1 − 1/ratio)`, at most `range_db`, and never
+    /// by more than the level stands above the floor, so silence, hiss and
+    /// the steady bed are never raised and nothing is lifted past the
+    /// threshold (quiet footsteps).
+    Lift,
+}
+
+/// One dynamic-EQ band: a bell at `freq_hz` / `q` whose gain follows the
+/// band's own level, stereo-linked.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DynBandParams {
+    pub mode: DynMode,
+    pub freq_hz: f32,
+    pub q: f32,
+    /// Relative level (see [`DYN_REF_DB`]) where the band starts acting.
+    pub threshold_db: f32,
+    /// ≥ 1. 1 = no action.
+    pub ratio: f32,
+    /// Largest cut (Tame) or boost (Lift), positive dB.
+    pub range_db: f32,
+    /// Lift only: no boost at or below this relative level.
+    #[serde(default = "default_floor_db")]
+    pub floor_db: f32,
+    #[serde(default = "default_attack_ms")]
+    pub attack_ms: f32,
+    #[serde(default = "default_dyn_release_ms")]
+    pub release_ms: f32,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_floor_db() -> f32 {
+    -100.0
+}
+fn default_attack_ms() -> f32 {
+    3.0
+}
+fn default_dyn_release_ms() -> f32 {
+    150.0
+}
+fn default_true() -> bool {
+    true
+}
+
+/// The dynamic stage: up to [`MAX_DYN_BANDS`] bands, after the EQ cascade
+/// and before the limiter.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct DynamicsParams {
+    pub bands: Vec<DynBandParams>,
+    /// Hold Lift bands back while any Tame band is cutting (and through its
+    /// release), so a gunshot's tail is never what gets lifted.
+    #[serde(default)]
+    pub duck_lift: bool,
+}
+
+impl DynamicsParams {
+    /// True when the stage would leave the audio untouched.
+    pub fn is_inert(&self) -> bool {
+        !self.bands.iter().any(|b| b.enabled && b.range_db > 0.0 && b.ratio > 1.0)
+    }
+
+    /// Why this stage cannot be prepared, if it cannot.
+    pub fn check(&self) -> Result<(), &'static str> {
+        if self.bands.len() > MAX_DYN_BANDS {
+            return Err("too many dynamic bands");
+        }
+        self.bands.iter().try_for_each(DynBandParams::check)
+    }
+}
+
+/// Hard bounds a dynamic band must sit inside to be prepared (the DSP's own
+/// sanity limits; the learned and imported paths cap tighter).
+pub mod dyn_bounds {
+    pub const MIN_HZ: f32 = 20.0;
+    pub const MAX_HZ: f32 = 20_000.0;
+    pub const MIN_Q: f32 = 0.1;
+    pub const MAX_Q: f32 = 10.0;
+    pub const MIN_LEVEL_DB: f32 = -120.0;
+    pub const MAX_LEVEL_DB: f32 = 40.0;
+    pub const MAX_RATIO: f32 = 20.0;
+    pub const MAX_RANGE_DB: f32 = 24.0;
+    pub const MIN_ATTACK_MS: f32 = 0.1;
+    pub const MAX_ATTACK_MS: f32 = 200.0;
+    pub const MIN_RELEASE_MS: f32 = 5.0;
+    pub const MAX_RELEASE_MS: f32 = 5000.0;
+}
+
+impl DynBandParams {
+    /// Why this band cannot be prepared, if it cannot.
+    pub fn check(&self) -> Result<(), &'static str> {
+        use dyn_bounds::*;
+        let all = [
+            self.freq_hz,
+            self.q,
+            self.threshold_db,
+            self.ratio,
+            self.range_db,
+            self.floor_db,
+            self.attack_ms,
+            self.release_ms,
+        ];
+        if all.iter().any(|x| !x.is_finite()) {
+            return Err("dynamic band has a non-finite parameter");
+        }
+        if !(MIN_HZ..=MAX_HZ).contains(&self.freq_hz) {
+            return Err("dynamic band frequency outside 20 Hz to 20 kHz");
+        }
+        if !(MIN_Q..=MAX_Q).contains(&self.q) {
+            return Err("dynamic band Q outside 0.1 to 10");
+        }
+        if !(MIN_LEVEL_DB..=MAX_LEVEL_DB).contains(&self.threshold_db)
+            || !(MIN_LEVEL_DB..=MAX_LEVEL_DB).contains(&self.floor_db)
+        {
+            return Err("dynamic band threshold or floor out of range");
+        }
+        if !(1.0..=MAX_RATIO).contains(&self.ratio) {
+            return Err("dynamic band ratio outside 1 to 20");
+        }
+        if !(0.0..=MAX_RANGE_DB).contains(&self.range_db) {
+            return Err("dynamic band range outside 0 to 24 dB");
+        }
+        if !(MIN_ATTACK_MS..=MAX_ATTACK_MS).contains(&self.attack_ms)
+            || !(MIN_RELEASE_MS..=MAX_RELEASE_MS).contains(&self.release_ms)
+        {
+            return Err("dynamic band attack or release out of range");
+        }
+        if self.mode == DynMode::Lift && self.floor_db >= self.threshold_db {
+            return Err("a lift band's floor must sit below its threshold");
+        }
+        Ok(())
+    }
+}
+
 /// Everything `Chain::prepare` needs.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ChainParams {
@@ -81,4 +233,49 @@ pub struct ChainParams {
     pub limiter: Option<LimiterParams>,
     /// Spatialize stereo → binaural with the bundled "Relay Arena" IR set.
     pub hrtf: bool,
+    /// The dynamic stage (S49): after the EQ, before the limiter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics: Option<DynamicsParams>,
+}
+
+impl ChainParams {
+    /// True when the chain would do nothing: no bands, limiter, HRTF or a
+    /// dynamic stage that acts. The APO and the core both skip such a chain.
+    pub fn is_passthrough(&self) -> bool {
+        self.bands.is_empty()
+            && self.limiter.is_none()
+            && !self.hrtf
+            && self.dynamics.as_ref().is_none_or(|d| d.is_inert())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passthrough_counts_an_acting_dynamic_stage() {
+        assert!(ChainParams::default().is_passthrough());
+        let band = DynBandParams {
+            mode: DynMode::Tame,
+            freq_hz: 1000.0,
+            q: 1.0,
+            threshold_db: -30.0,
+            ratio: 4.0,
+            range_db: 6.0,
+            floor_db: -100.0,
+            attack_ms: 2.0,
+            release_ms: 100.0,
+            enabled: true,
+        };
+        let mut p = ChainParams {
+            dynamics: Some(DynamicsParams { bands: vec![band], duck_lift: false }),
+            ..ChainParams::default()
+        };
+        assert!(!p.is_passthrough(), "dynamics alone is a chain");
+        p.dynamics.as_mut().unwrap().bands[0].enabled = false;
+        assert!(p.is_passthrough(), "a disabled stage is not");
+        p.hrtf = true;
+        assert!(!p.is_passthrough());
+    }
 }

@@ -19,6 +19,7 @@ fn demo_renders_through_the_full_chain() {
         bands: vec![BandParams::peaking(3000.0, 4.0, 1.0), BandParams::peaking(120.0, -3.0, 0.8)],
         limiter: Some(LimiterParams::new(150.0, -12.0)),
         hrtf: true, // demo is 48 kHz, so the bundled IR applies
+        dynamics: None,
     };
     let report = render(&params, &original, &processed).unwrap();
     assert_eq!(report.sample_rate, 48_000);
@@ -66,7 +67,7 @@ fn hrtf_is_skipped_not_fatal_at_unbundled_rates() {
     }
     w.finalize().unwrap();
 
-    let params = ChainParams { bands: vec![], limiter: None, hrtf: true };
+    let params = ChainParams { bands: vec![], limiter: None, hrtf: true, dynamics: None };
     let report = render(&params, &input, &output).unwrap();
     assert!(!report.hrtf_applied);
     assert_eq!(report.sample_rate, 32_000);

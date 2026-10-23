@@ -26,12 +26,16 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::params::{BandParams, ChainParams, FilterKind, LimiterParams, MAX_BANDS};
+use crate::params::{
+    BandParams, ChainParams, DynBandParams, DynMode, DynamicsParams, FilterKind, LimiterParams,
+    MAX_BANDS, MAX_DYN_BANDS,
+};
 
 /// "RAPO" little-endian.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"RAPO");
-/// Bump on any layout change; readers refuse other versions.
-pub const VERSION: u32 = 1;
+/// Bump on any layout change; readers refuse other versions (a mismatched
+/// APO and core leave the endpoint in pass-through). 2: S49 dynamics.
+pub const VERSION: u32 = 2;
 /// Appended to the section name to form the params-changed event name.
 pub const EVENT_SUFFIX: &str = ".evt";
 
@@ -74,6 +78,31 @@ pub struct PodLimiter {
     pub knee_db: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct PodDynBand {
+    /// 0 Tame, 1 Lift.
+    pub mode: u32,
+    pub freq_hz: f32,
+    pub q: f32,
+    pub threshold_db: f32,
+    pub ratio: f32,
+    pub range_db: f32,
+    pub floor_db: f32,
+    pub attack_ms: f32,
+    pub release_ms: f32,
+    pub enabled: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct PodDynamics {
+    pub present: u32,
+    pub duck_lift: u32,
+    pub n_bands: u32,
+    pub bands: [PodDynBand; MAX_DYN_BANDS],
+}
+
 /// Fixed-size POD image of [`ChainParams`]. No pointers, no padding surprises:
 /// every field is 4 bytes.
 #[repr(C)]
@@ -83,6 +112,7 @@ pub struct PodParams {
     pub bands: [PodBand; MAX_BANDS],
     pub limiter: PodLimiter,
     pub hrtf: u32,
+    pub dynamics: PodDynamics,
 }
 
 impl Default for PodParams {
@@ -148,7 +178,63 @@ pub fn encode(p: &ChainParams) -> PodParams {
             knee_db: 0.0,
         },
     };
-    PodParams { n_bands: n as u32, bands, limiter, hrtf: p.hrtf as u32 }
+    let mut dynamics = PodDynamics::default();
+    if let Some(d) = &p.dynamics {
+        dynamics.present = 1;
+        dynamics.duck_lift = d.duck_lift as u32;
+        let n = d.bands.len().min(MAX_DYN_BANDS);
+        dynamics.n_bands = n as u32;
+        for (dst, b) in dynamics.bands.iter_mut().zip(d.bands.iter().take(n)) {
+            *dst = PodDynBand {
+                mode: match b.mode {
+                    DynMode::Tame => 0,
+                    DynMode::Lift => 1,
+                },
+                freq_hz: b.freq_hz,
+                q: b.q,
+                threshold_db: b.threshold_db,
+                ratio: b.ratio,
+                range_db: b.range_db,
+                floor_db: b.floor_db,
+                attack_ms: b.attack_ms,
+                release_ms: b.release_ms,
+                enabled: b.enabled as u32,
+            };
+        }
+    }
+    PodParams { n_bands: n as u32, bands, limiter, hrtf: p.hrtf as u32, dynamics }
+}
+
+/// The dynamics half of [`decode`]. A stage that fails its own checks (an
+/// unknown mode, a value out of range) is dropped, not passed on: the EQ
+/// must still run if a writer got the dynamics wrong.
+fn decode_dynamics(d: &PodDynamics) -> Option<DynamicsParams> {
+    if d.present == 0 {
+        return None;
+    }
+    let n = (d.n_bands as usize).min(MAX_DYN_BANDS);
+    let mut bands = Vec::with_capacity(n);
+    for b in &d.bands[..n] {
+        let mode = match b.mode {
+            0 => DynMode::Tame,
+            1 => DynMode::Lift,
+            _ => return None,
+        };
+        bands.push(DynBandParams {
+            mode,
+            freq_hz: b.freq_hz,
+            q: b.q,
+            threshold_db: b.threshold_db,
+            ratio: b.ratio,
+            range_db: b.range_db,
+            floor_db: b.floor_db,
+            attack_ms: b.attack_ms,
+            release_ms: b.release_ms,
+            enabled: b.enabled != 0,
+        });
+    }
+    let p = DynamicsParams { bands, duck_lift: d.duck_lift != 0 };
+    p.check().ok().map(|()| p)
 }
 
 /// POD → [`ChainParams`]. Unknown filter kinds decode as disabled peaking
@@ -178,7 +264,7 @@ pub fn decode(p: &PodParams) -> ChainParams {
         release_ms: p.limiter.release_ms,
         knee_db: p.limiter.knee_db,
     });
-    ChainParams { bands, limiter, hrtf: p.hrtf != 0 }
+    ChainParams { bands, limiter, hrtf: p.hrtf != 0, dynamics: decode_dynamics(&p.dynamics) }
 }
 
 impl ParamBlock {
@@ -208,14 +294,20 @@ impl ParamBlock {
         self.bypass.store(on as u32, Ordering::Release);
     }
 
-    /// Publish new parameters (single-writer: the core).
-    pub fn write_params(&self, p: &ChainParams) {
+    /// Publish new parameters (single-writer: the core). Refused (false) on
+    /// a block another build created: its layout is not ours, and an APO of
+    /// that build would read our bytes as its own parameters.
+    pub fn write_params(&self, p: &ChainParams) -> bool {
+        if !self.is_valid() {
+            return false;
+        }
         let pod = encode(p);
         let s = self.seq.load(Ordering::Relaxed);
         self.seq.store(s.wrapping_add(1), Ordering::Release); // odd: in progress
                                                               // SAFETY: single writer; readers seeing an odd/changed seq discard.
         unsafe { std::ptr::write_volatile(self.params.get(), pod) };
         self.seq.store(s.wrapping_add(2), Ordering::Release);
+        true
     }
 
     /// Seqlock read. Returns `None` when a writer is mid-update after a few
@@ -433,7 +525,83 @@ mod tests {
             ],
             limiter: Some(LimiterParams::new(150.0, -12.0)),
             hrtf: true,
+            dynamics: Some(sample_dynamics()),
         }
+    }
+
+    fn sample_dynamics() -> DynamicsParams {
+        DynamicsParams {
+            bands: vec![
+                DynBandParams {
+                    mode: DynMode::Tame,
+                    freq_hz: 250.0,
+                    q: 0.8,
+                    threshold_db: -40.0,
+                    ratio: 3.0,
+                    range_db: 9.0,
+                    floor_db: -100.0,
+                    attack_ms: 5.0,
+                    release_ms: 120.0,
+                    enabled: true,
+                },
+                DynBandParams {
+                    mode: DynMode::Lift,
+                    freq_hz: 3150.0,
+                    q: 1.0,
+                    threshold_db: -55.0,
+                    ratio: 2.5,
+                    range_db: 6.0,
+                    floor_db: -75.0,
+                    attack_ms: 10.0,
+                    release_ms: 150.0,
+                    enabled: false,
+                },
+            ],
+            duck_lift: true,
+        }
+    }
+
+    #[test]
+    fn dynamics_round_trip_and_bad_stages_are_dropped_not_fatal() {
+        let p = sample_params();
+        let mut pod = encode(&p);
+        assert_eq!(decode(&pod).dynamics, p.dynamics);
+        // An unknown mode or an out-of-range value: the EQ survives, the
+        // dynamics are dropped.
+        pod.dynamics.bands[0].mode = 7;
+        let back = decode(&pod);
+        assert_eq!(back.dynamics, None);
+        assert_eq!(back.bands, p.bands);
+        let mut pod = encode(&p);
+        pod.dynamics.bands[1].ratio = f32::NAN;
+        assert_eq!(decode(&pod).dynamics, None);
+        // More bands than the stage holds are clamped on encode.
+        let mut many = p.clone();
+        many.dynamics.as_mut().unwrap().bands = vec![sample_dynamics().bands[0]; 6];
+        assert_eq!(decode(&encode(&many)).dynamics.unwrap().bands.len(), MAX_DYN_BANDS);
+    }
+
+    #[test]
+    fn a_block_of_another_layout_version_reads_as_nothing() {
+        let block = ParamBlock {
+            bypass: AtomicU32::new(0),
+            magic: AtomicU32::new(0),
+            version: AtomicU32::new(0),
+            seq: AtomicU32::new(0),
+            params: std::cell::UnsafeCell::new(PodParams::default()),
+        };
+        block.init();
+        block.write_params(&sample_params());
+        assert!(block.read_params().is_some());
+        // An older APO / core (layout 1) sharing the name.
+        block.version.store(1, Ordering::Release);
+        assert!(!block.is_valid());
+        assert!(block.read_params().is_none(), "mismatched layouts mean pass-through");
+        // And this build never writes into it: that APO would read our
+        // layout as its own.
+        let seq = block.sequence();
+        assert!(!block.write_params(&sample_params()));
+        assert_eq!(block.sequence(), seq, "nothing written");
     }
 
     #[test]
@@ -448,7 +616,10 @@ mod tests {
     fn block_layout_bypass_is_first_word_and_pod_sized() {
         assert_eq!(std::mem::offset_of!(ParamBlock, bypass), 0);
         // Everything is u32/f32: no hidden padding in the POD image.
-        assert_eq!(std::mem::size_of::<PodParams>(), 4 * (1 + 5 * MAX_BANDS + 6 + 1),);
+        assert_eq!(
+            std::mem::size_of::<PodParams>(),
+            4 * (1 + 5 * MAX_BANDS + 6 + 1 + 3 + 10 * MAX_DYN_BANDS),
+        );
     }
 
     #[test]

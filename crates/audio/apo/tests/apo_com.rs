@@ -153,6 +153,7 @@ fn apo_end_to_end_in_process() {
         bands: vec![BandParams::peaking(1_000.0, 6.0, 1.0)],
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     core_side.block().write_params(&params);
     core_side.block().set_bypass(false);
@@ -223,6 +224,7 @@ fn apo_end_to_end_in_process() {
         bands: vec![BandParams::peaking(1_000.0, -6.0, 1.0)],
         limiter: None,
         hrtf: false,
+        dynamics: None,
     };
     core_side.block().write_params(&params2);
     core_side.notify();
@@ -239,6 +241,53 @@ fn apo_end_to_end_in_process() {
         assert!(std::time::Instant::now() < deadline, "chain rebuild never landed");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+
+    // S49: the dynamic stage travels through the section too. A tame band on
+    // the sine's own frequency, threshold well under it: once the rebuilt
+    // chain has heard ~a second, the sine comes down by the band's range.
+    let params3 = ChainParams {
+        dynamics: Some(relay_audio::params::DynamicsParams {
+            bands: vec![relay_audio::params::DynBandParams {
+                mode: relay_audio::params::DynMode::Tame,
+                freq_hz: 1_000.0,
+                q: 1.0,
+                threshold_db: -60.0,
+                ratio: 4.0,
+                range_db: 6.0,
+                floor_db: -100.0,
+                attack_ms: 2.0,
+                release_ms: 100.0,
+                enabled: true,
+            }],
+            duck_lift: false,
+        }),
+        // Dynamics only: no EQ band. build_chain must still build it (a
+        // dynamics-only import, or a tame-only stage with no curve).
+        ..ChainParams::default()
+    };
+    core_side.block().write_params(&params3);
+    core_side.notify();
+    let rms = |x: &[f32]| (x.iter().map(|s| s * s).sum::<f32>() / x.len() as f32).sqrt();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        process(&input, &mut output);
+        if output != reference2 && output != input {
+            break; // the dynamic chain took over (the gain still opening)
+        }
+        assert!(std::time::Instant::now() < deadline, "dynamics never reached the APO");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for _ in 0..(48_000 / FRAMES) {
+        process(&input, &mut output);
+    }
+    let drop_db = 20.0 * (rms(&input) / rms(&output)).log10();
+    assert!(
+        (4.0..6.5).contains(&drop_db),
+        "tamed by {drop_db:.2} dB (same as input {}, rms in {} out {})",
+        output == input,
+        rms(&input),
+        rms(&output)
+    );
 
     // SAFETY: plain COM call; drops the chain and joins the control thread.
     unsafe { cfg.UnlockForProcess() }.expect("unlock");

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
-use relay_audio::params::{BandParams, ChainParams, FilterKind, LimiterParams, MAX_BANDS};
+use relay_audio::params::{BandParams, ChainParams, DynMode, FilterKind, LimiterParams, MAX_BANDS};
 
 use crate::types::AudioSettings;
 
@@ -71,6 +71,13 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
         bands.extend(game);
     }
 
+    // S49: the dynamic stage, tuned by the player and guarded. Its lift is a
+    // boost too, so it brings the safety limiter the same way.
+    let dynamics = audio.game_eq.as_ref().and_then(|l| l.effective_dynamics());
+    layer_boosts |= dynamics
+        .as_ref()
+        .is_some_and(|d| d.bands.iter().any(|b| b.enabled && b.mode == DynMode::Lift));
+
     bands.extend(audio.bands.iter().map(|b| BandParams {
         kind: FilterKind::Peaking,
         freq_hz: b.freq_hz,
@@ -90,6 +97,7 @@ pub fn chain_params_with(audio: &AudioSettings, correction: Option<&[(f32, f32)]
             None => None,
         },
         hrtf: audio.hrtf,
+        dynamics,
     }
 }
 
@@ -116,7 +124,10 @@ pub fn wants_processing(audio: &AudioSettings) -> bool {
     !audio.bands.is_empty()
         || audio.hrtf
         || audio.limiter.is_some()
-        || audio.game_eq.as_ref().is_some_and(|l| l.curve.len() >= 2)
+        || audio
+            .game_eq
+            .as_ref()
+            .is_some_and(|l| l.curve.len() >= 2 || l.effective_dynamics().is_some())
 }
 
 /// Result of an A/B render, IPC-friendly.
@@ -347,6 +358,59 @@ mod tests {
             120.0,
             "the user's limiter wins"
         );
+    }
+
+    fn stage(with_lift: bool) -> relay_audio::params::DynamicsParams {
+        use relay_audio::params::{DynBandParams, DynMode, DynamicsParams};
+        let band = |mode, freq_hz, threshold_db, floor_db| DynBandParams {
+            mode,
+            freq_hz,
+            q: 1.0,
+            threshold_db,
+            ratio: 4.0,
+            range_db: 30.0, // over every cap: must arrive guarded
+            floor_db,
+            attack_ms: 2.0,
+            release_ms: 100.0,
+            enabled: true,
+        };
+        let mut bands = vec![band(DynMode::Tame, 800.0, -44.0, -100.0)];
+        if with_lift {
+            bands.push(band(DynMode::Lift, 4000.0, -10.0, -60.0));
+        }
+        DynamicsParams { bands, duck_lift: true }
+    }
+
+    #[test]
+    fn the_dynamic_stage_reaches_the_chain_tuned_guarded_and_with_a_limiter_for_lifts() {
+        use relay_audio::learn::dynamics::{MAX_LIFT_DB, MAX_LIFT_THRESHOLD_DB, MAX_TAME_DB};
+        let cut = [(20.0, -4.0), (200.0, -2.0), (400.0, 0.0), (16000.0, 0.0)];
+        let mut audio = AudioSettings {
+            game_eq: Some(layer(&cut).with_dynamics(Some(stage(false)))),
+            ..AudioSettings::default()
+        };
+        let p = chain_params(&audio);
+        let d = p.dynamics.expect("dynamics in the chain");
+        assert_eq!(d.bands[0].range_db, MAX_TAME_DB);
+        assert!(p.limiter.is_none(), "taming alone cannot overshoot");
+
+        audio.game_eq = Some(layer(&cut).with_dynamics(Some(stage(true))));
+        let p = chain_params(&audio);
+        let lift = p.dynamics.unwrap().bands[1];
+        assert_eq!((lift.range_db, lift.threshold_db), (MAX_LIFT_DB, MAX_LIFT_THRESHOLD_DB));
+        assert!(p.limiter.is_some(), "a lift brings the safety limiter");
+
+        // A dynamics-only layer (an imported file without a curve) still
+        // counts as processing; turned off, nothing runs and nothing is asked.
+        let mut only = relay_audio::learn::GameEqLayer::learned(Vec::new(), None)
+            .with_dynamics(Some(stage(false)));
+        let a = AudioSettings { game_eq: Some(only.clone()), ..AudioSettings::default() };
+        assert!(wants_processing(&a));
+        only.dynamics_tuning =
+            Some(relay_audio::learn::DynamicsTuning { enabled: false, ..Default::default() });
+        let a = AudioSettings { game_eq: Some(only), ..AudioSettings::default() };
+        assert!(!wants_processing(&a));
+        assert!(chain_params(&a).dynamics.is_none());
     }
 
     /// A profile written by hand or over IPC cannot reach the DSP unguarded.
