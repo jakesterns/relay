@@ -506,9 +506,7 @@ mod real {
         }
 
         fn nv_color_write(&self, gdi_name: &str, raw: &NvColorRaw) -> Result<()> {
-            let Some(api) = nvapi::NvApi::load() else {
-                bail!("NvAPI unavailable for {gdi_name}")
-            };
+            let Some(api) = nvapi::NvApi::load() else { bail!("NvAPI unavailable for {gdi_name}") };
             let Some(d) = api.display_by_gdi_name(gdi_name) else {
                 bail!("NvAPI does not drive {gdi_name}")
             };
@@ -1100,11 +1098,8 @@ mod tests {
         io.state.lock().monitors[0].ddc = Some(vec![0x10, 0x12, 0x14]);
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
-        let mut d = DisplaySettings {
-            mode: Some(mode_4k(240)),
-            hdr: Some(false),
-            ..Default::default()
-        };
+        let mut d =
+            DisplaySettings { mode: Some(mode_4k(240)), hdr: Some(false), ..Default::default() };
         d.nvidia_color.bpc = Some(10);
         d.monitor.color_preset = Some(0x05);
 
@@ -1148,11 +1143,8 @@ mod tests {
         let io = FakeIo::two_monitors();
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
-        let mut d = DisplaySettings {
-            mode: Some(mode_1440(240)),
-            hdr: Some(true),
-            ..Default::default()
-        };
+        let mut d =
+            DisplaySettings { mode: Some(mode_1440(240)), hdr: Some(true), ..Default::default() };
         d.nvidia_color.bpc = Some(8);
         let snap = adapter.capture(Some(&t), &d).unwrap();
         assert!(snap.targets.is_empty(), "{snap:?}");
@@ -1163,7 +1155,10 @@ mod tests {
     #[test]
     fn s52_unlisted_modes_unsupported_hdr_and_no_nvapi_are_reported_not_forced() {
         let io = FakeIo::two_monitors_with(amd_state());
-        io.state.lock().hdr.insert(RAW_DISPLAY1.into(), HdrState { supported: false, enabled: false });
+        io.state
+            .lock()
+            .hdr
+            .insert(RAW_DISPLAY1.into(), HdrState { supported: false, enabled: false });
         io.state.lock().monitors[0].color_presets = Some(vec![0x05]);
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);

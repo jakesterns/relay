@@ -62,13 +62,9 @@ pub struct DisplayOptions {
 /// Pure: probe + library + live reads → options and recommendations.
 pub fn assemble(target: &MonitorProbe, lib: Option<&Monitor>, live: LiveOptions) -> DisplayOptions {
     let panel_label = lib.map(|m| m.panel.as_str()).unwrap_or("");
-    let native = lib
-        .and_then(|m| m.mode_override)
-        .map(|m| (m.width, m.height))
-        .or(target.native);
-    let hdr_supported = lib
-        .and_then(|m| m.hdr_override)
-        .unwrap_or_else(|| live.hdr.is_some_and(|h| h.supported));
+    let native = lib.and_then(|m| m.mode_override).map(|m| (m.width, m.height)).or(target.native);
+    let hdr_supported =
+        lib.and_then(|m| m.hdr_override).unwrap_or_else(|| live.hdr.is_some_and(|h| h.supported));
     let color_presets: Vec<u16> = target
         .color_presets
         .clone()
@@ -180,7 +176,14 @@ mod tests {
             modes: vec![m(3840, 2160, 240), m(3840, 2160, 60), m(2560, 1440, 240)],
             current_mode: Some(m(2560, 1440, 240)),
             hdr: Some(HdrState { supported: true, enabled: true }),
-            nv_color: Some(NvColorRaw { format: 0, colorimetry: 8, range: 0, bpc: 2, policy: 0, depth: 0 }),
+            nv_color: Some(NvColorRaw {
+                format: 0,
+                colorimetry: 8,
+                range: 0,
+                bpc: 2,
+                policy: 0,
+                depth: 0,
+            }),
             vendor: Vendor::Nvidia,
         }
     }
@@ -223,7 +226,8 @@ mod tests {
 
     #[test]
     fn a_non_nvidia_display_has_no_output_colour() {
-        let o = assemble(&lg(), None, LiveOptions { nv_color: None, vendor: Vendor::Amd, ..live() });
+        let o =
+            assemble(&lg(), None, LiveOptions { nv_color: None, vendor: Vendor::Amd, ..live() });
         assert!(o.nvidia_color.is_none());
         assert!(o.recommendations.iter().all(|r| !r.field.starts_with("nvidia_color")));
     }

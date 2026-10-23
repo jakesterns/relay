@@ -235,7 +235,9 @@ impl NvApi {
 
     /// NvAPI's display id for this display (what the colour control takes).
     fn display_id(&self, d: &NvDisplay) -> Result<u32> {
-        let f = self.display_id_by_name.ok_or_else(|| anyhow::anyhow!("this driver has no display ids"))?;
+        let f = self
+            .display_id_by_name
+            .ok_or_else(|| anyhow::anyhow!("this driver has no display ids"))?;
         let name: Vec<u8> = d.gdi_name.bytes().chain(std::iter::once(0)).collect();
         let mut id = 0u32;
         // SAFETY: NUL-terminated name, out-param for the id.
@@ -247,7 +249,9 @@ impl NvApi {
     }
 
     fn color_call(&self, d: &NvDisplay, data: &mut ColorDataV5) -> Result<()> {
-        let f = self.color_control.ok_or_else(|| anyhow::anyhow!("this driver has no colour control"))?;
+        let f = self
+            .color_control
+            .ok_or_else(|| anyhow::anyhow!("this driver has no colour control"))?;
         let id = self.display_id(d)?;
         data.version = nv_version::<ColorDataV5>(5);
         data.size = std::mem::size_of::<ColorDataV5>() as u16;

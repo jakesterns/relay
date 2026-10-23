@@ -311,7 +311,9 @@ pub enum Method {
     AckCrash,
     /// "Not for this game": never offer a profile for this exe again
     /// (`offers.json`), and drop the current offer if it is this one.
-    DeclineSuggestion { exe: String },
+    DeclineSuggestion {
+        exe: String,
+    },
     /// S46: a profile's learned game EQ — read its status, or act on it
     /// (learning switch, goal, auto-apply, Apply / Relearn / Reset, Import /
     /// Export). Every action replies with the status after it.
@@ -1018,10 +1020,15 @@ mod tests {
         let mut s = crate::types::CoreState::default();
         let v = serde_json::to_value(&s).unwrap();
         assert!(v.get("suggestion").is_none(), "no offer, no field: {v}");
-        s.suggestion =
-            Some(crate::suggest::Suggestion { exe: "mw4.exe".into(), title: "Call of Duty".into() });
+        s.suggestion = Some(crate::suggest::Suggestion {
+            exe: "mw4.exe".into(),
+            title: "Call of Duty".into(),
+        });
         let v = serde_json::to_value(&s).unwrap();
-        assert_eq!(v["suggestion"], serde_json::json!({ "exe": "mw4.exe", "title": "Call of Duty" }));
+        assert_eq!(
+            v["suggestion"],
+            serde_json::json!({ "exe": "mw4.exe", "title": "Call of Duty" })
+        );
         let r: Request = serde_json::from_str(
             r#"{"id":3,"method":"decline_suggestion","params":{"exe":"mw4.exe"}}"#,
         )
@@ -1055,7 +1062,9 @@ mod tests {
         };
         assert_eq!(name.as_deref(), Some("KZ IEMs"));
         assert_eq!(kind, Some(crate::hardware::HeadsetKind::Iem));
-        let old = format!(r#"{{"id":1,"method":"add_headset_from_catalog","params":{{"entry":{entry}}}}}"#);
+        let old = format!(
+            r#"{{"id":1,"method":"add_headset_from_catalog","params":{{"entry":{entry}}}}}"#
+        );
         let Method::AddHeadsetFromCatalog { name, kind, endpoint, .. } =
             serde_json::from_str::<Request>(&old).unwrap().method
         else {

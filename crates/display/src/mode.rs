@@ -47,7 +47,10 @@ impl std::fmt::Display for DisplayMode {
 /// scaling flags) removed.
 pub fn normalize(mut modes: Vec<DisplayMode>) -> Vec<DisplayMode> {
     modes.sort_by(|a, b| {
-        b.pixels().cmp(&a.pixels()).then(b.width.cmp(&a.width)).then(b.refresh_hz.cmp(&a.refresh_hz))
+        b.pixels()
+            .cmp(&a.pixels())
+            .then(b.width.cmp(&a.width))
+            .then(b.refresh_hz.cmp(&a.refresh_hz))
     });
     modes.dedup();
     modes
@@ -123,7 +126,11 @@ pub mod io {
     }
 
     fn mode_of(dm: &DEVMODEW) -> DisplayMode {
-        DisplayMode { width: dm.dmPelsWidth, height: dm.dmPelsHeight, refresh_hz: dm.dmDisplayFrequency }
+        DisplayMode {
+            width: dm.dmPelsWidth,
+            height: dm.dmPelsHeight,
+            refresh_hz: dm.dmDisplayFrequency,
+        }
     }
 
     /// Every raw DEVMODE the driver lists for this device.
@@ -309,7 +316,10 @@ pub mod io {
         // SAFETY: sized, typed set packet.
         let rc = unsafe { DisplayConfigSetDeviceInfo(&packet.header) };
         if rc != 0 {
-            bail!("Windows refused HDR {} on {gdi_name} ({rc})", if enabled { "on" } else { "off" });
+            bail!(
+                "Windows refused HDR {} on {gdi_name} ({rc})",
+                if enabled { "on" } else { "off" }
+            );
         }
         Ok(())
     }
@@ -325,13 +335,19 @@ mod tests {
 
     #[test]
     fn normalize_sorts_largest_and_fastest_first_without_duplicates() {
-        let got = normalize(vec![m(1920, 1080, 60), m(3840, 2160, 60), m(3840, 2160, 240), m(1920, 1080, 60)]);
+        let got = normalize(vec![
+            m(1920, 1080, 60),
+            m(3840, 2160, 60),
+            m(3840, 2160, 240),
+            m(1920, 1080, 60),
+        ]);
         assert_eq!(got, vec![m(3840, 2160, 240), m(3840, 2160, 60), m(1920, 1080, 60)]);
     }
 
     #[test]
     fn recommends_the_fastest_native_mode() {
-        let modes = vec![m(3840, 2160, 240), m(3840, 2160, 60), m(2560, 1440, 360), m(1920, 1080, 480)];
+        let modes =
+            vec![m(3840, 2160, 240), m(3840, 2160, 60), m(2560, 1440, 360), m(1920, 1080, 480)];
         assert_eq!(recommended(&modes, Some((3840, 2160))), Some(m(3840, 2160, 240)));
         // A faster mode at a lower resolution is not "native".
         assert_eq!(recommended(&modes, Some((2560, 1440))), Some(m(2560, 1440, 360)));

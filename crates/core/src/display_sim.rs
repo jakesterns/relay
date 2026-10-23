@@ -301,7 +301,11 @@ impl DisplayIo for SimIo {
     }
 
     fn modes(&self, gdi_name: &str) -> Vec<DisplayMode> {
-        if self.is_target(gdi_name) { SIM_MODES.to_vec() } else { Vec::new() }
+        if self.is_target(gdi_name) {
+            SIM_MODES.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     fn get_mode(&self, gdi_name: &str) -> Result<DisplayMode> {

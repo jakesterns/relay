@@ -450,7 +450,10 @@ mod tests {
         assert!(u.is_empty());
         let (w, u) = plan_writes(&input, Some(&[0x10]), &Quirks::default());
         assert!(w.is_empty());
-        assert_eq!(u, vec![Unsupported { field: "color_preset", reason: UnsupportedReason::NotAdvertised }]);
+        assert_eq!(
+            u,
+            vec![Unsupported { field: "color_preset", reason: UnsupportedReason::NotAdvertised }]
+        );
     }
 
     /// A verified row, built the only way one can be built.

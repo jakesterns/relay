@@ -135,7 +135,10 @@ impl NvColorRaw {
 /// already matches (no write, nothing to restore). Fields the profile leaves
 /// unset keep their current raw value. An unknown bit depth is refused as
 /// `Err` naming the field, so it reaches "not on this hardware".
-pub fn plan(current: &NvColorRaw, want: &NvColorSettings) -> Result<Option<NvColorRaw>, &'static str> {
+pub fn plan(
+    current: &NvColorRaw,
+    want: &NvColorSettings,
+) -> Result<Option<NvColorRaw>, &'static str> {
     if want.is_inert() {
         return Ok(None);
     }

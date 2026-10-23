@@ -164,7 +164,8 @@ pub fn window_covers_monitor(hwnd: u64) -> bool {
         if mon.is_invalid() {
             return false;
         }
-        let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut info =
+            MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         // SAFETY: cbSize set; valid out-pointer.
         if !unsafe { GetMonitorInfoW(mon, &mut info) }.as_bool() {
             return false;

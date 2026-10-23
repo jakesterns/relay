@@ -143,20 +143,31 @@ pub fn recommend(input: &Input) -> Vec<Recommendation> {
     }
 
     let (lift, lift_why) = match (kind, mini_led) {
-        (_, true) => (0, "Local dimming already handles this panel's blacks; a lift only adds bloom."),
+        (_, true) => {
+            (0, "Local dimming already handles this panel's blacks; a lift only adds bloom.")
+        }
         (PanelKind::Oled, _) => (0, "OLED black is true black; lifting shadows turns it grey."),
-        (PanelKind::Va, _) => (10, "VA panels crush detail just above black; a small lift brings it back."),
+        (PanelKind::Va, _) => {
+            (10, "VA panels crush detail just above black; a small lift brings it back.")
+        }
         (PanelKind::Tn, _) => (5, "TN panels lose some shadow detail; a light lift recovers it."),
         (PanelKind::Ips, _) => (0, "IPS shows near-black detail as it is; a lift only adds glow."),
-        (PanelKind::Unknown, _) => (0, "Set the panel type on the monitor for shadow advice; none until then."),
+        (PanelKind::Unknown, _) => {
+            (0, "Set the panel type on the monitor for shadow advice; none until then.")
+        }
     };
     out.push(rec("shadow_lift", Value::Number(lift), lift_why));
 
     if input.vendor != Vendor::Other {
         let (vib, why) = match kind {
-            PanelKind::Oled => (50, "OLED colour is already vivid; extra vibrance oversaturates skin and skies."),
+            PanelKind::Oled => {
+                (50, "OLED colour is already vivid; extra vibrance oversaturates skin and skies.")
+            }
             PanelKind::Unknown => (50, "Neutral until the panel type is known."),
-            _ => (60, "A little vibrance helps enemies stand out on an sRGB LCD without clipping colour."),
+            _ => (
+                60,
+                "A little vibrance helps enemies stand out on an sRGB LCD without clipping colour.",
+            ),
         };
         out.push(rec("vibrance", Value::Number(vib), why));
     }
@@ -230,6 +241,9 @@ mod tests {
         let v = serde_json::to_value(Value::Mode(modes()[0])).unwrap();
         assert_eq!(v["refresh_hz"], 240);
         assert_eq!(serde_json::to_value(Value::Flag(false)).unwrap(), serde_json::json!(false));
-        assert_eq!(serde_json::to_value(Value::Text("rgb".into())).unwrap(), serde_json::json!("rgb"));
+        assert_eq!(
+            serde_json::to_value(Value::Text("rgb".into())).unwrap(),
+            serde_json::json!("rgb")
+        );
     }
 }

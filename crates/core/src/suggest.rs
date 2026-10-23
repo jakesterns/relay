@@ -212,7 +212,10 @@ mod tests {
         let has = |e: &str| e == "cod.exe";
         assert_eq!(decide(kept.as_ref(), seen("relay-ui.exe", false), has, &[]), None);
         // Or declined it.
-        assert_eq!(decide(offer.as_ref(), seen("relay-ui.exe", false), none, &["cod.exe".into()]), None);
+        assert_eq!(
+            decide(offer.as_ref(), seen("relay-ui.exe", false), none, &["cod.exe".into()]),
+            None
+        );
     }
 
     #[test]
