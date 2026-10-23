@@ -23,6 +23,12 @@ pub const CAMERA_MEDIA_SOURCE: &str = "camera-media-source";
 /// registered per user, so its keys live under HKCU.
 pub const CAMERA_DSHOW_FILTER: &str = "camera-dshow-filter";
 
+/// Component id of a VB-CABLE install Relay ran from its bundled pack. Only
+/// a recorded component is ever uninstalled: a VB-CABLE the user installed
+/// themselves has no record and is never touched. No keys are listed:
+/// VB-Audio's own uninstaller removes what its installer added.
+pub const VBCABLE_DRIVER: &str = "vbcable-driver";
+
 /// The user's first-run decision. `None` = not asked yet (the UI shows the
 /// consent screen). A recorded `false` is as final as a `true`: the screen
 /// does not come back, Settings does.
@@ -41,6 +47,11 @@ pub struct Consent {
     /// VB-Cable route also honours this flag even though it installs
     /// nothing).
     pub microphone: bool,
+    /// "Install the virtual microphone (VB-CABLE by VB-Audio)": Relay may
+    /// install its bundled VB-CABLE. Off by default; absent in files written
+    /// before it existed.
+    #[serde(default)]
+    pub vbcable: bool,
 }
 
 /// One registered component and exactly what it added to the machine.
@@ -174,6 +185,7 @@ mod tests {
                 apo: false,
                 camera: true,
                 microphone: false,
+                vbcable: false,
             }),
             ..Default::default()
         };
@@ -203,6 +215,13 @@ mod tests {
         save(&path, &f).expect("save 2");
         assert!(load(&path).expect("load 2").components.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn consent_without_vbcable_field_still_loads() {
+        let old = r#"{"version":1,"consent":{"decided_at":"2026-01-01T00:00:00Z","apo":true,"camera":true,"microphone":true},"components":[]}"#;
+        let f: InstalledFile = serde_json::from_str(old).expect("pre-vbcable file");
+        assert!(!f.consent.unwrap().vbcable, "absent = not opted in");
     }
 
     #[test]
