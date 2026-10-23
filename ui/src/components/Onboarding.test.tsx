@@ -52,7 +52,10 @@ describe("the profile offer", () => {
     await settle();
     const actions = tauri.calls.filter((c) => c.cmd === "game_eq").map((c) => c.args.action);
     expect(actions).toEqual([{ kind: "set_goal", goal: "awareness" }, { kind: "set_learning", enabled: true }]);
-    expect(offer()).toHaveTextContent(/learning for Awareness.*nothing about your sound changes until you press Apply/);
+    // Both learners start: the sound (above) and the look.
+    expect(tauri.lastCall("learn_display_set")?.args).toEqual({ exe: "mw4.exe", enabled: true });
+    expect(offer()).toHaveTextContent(/learning its sound for Awareness and its look.*nothing changes until you press Apply/);
+    expect(within(offer()).getByTestId("tournament-notice")).toHaveTextContent(/tournaments/);
     await h.user.click(within(offer()).getByRole("button", { name: "Done" }));
     expect(screen.queryByTestId("profile-offer")).not.toBeInTheDocument();
     h.expectClean();
