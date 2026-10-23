@@ -92,7 +92,7 @@ export function LearnFromVideoCard({ profileId }: { profileId: string | null }) 
               <Kv k="Video" v={job.file_name} />
               {job.state === "running" && (
                 <>
-                  <div className="meter" role="progressbar" aria-label="Video learning progress"
+                  <div className="progbar" role="progressbar" aria-label="Video learning progress"
                     aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined}>
                     <i style={{ width: `${pct ?? 0}%` }} />
                   </div>

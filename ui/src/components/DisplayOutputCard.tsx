@@ -134,6 +134,7 @@ export function DisplayOutputCard({ draft, update, monitor }: {
     <Card title="Output & HDR" action="Reset" onAction={() => set((p) => {
       delete p.display.mode; delete p.display.hdr; delete p.display.nvidia_color; delete p.display.monitor.color_preset;
     })}>
+      <div className="dout">
       <p className="note" data-testid="panel-advice">
         Advice for {opts.name}: {PANEL_NAMES[opts.panel_kind]}
         {opts.panel_from_user ? "" : opts.panel_kind === "unknown"
@@ -174,7 +175,7 @@ export function DisplayOutputCard({ draft, update, monitor }: {
 
       {opts.vendor === "nvidia" && nvNow ? (
         <>
-          <div className="two">
+          <div className="three">
             <label className="field">
               <span>NVIDIA colour format</span>
               <select aria-label="NVIDIA colour format" disabled={off} value={d?.nvidia_color?.format ?? ""}
@@ -199,7 +200,6 @@ export function DisplayOutputCard({ draft, update, monitor }: {
                 {RANGES.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
               </select>
             </label>
-          </div>
           <label className="field">
             <span>Output colour depth</span>
             <select aria-label="NVIDIA colour depth" disabled={off} value={d?.nvidia_color?.bpc ?? ""}
@@ -212,6 +212,7 @@ export function DisplayOutputCard({ draft, update, monitor }: {
               {DEPTHS.map((b) => <option key={b} value={b}>{b}-bit</option>)}
             </select>
           </label>
+          </div>
           <Rec field="nvidia_color.format" recs={recs} draft={draft} update={update} />
           <Rec field="nvidia_color.range" recs={recs} draft={draft} update={update} />
           <Rec field="nvidia_color.bpc" recs={recs} draft={draft} update={update} />
@@ -248,6 +249,7 @@ export function DisplayOutputCard({ draft, update, monitor }: {
         </div>
       )}
       <p className="note">Recommendations are only suggestions: nothing changes until you press Use and save, and everything here is put back when the game leaves the front.</p>
+      </div>
     </Card>
   );
 }
