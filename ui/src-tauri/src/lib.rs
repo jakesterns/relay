@@ -716,6 +716,17 @@ async fn probe_hardware() -> CmdResult<relay_core::hardware::ProbeReport> {
 }
 
 #[tauri::command]
+async fn display_options(
+    monitor: Option<String>,
+) -> CmdResult<relay_core::display_options::DisplayOptions> {
+    let monitor = monitor.map(relay_core::types::MonitorId);
+    match call(Method::DisplayOptions { monitor }).await? {
+        Reply::DisplayOptions { options } => Ok(*options),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
 async fn import_curve(headset: String, csv: String) -> CmdResult<Vec<(f32, f32)>> {
     match call(Method::ImportCurve { headset: relay_core::types::HeadsetId(headset), csv }).await? {
         Reply::Curve { points } => Ok(points),
@@ -1395,6 +1406,7 @@ pub fn run() {
             set_listening_devices,
             set_active_listening,
             probe_hardware,
+            display_options,
             import_curve,
             render_preview,
             game_eq,

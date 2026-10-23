@@ -3380,6 +3380,23 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }
+            Method::DisplayOptions { monitor } => {
+                let target = match monitor {
+                    Some(id) => g.last_report.monitors.iter().find(|m| m.id == id),
+                    None => g.last_report.monitors.iter().find(|m| m.primary),
+                }
+                .or_else(|| g.last_report.monitors.first())
+                .cloned();
+                let Some(target) = target else {
+                    return Reply::Error { message: "that monitor is not connected".into() };
+                };
+                let lib = g.library.monitors.iter().find(|m| m.id == target.id).cloned();
+                drop(g);
+                // Off the lock: the reads load NvAPI/ADL and enumerate modes.
+                let live = crate::display_options::read_live(&target.gdi_name);
+                let options = crate::display_options::assemble(&target, lib.as_ref(), live);
+                Reply::DisplayOptions { options: Box::new(options) }
+            }
             Method::ProbeHardware => {
                 let report = g.hardware.probe(true);
                 // Remember what the panels reported: the advertised VCP codes
@@ -3399,6 +3416,12 @@ impl IpcHandler {
                         {
                             if known.ddcci.as_ref() != Some(ddc) {
                                 known.ddcci = Some(ddc.clone());
+                                dirty = true;
+                            }
+                            if probed.color_presets.is_some()
+                                && known.color_presets != probed.color_presets
+                            {
+                                known.color_presets = probed.color_presets.clone();
                                 dirty = true;
                             }
                         }

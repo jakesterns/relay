@@ -19,6 +19,7 @@ pub mod backup;
 pub mod config;
 pub mod crash;
 pub mod display_backend;
+pub mod display_options;
 pub mod display_sim;
 pub mod elevate;
 pub mod firewall;

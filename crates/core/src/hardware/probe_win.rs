@@ -250,11 +250,13 @@ pub(crate) fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
         let refresh_hz = (refresh.Denominator != 0)
             .then(|| refresh.Numerator as f32 / refresh.Denominator as f32);
 
-        let ddc = if with_ddc && hmonitor != 0 {
-            ddc_capabilities(HMONITOR(hmonitor as *mut _)).map(|caps| ddc::parse_vcp_codes(&caps))
+        let caps = if with_ddc && hmonitor != 0 {
+            ddc_capabilities(HMONITOR(hmonitor as *mut _))
         } else {
             None
         };
+        let ddc = caps.as_deref().map(ddc::parse_vcp_codes);
+        let color_presets = caps.as_deref().and_then(|c| ddc::parse_vcp_values(c, 0x14));
 
         out.push(MonitorProbe {
             id,
@@ -265,6 +267,7 @@ pub(crate) fn probe_monitors(with_ddc: bool) -> Vec<MonitorProbe> {
             hmonitor,
             gdi_name,
             ddc,
+            color_presets,
             color,
         });
     }

@@ -143,6 +143,10 @@ pub struct MonitorSettings {
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharpness: Option<u16>,
+    /// MCCS 0x14 "select colour preset" value (S52), only values the panel
+    /// advertises: 0x01 sRGB, 0x05 6500 K, 0x08 9300 K, 0x0B user 1, …
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_preset: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -160,6 +164,18 @@ pub struct DisplaySettings {
     /// Send the unfiltered frame to the share feed.
     #[serde(default = "default_true")]
     pub share_true_colors: bool,
+    /// S52: Windows display mode while this profile is applied (`None` =
+    /// leave). Only modes the driver lists are applied; the screen blanks for
+    /// about a second each way, so this is opt-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<relay_display::mode::DisplayMode>,
+    /// S52: Windows HDR on/off while applied (`None` = leave). Only where
+    /// Windows reports HDR as supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<bool>,
+    /// S52: NVIDIA output colour (format, dynamic range, bit depth).
+    #[serde(default, skip_serializing_if = "relay_display::nvcolor::NvColorSettings::is_inert")]
+    pub nvidia_color: relay_display::nvcolor::NvColorSettings,
 }
 
 fn default_true() -> bool {
@@ -373,6 +389,9 @@ pub struct DisplayVia {
     pub amd: bool,
     pub gamma: bool,
     pub ddcci: bool,
+    /// S52: display mode or HDR went through Windows' own display settings.
+    #[serde(default)]
+    pub windows: bool,
     /// Field names from `MonitorSettings`/`GpuColor` that were skipped,
     /// e.g. `black_equalizer` on a model with no verified vendor code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

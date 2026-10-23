@@ -108,3 +108,34 @@ fn live_read_amd_state() {
         println!("    hue:        {:?}", adl.get_hue(d));
     }
 }
+
+/// S52: the read-only half of the new controls — the mode list, HDR state,
+/// NVIDIA output colour (NV_COLOR_DATA v5 GET) and the 0x14 colour preset.
+/// Confirms the struct layouts against the real driver without writing.
+#[test]
+#[ignore = "reads the live monitor/GPU state; run by hand"]
+fn live_read_s52_state() {
+    use relay_display::mode;
+    for (hmon, gdi) in monitors() {
+        println!("== {gdi}");
+        let modes = mode::io::list_modes(&gdi);
+        println!("  current mode: {:?}", mode::io::current_mode(&gdi).map(|m| m.to_string()));
+        let first: Vec<String> = modes.iter().take(6).map(|m| m.to_string()).collect();
+        println!("  {} modes; first: {first:?}", modes.len());
+        println!("  hdr: {:?}", mode::io::hdr_state(&gdi));
+        match nvapi::NvApi::load() {
+            Some(api) => match api.display_by_gdi_name(&gdi) {
+                Some(d) => match api.get_color(&d) {
+                    Ok(raw) => println!("  nvidia colour: {raw:?} -> {:?}", raw.reading()),
+                    Err(e) => println!("  nvidia colour: {e}"),
+                },
+                None => println!("  nvidia colour: not an NVIDIA display"),
+            },
+            None => println!("  nvidia colour: no NvAPI"),
+        }
+        match ddc::PhysicalMonitor::open(hmon, 60) {
+            Ok(pm) => println!("  colour preset 0x14: {:?}", pm.get_vcp(0x14)),
+            Err(e) => println!("  DDC/CI: {e}"),
+        }
+    }
+}

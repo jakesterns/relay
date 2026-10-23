@@ -57,6 +57,15 @@ pub struct MonitorStateSnapshot {
     /// restoring someone's monitor after an upgrade — still loads.
     #[serde(default, rename = "nvapi", alias = "gpu", skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuColorSnapshot>,
+    /// S52: the Windows display mode before apply, when the profile changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<relay_display::mode::DisplayMode>,
+    /// S52: whether HDR was on before apply, when the profile changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<bool>,
+    /// S52: raw NVIDIA output colour before apply (policy included).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nv_color: Option<relay_display::nvcolor::NvColorRaw>,
 }
 
 /// Which vendor's colour API produced a snapshot. Restore must go back
@@ -227,6 +236,9 @@ mod tests {
                     hue_min: -30,
                     hue_max: 30,
                 }),
+                mode: None,
+                hdr: None,
+                nv_color: None,
             };
             let text = serde_json::to_string(&ms).unwrap();
             assert!(text.contains("\"nvapi\""), "wire name is unchanged: {text}");
@@ -265,6 +277,22 @@ mod tests {
                         hue_deg: 0,
                         hue_min: 0,
                         hue_max: 0,
+                    }),
+                    // S52 state survives the disk round trip too: the crash
+                    // path is the one place it has to.
+                    mode: Some(relay_display::mode::DisplayMode {
+                        width: 2560,
+                        height: 1440,
+                        refresh_hz: 240,
+                    }),
+                    hdr: Some(true),
+                    nv_color: Some(relay_display::nvcolor::NvColorRaw {
+                        format: 0,
+                        colorimetry: 8,
+                        range: 0,
+                        bpc: 2,
+                        policy: 0,
+                        depth: 0,
                     }),
                 }],
             },
