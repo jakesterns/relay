@@ -268,10 +268,16 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .hwl .ic { width: 22px; height: 16px; border: 1.25px solid var(--mute); border-radius: 3px; flex: none; }
 .hwl .ic.r { border-radius: 50%; width: 18px; height: 18px; }
 .hwl .pill { margin-left: auto; }
-/* The text column takes the free width and wraps a long model name
-   ("KZ ZS10 Pro 2 (on-on-off-off)") instead of pushing the row's buttons
-   out of the card. */
-.hwl .hwt { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* The text column takes the row's free width; the library rows keep their
+   pill and buttons on a line beneath (.hwa), so a long model name ("KZ ZS10
+   Pro 2 (on-on-off-off)") wraps between words in the full width instead of
+   being squeezed beside them. break-word, not anywhere: anywhere lets the
+   column's min-content shrink to one character. */
+.hwl .hwt { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
+.hwl .hwa { display: flex; align-items: center; gap: 10px; margin-top: 4px; min-height: 18px; }
+.hwl .hwa .pill, .hwl .hwa .ed, .hwl .hwa .rm { margin-left: 0; }
+.hwl .hwa .ed, .hwl .hwa .rm { padding-left: 0; }
+.hwl .hwa:empty { display: none; }
 /* Edit: quiet like Remove, but always readable — it is how a saved entry
    is changed at all. */
 .hwl .ed {
@@ -279,8 +285,6 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
   font: inherit; font-size: 11.5px; padding: 2px 4px;
 }
 .hwl .ed:hover, .hwl .ed:focus-visible { color: var(--ink); }
-.hwl .hwt + .ed, .hwl .pill + .ed { margin-left: auto; }
-.hwl .ed + .rm { margin-left: 4px; }
 .hwl.picked { border: 1px solid var(--line2); border-radius: 8px; padding: 9px 10px; }
 /* Remove: present but quiet. It sits at the end of a library row and only
    resolves on hover, so the list reads as hardware rather than as a row of

@@ -189,17 +189,21 @@ export function Profiles() {
           ) : hardware.headsets.map((h) => (
             <div className="hwl" key={h.id}>
               <div className="ic r" />
+              {/* The side panel is narrow: the name gets the full width and
+                  the pill and buttons sit on their own line beneath it. */}
               <div className="hwt">
                 <b>{h.name}</b>
                 <span>{kindLabel[h.kind]}{h.curve ? ` · curve (${h.source || "measured"})` : " · no curve"}</span>
+                <div className="hwa">
+                  {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
+                  <button type="button" className="ed" aria-label={`Edit ${h.name}`}
+                    onClick={() => { setAdding(null); setEditingHs(h); }}>Edit</button>
+                  <ConfirmButton className="rm" confirmClassName="rm btn danger"
+                    label="Remove" confirm="Remove?"
+                    title={`Remove ${h.name} from the library. Profiles that use it stay, but stop matching on it.`}
+                    onConfirm={() => void removeHw(h.id)} />
+                </div>
               </div>
-              {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
-              <button type="button" className="ed" aria-label={`Edit ${h.name}`}
-                onClick={() => { setAdding(null); setEditingHs(h); }}>Edit</button>
-              <ConfirmButton className="rm" confirmClassName="rm btn danger"
-                label="Remove" confirm="Remove?"
-                title={`Remove ${h.name} from the library. Profiles that use it stay, but stop matching on it.`}
-                onConfirm={() => void removeHw(h.id)} />
             </div>
           ))}
         </Card>
@@ -216,12 +220,14 @@ export function Profiles() {
                   <b>{m.name}</b>
                   <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
                   {m.color && <span className="mono" style={{ fontSize: 11 }}>{colorSummary(m.color)}</span>}
+                  <div className="hwa">
+                    {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
+                    <ConfirmButton className="rm" confirmClassName="rm btn danger"
+                      label="Remove" confirm="Remove?"
+                      title={`Remove ${m.name} from the library. Profiles that use it stay, but stop matching on it.`}
+                      onConfirm={() => void removeHw(m.id)} />
+                  </div>
                 </div>
-                {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
-                <ConfirmButton className="rm" confirmClassName="rm btn danger"
-                  label="Remove" confirm="Remove?"
-                  title={`Remove ${m.name} from the library. Profiles that use it stay, but stop matching on it.`}
-                  onConfirm={() => void removeHw(m.id)} />
               </div>
             );
           })}
