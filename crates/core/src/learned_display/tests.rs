@@ -248,7 +248,9 @@ fn view_carries_the_exact_notices_and_progress() {
 fn sampler_wire_lines_decode() {
     let r = FrameReport { class: FrameClass::Static, stats: FrameStats::default() };
     let line = serde_json::json!({ "event": "look", "report": r }).to_string();
-    assert_eq!(decode_line(&line), Some(SamplerLine::Frame(Box::new(r))));
+    assert_eq!(decode_line(&line), Some(SamplerLine::Frame(Box::new(r.clone()), false)));
+    let hdr = serde_json::json!({ "event": "look", "hdr": true, "report": r }).to_string();
+    assert_eq!(decode_line(&hdr), Some(SamplerLine::Frame(Box::new(r), true)));
     assert_eq!(decode_line(r#"{"event":"look_hdr"}"#), Some(SamplerLine::Hdr));
     assert_eq!(
         decode_line(r#"{"event":"error","where":"fatal","message":"boom"}"#),
@@ -256,7 +258,8 @@ fn sampler_wire_lines_decode() {
     );
     assert_eq!(decode_line("garbage"), None);
     assert_eq!(decode_line(r#"{"event":"stats"}"#), None);
-    assert_eq!(sampler_args(42, SAMPLE_FPS), ["look", "--hmonitor", "42", "--fps", "2"]);
+    assert_eq!(sampler_args(42, SAMPLE_FPS, false), ["look", "--hmonitor", "42", "--fps", "2"]);
+    assert_eq!(sampler_args(42, SAMPLE_FPS, true).last().map(String::as_str), Some("--hdr"));
     assert_eq!(SAMPLE_FPS, 2);
     const { assert!(SAMPLE_FPS <= 2, "relay-share look caps at MAX_FPS = 2") };
 }
@@ -507,4 +510,114 @@ fn status_walks_off_learning_ready_applied() {
     assert_eq!(g.status(Some(&mon())), LookStatus::Applied);
     g.monitors.get_mut(&mon().0).unwrap().hdr_skipped = true;
     assert_eq!(g.status(Some(&mon())), LookStatus::HdrSkipped);
+}
+
+// ---------------------------------------------------------------------------
+// HDR looks (owner 2026-10-23)
+// ---------------------------------------------------------------------------
+
+fn applied(l: &Learner) -> MonitorRecord {
+    let mut l = l.clone();
+    l.apply();
+    MonitorRecord { learner: l, hdr_skipped: false }
+}
+
+#[test]
+fn hdr_records_have_their_own_key() {
+    let k = record_key(&mon(), true);
+    assert_eq!(k.0, "GSM5C7C-abc#hdr");
+    assert!(is_hdr_key(&k.0));
+    assert_eq!(base_id(&k.0), mon().0);
+    assert_eq!(record_key(&k, false), mon());
+    assert_eq!(record_key(&k, true), k, "never doubled");
+}
+
+#[test]
+fn sdr_and_hdr_looks_never_stand_in_for_each_other() {
+    let mut g = GameRecord::default();
+    let imported = LookTargets { shadow: 0.2, saturation: 0.0, highlight: 0.0 };
+    g.imported = Some(ImportedLook { look: imported, note: String::new() });
+    let hdr = record_key(&mon(), true);
+    // An SDR import is no HDR look.
+    assert_eq!(g.effective(&hdr), None);
+    assert!(!g.has_hdr_look());
+    // An applied SDR look on another monitor does not reach HDR either.
+    g.monitors.insert("OTHER-1".into(), applied(&converged_learner()));
+    assert_eq!(g.effective(&hdr), None);
+    // An HDR look serves HDR keys, on any monitor, and never SDR ones.
+    let mut l = converged_learner();
+    l.observe(&FrameReport { class: FrameClass::Gameplay, stats: FrameStats::default() });
+    g.monitors.insert(hdr.0.clone(), applied(&l));
+    assert!(g.has_hdr_look());
+    assert_eq!(g.effective(&hdr), g.monitors[&hdr.0].learner.applied);
+    let elsewhere = record_key(&MonitorId("NEW-2".into()), true);
+    assert_eq!(g.effective(&elsewhere), g.monitors[&hdr.0].learner.applied);
+    assert_eq!(g.effective(&mon()), g.monitors["OTHER-1"].learner.applied);
+}
+
+#[test]
+fn hdr_choice_clears_the_skip_and_flags_the_game() {
+    let mut s = tmp_store("hdr-flag");
+    let g = s.game_mut("MW4.exe");
+    g.monitors.insert(mon().0, MonitorRecord { learner: Learner::new("b1"), hdr_skipped: true });
+    assert_eq!(g.status(Some(&mon())), LookStatus::HdrSkipped);
+    g.hdr_ok = true;
+    assert_ne!(g.status(Some(&mon())), LookStatus::HdrSkipped);
+    assert!(s.hdr_exes().is_empty(), "chosen, but nothing learned yet");
+    s.game_mut("mw4.exe")
+        .monitors
+        .insert(record_key(&mon(), true).0, applied(&converged_learner()));
+    assert_eq!(s.hdr_exes(), ["mw4.exe"]);
+    // Turning HDR learning off stops flagging (and applying) it.
+    s.game_mut("mw4.exe").hdr_ok = false;
+    assert!(s.hdr_exes().is_empty());
+}
+
+#[test]
+fn the_view_shows_hdr_as_its_own_row_with_hdr_adjustments() {
+    let mut s = tmp_store("hdr-view");
+    let g = s.game_mut("mw4.exe");
+    g.hdr_ok = true;
+    g.monitors.insert(mon().0, applied(&converged_learner()));
+    g.monitors.insert(record_key(&mon(), true).0, applied(&converged_learner()));
+    let names = |id: &MonitorId| {
+        assert!(!is_hdr_key(&id.0), "names are looked up by monitor, not record key");
+        ("LG 32GS95UE".to_string(), "WOLED".to_string())
+    };
+    let v = view(&s, "mw4.exe", false, &names);
+    assert!(v.hdr_ok);
+    assert_eq!(v.hdr_notice, HDR_NOTICE);
+    assert_eq!(v.monitors.len(), 2);
+    let sdr = v.monitors.iter().find(|m| !m.hdr).unwrap();
+    let hdr = v.monitors.iter().find(|m| m.hdr).unwrap();
+    assert_eq!(hdr.monitor, mon(), "the row names the monitor; hdr is the flag");
+    let (sa, ha) = (sdr.adjustments.clone().unwrap(), hdr.adjustments.clone().unwrap());
+    assert!(sa.gamma > 1.0, "SDR opens shadows with gamma");
+    assert_eq!((ha.gamma, ha.shadow_lift), (1.0, 0), "HDR never touches gamma or lift");
+    assert!(ha.notes.iter().any(|n| n == relay_display::learn::hdr::ADVICE_SHADOWS));
+}
+
+#[test]
+fn files_carry_the_sdr_look_only() {
+    let mut s = tmp_store("hdr-files");
+    let g = s.game_mut("mw4.exe");
+    let mut hdr_only = converged_learner();
+    hdr_only.apply();
+    g.monitors.insert(
+        record_key(&mon(), true).0,
+        MonitorRecord { learner: hdr_only, hdr_skipped: false },
+    );
+    assert!(export(&s, "mw4.exe", None, "").is_err(), "an HDR look alone is not exported");
+    let file = GameDisplayFile::new(
+        "mw4.exe",
+        None,
+        LookTargets { shadow: 0.1, saturation: 0.1, highlight: 0.0 },
+        FileEvidence::default(),
+        "",
+    )
+    .to_json()
+    .unwrap();
+    let before = s.game("mw4.exe").unwrap().monitors[&record_key(&mon(), true).0].clone();
+    import(&mut s, "mw4.exe", &file).unwrap();
+    assert_eq!(s.game("mw4.exe").unwrap().monitors[&record_key(&mon(), true).0], before);
 }

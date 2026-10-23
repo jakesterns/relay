@@ -251,6 +251,7 @@ impl Profile {
             monitor: self.monitor.clone(),
             share: self.share,
             status: self.status,
+            hdr: self.display.hdr == Some(true),
         }
     }
 }
@@ -266,6 +267,10 @@ pub struct ProfileSummary {
     pub monitor: Option<MonitorId>,
     pub share: SharePreset,
     pub status: ProfileStatus,
+    /// The profile turns Windows HDR on while applied (S52). A learned HDR
+    /// look is flagged through `CoreState::hdr_looks`.
+    #[serde(default)]
+    pub hdr: bool,
 }
 
 /// What the core is doing right now. Mirrors the "Now" block in the rail.
@@ -296,6 +301,10 @@ pub struct CoreState {
     /// offered as "make a profile for it?". Never acted on by the core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<crate::suggest::Suggestion>,
+    /// Games (lower-case exe) with a learned HDR look in use, so a profile
+    /// can be flagged as HDR-tuned wherever it is picked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hdr_looks: Vec<String>,
 }
 
 /// What this build is and where it keeps its files.

@@ -173,6 +173,8 @@ export interface Profile {
 export interface ProfileSummary {
   id: string; name: string; note: string; exe: string;
   headset: HeadsetId | null; monitor: MonitorId | null; share: SharePreset; status: ProfileStatus;
+  /** The profile turns Windows HDR on while applied (S52). */
+  hdr?: boolean;
 }
 /** Mirror of `crates/core/src/hardware/mod.rs`. */
 export type HeadsetKind = "headphone" | "iem" | "speakers";
@@ -307,7 +309,9 @@ export interface LookReadiness {
 export interface LookExcluded { static_frames: number; loading: number; cutscene: number; outlier: number; idle: number; warmup: number }
 export interface LookAdjustments { gamma: number; shadow_lift: number; vibrance: number; black_equalizer?: number; notes: string[] }
 export interface MonitorLearnView {
-  monitor: MonitorId; monitor_name: string; panel: PanelKind; panel_guessed?: boolean; phase: LookPhase;
+  monitor: MonitorId; monitor_name: string; panel: PanelKind;
+  /** This row is the monitor's HDR look (kept apart from its SDR look). */
+  hdr?: boolean; panel_guessed?: boolean; phase: LookPhase;
   readiness: LookReadiness; converged: LookTargets | null; applied: LookTargets | null;
   use_learned: boolean; hdr_skipped: boolean; status: LookStatus;
   adjustments: LookAdjustments | null; excluded: number; excluded_by?: LookExcluded;
@@ -319,12 +323,17 @@ export interface MonitorLearnView {
 export interface ImportedLook { look: LookTargets; note: string }
 export interface LearnView {
   exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
+  /** The user chose "Learn in HDR" for this game. */
+  hdr_ok?: boolean; hdr_notice?: string;
   monitors: MonitorLearnView[]; imported: ImportedLook | null;
   privacy: string; tournament: string;
 }
 /** The owner's exact wording (S47). A notice only. */
 export const TOURNAMENT_NOTICE =
   "Relay's visual enhancements may not be allowed in some tournaments or professional environments. Check with your tournament host or rules.";
+/** What HDR tuning is, shown before the user chooses it (owner 2026-10-23). */
+export const HDR_NOTICE =
+  "HDR tuning works differently. In HDR, Relay adjusts colour vibrance only and gives tips for the game's own HDR settings; shadows and brightness are left to the game. Relay keeps the HDR look separate from the SDR one and uses whichever matches your screen.";
 export const LOOK_PRIVACY =
   "Frames are analysed in memory at low resolution while the game has focus. No frames are recorded or saved, and nothing leaves this PC.";
 export interface ProcessInfo { pid: number; exe: string; title: string; hwnd: number }
@@ -354,6 +363,8 @@ export interface CoreState {
   /** A full-screen app with no profile, offered as "make a profile for
    *  it?". Mirrors `suggest::Suggestion`; the core never acts on it. */
   suggestion?: Suggestion | null;
+  /** Games (lower-case exe) with a learned HDR look in use. */
+  hdr_looks?: string[];
 }
 export interface Suggestion { exe: string; title: string }
 /** Version and the paths this core actually uses (`--data-dir` moves them). */
@@ -848,7 +859,14 @@ export function summarize(p: Profile): ProfileSummary {
   return {
     id: p.id, name: p.name, note: p.note, exe: p.game.exe,
     headset: p.headset ?? null, monitor: p.monitor ?? null, share: p.share, status: p.status,
+    ...(p.display?.hdr === true ? { hdr: true } : {}),
   };
+}
+
+/** The profile is tuned for HDR: it turns Windows HDR on, or its game has a
+ *  learned HDR look in use. Shown wherever a profile is picked. */
+export function isHdrTuned(p: ProfileSummary, state: CoreState): boolean {
+  return p.hdr === true || (state.hdr_looks ?? []).includes(p.exe.toLowerCase());
 }
 
 /** Browser-only mock hardware, shaped like the dev PC's real probe. */
@@ -1553,6 +1571,10 @@ export const api = {
     if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
     return invoke<LearnView>("learn_display_set", { exe, enabled });
   },
+  async learnDisplayHdr(exe: string, enabled: boolean): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.hdr_ok = enabled; for (const m of v.monitors) m.hdr_skipped = false; if (v.status === "hdr_skipped") v.status = v.enabled ? "learning" : "off"; return structuredClone(v); }
+    return invoke<LearnView>("learn_display_hdr", { exe, enabled });
+  },
   async learnDisplayApply(exe: string): Promise<LearnView> {
     if (!isTauri()) throw new Error("this game's look has not settled yet; keep playing");
     return invoke<LearnView>("learn_display_apply", { exe });
@@ -1679,7 +1701,7 @@ function mockLearn(exe: string): LearnView {
   let v = mockLearnStore.get(key);
   if (!v) {
     v = { exe: key, enabled: false, status: "off", sampling: false, monitors: [], imported: null,
-      privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE };
+      privacy: LOOK_PRIVACY, tournament: TOURNAMENT_NOTICE, hdr_ok: false, hdr_notice: HDR_NOTICE };
     mockLearnStore.set(key, v);
   }
   return v;

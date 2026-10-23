@@ -1,4 +1,4 @@
-import type { CoreState } from "../lib/ipc";
+import { isHdrTuned, type CoreState } from "../lib/ipc";
 
 export type Screen = "share" | "receive" | "games" | "audio" | "display" | "profiles" | "settings";
 
@@ -41,7 +41,7 @@ export function Rail({ screen, onNav, state, note, unsaved }: {
         <i />Sharing<small>{sharing ? "on" : "off"}</small>
       </div>
       <div className={"st" + (profile ? " on" : "")}>
-        <i />Game profile<small>{profile ? shortName(profile.name) : "none"}</small>
+        <i />Game profile<small>{profile ? shortName(profile.name) + (isHdrTuned(profile, state) ? " · HDR" : "") : "none"}</small>
       </div>
       <div className="sp" />
       <small>{note}</small>

@@ -9,7 +9,7 @@ import userEvent from "@testing-library/user-event";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
 import type { LearnView, MonitorLearnView } from "../lib/ipc";
-import { TOURNAMENT_NOTICE } from "../lib/ipc";
+import { HDR_NOTICE, TOURNAMENT_NOTICE } from "../lib/ipc";
 import { LearnLookCard } from "./LearnLookCard";
 
 let core: FakeCore;
@@ -193,5 +193,41 @@ describe("the learn-this-game's-look card", () => {
     await mount(null);
     expect(screen.getByText(/Pick a game/)).toBeInTheDocument();
     expect(cmds()).toHaveLength(0);
+  });
+});
+
+describe("HDR learning (owner 2026-10-23)", () => {
+  it("offers Learn in HDR with what HDR tuning is, and asks the core only on the click", async () => {
+    seed({ status: "hdr_skipped", monitors: [monitor({ hdr_skipped: true, status: "hdr_skipped" })] });
+    const user = await mount();
+    const offer = screen.getByTestId("hdr-offer");
+    expect(offer).toHaveTextContent(HDR_NOTICE);
+    expect(cmds()).not.toContain("learn_display_hdr");
+    await user.click(screen.getByRole("button", { name: "Learn in HDR" }));
+    expect(tauri.lastCall("learn_display_hdr")?.args).toEqual({ exe: "game.exe", enabled: true });
+    expect(screen.queryByTestId("hdr-offer")).toBeNull();
+    expect(screen.getByRole("switch", { name: /Learn in HDR/ })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("does not offer HDR to a game that never ran in HDR", async () => {
+    seed({ monitors: [monitor()] });
+    await mount();
+    expect(screen.queryByTestId("hdr-offer")).toBeNull();
+    expect(screen.queryByRole("switch", { name: /Learn in HDR/ })).toBeNull();
+  });
+
+  it("shows the HDR look as its own row with vibrance and advice only", async () => {
+    const adj = { gamma: 1, shadow_lift: 0, vibrance: 54, notes: ["Shadows are crushed. Raise the game's HDR black level"] };
+    seed({
+      hdr_ok: true,
+      monitors: [monitor(), monitor({ hdr: true, status: "applied", use_learned: true, adjustments: adj })],
+    });
+    await mount();
+    const rows = screen.getAllByTestId("look-monitor");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toHaveTextContent("LG ULTRAGEAR+ · HDR");
+    expect(rows[1]).toHaveTextContent("vibrance 54");
+    expect(rows[1]).not.toHaveTextContent("gamma");
+    expect(rows[1]).toHaveTextContent(/HDR black level/);
   });
 });
