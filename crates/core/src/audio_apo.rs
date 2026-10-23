@@ -16,9 +16,15 @@
 //! default render endpoint — and restore bypasses both that endpoint and any
 //! endpoint an earlier apply wrote to (the default can change mid-game).
 //!
-//! The connection is per-call: applies happen on focus changes, and an open
-//! is one `OpenFileMappingW`. Holding a mapping in the always-on core would
-//! buy microseconds and cost resident pages.
+//! S44e: while an apply is in force the core *holds* the endpoint's section
+//! (one page). audiodg creates and drops APO instances whenever it rebuilds
+//! the endpoint's graph; the instance that dropped the last handle used to
+//! take the parameters with it, and the next one came up in bypass. Held,
+//! the name survives the rebuild and the new instance opens the same block.
+//! [`AudioControl::keep_alive`] (the 1 s service tick) re-asserts the chain
+//! when the section appears late (nothing was playing at apply time), when
+//! the default output moved, or when anything else rewrote the block. The
+//! hold is dropped on restore, so an idle core maps nothing.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +46,56 @@ pub struct ApoAudioControl {
     /// even when the default output has changed since.
     #[allow(dead_code)]
     applied: std::sync::Mutex<Option<String>>,
+    /// The chain in force and the section held for it (S44e).
+    #[allow(dead_code)]
+    held: std::sync::Mutex<Option<Held>>,
+}
+
+/// What `keep_alive` re-asserts.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Held {
+    endpoint: String,
+    params: relay_audio::params::ChainParams,
+    #[cfg(windows)]
+    section: Option<HeldSection>,
+    /// The block sequence our last write left; anything else means the block
+    /// was rewritten (or recreated) under us.
+    written_seq: Option<u32>,
+}
+
+/// A mapped section owned by the control's mutex.
+#[cfg(windows)]
+struct HeldSection(SharedParams);
+
+// SAFETY: the mapping and event handles are process-wide kernel objects;
+// the view is only touched through `ParamBlock`'s atomics and seqlock, and
+// the wrapper is only ever reached through `ApoAudioControl::held`'s mutex.
+#[cfg(windows)]
+unsafe impl Send for HeldSection {}
+
+#[cfg(windows)]
+impl std::fmt::Debug for HeldSection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("HeldSection")
+    }
+}
+
+/// Write `params` and un-bypass unless the block already carries our last
+/// write. Returns true when it wrote.
+#[cfg(windows)]
+fn reassert(
+    block: &relay_audio::shm::ParamBlock,
+    params: &relay_audio::params::ChainParams,
+    written_seq: &mut Option<u32>,
+) -> bool {
+    if !block.bypass() && *written_seq == Some(block.sequence()) {
+        return false;
+    }
+    block.write_params(params);
+    block.set_bypass(false);
+    *written_seq = Some(block.sequence());
+    true
 }
 
 /// One render endpoint as the Settings APO card lists it.
@@ -76,6 +132,10 @@ pub struct ApoStatus {
     /// APO at all (S42b).
     #[serde(default)]
     pub audio_engine: AudioEngineRegistration,
+    /// An installed output runs (or will next load) another Relay build's
+    /// APO: Settings offers Update, which is an install over the install.
+    #[serde(default)]
+    pub update_needed: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +377,11 @@ pub fn apo_status(backup_dir: &Path) -> ApoStatus {
     let endpoints =
         merge_endpoints(&active, &recorded, fx_has_relay, |g| open_endpoint(g).is_some());
     let default = endpoints.iter().find(|e| e.is_default);
+    let update_needed = endpoints.iter().any(|e| e.installed)
+        && (staged_dll_stale()
+            || endpoints.iter().any(|e| e.installed && loaded_other_build(&e.endpoint)));
     ApoStatus {
+        update_needed,
         installed: default.is_some_and(|e| e.installed),
         endpoint: default.map(|e| e.endpoint.clone()),
         running: default.is_some_and(|e| e.running),
@@ -336,6 +400,7 @@ pub fn apo_status(_backup_dir: &Path) -> ApoStatus {
         running: false,
         endpoints: Vec::new(),
         audio_engine: AudioEngineRegistration::Missing,
+        update_needed: false,
     }
 }
 
@@ -363,16 +428,33 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
         Ok(e) => e,
         Err(e) => return vec![format!("No output to install on: {e:#}")],
     };
-    let dll = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
-        .filter(|p| p.exists());
-    let dll_text = dll
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| r"<install dir>\relay_apo.dll (not built yet)".into());
+    let built = shipped_dll();
+    let staged = staged_dll_path();
+    let dll_text = staged.display().to_string();
 
     let mut lines = Vec::new();
+    if fx_has_relay(&endpoint) {
+        // Installed already: the only thing an install does is bring the
+        // copy Windows audio loads up to this Relay's build (an update).
+        if apo_update_needed(&endpoint) {
+            if staged_dll_stale() {
+                if let Some(src) = &built {
+                    lines.push(format!(
+                        "file: {} replaces {dll_text} (it is from another Relay build)",
+                        src.display()
+                    ));
+                }
+            }
+            lines.push(
+                "Windows audio restarts so it loads the new one: a few seconds of silence. \
+                 No registry value changes."
+                    .into(),
+            );
+        } else {
+            lines.push(format!("Already installed on {endpoint} and up to date: nothing to do."));
+        }
+        return lines;
+    }
     match relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint) {
         Ok(current) => match relay_apo::fxstore::plan_install_with(
             &current,
@@ -389,8 +471,139 @@ pub fn install_dry_run(backup_dir: &Path, endpoint: Option<&str>) -> Vec<String>
         "backup: {} (written before anything is changed)",
         backup_file(backup_dir, &endpoint).display()
     ));
-    lines.push(format!("file: {dll_text} (stays in place; only registered)"));
+    lines.push(match built {
+        Some(src) => format!(
+            "file: {} copied to {dll_text} (Windows audio cannot read your user folder, \
+             and only administrators can change that one); removed with the last output",
+            src.display()
+        ),
+        None => r"file: relay_apo.dll not found next to Relay (not built yet)".into(),
+    });
     lines
+}
+
+/// Where Windows audio loads the APO from (S44c).
+///
+/// audiodg runs as LOCAL SERVICE, which cannot read `%LOCALAPPDATA%`: an
+/// APO registered at the install folder never loads, and the endpoint goes
+/// silent (owner's main PC, 2026-10-14: Microsoft's own GFX loaded, Relay's
+/// DLL did not, no sound on the RODECaster). Loading a DLL the user can
+/// rewrite into a service would also hand that user the service's account.
+/// So the elevated helper copies it under Program Files, which only
+/// administrators can write and every service can read, and registers that.
+#[cfg(windows)]
+pub fn staged_dll_path() -> PathBuf {
+    let base = std::env::var_os("ProgramW6432")
+        .or_else(|| std::env::var_os("ProgramFiles"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    base.join("Relay").join("audio").join("relay_apo.dll")
+}
+
+/// Copy `src` to [`staged_dll_path`] unless an identical copy is there.
+/// A copy Windows audio still has loaded cannot be overwritten, but it can
+/// be renamed: it goes aside as `relay_apo.dll.oldN` and the new one takes
+/// its name (the next audio restart loads it; the aside copy is removed by
+/// [`remove_staged_dll`] or the next stage).
+#[cfg(windows)]
+fn stage_dll(src: &Path) -> Result<PathBuf> {
+    use anyhow::Context;
+
+    let dst = staged_dll_path();
+    let dir = dst.parent().expect("a parent").to_path_buf();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    sweep_aside(&dir);
+    let new = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
+    if std::fs::read(&dst).is_ok_and(|old| old == new) {
+        return Ok(dst);
+    }
+    let tmp = dir.join("relay_apo.dll.tmp");
+    std::fs::write(&tmp, &new).with_context(|| format!("writing {}", tmp.display()))?;
+    if dst.exists() && std::fs::remove_file(&dst).is_err() {
+        let aside = (1..1000)
+            .map(|n| dir.join(format!("relay_apo.dll.old{n}")))
+            .find(|p| !p.exists())
+            .context("no free name to move the loaded APO aside")?;
+        std::fs::rename(&dst, &aside).context("moving the loaded APO aside")?;
+    }
+    std::fs::rename(&tmp, &dst).with_context(|| format!("placing {}", dst.display()))?;
+    Ok(dst)
+}
+
+/// The APO DLL this Relay ships, next to the running binary.
+#[cfg(windows)]
+fn shipped_dll() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
+        .filter(|p| p.exists())
+}
+
+/// The staged copy is not the DLL this Relay ships: a Relay update left the
+/// previous build's APO under Program Files (the installer runs unelevated
+/// and cannot replace it).
+#[cfg(windows)]
+pub fn staged_dll_stale() -> bool {
+    let (Some(src), dst) = (shipped_dll(), staged_dll_path()) else { return false };
+    match (std::fs::read(src), std::fs::read(dst)) {
+        (Ok(new), Ok(old)) => new != old,
+        _ => false,
+    }
+}
+
+/// Windows audio runs another build's APO on this output: its parameter
+/// section is there but carries another layout, so the core will not steer
+/// it. Covers a staged copy already updated but not yet loaded.
+#[cfg(windows)]
+pub fn loaded_other_build(endpoint: &str) -> bool {
+    open_endpoint(endpoint).is_some_and(|s| !s.block().is_valid())
+}
+
+/// An installed output needs the APO brought up to this Relay's build.
+#[cfg(windows)]
+pub fn apo_update_needed(endpoint: &str) -> bool {
+    staged_dll_stale() || loaded_other_build(endpoint)
+}
+
+/// The update half of an install over an install: refresh the staged copy
+/// (a loaded one goes aside, see [`stage_dll`]). The registry is untouched;
+/// the caller restarts Windows audio so the new one loads.
+#[cfg(windows)]
+pub fn update_staged_dll() -> Result<()> {
+    use anyhow::Context;
+    let built = shipped_dll().context("relay_apo.dll not found next to the running binary")?;
+    stage_dll(&built).map(|_| ())
+}
+
+/// Delete aside copies nothing has loaded any more.
+#[cfg(windows)]
+fn sweep_aside(dir: &Path) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.starts_with("relay_apo.dll.old") || name == "relay_apo.dll.tmp" {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// With the last output restored: remove the staged copy (aside if Windows
+/// audio still has it loaded) and its folders when empty.
+#[cfg(windows)]
+fn remove_staged_dll() {
+    let dst = staged_dll_path();
+    let Some(dir) = dst.parent().map(Path::to_path_buf) else { return };
+    if dst.exists() && std::fs::remove_file(&dst).is_err() {
+        let aside = dir.join("relay_apo.dll.old1");
+        let _ = std::fs::remove_file(&aside);
+        let _ = std::fs::rename(&dst, &aside);
+    }
+    sweep_aside(&dir);
+    let _ = std::fs::remove_dir(&dir);
+    if let Some(relay) = dir.parent() {
+        let _ = std::fs::remove_dir(relay);
+    }
 }
 
 #[cfg(not(windows))]
@@ -416,11 +629,8 @@ pub fn install_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<String>
     if backup_path.exists() {
         bail!("a backup for {endpoint} already exists — the APO looks installed; uninstall first");
     }
-    let dll = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("relay_apo.dll")))
-        .filter(|p| p.exists())
-        .context("relay_apo.dll not found next to the running binary")?;
+    let built = shipped_dll().context("relay_apo.dll not found next to the running binary")?;
+    let dll = stage_dll(&built)?;
 
     let current = relay_apo::livereg::LiveRegistry::read_fx_store(&endpoint)
         .with_context(|| format!("reading FX store of {endpoint}"))?;
@@ -487,6 +697,9 @@ pub fn uninstall_live(backup_dir: &Path, endpoint: Option<&str>) -> Result<Strin
     relay_apo::livereg::LiveRegistry::restore(&restore_backup_for(&backup, others))
         .context("restoring the FX property store (RELAY_APO_ALLOW_LIVE_WRITE gate)")?;
     let _ = std::fs::rename(&backup_path, backup_path.with_extension("json.restored"));
+    if !others {
+        remove_staged_dll();
+    }
     info!(%endpoint, "FX property store restored to the pre-install state");
     Ok(endpoint)
 }
@@ -540,6 +753,23 @@ fn target_endpoint() -> Option<String> {
 }
 
 #[cfg(windows)]
+impl ApoAudioControl {
+    /// Bypass and unmap the held section, if any.
+    fn release_held(&self) {
+        let held = self.held.lock().ok().and_then(|mut h| h.take());
+        if let Some(s) = held.and_then(|h| h.section) {
+            s.0.block().set_bypass(true);
+            s.0.notify();
+        }
+    }
+
+    /// True while a section is held (tests and status).
+    pub fn holds_section(&self) -> bool {
+        self.held.lock().ok().is_some_and(|h| h.as_ref().is_some_and(|h| h.section.is_some()))
+    }
+}
+
+#[cfg(windows)]
 impl AudioControl for ApoAudioControl {
     fn capture(&self) -> Result<AudioState> {
         // The APO's resting state is bypass by construction (the block is
@@ -557,32 +787,87 @@ impl AudioControl for ApoAudioControl {
     ) -> Result<AudioChainState> {
         let params = crate::audio_bridge::chain_params_with(settings, correction);
         if params.bands.is_empty() && params.limiter.is_none() && !params.hrtf {
+            // Nothing to process: let go of any chain still held.
+            self.release_held();
             return Ok(AudioChainState::Bypass);
         }
         let Some(guid) = target_endpoint() else { return Ok(AudioChainState::Bypass) };
+        let mut held = Held { endpoint: guid.clone(), params, section: None, written_seq: None };
         // Reachability is the truth: the APO's parameter section exists only
         // while the effect is loaded on this endpoint. Without it, say why.
-        let Some(s) = open_endpoint(&guid) else {
-            return Ok(if fx_has_relay(&guid) {
-                // Registered, but audiodg has not loaded it (the S42 case).
+        let state = match open_endpoint(&guid) {
+            Some(s) => {
+                reassert(s.block(), &held.params, &mut held.written_seq);
+                s.notify();
+                held.section = Some(HeldSection(s));
+                if let Ok(mut a) = self.applied.lock() {
+                    *a = Some(guid.clone());
+                }
+                info!(
+                    endpoint = %guid,
+                    bands = held.params.bands.len(),
+                    hrtf = held.params.hrtf,
+                    "APO chain active"
+                );
+                AudioChainState::Active
+            }
+            // Registered, but audiodg has no instance yet (nothing playing,
+            // or the S42 case): keep_alive activates it when one appears.
+            None if fx_has_relay(&guid) => AudioChainState::NotLoaded,
+            None => return Ok(AudioChainState::NotInstalled),
+        };
+        if let Ok(mut h) = self.held.lock() {
+            *h = Some(held);
+        }
+        Ok(state)
+    }
+
+    fn keep_alive(&self) -> Option<AudioChainState> {
+        let mut g = self.held.lock().ok()?;
+        let h = g.as_mut()?;
+        // The game's audio follows the default output; so does the chain.
+        if let Some(d) = target_endpoint() {
+            if !d.eq_ignore_ascii_case(&h.endpoint) {
+                if let Some(s) = h.section.take() {
+                    s.0.block().set_bypass(true);
+                    s.0.notify();
+                }
+                info!(from = %h.endpoint, to = %d, "default output moved; APO chain follows");
+                h.endpoint = d;
+                h.written_seq = None;
+            }
+        }
+        // A block of another version (the DLL was updated under a held
+        // section) is never steered: let it go so the new APO recreates it.
+        if h.section.as_ref().is_some_and(|s| !s.0.block().is_valid()) {
+            h.section = None;
+            h.written_seq = None;
+        }
+        if h.section.is_none() {
+            h.section = open_endpoint(&h.endpoint).map(HeldSection);
+            h.written_seq = None;
+        }
+        let Some(s) = h.section.as_ref() else {
+            return Some(if fx_has_relay(&h.endpoint) {
                 AudioChainState::NotLoaded
             } else {
                 AudioChainState::NotInstalled
             });
         };
-        s.block().write_params(&params);
-        s.block().set_bypass(false);
-        s.notify();
-        if let Ok(mut a) = self.applied.lock() {
-            *a = Some(guid.clone());
+        if reassert(s.0.block(), &h.params, &mut h.written_seq) {
+            s.0.notify();
+            info!(endpoint = %h.endpoint, "APO chain re-asserted");
+            if let Ok(mut a) = self.applied.lock() {
+                *a = Some(h.endpoint.clone());
+            }
         }
-        info!(endpoint = %guid, bands = params.bands.len(), hrtf = params.hrtf, "APO chain active");
-        Ok(AudioChainState::Active)
+        Some(AudioChainState::Active)
     }
 
     fn restore(&self, _original: &AudioState) -> Result<()> {
         // Restore = bypass, regardless of what was captured, on the endpoint
         // the last apply wrote to and on the current default.
+        self.release_held();
         let applied = self.applied.lock().ok().and_then(|mut a| a.take());
         let mut targets: Vec<String> = applied.into_iter().collect();
         if let Some(d) = target_endpoint() {
@@ -668,7 +953,11 @@ mod tests {
     #[test]
     fn params_sections_are_per_endpoint() {
         assert_eq!(params_section(A, "", false), format!("Global\\Relay.APO.{A}"));
-        assert_eq!(params_section(B, "", false), format!("Global\\Relay.APO.{B}"));
+        // Upper-cased: the APO names it from audiodg's `{FE54...}` spelling.
+        assert_eq!(
+            params_section(B, "", false),
+            format!("Global\\Relay.APO.{}", B.to_ascii_uppercase())
+        );
         assert_eq!(params_section(A, "t1", true), format!("Local\\Relay.APO.t1.{A}"));
         assert_ne!(params_section(A, "", false), params_section(B, "", false));
     }
@@ -696,6 +985,7 @@ mod tests {
             running: false,
             endpoints: merge_endpoints(&[(A.into(), "X".into(), true)], &[], |_| true, |_| false),
             audio_engine: AudioEngineRegistration::Registered,
+            update_needed: false,
         })
         .unwrap();
         assert_eq!(v["endpoints"][0]["endpoint"], A);

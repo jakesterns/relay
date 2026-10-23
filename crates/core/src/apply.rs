@@ -36,6 +36,13 @@ pub trait AudioControl: Send + Sync {
         correction: Option<&[(f32, f32)]>,
     ) -> Result<AudioChainState>;
     fn restore(&self, original: &AudioState) -> Result<()>;
+    /// Called about once a second while an apply is in force: re-assert the
+    /// applied chain if the backend lost it (audiodg rebuilt its graph, or
+    /// the first stream started after the apply). `None` = nothing to say;
+    /// `Some(state)` = what the chain is now.
+    fn keep_alive(&self) -> Option<AudioChainState> {
+        None
+    }
 }
 
 pub trait DisplayControl: Send + Sync {
@@ -197,6 +204,18 @@ impl Applier {
 
     pub fn is_applied(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// While applied, let the audio backend re-assert its chain; returns the
+    /// chain state when it changed from what the last apply reported.
+    pub fn audio_keep_alive(&mut self) -> Option<AudioChainState> {
+        self.current.as_ref()?;
+        let now = self.audio.keep_alive()?;
+        if now == self.current_audio {
+            return None;
+        }
+        self.current_audio = now;
+        Some(now)
     }
 
     /// Called once at start-up. If a previous run left a snapshot marked
@@ -453,6 +472,51 @@ mod tests {
         a.apply(&p, Some(&m), None).unwrap();
         assert_eq!(*audio.applies.lock(), 2);
         a.restore().unwrap();
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    /// Reports NotLoaded on apply; keep_alive reports whatever `now` holds.
+    #[derive(Default)]
+    struct LateAudio {
+        now: Mutex<Option<AudioChainState>>,
+    }
+    impl AudioControl for LateAudio {
+        fn capture(&self) -> Result<AudioState> {
+            Ok(AudioState { bypass: true })
+        }
+        fn apply(&self, _: &AudioSettings, _: Option<&[(f32, f32)]>) -> Result<AudioChainState> {
+            Ok(AudioChainState::NotLoaded)
+        }
+        fn restore(&self, _: &AudioState) -> Result<()> {
+            Ok(())
+        }
+        fn keep_alive(&self) -> Option<AudioChainState> {
+            *self.now.lock()
+        }
+    }
+
+    #[test]
+    fn keep_alive_reports_only_changes_and_only_while_applied() {
+        let dir = std::env::temp_dir().join(format!("relay-apply-{}", Uuid::new_v4()));
+        let audio = Arc::new(LateAudio::default());
+        let rec = Arc::new(Recorder::default());
+        let mut a = Applier::new(audio.clone(), rec, BackupFile::at(dir.join("o.json")));
+        *audio.now.lock() = Some(AudioChainState::Active);
+        assert_eq!(a.audio_keep_alive(), None, "nothing applied, nothing kept alive");
+        let m = monitor("mon:A");
+        let p = profile();
+        *audio.now.lock() = None;
+        assert_eq!(a.apply(&p, Some(&m), None).unwrap().audio, AudioChainState::NotLoaded);
+        assert_eq!(a.audio_keep_alive(), None, "backend silent");
+        *audio.now.lock() = Some(AudioChainState::NotLoaded);
+        assert_eq!(a.audio_keep_alive(), None, "unchanged");
+        // The stream starts: the chain goes live and the fast path says so.
+        *audio.now.lock() = Some(AudioChainState::Active);
+        assert_eq!(a.audio_keep_alive(), Some(AudioChainState::Active));
+        assert_eq!(a.audio_keep_alive(), None);
+        assert_eq!(a.apply(&p, Some(&m), None).unwrap().audio, AudioChainState::Active);
+        a.restore().unwrap();
+        assert_eq!(a.audio_keep_alive(), None);
         std::fs::remove_dir_all(dir).ok();
     }
 

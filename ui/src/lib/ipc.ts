@@ -595,6 +595,9 @@ export interface ApoStatus {
   endpoints?: EndpointApo[];
   /** Machine-wide audio-engine registration audiodg needs (S42b). */
   audio_engine?: "registered" | "mismatch" | "missing";
+  /** An installed output runs another Relay build's APO: Settings offers
+   *  Update (an install over the install, then an audio restart). */
+  update_needed?: boolean;
 }
 /** Mirror of relay-vdevice's `installed::Consent`. */
 export interface VdeviceConsent { decided_at: string; apo: boolean; camera: boolean; microphone: boolean }

@@ -37,8 +37,14 @@ pub const EVENT_SUFFIX: &str = ".evt";
 
 /// Section name for one endpoint, shared between core and APO.
 /// `instance` is the `RELAY_INSTANCE` suffix ("" in production).
+///
+/// The GUID is upper-cased: kernel object names are case-sensitive, and the
+/// two sides spell it differently (audiodg's endpoint store hands the APO
+/// `{FE54...}`, the MMDevice id the core reads says `{fe54...}`). Before
+/// S44e that mismatch meant the core never found a running APO's section.
 pub fn section_name(endpoint_guid: &str, instance: &str) -> String {
     // The GUID is registry-derived: braces/hex/dashes only, safe in an object name.
+    let endpoint_guid = endpoint_guid.to_ascii_uppercase();
     if instance.is_empty() {
         format!("Global\\Relay.APO.{endpoint_guid}")
     } else {
@@ -405,6 +411,19 @@ mod win {
 mod tests {
     use super::*;
     use crate::params::{BandParams, ChainParams, LimiterParams};
+
+    #[test]
+    fn section_name_ignores_guid_case() {
+        let lower = section_name("{fe542c97-9221-4358-a079-dbd65b2fb258}", "");
+        let upper = section_name("{FE542C97-9221-4358-A079-DBD65B2FB258}", "");
+        assert_eq!(lower, upper);
+        assert_eq!(upper, "Global\\Relay.APO.{FE542C97-9221-4358-A079-DBD65B2FB258}");
+        assert_eq!(
+            section_name("{fe542c97-9221-4358-a079-dbd65b2fb258}", "t1"),
+            "Global\\Relay.APO.t1.{FE542C97-9221-4358-A079-DBD65B2FB258}",
+            "the instance suffix keeps its own case"
+        );
+    }
 
     fn sample_params() -> ChainParams {
         ChainParams {

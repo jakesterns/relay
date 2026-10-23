@@ -300,7 +300,7 @@ pub fn mix_sum(samples: &[f32]) -> f32 {
 /// 48 kHz stereo float. Opened with AUTOCONVERTPCM so an endpoint whose mix
 /// format is anything else is converted by the audio engine, not played at
 /// the wrong pitch; the endpoint's own format is never touched.
-fn render_format() -> WAVEFORMATEXTENSIBLE {
+pub(crate) fn render_format() -> WAVEFORMATEXTENSIBLE {
     // KSDATAFORMAT_SUBTYPE_IEEE_FLOAT
     const IEEE_FLOAT: windows::core::GUID =
         windows::core::GUID::from_u128(0x00000003_0000_0010_8000_00aa00389b71);
