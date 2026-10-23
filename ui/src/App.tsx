@@ -30,6 +30,7 @@ function Shell() {
   const unsaved = useDraft()?.profile.name ?? null;
   const [screen, setScreen] = useState<Screen>("profiles");
   const [section, setSection] = useState<Section>("audio");
+  const [fromGames, setFromGames] = useState(false);
   // null = unknown yet; true = the first-run consent decision is still due.
   const [firstRun, setFirstRun] = useState<boolean | null>(null);
 
@@ -51,6 +52,7 @@ function Shell() {
       const r = takeNav("audio");
       setScreen("games");
       setSection("audio");
+      setFromGames(false);
       const anchor = r?.anchor;
       if (anchor) {
         setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 0);
@@ -77,11 +79,17 @@ function Shell() {
     : "Nothing is applied right now. Your desktop, apps, and audio are exactly as Windows set them.";
 
   const nav = (s: Screen) => {
+    setFromGames(s === "games");
     if (s === "audio") { setScreen("games"); setSection("audio"); return; }
     if (s === "display") { setScreen("games"); setSection("display"); return; }
     setScreen(s);
   };
-  const railKey: Screen = screen === "games" ? (section === "audio" ? "audio" : section === "display" ? "display" : "games") : screen;
+  // Games, Audio and Display all open the per-game editor. The rail marks the
+  // entry that was clicked: Games stays lit on whichever section it shows
+  // (it used to light Audio, so Games looked like it did nothing).
+  const railKey: Screen = screen !== "games" ? screen
+    : fromGames ? "games"
+    : section === "audio" ? "audio" : section === "display" ? "display" : "games";
 
   if (firstRun === true) {
     return (

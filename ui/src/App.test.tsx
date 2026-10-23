@@ -91,6 +91,18 @@ describe("the rail", () => {
     expect(rail().getByText("Audio").closest("button")).not.toHaveAttribute("aria-current");
   });
 
+  it("clicking Games lights Games, not the Audio section it opens on", async () => {
+    const h = await mount();
+    await h.user.click(rail().getByText("Games"));
+    await settle();
+    expect(rail().getByText("Games").closest("button")).toHaveAttribute("aria-current", "page");
+    expect(rail().getByText("Audio").closest("button")).not.toHaveAttribute("aria-current");
+    // Going to Audio from the rail moves the mark there.
+    await h.user.click(rail().getByText("Audio"));
+    await settle();
+    expect(rail().getByText("Audio").closest("button")).toHaveAttribute("aria-current", "page");
+  });
+
   it("shows what is running now", async () => {
     const h = await mount();
     expect(rail().getByText("Sharing").closest(".st")).not.toHaveClass("on");
