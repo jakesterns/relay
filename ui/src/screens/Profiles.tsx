@@ -5,7 +5,7 @@ import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import {
-  api, fmtMb, newProfile,
+  api, catalogKind, fmtMb, newProfile,
   type CatalogEntry, type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
   type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
 } from "../lib/ipc";
@@ -44,6 +44,7 @@ export function Profiles() {
   const [editing, setEditing] = useState<Profile | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [adding, setAdding] = useState<"headset" | "monitor" | null>(null);
+  const [editingHs, setEditingHs] = useState<Headset | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hwError, setHwError] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -132,8 +133,10 @@ export function Profiles() {
             onDismissError={() => setError(null)}
           />
         )}
-        {adding === "headset" && (
-          <HeadsetDialog onClose={() => setAdding(null)} onSaved={async () => { setAdding(null); await refresh(); }} />
+        {(adding === "headset" || editingHs) && (
+          <HeadsetDialog key={editingHs?.id ?? "new"} editing={editingHs ?? undefined}
+            onClose={() => { setAdding(null); setEditingHs(null); }}
+            onSaved={async () => { setAdding(null); setEditingHs(null); await refresh(); }} />
         )}
         {adding === "monitor" && (
           <MonitorDialog onClose={() => setAdding(null)} onSaved={async () => { setAdding(null); await refresh(); }} />
@@ -180,19 +183,21 @@ export function Profiles() {
         </Card>
       </section>
       <aside className="side">
-        <Card title="Headsets & IEMs" action="Add" onAction={() => setAdding("headset")}>
+        <Card title="Headsets & IEMs" action="Add" onAction={() => { setEditingHs(null); setAdding("headset"); }}>
           {hardware.headsets.length === 0 ? (
             <div className="empty">Library is empty</div>
           ) : hardware.headsets.map((h) => (
             <div className="hwl" key={h.id}>
               <div className="ic r" />
-              <div>
+              <div className="hwt">
                 <b>{h.name}</b>
                 <span>{kindLabel[h.kind]}{h.curve ? ` · curve (${h.source || "measured"})` : " · no curve"}</span>
               </div>
               {hardware.connected.headset === h.id && <Pill kind="on" text="Plugged" />}
+              <button type="button" className="ed" aria-label={`Edit ${h.name}`}
+                onClick={() => { setAdding(null); setEditingHs(h); }}>Edit</button>
               <ConfirmButton className="rm" confirmClassName="rm btn danger"
-                label="Remove" confirm={`Remove ${h.name}?`}
+                label="Remove" confirm="Remove?"
                 title={`Remove ${h.name} from the library. Profiles that use it stay, but stop matching on it.`}
                 onConfirm={() => void removeHw(h.id)} />
             </div>
@@ -207,14 +212,14 @@ export function Profiles() {
             return (
               <div className="hwl" key={m.id}>
                 <div className="ic" />
-                <div>
+                <div className="hwt">
                   <b>{m.name}</b>
                   <span>{m.panel || "Panel unknown"}{m.ddcci ? ` · ${ddcControls(m.ddcci)}` : " · controls not scanned"}</span>
                   {m.color && <span className="mono" style={{ fontSize: 11 }}>{colorSummary(m.color)}</span>}
                 </div>
                 {plugged && <Pill kind={plugged.primary ? "on" : "ready"} text={plugged.primary ? "Main" : "Second"} />}
                 <ConfirmButton className="rm" confirmClassName="rm btn danger"
-                  label="Remove" confirm={`Remove ${m.name}?`}
+                  label="Remove" confirm="Remove?"
                   title={`Remove ${m.name} from the library. Profiles that use it stay, but stop matching on it.`}
                   onConfirm={() => void removeHw(m.id)} />
               </div>
@@ -269,17 +274,17 @@ export function colorSummary(c: ColorInfo): string {
   return parts.join(" · ") || "no colour data";
 }
 
-/** Search 8,849 measured models and add one with its curve.
+/** Search 8,849 measured models and pick one.
  *
- *  The index ships with Relay, so typing is offline and instant. Picking a
- *  model is the one moment Relay reaches the network: it downloads that
- *  model's measurement, caches it under the data folder, and credits whoever
- *  measured it — the licence requires the credit, and the download-on-demand
- *  is why Relay can use this data at all without redistributing it. */
-function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () => Promise<void> }) {
+ *  The index ships with Relay, so typing is offline and instant. Picking only
+ *  fills the dialog; "Add to library" is the one moment Relay reaches the
+ *  network: it downloads that model's measurement, caches it under the data
+ *  folder, and credits whoever measured it — the licence requires the
+ *  credit, and the download-on-demand is why Relay can use this data at all
+ *  without redistributing it. */
+function CatalogSearch({ onPick }: { onPick: (e: CatalogEntry) => void }) {
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<CatalogEntry[]>([]);
-  const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [searching, setSearching] = useState(false);
 
@@ -297,14 +302,6 @@ function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () =>
     }, 180);
     return () => { live = false; clearTimeout(t); };
   }, [query]);
-
-  const add = async (e: CatalogEntry) => {
-    setBusy(`${e.name}|${e.source}`);
-    setError(null);
-    try { await api.addHeadsetFromCatalog(e, endpoint || null); await onAdded(); }
-    catch (err) { setError(errText(err)); }
-    finally { setBusy(null); }
-  };
 
   return (
     <>
@@ -326,8 +323,8 @@ function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () =>
                   <b>{e.name}</b>
                   <span>Measured by {e.source}{e.rig ? ` on ${e.rig}` : ""}</span>
                 </div>
-                <button className="btn q" disabled={busy !== null}
-                  onClick={() => void add(e)}>{busy === key ? "Adding…" : "Add"}</button>
+                <button className="btn q" aria-label={`Use ${e.name} measured by ${e.source}`}
+                  onClick={() => onPick(e)}>Use</button>
               </div>
             );
           })}
@@ -336,7 +333,7 @@ function CatalogSearch({ endpoint, onAdded }: { endpoint: string; onAdded: () =>
       <p className="p small">
         Measurements come from the <b>AutoEQ</b> project and its contributors (oratory1990,
         crinacle and others). Relay ships only the list of names; the curve itself is downloaded
-        when you pick a model, cached on this PC, and never redistributed.
+        when you add the model you picked, cached on this PC, and never redistributed.
       </p>
       <ErrorNote text={error} onDismiss={() => setError(null)} />
     </>
@@ -348,45 +345,87 @@ function slug(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-/** Add a headset: name it, bind it to an audio endpoint, optionally paste an
- *  AutoEQ result. The endpoint binding is what makes it "plugged". */
-function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
+/** Add or edit a headset. Adding: pick a measured model from the catalogue
+ *  (which fills the form) or describe it yourself, then set what the
+ *  catalogue cannot know — where it is plugged in — and press Add. Nothing is
+ *  saved or downloaded until then. Editing: rename, change the kind or the
+ *  output, or paste a new curve; the stored curve is kept otherwise. The
+ *  endpoint binding is what makes it "plugged". */
+function HeadsetDialog({ editing, onClose, onSaved }: {
+  editing?: Headset;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
   const { hardware } = useCore();
   const endpoints = hardware.connected.endpoints;
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState<HeadsetKind>("headphone");
-  const [endpoint, setEndpoint] = useState(endpoints.find((e) => e.default)?.key ?? endpoints[0]?.key ?? "");
+  const [picked, setPicked] = useState<CatalogEntry | null>(null);
+  const [name, setName] = useState(editing?.name ?? "");
+  const [kind, setKind] = useState<HeadsetKind>(editing?.kind ?? "headphone");
+  const [endpoint, setEndpoint] = useState(editing
+    ? editing.endpoints[0] ?? ""
+    : endpoints.find((e) => e.default)?.key ?? endpoints[0]?.key ?? "");
   const [curveText, setCurveText] = useState("");
-  const [source, setSource] = useState("");
+  const [source, setSource] = useState(editing?.source ?? "");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = name.trim().length > 0;
+  const valid = name.trim().length > 0 && !busy;
+
+  const pick = (e: CatalogEntry) => {
+    setPicked(e);
+    setName(e.name);
+    setKind(catalogKind(e));
+    setSource(e.source);
+    setCurveText("");
+    setError(null);
+  };
 
   const save = async () => {
     if (!valid) return;
-    const h: Headset = {
-      id: slug(name),
-      name: name.trim(),
-      kind,
-      source: source.trim(),
-      endpoints: endpoint ? [endpoint] : [],
-    };
+    setBusy(true);
+    setError(null);
     try {
-      await api.saveHardware({ kind: "headset", value: h });
-      if (curveText.trim()) await api.importCurve(h.id, curveText);
+      if (picked) {
+        await api.addHeadsetFromCatalog(picked, endpoint || null, name.trim(), kind);
+      } else {
+        const h: Headset = {
+          id: editing?.id ?? slug(name),
+          name: name.trim(),
+          kind,
+          source: source.trim(),
+          endpoints: endpoint ? [endpoint] : [],
+          ...(editing?.curve ? { curve: editing.curve } : {}),
+        };
+        await api.saveHardware({ kind: "headset", value: h });
+        if (curveText.trim()) await api.importCurve(h.id, curveText);
+      }
       await onSaved();
     } catch (e) { setError(errText(e)); }
+    finally { setBusy(false); }
   };
 
   return (
-    <Card title="Add headset" action="Cancel" onAction={onClose}>
+    <Card title={editing ? "Edit headset" : "Add headset"} action="Cancel" onAction={onClose}>
       <div className="form">
-        <CatalogSearch endpoint={endpoint} onAdded={onSaved} />
-        <div className="hdr" style={{ margin: "6px 0 0" }}>
-          <span className="note">Or describe it yourself</span>
-        </div>
+        {!editing && (picked ? (
+          <div className="hwl picked" data-testid="catalog-picked">
+            <div className="ic r" />
+            <div className="hwt">
+              <b>{picked.name}</b>
+              <span>Measured by {picked.source}{picked.rig ? ` on ${picked.rig}` : ""} · downloaded when you add it</span>
+            </div>
+            <button type="button" className="btn q" onClick={() => setPicked(null)}>Change</button>
+          </div>
+        ) : (
+          <>
+            <CatalogSearch onPick={pick} />
+            <div className="hdr" style={{ margin: "6px 0 0" }}>
+              <span className="note">Or describe it yourself</span>
+            </div>
+          </>
+        ))}
         <label className="field">
           <span>Name</span>
-          <input value={name} placeholder="HD 560S" autoFocus onChange={(e) => setName(e.target.value)} />
+          <input value={name} placeholder="HD 560S" autoFocus={!!editing} onChange={(e) => setName(e.target.value)} />
         </label>
         <Chips<HeadsetKind> label="Kind" value={kind} onChange={setKind}
           options={[{ key: "headphone", label: "Headphones" }, { key: "iem", label: "IEM" }, { key: "speakers", label: "Speakers" }]} />
@@ -399,21 +438,33 @@ function HeadsetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () 
             ))}
           </select>
         </label>
-        <div className="two">
-          <label className="field">
-            <span>Curve source</span>
-            <input value={source} placeholder="oratory1990" onChange={(e) => setSource(e.target.value)} />
-          </label>
-        </div>
-        <label className="field">
-          <span>Measured curve (AutoEQ CSV, optional)</span>
-          <textarea rows={4} className="mono" value={curveText} placeholder={"frequency,raw,…\n20.00,-4.11,…"}
-            onChange={(e) => setCurveText(e.target.value)} />
-        </label>
-        <p className="p small">Paste the contents of an AutoEQ result file, or leave this empty and use the search above.</p>
+        {!picked && (
+          <>
+            <div className="two">
+              <label className="field">
+                <span>Curve source</span>
+                <input value={source} placeholder="oratory1990" onChange={(e) => setSource(e.target.value)} />
+              </label>
+            </div>
+            <label className="field">
+              <span>{editing ? "Replace measured curve (AutoEQ CSV, optional)" : "Measured curve (AutoEQ CSV, optional)"}</span>
+              <textarea rows={4} className="mono" value={curveText} placeholder={"frequency,raw,…\n20.00,-4.11,…"}
+                onChange={(e) => setCurveText(e.target.value)} />
+            </label>
+            <p className="p small">
+              <b>Curve source</b> is who measured it. <b>Measured curve</b> is that measurement: the
+              frequency response as an AutoEQ CSV, as squig.link and similar sites export it.
+              {editing
+                ? editing.curve ? " Leave it empty to keep the current curve." : " This headset has no curve yet."
+                : " Leave it empty and use the search above to get both filled in for you."}
+            </p>
+          </>
+        )}
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         <div className="actions">
-          <button className="btn acc" disabled={!valid} onClick={() => void save()}>Add to library</button>
+          <button className="btn acc" disabled={!valid} onClick={() => void save()}>
+            {busy ? (picked ? "Downloading…" : "Saving…") : editing ? "Save changes" : "Add to library"}
+          </button>
           <button className="btn q" onClick={onClose}>Cancel</button>
         </div>
       </div>

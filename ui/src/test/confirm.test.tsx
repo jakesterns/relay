@@ -105,7 +105,7 @@ describe("every destructive action", () => {
     const hw = inCard("Headsets & IEMs");
     await h.user.click(hw.getAllByRole("button", { name: "Remove" })[0]);
     expect(tauri.lastCall("delete_hardware")).toBeUndefined();
-    await h.user.click(hw.getByRole("button", { name: "Remove HD 560S?" }));
+    await h.user.click(hw.getByRole("button", { name: "Remove?" }));
     await settle();
     expect(tauri.lastCall("delete_hardware")?.args).toEqual({ id: "hd560s" });
   });

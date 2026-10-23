@@ -890,8 +890,12 @@ async fn search_catalog(
 async fn add_headset_from_catalog(
     entry: relay_core::hardware::catalog::CatalogEntry,
     endpoint: Option<String>,
+    name: Option<String>,
+    kind: Option<relay_core::hardware::HeadsetKind>,
 ) -> CmdResult<()> {
-    match call(Method::AddHeadsetFromCatalog { entry: Box::new(entry), endpoint }).await? {
+    match call(Method::AddHeadsetFromCatalog { entry: Box::new(entry), endpoint, name, kind })
+        .await?
+    {
         Reply::Ok => Ok(()),
         other => Err(unexpected(other).into()),
     }

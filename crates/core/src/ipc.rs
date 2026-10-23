@@ -196,6 +196,13 @@ pub enum Method {
         entry: Box<crate::hardware::catalog::CatalogEntry>,
         #[serde(default)]
         endpoint: Option<String>,
+        /// What the user named it in the dialog (the catalogue name when
+        /// absent or blank).
+        #[serde(default)]
+        name: Option<String>,
+        /// The kind the user chose (read from the catalogue path otherwise).
+        #[serde(default)]
+        kind: Option<crate::hardware::HeadsetKind>,
     },
     /// Render the A/B listening pair for a profile's audio chain into the
     /// previews directory. `wav` is an optional source clip; without it a
@@ -1000,6 +1007,30 @@ mod tests {
         assert_eq!(v["params"]["id"], Uuid::nil().to_string());
         let back: Request = serde_json::from_value(v).unwrap();
         assert!(matches!(back.method, Method::GetProfile { .. }));
+    }
+
+    /// The catalogue add takes the dialog's name and kind; a request from a
+    /// UI that predates them still parses (both absent).
+    #[test]
+    fn catalog_add_takes_name_and_kind_and_old_requests_still_parse() {
+        let entry = r#"{"name":"KZ ZS10 Pro 2 (on-on-off-off)","source":"Hi End Portable","rig":"","path":"Hi%20End%20Portable/in-ear/KZ%20ZS10%20Pro%202%20(on-on-off-off)"}"#;
+        let new = format!(
+            r#"{{"id":1,"method":"add_headset_from_catalog","params":{{"entry":{entry},"endpoint":null,"name":"KZ IEMs","kind":"iem"}}}}"#
+        );
+        let Method::AddHeadsetFromCatalog { name, kind, .. } =
+            serde_json::from_str::<Request>(&new).unwrap().method
+        else {
+            panic!("wrong method")
+        };
+        assert_eq!(name.as_deref(), Some("KZ IEMs"));
+        assert_eq!(kind, Some(crate::hardware::HeadsetKind::Iem));
+        let old = format!(r#"{{"id":1,"method":"add_headset_from_catalog","params":{{"entry":{entry}}}}}"#);
+        let Method::AddHeadsetFromCatalog { name, kind, endpoint, .. } =
+            serde_json::from_str::<Request>(&old).unwrap().method
+        else {
+            panic!("wrong method")
+        };
+        assert!(name.is_none() && kind.is_none() && endpoint.is_none());
     }
 
     /// S51: locks the shape `ui/src/lib/ipc.ts` mirrors for NDI status and

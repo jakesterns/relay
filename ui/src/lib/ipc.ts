@@ -167,6 +167,9 @@ export interface HardwareMonitor {
 /** One model in the bundled headphone catalogue. Mirrors
  *  `hardware::catalog::CatalogEntry`. */
 export interface CatalogEntry { name: string; source: string; rig: string; path: string }
+/** The kind a catalogue entry's path implies, as the core reads it. */
+export const catalogKind = (e: CatalogEntry): HeadsetKind =>
+  (/in-ear|in%20ear/i.test(e.path) ? "iem" : "headphone");
 /** A base64 JPEG thumbnail of the live capture (Event::SharePreview). */
 export interface SharePreview { width: number; height: number; jpeg: string }
 export interface AudioInterface { id: string; name: string }
@@ -1374,18 +1377,21 @@ export const api = {
     }
     return invoke<CatalogEntry[]>("search_catalog", { query });
   },
-  /** Add a catalogue model: downloads its measurement once, then caches. */
-  async addHeadsetFromCatalog(entry: CatalogEntry, endpoint: string | null): Promise<void> {
+  /** Add a catalogue model: downloads its measurement once, then caches.
+   *  `name` / `kind` are what the user set in the dialog; omitted, the core
+   *  uses the catalogue's name and the kind its path implies. */
+  async addHeadsetFromCatalog(entry: CatalogEntry, endpoint: string | null,
+    name?: string, kind?: HeadsetKind): Promise<void> {
     if (!isTauri()) {
       mockHardware.headsets.push({
         id: `${entry.name}-${entry.source}`.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
-        name: entry.name, kind: entry.path.includes("in-ear") ? "iem" : "headphone",
+        name: name?.trim() || entry.name, kind: kind ?? catalogKind(entry),
         curve: [[20, 6], [1000, 0], [20000, -3]], source: entry.source,
         endpoints: endpoint ? [endpoint] : [],
       });
       return;
     }
-    return invoke<void>("add_headset_from_catalog", { entry, endpoint });
+    return invoke<void>("add_headset_from_catalog", { entry, endpoint, name: name ?? null, kind: kind ?? null });
   },
   /** Remove the recorded registration; empties installed.json. */
   async uninstallVcam(): Promise<void> {
