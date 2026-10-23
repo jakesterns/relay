@@ -43,6 +43,7 @@ pub mod service;
 pub mod share;
 pub mod startup;
 pub mod status;
+pub mod suggest;
 pub mod tray;
 pub mod types;
 pub mod uiprefs;

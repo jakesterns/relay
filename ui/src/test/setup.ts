@@ -6,6 +6,7 @@ import { afterEach } from "vitest";
 import { cleanup } from "@testing-library/react";
 import * as tauri from "./tauriMock";
 import { clearDraft } from "../lib/drafts";
+import { resetOnboarding } from "../lib/onboarding";
 
 /** Relay asks its own questions, inside its own window. A native dialog here
  *  is a bug, so the three of them throw rather than quietly returning a value
@@ -42,4 +43,6 @@ afterEach(() => {
   // The unsaved-edit store outlives the React tree on purpose; it must not
   // outlive a test.
   clearDraft();
+  // Same for the selected profile and any pending navigation request.
+  resetOnboarding();
 });

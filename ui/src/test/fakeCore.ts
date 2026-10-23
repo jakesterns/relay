@@ -88,6 +88,8 @@ export interface FakeCore {
   pickedVideo: string | null;
   /** S48: the ETA the fake game EQ status reports (seconds). */
   gameEqEta: number | null;
+  /** Exes the user said "Not for this game" to (lower case). */
+  declined: string[];
   /** Commands that should reject, with the message the core would give. */
   fail: Map<string, string>;
   handler: InvokeHandler;
@@ -260,6 +262,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     ],
     pickedVideo: "C:\\Users\\test\\Desktop\\clip.webm",
     gameEqEta: 240,
+    declined: [],
     fail: new Map(),
     handler: () => undefined,
     ...overrides,
@@ -289,6 +292,14 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
     save_profile: (a) => {
       const p = a.profile as Profile;
       core.profiles.set(p.id, structuredClone(p));
+      // As the core: an offer goes once a profile names its exe.
+      const s = core.state.suggestion;
+      if (s && s.exe.toLowerCase() === p.game.exe.toLowerCase()) core.state.suggestion = null;
+    },
+    decline_suggestion: (a) => {
+      const exe = String(a.exe).toLowerCase();
+      core.declined.push(exe);
+      if (core.state.suggestion?.exe.toLowerCase() === exe) core.state.suggestion = null;
     },
     delete_profile: (a) => void core.profiles.delete(a.id as string),
     apply_profile: (a) => {
@@ -787,7 +798,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
 export const KNOWN_COMMANDS: readonly string[] = [
   "core_status", "list_profiles", "get_profile", "save_profile", "delete_profile",
   "apply_profile", "restore_all", "list_processes", "get_autostart", "set_autostart",
-  "get_ui_prefs", "set_ui_prefs", "ack_crash", "start_core",
+  "get_ui_prefs", "set_ui_prefs", "ack_crash", "decline_suggestion", "start_core",
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "game_eq",
   "list_learn_videos", "pick_video_file", "learn_from_file", "learn_file_status", "learn_file_cancel",

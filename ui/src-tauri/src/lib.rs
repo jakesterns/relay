@@ -159,6 +159,14 @@ async fn ack_crash() -> CmdResult<()> {
     }
 }
 
+#[tauri::command]
+async fn decline_suggestion(exe: String) -> CmdResult<()> {
+    match call(Method::DeclineSuggestion { exe }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// S45: every update method answers with the updater's status.
 async fn update_call(method: Method) -> CmdResult<relay_core::update::UpdateStatus> {
     match call(method).await? {
@@ -1376,6 +1384,7 @@ pub fn run() {
             forget_peer,
             set_peer_favourite,
             ack_crash,
+            decline_suggestion,
             update_status,
             check_for_updates,
             install_update,

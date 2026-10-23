@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Card, Chips, ConfirmButton, DoneNote, ErrorNote, Kv, Live, Pill } from "../components/Controls";
 import { OfflineBanner } from "../components/Offline";
+import { GettingStarted, ProfileOffer } from "../components/Onboarding";
+import { takeNav, usePendingNav } from "../lib/onboarding";
 import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
@@ -59,6 +61,11 @@ export function Profiles() {
   };
 
   const startNew = () => { setEditing(newProfile()); setIsNew(true); setError(null); };
+  // "New profile" from a getting-started step on another screen.
+  const navReq = usePendingNav();
+  useEffect(() => {
+    if (navReq?.to === "new-profile" && takeNav("new-profile")) startNew();
+  }, [navReq]);
   const startEdit = async (id: string) => {
     try { setEditing(await api.getProfile(id)); setIsNew(false); setError(null); }
     catch (e) { setError(errText(e)); }
@@ -116,6 +123,7 @@ export function Profiles() {
           <Live on={!!active} text={active ? `${active.name} active` : "Nothing active"} />
         </div>
         <OfflineBanner />
+        <ProfileOffer />
         <div className="stat">
           <div><label>Memory</label><div className="v">{fmtMb(fp.rss_bytes)}<u>MB</u></div><div className="hint">Background part of Relay</div></div>
           <div><label>CPU</label><div className="v">{fp.cpu_percent.toFixed(1)}<u>%</u></div><div className="hint">{active ? "Profile active" : "Waiting for a game"}</div></div>
@@ -146,7 +154,10 @@ export function Profiles() {
         )}
         <Card title="Game profiles" action="New profile" onAction={startNew}>
           {profiles.length === 0 ? (
-            <div className="empty">No profiles yet. Add one and it applies the next time that game has focus.</div>
+            <>
+              <div className="empty">No profiles yet. Add one and it applies the next time that game has focus.</div>
+              <GettingStarted />
+            </>
           ) : (
             <table className="tbl">
               <thead>

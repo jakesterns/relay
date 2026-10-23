@@ -303,7 +303,11 @@ export interface CoreState {
   build?: BuildInfo;
   /** One sentence about a crash not yet shown to the user (S38). */
   last_crash?: string | null;
+  /** A full-screen app with no profile, offered as "make a profile for
+   *  it?". Mirrors `suggest::Suggestion`; the core never acts on it. */
+  suggestion?: Suggestion | null;
 }
+export interface Suggestion { exe: string; title: string }
 /** Version and the paths this core actually uses (`--data-dir` moves them). */
 export interface BuildInfo { version: string; data_dir: string; log_file: string }
 
@@ -1447,6 +1451,11 @@ export const api = {
   async ackCrash(): Promise<void> {
     if (!isTauri()) return;
     return invoke<void>("ack_crash");
+  },
+  /** "Not for this game": the core never offers a profile for it again. */
+  async declineSuggestion(exe: string): Promise<void> {
+    if (!isTauri()) { mockState.suggestion = null; return; }
+    return invoke<void>("decline_suggestion", { exe });
   },
   /** S46: read or act on a profile's learned game EQ. */
   async gameEq(id: string, action: GameEqAction): Promise<GameEqReply> {

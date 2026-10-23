@@ -276,6 +276,10 @@ pub struct CoreState {
     /// Set once at start, cleared by `Method::AckCrash`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_crash: Option<String>,
+    /// A full-screen app in front (or last in front) with no profile:
+    /// offered as "make a profile for it?". Never acted on by the core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<crate::suggest::Suggestion>,
 }
 
 /// What this build is and where it keeps its files.

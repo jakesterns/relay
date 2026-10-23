@@ -302,6 +302,9 @@ pub enum Method {
     /// The user has seen the last-crash line; clear it and mark the records
     /// seen (S38).
     AckCrash,
+    /// "Not for this game": never offer a profile for this exe again
+    /// (`offers.json`), and drop the current offer if it is this one.
+    DeclineSuggestion { exe: String },
     /// S46: a profile's learned game EQ — read its status, or act on it
     /// (learning switch, goal, auto-apply, Apply / Relearn / Reset, Import /
     /// Export). Every action replies with the status after it.
@@ -997,6 +1000,24 @@ pub mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The profile offer, as `ui/src/lib/ipc.ts` mirrors it: the state field
+    /// is absent when there is no offer, and the decline carries the exe.
+    #[test]
+    fn suggestion_wire_shape() {
+        let mut s = crate::types::CoreState::default();
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("suggestion").is_none(), "no offer, no field: {v}");
+        s.suggestion =
+            Some(crate::suggest::Suggestion { exe: "mw4.exe".into(), title: "Call of Duty".into() });
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["suggestion"], serde_json::json!({ "exe": "mw4.exe", "title": "Call of Duty" }));
+        let r: Request = serde_json::from_str(
+            r#"{"id":3,"method":"decline_suggestion","params":{"exe":"mw4.exe"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(r.method, Method::DeclineSuggestion { ref exe } if exe == "mw4.exe"));
+    }
 
     #[test]
     fn request_wire_shape_is_flat() {

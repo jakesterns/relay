@@ -5,6 +5,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Toasts } from "./components/Toasts";
 import { CoreProvider, useCore } from "./lib/core";
 import { useDraft } from "./lib/drafts";
+import { takeNav, usePendingNav } from "./lib/onboarding";
 import { api } from "./lib/ipc";
 import { useEffect } from "react";
 import { FirstRun } from "./screens/FirstRun";
@@ -39,6 +40,23 @@ function Shell() {
       .catch(() => { if (!cancelled) setFirstRun(false); }); // offline: don't block the app
     return () => { cancelled = true; };
   }, [offline]);
+
+  // A getting-started button asked to go somewhere. New profile is taken by
+  // the Profiles screen itself (it opens the form); the Audio request is
+  // taken here, then the card it names is scrolled into view.
+  const navReq = usePendingNav();
+  useEffect(() => {
+    if (navReq?.to === "new-profile") setScreen("profiles");
+    if (navReq?.to === "audio") {
+      const r = takeNav("audio");
+      setScreen("games");
+      setSection("audio");
+      const anchor = r?.anchor;
+      if (anchor) {
+        setTimeout(() => document.getElementById(anchor)?.scrollIntoView?.({ behavior: "smooth", block: "start" }), 0);
+      }
+    }
+  }, [navReq]);
 
   const sharing = state.sharing.kind !== "off";
   const profile = state.active_profile;
