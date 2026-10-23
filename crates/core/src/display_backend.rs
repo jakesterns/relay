@@ -1100,9 +1100,11 @@ mod tests {
         io.state.lock().monitors[0].ddc = Some(vec![0x10, 0x12, 0x14]);
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
-        let mut d = DisplaySettings::default();
-        d.mode = Some(mode_4k(240));
-        d.hdr = Some(false);
+        let mut d = DisplaySettings {
+            mode: Some(mode_4k(240)),
+            hdr: Some(false),
+            ..Default::default()
+        };
         d.nvidia_color.bpc = Some(10);
         d.monitor.color_preset = Some(0x05);
 
@@ -1146,9 +1148,11 @@ mod tests {
         let io = FakeIo::two_monitors();
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
-        let mut d = DisplaySettings::default();
-        d.mode = Some(mode_1440(240));
-        d.hdr = Some(true);
+        let mut d = DisplaySettings {
+            mode: Some(mode_1440(240)),
+            hdr: Some(true),
+            ..Default::default()
+        };
         d.nvidia_color.bpc = Some(8);
         let snap = adapter.capture(Some(&t), &d).unwrap();
         assert!(snap.targets.is_empty(), "{snap:?}");
@@ -1163,9 +1167,11 @@ mod tests {
         io.state.lock().monitors[0].color_presets = Some(vec![0x05]);
         let adapter = DisplayAdapter::with_io(io.clone());
         let t = target_a(&io);
-        let mut d = DisplaySettings::default();
-        d.mode = Some(DisplayMode { width: 1280, height: 720, refresh_hz: 60 });
-        d.hdr = Some(true);
+        let mut d = DisplaySettings {
+            mode: Some(DisplayMode { width: 1280, height: 720, refresh_hz: 60 }),
+            hdr: Some(true),
+            ..Default::default()
+        };
         d.nvidia_color.range = Some(relay_display::nvcolor::DynamicRange::Full);
         d.monitor.color_preset = Some(0x0B);
         let snap = adapter.capture(Some(&t), &d).unwrap();

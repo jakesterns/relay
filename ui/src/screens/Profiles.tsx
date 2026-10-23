@@ -5,7 +5,8 @@ import { ListeningCard } from "./Listening";
 import { useCore } from "../lib/core";
 import { errText } from "../lib/err";
 import {
-  api, catalogKind, fmtMb, newProfile,
+  api, catalogKind, fmtMb, fmtMode, newProfile, sameMode,
+  type DisplayMode, type DisplayOptions,
   type CatalogEntry, type ColorInfo, type HardwareMonitor, type Headset, type HeadsetKind, type ProcessInfo,
   type Profile, type ProfileSummary, type SharePreset, type ProfileStatus,
 } from "../lib/ipc";
@@ -506,11 +507,25 @@ function MonitorDialog({ editing, onClose, onSaved }: {
   const [name, setName] = useState(editing?.name ?? detected[0]?.name ?? "");
   const [panel, setPanel] = useState(editing?.panel ?? "");
   const [error, setError] = useState<string | null>(null);
+  // S52: the user's corrections of what Windows / the EDID say. Advice
+  // only — recommendations use them; they never change the PC by themselves.
+  const [modeOverride, setModeOverride] = useState<DisplayMode | undefined>(editing?.mode_override);
+  const [hdrOverride, setHdrOverride] = useState<boolean | undefined>(editing?.hdr_override);
+  const [opts, setOpts] = useState<DisplayOptions | null>(null);
+  const plugged = editing ? detected.find((m) => m.id === editing.id) : undefined;
+  useEffect(() => {
+    if (!editing || !plugged) return;
+    let live = true;
+    api.displayOptions(editing.id).then((o) => { if (live) setOpts(o); }).catch(() => {});
+    return () => { live = false; };
+  }, [editing?.id, plugged?.id]);
   const valid = (picked || editing ? true : pick.trim().length > 0) && name.trim().length > 0;
 
   const save = async () => {
     if (!valid) return;
     const m: HardwareMonitor = { ...editing, id: pick.trim(), name: name.trim(), panel: panel.trim() };
+    if (modeOverride) m.mode_override = modeOverride; else delete m.mode_override;
+    if (hdrOverride === undefined) delete m.hdr_override; else m.hdr_override = hdrOverride;
     try {
       await api.saveHardware({ kind: "monitor", value: m });
       await onSaved();
@@ -559,7 +574,32 @@ function MonitorDialog({ editing, onClose, onSaved }: {
             </datalist>
           </label>
         </div>
-        <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. Windows does not report the panel type, so set it here; DDC/CI controls are filled in by Scan monitor controls{editing ? " and are kept when you save" : ""}.</p>
+        {editing && (
+          <div className="two">
+            <label className="field">
+              <span>Best mode{plugged?.native ? ` · EDID ${plugged.native[0]}×${plugged.native[1]}` : ""}{plugged?.refresh_hz ? ` · now ${Math.round(plugged.refresh_hz)} Hz` : ""}</span>
+              <select aria-label="Best mode" value={modeOverride ? fmtMode(modeOverride) : ""}
+                onChange={(e) => setModeOverride((opts?.modes ?? []).find((m) => fmtMode(m) === e.target.value)
+                  ?? (modeOverride && fmtMode(modeOverride) === e.target.value ? modeOverride : undefined))}>
+                <option value="">As detected</option>
+                {modeOverride && !(opts?.modes ?? []).some((m) => sameMode(m, modeOverride)) && (
+                  <option value={fmtMode(modeOverride)}>{fmtMode(modeOverride)}</option>
+                )}
+                {(opts?.modes ?? []).map((m) => <option key={fmtMode(m)} value={fmtMode(m)}>{fmtMode(m)}</option>)}
+              </select>
+            </label>
+            <label className="field">
+              <span>HDR{opts?.hdr ? ` · Windows says ${opts.hdr.supported ? "supported" : "not supported"}` : plugged?.color?.hdr?.hdr10 ? " · EDID says HDR10" : ""}</span>
+              <select aria-label="HDR capability" value={hdrOverride === undefined ? "" : hdrOverride ? "yes" : "no"}
+                onChange={(e) => setHdrOverride(e.target.value === "" ? undefined : e.target.value === "yes")}>
+                <option value="">As detected</option>
+                <option value="yes">Supports HDR</option>
+                <option value="no">No HDR</option>
+              </select>
+            </label>
+          </div>
+        )}
+        <p className="p small">The id comes from the monitor's EDID, so it stays the same on any port or GPU output. Windows does not report the panel type, so set it here; DDC/CI controls are filled in by Scan monitor controls{editing ? " and are kept when you save. Best mode and HDR only correct what Relay recommends; they never change your screen by themselves" : ""}.</p>
         <ErrorNote text={error} onDismiss={() => setError(null)} />
         <div className="actions">
           <button className="btn acc" disabled={!valid} onClick={() => void save()}>{editing ? "Save changes" : "Add to library"}</button>

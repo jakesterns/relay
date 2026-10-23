@@ -14,6 +14,32 @@ import type {
   SharePresetDef, StreamStatus, UiPrefs, UpdateStatus, VdeviceStatus, AudioDevices, DeviceTrack, MixerSide,
 } from "../lib/ipc";
 import type { NdiRuntime } from "../lib/ipc";
+import type { DisplayOptions } from "../lib/ipc";
+
+/** S52: the dev PC's LG on its RTX, as read live (read-only) on 2026-10-22:
+ *  2560×1440 @ 240 now, HDR supported and on, NVIDIA RGB / full / 8-bit,
+ *  colour presets 6500 K, 9300 K, User 1. */
+export function fakeDisplayOptions(): DisplayOptions {
+  const m = (width: number, height: number, refresh_hz: number) => ({ width, height, refresh_hz });
+  return {
+    monitor: "mon:ULTRAGEAR", name: "LG ULTRAGEAR+",
+    modes: [m(3840, 2160, 240), m(3840, 2160, 60), m(2560, 1440, 240)],
+    current_mode: m(2560, 1440, 240), native: [3840, 2160],
+    hdr: { supported: true, enabled: true }, hdr_supported: true,
+    nvidia_color: { format: "rgb", range: "full", bpc: 8 }, vendor: "nvidia",
+    color_presets: [0x05, 0x08, 0x0b], panel_kind: "oled", panel_from_user: false,
+    recommendations: [
+      { field: "mode", value: m(3840, 2160, 240), reason: "Native resolution at the panel's highest refresh." },
+      { field: "hdr", value: false, reason: "Off unless the game has its own HDR mode you use." },
+      { field: "nvidia_color.format", value: "rgb", reason: "RGB is full 4:4:4 colour." },
+      { field: "nvidia_color.range", value: "full", reason: "A PC monitor expects full range." },
+      { field: "nvidia_color.bpc", value: 10, reason: "The panel takes 10-bit." },
+      { field: "color_preset", value: 0x05, reason: "6500 K is the standard white point." },
+      { field: "shadow_lift", value: 0, reason: "OLED black is true black." },
+      { field: "vibrance", value: 50, reason: "OLED colour is already vivid." },
+    ],
+  };
+}
 import type { EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
 import { LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
@@ -40,6 +66,8 @@ function setApo(core: FakeCore, endpoint: string | null, installed: boolean) {
 
 export interface FakeCore {
   state: CoreState;
+  /** S52: what `display_options` answers (the dev PC's LG on an RTX). */
+  displayOptions: DisplayOptions;
   profiles: Map<string, Profile>;
   hardware: HardwareReply;
   presets: SharePresetDef[];
@@ -143,6 +171,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
   };
 
   const core: FakeCore = {
+    displayOptions: fakeDisplayOptions(),
     state: {
       active_profile: null,
       foreground: null,
@@ -565,6 +594,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       core.hardware.monitors = core.hardware.monitors.filter((m) => m.id !== a.id);
     },
     probe_hardware: (): ProbeReport => structuredClone(core.hardware.connected),
+    display_options: () => structuredClone(core.displayOptions),
     import_curve: (a) => {
       const h = core.hardware.headsets.find((x) => x.id === a.headset);
       if (!h) throw new Error("no such headset");
@@ -797,7 +827,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
   "set_recording_settings", "start_receive", "stop_receive", "stop_call_return", "set_video_area",
   "set_stream_mode", "stream_status", "list_hardware",
-  "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "import_curve",
+  "save_hardware", "delete_hardware", "set_listening_devices", "set_active_listening", "probe_hardware", "display_options", "import_curve",
   "render_preview", "share_capabilities", "firewall_status",
   "apo_status", "audio_effects_status", "install_apo", "uninstall_apo",
   "elevation_plan", "run_elevated",

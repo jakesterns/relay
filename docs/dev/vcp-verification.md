@@ -116,3 +116,26 @@ response: Some(ResponseCandidate {
 
 Every other monitor falls back to `Quirks::default()`: a 50 ms write delay,
 standard codes only.
+
+## What Jake checks on the LG (S52)
+
+The S52 build leaves 0xF6 and 0xF5 gated exactly as above. To turn them on,
+one OSD session on the main PC (LG ULTRAGEAR+ / 32GS95UE, GSM 5C7C):
+
+1. OSD → **Game Adjust** (or Picture → Game Adjust on some firmware), leave it
+   open on the page that shows **Black Stabilizer** and **Response Time**.
+2. `RELAY_VCP_PROBE = "F6:0|1|2"` — note whether **Black Stabilizer** moves,
+   and which written value is which level. The capability string lists
+   `F6(00 01 02)`, three values; the OSD slider has more steps on most LG
+   OLEDs, so 0xF6 may be a different control. If nothing on that page moves,
+   it stays `Unverified`.
+3. `RELAY_VCP_PROBE = "F5:1|2|3|4"` — note whether **Response Time** moves and
+   which value is Off / Normal / Fast / Faster (the four levels the table
+   assumes).
+4. Both observed: change each row's `Evidence::Unverified` to
+   `Evidence::Osd { observer, date, monitor }` with the levels as seen, and
+   the controls light up in the Games screen. Nothing else is needed.
+
+Colour preset (0x14) needs none of this: it is a standard MCCS code, and
+Relay writes only the values the panel itself lists (`14(05 08 0B)` on this
+LG: 6500 K, 9300 K, User 1).
