@@ -20,6 +20,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use relay_display::gamma::Ramp;
+use relay_display::mode::{DisplayMode, HdrState};
+use relay_display::nvcolor::NvColorRaw;
 use serde::{Deserialize, Serialize};
 
 use crate::backup::{GpuColorSnapshot, GpuVendor};
@@ -45,6 +47,30 @@ pub struct SimState {
     pub vcp: BTreeMap<u8, u32>,
     pub ramp: Ramp,
     pub gpu: GpuColorSnapshot,
+    /// S52: the simulated display's Windows mode, HDR switch and NVIDIA
+    /// output colour. Defaults keep a pre-S52 sim file loadable.
+    #[serde(default = "sim_boot_mode")]
+    pub mode: DisplayMode,
+    #[serde(default)]
+    pub hdr: bool,
+    #[serde(default = "sim_boot_nv")]
+    pub nv: NvColorRaw,
+}
+
+/// The modes the simulated display lists.
+pub const SIM_MODES: [DisplayMode; 3] = [
+    DisplayMode { width: 2560, height: 1440, refresh_hz: 144 },
+    DisplayMode { width: 2560, height: 1440, refresh_hz: 60 },
+    DisplayMode { width: 1920, height: 1080, refresh_hz: 144 },
+];
+
+fn sim_boot_mode() -> DisplayMode {
+    SIM_MODES[0]
+}
+
+/// Driver-chosen RGB, auto range, 8-bit (policy best quality).
+fn sim_boot_nv() -> NvColorRaw {
+    NvColorRaw { format: 0, colorimetry: 0, range: 0xFF, bpc: 2, policy: 1, depth: 0 }
 }
 
 impl SimState {
@@ -73,9 +99,12 @@ impl SimState {
             },
         };
         Self {
-            vcp: BTreeMap::from([(0x10u8, 100u32), (0x12u8, 70u32)]),
+            vcp: BTreeMap::from([(0x10u8, 100u32), (0x12u8, 70u32), (0x14u8, 0x0Bu32)]),
             ramp: Ramp::identity(),
             gpu,
+            mode: sim_boot_mode(),
+            hdr: false,
+            nv: sim_boot_nv(),
         }
     }
 
@@ -108,7 +137,8 @@ pub fn sim_monitor() -> MonitorProbe {
         primary: true,
         hmonitor: SIM_HMONITOR,
         gdi_name: SIM_GDI_NAME.into(),
-        ddc: Some(vec![0x10, 0x12]),
+        ddc: Some(vec![0x10, 0x12, 0x14]),
+        color_presets: Some(vec![0x05, 0x0B]),
         color: None,
     }
 }
@@ -268,6 +298,45 @@ impl DisplayIo for SimIo {
 
     fn monitors(&self) -> Vec<MonitorProbe> {
         vec![sim_monitor()]
+    }
+
+    fn modes(&self, gdi_name: &str) -> Vec<DisplayMode> {
+        if self.is_target(gdi_name) {
+            SIM_MODES.to_vec()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn get_mode(&self, gdi_name: &str) -> Result<DisplayMode> {
+        anyhow::ensure!(self.is_target(gdi_name), "no such display {gdi_name}");
+        Ok(self.load().mode)
+    }
+
+    fn set_mode(&self, gdi_name: &str, mode: DisplayMode) -> Result<()> {
+        anyhow::ensure!(self.is_target(gdi_name), "no such display {gdi_name}");
+        anyhow::ensure!(SIM_MODES.contains(&mode), "{mode} is not a mode the display offers");
+        self.update(|s| s.mode = mode)
+    }
+
+    fn hdr_state(&self, gdi_name: &str) -> Option<HdrState> {
+        self.is_target(gdi_name).then(|| HdrState { supported: true, enabled: self.load().hdr })
+    }
+
+    fn set_hdr(&self, gdi_name: &str, enabled: bool) -> Result<()> {
+        anyhow::ensure!(self.is_target(gdi_name), "no such display {gdi_name}");
+        self.update(|s| s.hdr = enabled)
+    }
+
+    fn nv_color_read(&self, gdi_name: &str) -> Option<NvColorRaw> {
+        // Only an NVIDIA-driven sim display has the output-colour control.
+        (self.is_target(gdi_name) && self.vendor == GpuVendor::Nvidia).then(|| self.load().nv)
+    }
+
+    fn nv_color_write(&self, gdi_name: &str, raw: &NvColorRaw) -> Result<()> {
+        anyhow::ensure!(self.is_target(gdi_name), "no such display {gdi_name}");
+        anyhow::ensure!(self.vendor == GpuVendor::Nvidia, "no NvAPI on the {:?} sim", self.vendor);
+        self.update(|s| s.nv = *raw)
     }
 }
 

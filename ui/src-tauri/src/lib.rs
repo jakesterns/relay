@@ -159,6 +159,14 @@ async fn ack_crash() -> CmdResult<()> {
     }
 }
 
+#[tauri::command]
+async fn decline_suggestion(exe: String) -> CmdResult<()> {
+    match call(Method::DeclineSuggestion { exe }).await? {
+        Reply::Ok => Ok(()),
+        other => Err(unexpected(other).into()),
+    }
+}
+
 /// S45: every update method answers with the updater's status.
 async fn update_call(method: Method) -> CmdResult<relay_core::update::UpdateStatus> {
     match call(method).await? {
@@ -711,6 +719,17 @@ async fn delete_hardware(id: String) -> CmdResult<()> {
 async fn probe_hardware() -> CmdResult<relay_core::hardware::ProbeReport> {
     match call(Method::ProbeHardware).await? {
         Reply::Probe { report } => Ok(*report),
+        other => Err(unexpected(other).into()),
+    }
+}
+
+#[tauri::command]
+async fn display_options(
+    monitor: Option<String>,
+) -> CmdResult<relay_core::display_options::DisplayOptions> {
+    let monitor = monitor.map(relay_core::types::MonitorId);
+    match call(Method::DisplayOptions { monitor }).await? {
+        Reply::DisplayOptions { options } => Ok(*options),
         other => Err(unexpected(other).into()),
     }
 }
@@ -1376,6 +1395,7 @@ pub fn run() {
             forget_peer,
             set_peer_favourite,
             ack_crash,
+            decline_suggestion,
             update_status,
             check_for_updates,
             install_update,
@@ -1395,6 +1415,7 @@ pub fn run() {
             set_listening_devices,
             set_active_listening,
             probe_hardware,
+            display_options,
             import_curve,
             render_preview,
             game_eq,

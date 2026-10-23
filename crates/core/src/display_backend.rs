@@ -17,6 +17,8 @@
 
 use anyhow::{bail, Context, Result};
 use relay_display::gamma::{build_ramp, Ramp, RampParams};
+use relay_display::mode::{DisplayMode, HdrState};
+use relay_display::nvcolor::{self, NvColorRaw};
 use relay_display::vcp::{self, MonitorPlanInput, Unsupported, VcpWrite};
 use tracing::warn;
 
@@ -52,6 +54,18 @@ pub trait DisplayIo: Send + Sync {
     fn gpu_restore(&self, gdi_name: &str, snap: &GpuColorSnapshot) -> Result<()>;
     /// Currently attached monitors, for re-resolving stale snapshots.
     fn monitors(&self) -> Vec<MonitorProbe>;
+    /// S52: modes the driver lists for this display (empty = unknown).
+    fn modes(&self, gdi_name: &str) -> Vec<DisplayMode>;
+    fn get_mode(&self, gdi_name: &str) -> Result<DisplayMode>;
+    /// Switch mode, dynamically (never saved to the registry).
+    fn set_mode(&self, gdi_name: &str, mode: DisplayMode) -> Result<()>;
+    /// Windows' HDR state, `None` when unknown.
+    fn hdr_state(&self, gdi_name: &str) -> Option<HdrState>;
+    fn set_hdr(&self, gdi_name: &str, enabled: bool) -> Result<()>;
+    /// Raw NVIDIA output colour, `None` when NvAPI does not drive this
+    /// display or the driver lacks the colour control.
+    fn nv_color_read(&self, gdi_name: &str) -> Option<NvColorRaw>;
+    fn nv_color_write(&self, gdi_name: &str, raw: &NvColorRaw) -> Result<()>;
 }
 
 /// What a vendor colour apply actually managed to do.
@@ -69,6 +83,7 @@ fn plan_input(m: &MonitorSettings) -> MonitorPlanInput {
         black_equalizer: m.black_equalizer,
         response: m.response.clone(),
         sharpness: m.sharpness,
+        color_preset: m.color_preset,
     }
 }
 
@@ -97,8 +112,21 @@ fn plan(target: &MonitorProbe, settings: &DisplaySettings) -> Plan {
     // along for logs only, because one marketing name covers several panels.
     let key = vcp::MonitorKey::from_id(&target.id.0).map(|k| k.with_name(&target.name));
     let quirks = key.as_ref().map(vcp::quirks_for_key).unwrap_or_default();
-    let (writes, unsupported) =
-        vcp::plan_writes(&plan_input(&settings.monitor), target.ddc.as_deref(), &quirks);
+    let mut input = plan_input(&settings.monitor);
+    let mut preset_unsupported = None;
+    // A colour preset the panel does not list is never written: the value
+    // set is the monitor's own answer, not MCCS's full table.
+    if let (Some(v), Some(allowed)) = (input.color_preset, target.color_presets.as_deref()) {
+        if !allowed.contains(&v) {
+            input.color_preset = None;
+            preset_unsupported = Some(Unsupported {
+                field: "color_preset",
+                reason: vcp::UnsupportedReason::NotAdvertised,
+            });
+        }
+    }
+    let (writes, mut unsupported) = vcp::plan_writes(&input, target.ddc.as_deref(), &quirks);
+    unsupported.extend(preset_unsupported);
     let params = ramp_params(&settings.gpu);
     Plan {
         writes,
@@ -107,6 +135,62 @@ fn plan(target: &MonitorProbe, settings: &DisplaySettings) -> Plan {
         ramp: (!params.is_neutral()).then(|| build_ramp(&params)),
         gpu: wants_gpu_color(&settings.gpu),
     }
+}
+
+/// S52: the Windows/NVIDIA output half of one apply. Unlike [`Plan`] it
+/// depends on live state (the mode list, HDR support, the current NVIDIA
+/// colour), so it is planned through the I/O and only carries changes: a
+/// setting already in effect is neither captured nor written.
+#[derive(Default)]
+struct OutputPlan {
+    mode: Option<DisplayMode>,
+    /// The mode in effect now (captured for restore).
+    mode_was: Option<DisplayMode>,
+    hdr: Option<bool>,
+    hdr_was: Option<bool>,
+    nv: Option<NvColorRaw>,
+    nv_was: Option<NvColorRaw>,
+    unsupported: Vec<String>,
+}
+
+fn plan_output<Io: DisplayIo>(io: &Io, gdi: &str, s: &DisplaySettings) -> Result<OutputPlan> {
+    let mut p = OutputPlan::default();
+    if let Some(want) = s.mode {
+        if io.modes(gdi).contains(&want) {
+            let now = io.get_mode(gdi).context("reading the current display mode")?;
+            if now != want {
+                p.mode = Some(want);
+                p.mode_was = Some(now);
+            }
+        } else {
+            p.unsupported.push("mode".into());
+        }
+    }
+    if let Some(want) = s.hdr {
+        match io.hdr_state(gdi) {
+            Some(h) if h.supported => {
+                if h.enabled != want {
+                    p.hdr = Some(want);
+                    p.hdr_was = Some(h.enabled);
+                }
+            }
+            _ => p.unsupported.push("hdr".into()),
+        }
+    }
+    if !s.nvidia_color.is_inert() {
+        match io.nv_color_read(gdi) {
+            Some(now) => match nvcolor::plan(&now, &s.nvidia_color) {
+                Ok(Some(next)) => {
+                    p.nv = Some(next);
+                    p.nv_was = Some(now);
+                }
+                Ok(None) => {}
+                Err(field) => p.unsupported.push(field.into()),
+            },
+            None => p.unsupported.push("nvidia_color".into()),
+        }
+    }
+    Ok(p)
 }
 
 pub struct DisplayAdapter<Io> {
@@ -156,7 +240,14 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
             vcp: Vec::new(),
             gamma: None,
             gpu: None,
+            mode: None,
+            hdr: None,
+            nv_color: None,
         };
+        let out = plan_output(&self.io, &t.gdi_name, settings)?;
+        ms.mode = out.mode_was;
+        ms.hdr = out.hdr_was;
+        ms.nv_color = out.nv_was;
         if !plan.writes.is_empty() {
             let codes: Vec<u8> = plan.writes.iter().map(|w| w.code).collect();
             ms.vcp = self
@@ -173,7 +264,13 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
             // the gamma ramp and DDC/CI, never a failure.
             ms.gpu = self.io.gpu_read(&t.gdi_name);
         }
-        if !ms.vcp.is_empty() || ms.gamma.is_some() || ms.gpu.is_some() {
+        if !ms.vcp.is_empty()
+            || ms.gamma.is_some()
+            || ms.gpu.is_some()
+            || ms.mode.is_some()
+            || ms.hdr.is_some()
+            || ms.nv_color.is_some()
+        {
             snap.targets.push(ms);
         }
         Ok(snap)
@@ -188,6 +285,23 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
         let Some(t) = target else { return Ok(via) };
         let plan = plan(t, settings);
         via.unsupported = plan.unsupported.iter().map(|u| u.field.to_string()).collect();
+
+        // Mode and HDR first: both can reset the ramp and the GPU's output
+        // colour, so everything after re-asserts on top of the new mode.
+        let out = plan_output(&self.io, &t.gdi_name, settings)?;
+        via.unsupported.extend(out.unsupported.iter().cloned());
+        if let Some(m) = out.mode {
+            self.io.set_mode(&t.gdi_name, m).context("changing the display mode")?;
+            via.windows = true;
+        }
+        if let Some(on) = out.hdr {
+            self.io.set_hdr(&t.gdi_name, on).context("switching HDR")?;
+            via.windows = true;
+        }
+        if let Some(raw) = &out.nv {
+            self.io.nv_color_write(&t.gdi_name, raw).context("setting NVIDIA output colour")?;
+            via.nvapi = true;
+        }
 
         if !plan.writes.is_empty() {
             let writes: Vec<(u8, u32)> = plan.writes.iter().map(|w| (w.code, w.value)).collect();
@@ -227,8 +341,10 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
     fn restore(&self, original: &DisplayStateSnapshot) -> Result<()> {
         let mut first_err: Option<anyhow::Error> = None;
         let current = if original.targets.is_empty() { Vec::new() } else { self.io.monitors() };
-        // Reverse of capture order, and within one monitor reverse of apply
-        // order: GPU colour, then ramp, then VCP codes last-written-first.
+        // Reverse of capture order. Within one monitor: the mode and HDR go
+        // back first (each can reset the ramp and output colour), then the
+        // NVIDIA output colour, GPU colour, ramp, and VCP codes
+        // last-written-first.
         for ms in original.targets.iter().rev() {
             let Some((hmonitor, gdi_name)) = self.resolve(&current, ms) else {
                 warn!(monitor = %ms.monitor.0, "monitor not attached; restore stays pending");
@@ -237,6 +353,24 @@ impl<Io: DisplayIo> DisplayControl for DisplayAdapter<Io> {
                 });
                 continue;
             };
+            if let Some(m) = ms.mode {
+                if let Err(e) = self.io.set_mode(&gdi_name, m) {
+                    warn!(error = %e, "display mode restore failed");
+                    first_err.get_or_insert(e);
+                }
+            }
+            if let Some(on) = ms.hdr {
+                if let Err(e) = self.io.set_hdr(&gdi_name, on) {
+                    warn!(error = %e, "HDR restore failed");
+                    first_err.get_or_insert(e);
+                }
+            }
+            if let Some(raw) = &ms.nv_color {
+                if let Err(e) = self.io.nv_color_write(&gdi_name, raw) {
+                    warn!(error = %e, "NVIDIA output colour restore failed");
+                    first_err.get_or_insert(e);
+                }
+            }
             if let Some(gpu) = &ms.gpu {
                 if let Err(e) = self.io.gpu_restore(&gdi_name, gpu) {
                     warn!(error = %e, "GPU colour restore failed");
@@ -275,7 +409,7 @@ pub use real::{RealIo, WinDisplay};
 #[cfg(windows)]
 mod real {
     use super::*;
-    use relay_display::{amd, ddc, gamma, nvapi};
+    use relay_display::{amd, ddc, gamma, mode, nvapi};
 
     /// The production backend type wired in `service::Backends`.
     pub type WinDisplay = DisplayAdapter<RealIo>;
@@ -343,6 +477,40 @@ mod real {
 
         fn monitors(&self) -> Vec<MonitorProbe> {
             crate::hardware::probe_win::probe_monitors(false)
+        }
+
+        fn modes(&self, gdi_name: &str) -> Vec<DisplayMode> {
+            mode::io::list_modes(gdi_name)
+        }
+
+        fn get_mode(&self, gdi_name: &str) -> Result<DisplayMode> {
+            mode::io::current_mode(gdi_name)
+        }
+
+        fn set_mode(&self, gdi_name: &str, m: DisplayMode) -> Result<()> {
+            mode::io::set_mode(gdi_name, m)
+        }
+
+        fn hdr_state(&self, gdi_name: &str) -> Option<HdrState> {
+            mode::io::hdr_state(gdi_name)
+        }
+
+        fn set_hdr(&self, gdi_name: &str, enabled: bool) -> Result<()> {
+            mode::io::set_hdr(gdi_name, enabled)
+        }
+
+        fn nv_color_read(&self, gdi_name: &str) -> Option<NvColorRaw> {
+            let api = nvapi::NvApi::load()?;
+            let d = api.display_by_gdi_name(gdi_name)?;
+            api.get_color(&d).ok()
+        }
+
+        fn nv_color_write(&self, gdi_name: &str, raw: &NvColorRaw) -> Result<()> {
+            let Some(api) = nvapi::NvApi::load() else { bail!("NvAPI unavailable for {gdi_name}") };
+            let Some(d) = api.display_by_gdi_name(gdi_name) else {
+                bail!("NvAPI does not drive {gdi_name}")
+            };
+            api.set_color(&d, raw)
         }
     }
 
@@ -484,6 +652,11 @@ mod tests {
         /// Fail every VCP write after this many have succeeded.
         fail_writes_after: Option<usize>,
         writes_done: usize,
+        /// S52: gdi name → (listed modes, current mode, HDR, NVIDIA colour).
+        modes: BTreeMap<String, Vec<DisplayMode>>,
+        mode: BTreeMap<String, DisplayMode>,
+        hdr: BTreeMap<String, HdrState>,
+        nvc: BTreeMap<String, NvColorRaw>,
     }
 
     fn monitor(
@@ -503,6 +676,7 @@ mod tests {
             gdi_name: gdi.into(),
             ddc,
             color: None,
+            color_presets: None,
         }
     }
 
@@ -555,6 +729,14 @@ mod tests {
                 s.ramps.insert(r"\\.\DISPLAY2".into(), Ramp::identity());
                 s.nv.insert(r"\\.\DISPLAY1".into(), gpu);
                 s.nv.insert(r"\\.\DISPLAY2".into(), gpu);
+                for gdi in [r"\\.\DISPLAY1", r"\\.\DISPLAY2"] {
+                    s.modes.insert(gdi.into(), vec![mode_4k(240), mode_4k(60), mode_1440(240)]);
+                    s.mode.insert(gdi.into(), mode_1440(240));
+                    s.hdr.insert(gdi.into(), HdrState { supported: true, enabled: true });
+                    if gpu.vendor == GpuVendor::Nvidia {
+                        s.nvc.insert(gdi.into(), nv_now());
+                    }
+                }
             }
             io
         }
@@ -695,6 +877,57 @@ mod tests {
         fn monitors(&self) -> Vec<MonitorProbe> {
             self.state.lock().monitors.clone()
         }
+
+        fn modes(&self, gdi: &str) -> Vec<DisplayMode> {
+            self.state.lock().modes.get(gdi).cloned().unwrap_or_default()
+        }
+
+        fn get_mode(&self, gdi: &str) -> Result<DisplayMode> {
+            self.state.lock().mode.get(gdi).copied().context("no such display")
+        }
+
+        fn set_mode(&self, gdi: &str, m: DisplayMode) -> Result<()> {
+            let mut s = self.state.lock();
+            s.log.push(format!("mode {gdi} {m}"));
+            *s.mode.get_mut(gdi).context("no such display")? = m;
+            Ok(())
+        }
+
+        fn hdr_state(&self, gdi: &str) -> Option<HdrState> {
+            self.state.lock().hdr.get(gdi).copied()
+        }
+
+        fn set_hdr(&self, gdi: &str, enabled: bool) -> Result<()> {
+            let mut s = self.state.lock();
+            s.log.push(format!("hdr {gdi} {enabled}"));
+            s.hdr.get_mut(gdi).context("no such display")?.enabled = enabled;
+            Ok(())
+        }
+
+        fn nv_color_read(&self, gdi: &str) -> Option<NvColorRaw> {
+            self.state.lock().nvc.get(gdi).copied()
+        }
+
+        fn nv_color_write(&self, gdi: &str, raw: &NvColorRaw) -> Result<()> {
+            let mut s = self.state.lock();
+            s.log.push(format!("nvcolor {gdi} range={} bpc={}", raw.range, raw.bpc));
+            *s.nvc.get_mut(gdi).context("no NvAPI on this display")? = *raw;
+            Ok(())
+        }
+    }
+
+    fn mode_4k(hz: u32) -> DisplayMode {
+        DisplayMode { width: 3840, height: 2160, refresh_hz: hz }
+    }
+
+    fn mode_1440(hz: u32) -> DisplayMode {
+        DisplayMode { width: 2560, height: 1440, refresh_hz: hz }
+    }
+
+    /// What the dev PC's RTX reported live (2026-10-22, read-only GET):
+    /// RGB, BT.2100 colorimetry (HDR on), full range, 8-bit, user policy.
+    fn nv_now() -> NvColorRaw {
+        NvColorRaw { format: 0, colorimetry: 8, range: 0, bpc: 2, policy: 0, depth: 0 }
     }
 
     pub(super) fn settings() -> DisplaySettings {
@@ -852,6 +1085,97 @@ mod tests {
         let err = adapter.restore(&snap).unwrap_err();
         assert!(err.to_string().contains("not attached"), "{err}");
         assert_eq!(io.snapshot_of(2), before_b, "monitor B untouched");
+    }
+
+    /// S52: mode, HDR, NVIDIA output colour and the colour preset are
+    /// captured, applied on the target only, and put back — mode and HDR
+    /// first on restore.
+    #[test]
+    fn s52_output_controls_capture_apply_and_restore_on_the_target_only() {
+        let io = FakeIo::two_monitors();
+        io.state.lock().monitors[0].color_presets = Some(vec![0x05, 0x08, 0x0B]);
+        io.state.lock().vcp.get_mut(&1).unwrap().insert(0x14, 0x0B);
+        io.state.lock().monitors[0].ddc = Some(vec![0x10, 0x12, 0x14]);
+        let adapter = DisplayAdapter::with_io(io.clone());
+        let t = target_a(&io);
+        let mut d =
+            DisplaySettings { mode: Some(mode_4k(240)), hdr: Some(false), ..Default::default() };
+        d.nvidia_color.bpc = Some(10);
+        d.monitor.color_preset = Some(0x05);
+
+        let snap = adapter.capture(Some(&t), &d).unwrap();
+        let ms = &snap.targets[0];
+        assert_eq!(ms.mode, Some(mode_1440(240)));
+        assert_eq!(ms.hdr, Some(true));
+        assert_eq!(ms.nv_color, Some(nv_now()));
+        assert_eq!(ms.vcp, vec![(0x14, 0x0B)]);
+
+        let via = adapter.apply(Some(&t), &d).unwrap();
+        assert!(via.windows && via.nvapi && via.ddcci, "{via:?}");
+        assert!(via.unsupported.is_empty(), "{via:?}");
+        {
+            let s = io.state.lock();
+            assert_eq!(s.mode[RAW_DISPLAY1], mode_4k(240));
+            assert!(!s.hdr[RAW_DISPLAY1].enabled);
+            assert_eq!(s.nvc[RAW_DISPLAY1].bpc, 3, "10-bit");
+            assert_eq!(s.nvc[RAW_DISPLAY1].policy, 0);
+            assert_eq!(s.mode[r"\\.\DISPLAY2"], mode_1440(240), "monitor B untouched");
+            assert!(s.hdr[r"\\.\DISPLAY2"].enabled);
+        }
+        assert_eq!(io.snapshot_of(1)[&0x14], 0x05);
+        let log = io.log();
+        let first_mode = log.iter().position(|l| l.starts_with("mode")).unwrap();
+        let first_vcp = log.iter().position(|l| l.starts_with("vcp")).unwrap();
+        assert!(first_mode < first_vcp, "mode before colour on apply: {log:?}");
+
+        io.state.lock().log.clear();
+        adapter.restore(&snap).unwrap();
+        let s = io.state.lock();
+        assert_eq!(s.mode[RAW_DISPLAY1], mode_1440(240));
+        assert!(s.hdr[RAW_DISPLAY1].enabled);
+        assert_eq!(s.nvc[RAW_DISPLAY1], nv_now());
+        assert_eq!(s.vcp[&1][&0x14], 0x0B);
+        assert!(s.log[0].starts_with("mode") && s.log[1].starts_with("hdr"), "{:?}", s.log);
+    }
+
+    #[test]
+    fn s52_settings_already_in_effect_are_neither_captured_nor_written() {
+        let io = FakeIo::two_monitors();
+        let adapter = DisplayAdapter::with_io(io.clone());
+        let t = target_a(&io);
+        let mut d =
+            DisplaySettings { mode: Some(mode_1440(240)), hdr: Some(true), ..Default::default() };
+        d.nvidia_color.bpc = Some(8);
+        let snap = adapter.capture(Some(&t), &d).unwrap();
+        assert!(snap.targets.is_empty(), "{snap:?}");
+        assert_eq!(adapter.apply(Some(&t), &d).unwrap(), DisplayVia::default());
+        assert!(io.log().is_empty());
+    }
+
+    #[test]
+    fn s52_unlisted_modes_unsupported_hdr_and_no_nvapi_are_reported_not_forced() {
+        let io = FakeIo::two_monitors_with(amd_state());
+        io.state
+            .lock()
+            .hdr
+            .insert(RAW_DISPLAY1.into(), HdrState { supported: false, enabled: false });
+        io.state.lock().monitors[0].color_presets = Some(vec![0x05]);
+        let adapter = DisplayAdapter::with_io(io.clone());
+        let t = target_a(&io);
+        let mut d = DisplaySettings {
+            mode: Some(DisplayMode { width: 1280, height: 720, refresh_hz: 60 }),
+            hdr: Some(true),
+            ..Default::default()
+        };
+        d.nvidia_color.range = Some(relay_display::nvcolor::DynamicRange::Full);
+        d.monitor.color_preset = Some(0x0B);
+        let snap = adapter.capture(Some(&t), &d).unwrap();
+        assert!(snap.targets.is_empty());
+        let via = adapter.apply(Some(&t), &d).unwrap();
+        let mut un = via.unsupported.clone();
+        un.sort();
+        assert_eq!(un, vec!["color_preset", "hdr", "mode", "nvidia_color"]);
+        assert!(io.log().is_empty(), "nothing written: {:?}", io.log());
     }
 
     #[test]

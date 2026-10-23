@@ -27,6 +27,15 @@ const ID_GET_DVC_INFO: u32 = 0x4085DE45;
 const ID_SET_DVC_LEVEL: u32 = 0x172409B4;
 const ID_GET_HUE_INFO: u32 = 0x95B64341;
 const ID_SET_HUE_ANGLE: u32 = 0xF5A0F22C;
+// S52 output colour. Optional: a driver without them still drives vibrance.
+const ID_GET_DISPLAY_ID_BY_NAME: u32 = 0xAE457190;
+const ID_COLOR_CONTROL: u32 = 0x92F9D80D;
+
+/// `NV_COLOR_CMD_GET` / `NV_COLOR_CMD_SET`.
+const COLOR_CMD_GET: u8 = 1;
+const COLOR_CMD_SET: u8 = 2;
+/// `NVAPI_INCOMPATIBLE_STRUCT_VERSION`.
+const NVAPI_INCOMPATIBLE_STRUCT_VERSION: i32 = -9;
 
 const NVAPI_END_ENUMERATION: i32 = -7;
 
@@ -50,6 +59,25 @@ struct HueInfoRaw {
     default_: i32,
 }
 
+/// `NV_COLOR_DATA_V5`: version, size, cmd, then the data block. Field order
+/// and widths follow nvapi.h (R470+); `size` is the whole struct.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct ColorDataV5 {
+    version: u32,
+    size: u16,
+    cmd: u8,
+    /// The data block is a nested struct holding u32 enums, so it is
+    /// 4-aligned and starts at offset 8.
+    _pad: u8,
+    color_format: u8,
+    colorimetry: u8,
+    dynamic_range: u8,
+    bpc: u32,
+    selection_policy: u32,
+    depth: u32,
+}
+
 const fn nv_version<T>(ver: u32) -> u32 {
     (std::mem::size_of::<T>() as u32) | (ver << 16)
 }
@@ -62,6 +90,8 @@ type FnGetDvc = unsafe extern "C" fn(NvDisplayHandle, u32, *mut DvcInfoRaw) -> N
 type FnSetDvc = unsafe extern "C" fn(NvDisplayHandle, u32, i32) -> NvStatus;
 type FnGetHue = unsafe extern "C" fn(NvDisplayHandle, u32, *mut HueInfoRaw) -> NvStatus;
 type FnSetHue = unsafe extern "C" fn(NvDisplayHandle, u32, i32) -> NvStatus;
+type FnDisplayIdByName = unsafe extern "C" fn(*const u8, *mut u32) -> NvStatus;
+type FnColorControl = unsafe extern "C" fn(u32, *mut ColorDataV5) -> NvStatus;
 
 /// Digital-vibrance state of one display, in raw NvAPI units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +118,8 @@ pub struct NvApi {
     set_dvc: FnSetDvc,
     get_hue: FnGetHue,
     set_hue: FnSetHue,
+    display_id_by_name: Option<FnDisplayIdByName>,
+    color_control: Option<FnColorControl>,
 }
 
 impl NvApi {
@@ -119,6 +151,10 @@ impl NvApi {
                 set_dvc: std::mem::transmute::<P, FnSetDvc>(get(ID_SET_DVC_LEVEL)?),
                 get_hue: std::mem::transmute::<P, FnGetHue>(get(ID_GET_HUE_INFO)?),
                 set_hue: std::mem::transmute::<P, FnSetHue>(get(ID_SET_HUE_ANGLE)?),
+                display_id_by_name: get(ID_GET_DISPLAY_ID_BY_NAME)
+                    .map(|p| std::mem::transmute::<P, FnDisplayIdByName>(p)),
+                color_control: get(ID_COLOR_CONTROL)
+                    .map(|p| std::mem::transmute::<P, FnColorControl>(p)),
             };
             let rc = init();
             if rc != 0 {
@@ -197,6 +233,69 @@ impl NvApi {
         Ok(())
     }
 
+    /// NvAPI's display id for this display (what the colour control takes).
+    fn display_id(&self, d: &NvDisplay) -> Result<u32> {
+        let f = self
+            .display_id_by_name
+            .ok_or_else(|| anyhow::anyhow!("this driver has no display ids"))?;
+        let name: Vec<u8> = d.gdi_name.bytes().chain(std::iter::once(0)).collect();
+        let mut id = 0u32;
+        // SAFETY: NUL-terminated name, out-param for the id.
+        let rc = unsafe { f(name.as_ptr(), &mut id) };
+        if rc != 0 {
+            bail!("NvAPI_DISP_GetDisplayIdByDisplayName failed with {rc} on {}", d.gdi_name);
+        }
+        Ok(id)
+    }
+
+    fn color_call(&self, d: &NvDisplay, data: &mut ColorDataV5) -> Result<()> {
+        let f = self
+            .color_control
+            .ok_or_else(|| anyhow::anyhow!("this driver has no colour control"))?;
+        let id = self.display_id(d)?;
+        data.version = nv_version::<ColorDataV5>(5);
+        data.size = std::mem::size_of::<ColorDataV5>() as u16;
+        // SAFETY: versioned struct per the contract.
+        let rc = unsafe { f(id, data) };
+        if rc == NVAPI_INCOMPATIBLE_STRUCT_VERSION {
+            bail!("this driver does not speak NV_COLOR_DATA v5");
+        }
+        if rc != 0 {
+            bail!("NvAPI_Disp_ColorControl(cmd {}) failed with {rc} on {}", data.cmd, d.gdi_name);
+        }
+        Ok(())
+    }
+
+    /// Current output colour (format, range, bit depth, policy). Read-only.
+    pub fn get_color(&self, d: &NvDisplay) -> Result<crate::nvcolor::NvColorRaw> {
+        let mut data = ColorDataV5 { cmd: COLOR_CMD_GET, ..Default::default() };
+        self.color_call(d, &mut data)?;
+        Ok(crate::nvcolor::NvColorRaw {
+            format: data.color_format,
+            colorimetry: data.colorimetry,
+            range: data.dynamic_range,
+            bpc: data.bpc,
+            policy: data.selection_policy,
+            depth: data.depth,
+        })
+    }
+
+    /// Write output colour verbatim (a planned state, or a captured one on
+    /// restore).
+    pub fn set_color(&self, d: &NvDisplay, raw: &crate::nvcolor::NvColorRaw) -> Result<()> {
+        let mut data = ColorDataV5 {
+            cmd: COLOR_CMD_SET,
+            color_format: raw.format,
+            colorimetry: raw.colorimetry,
+            dynamic_range: raw.range,
+            bpc: raw.bpc,
+            selection_policy: raw.policy,
+            depth: raw.depth,
+            ..Default::default()
+        };
+        self.color_call(d, &mut data)
+    }
+
     /// The display whose GDI name matches, if NVIDIA drives it.
     pub fn display_by_gdi_name(&self, gdi_name: &str) -> Option<NvDisplay> {
         self.displays().into_iter().find(|d| d.gdi_name.eq_ignore_ascii_case(gdi_name))
@@ -266,5 +365,12 @@ mod tests {
     fn struct_versions_encode_size_and_version() {
         assert_eq!(nv_version::<DvcInfoRaw>(1), 16 | (1 << 16));
         assert_eq!(nv_version::<HueInfoRaw>(1), 12 | (1 << 16));
+        // NV_COLOR_DATA_V5 is 24 bytes: u32, u16, u8, pad, then the data
+        // block at offset 8 (3×u8, pad, 3×u32).
+        assert_eq!(std::mem::size_of::<ColorDataV5>(), 24);
+        assert_eq!(std::mem::offset_of!(ColorDataV5, color_format), 8);
+        assert_eq!(std::mem::offset_of!(ColorDataV5, bpc), 12);
+        assert_eq!(std::mem::offset_of!(ColorDataV5, depth), 20);
+        assert_eq!(nv_version::<ColorDataV5>(5), 24 | (5 << 16));
     }
 }

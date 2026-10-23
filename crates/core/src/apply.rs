@@ -415,6 +415,7 @@ mod tests {
             gdi_name: r"\\.\DISPLAY1".into(),
             ddc: None,
             color: None,
+            color_presets: None,
         }
     }
 

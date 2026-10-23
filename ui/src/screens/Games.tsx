@@ -16,6 +16,9 @@ import { buildRamp, cascadeDb } from "../lib/honest";
 import { colorSummary } from "./Profiles";
 import { LearnLookCard } from "../components/LearnLookCard";
 import { LearnFromVideoCard } from "../components/LearnFromVideoCard";
+import { GettingStarted, LearnTip, ProfileOffer } from "../components/Onboarding";
+import { useSelected } from "../lib/onboarding";
+import { DisplayOutputCard } from "../components/DisplayOutputCard";
 import { etaText } from "../lib/eta";
 
 export type Section = "audio" | "display" | "sharing";
@@ -31,7 +34,10 @@ export type Section = "audio" | "display" | "sharing";
 export function Games({ section, onSection }: { section: Section; onSection: (s: Section) => void }) {
   const { state, profiles } = useCore();
   const active = state.active_profile;
-  const subject = active ?? profiles[0] ?? null;
+  // In focus first; else the one just made or picked (getting started);
+  // else the first.
+  const selected = useSelected();
+  const subject = active ?? profiles.find((p) => p.id === selected) ?? profiles[0] ?? null;
   const sectionLabel = section === "audio" ? "Audio" : section === "display" ? "Display" : "Sharing";
 
   // The profile these editors are working on. An unsaved edit lives outside
@@ -102,6 +108,13 @@ export function Games({ section, onSection }: { section: Section; onSection: (s:
           <Live on={!!active} text={active ? "Active · in focus" : "Not in focus"} />
         </div>
         <OfflineBanner />
+        <ProfileOffer />
+        {!subject && !draft && (
+          <Card title="Get started">
+            <p className="p">Nothing to tune yet: settings here belong to a game's profile.</p>
+            <GettingStarted />
+          </Card>
+        )}
         {stray && (
           <div className="warnbanner">
             <i />
@@ -210,7 +223,10 @@ function AudioSection({ draft, update, onGameEq }: {
         </Card>
         <GameEqCard profileId={draft?.id ?? null} onChanged={onGameEq} />
       </div>
-      <LearnFromVideoCard profileId={draft?.id ?? null} />
+      <LearnTip />
+      <div id="learn-video">
+        <LearnFromVideoCard profileId={draft?.id ?? null} />
+      </div>
       <HeadsetCorrectionCard draft={draft} update={update} />
       <AbListeningCard profileId={draft?.id ?? null} />
     </>
@@ -860,7 +876,9 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
           )}
         </Card>
       </div>
+      <DisplayOutputCard draft={draft} update={update} monitor={draft?.monitor ?? null} />
       <LearnLookCard exe={draft?.game.exe ?? null} />
+      <LearnTip what="look" />
       <LearnFromVideoCard profileId={draft?.id ?? null} />
     </>
   );
@@ -925,6 +943,7 @@ function RampPreview({ gpu }: { gpu: GpuColor }) {
 function appliedViaText(state: ReturnType<typeof useCore>["state"]): string {
   if (state.display_state !== "applied") return "—";
   const parts = [
+    state.display_via.windows && "Windows display settings",
     state.display_via.nvapi && "NvAPI",
     state.display_via.amd && "AMD ADL",
     state.display_via.gamma && "gamma ramp",

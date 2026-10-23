@@ -87,6 +87,8 @@ impl Backends {
 /// Everything the IPC handler and the event loop share.
 struct Inner {
     store: ProfileStore,
+    /// Games the user said "Not for this game" to (`offers.json`).
+    declined: crate::suggest::Declined,
     applier: Applier,
     state: CoreState,
     meter: FootprintMeter,
@@ -374,6 +376,7 @@ impl Service {
 
         let inner = Arc::new(Mutex::new(Inner {
             store,
+            declined: crate::suggest::Declined::load(&paths.data_dir()),
             applier,
             state,
             meter: FootprintMeter::new(),
@@ -1138,8 +1141,12 @@ impl Service {
     }
 
     fn on_foreground(&self, fg: Foreground) {
+        // Outside the lock: two rectangle queries on the window.
+        let full_screen = crate::winloop::window_covers_monitor(fg.hwnd);
         let mut g = self.inner.lock();
         g.state.foreground = Some(fg.clone());
+        let seen = crate::suggest::Seen { exe: &fg.exe, title: &fg.title, full_screen };
+        offer_after_focus(&mut g, seen);
         select_and_apply(&mut g, &fg);
         sync_look(&mut g);
         let state = Box::new(g.state.clone());
@@ -1849,6 +1856,31 @@ fn select_and_apply(g: &mut Inner, fg: &Foreground) {
 /// went Draft / was deleted), or when selection now picks something else.
 fn needs_reselect(active: Option<uuid::Uuid>, edited: uuid::Uuid, now: Option<uuid::Uuid>) -> bool {
     active == Some(edited) || now != active
+}
+
+/// The profile offer after the foreground changed (see `suggest`). Any
+/// profile for the exe counts, Draft included: the user already made one.
+fn offer_after_focus(g: &mut Inner, seen: crate::suggest::Seen<'_>) {
+    let store = &g.store;
+    let has = |exe: &str| store.all().iter().any(|p| p.game.exe.eq_ignore_ascii_case(exe));
+    let next = crate::suggest::decide(g.state.suggestion.as_ref(), seen, has, &g.declined.exes);
+    if next != g.state.suggestion {
+        if let Some(s) = &next {
+            info!(exe = %s.exe, "full-screen app with no profile; offering one");
+        }
+        g.state.suggestion = next;
+    }
+}
+
+/// Drop the offer once a profile names its exe or it was declined, without
+/// waiting for the next focus change (the user acts from Relay's window).
+fn prune_offer(g: &mut Inner) {
+    let Some(s) = g.state.suggestion.as_ref() else { return };
+    let made = g.store.all().iter().any(|p| p.game.exe.eq_ignore_ascii_case(&s.exe));
+    let refused = g.declined.exes.iter().any(|d| d.eq_ignore_ascii_case(&s.exe));
+    if made || refused {
+        g.state.suggestion = None;
+    }
 }
 
 /// After a profile save or delete: re-run selection at once instead of on
@@ -2872,7 +2904,10 @@ impl IpcHandler {
                     Ok(()) => Reply::Ok,
                     Err(e) => Reply::Error { message: e.to_string() },
                 };
-                if after_profile_edit(&mut g, id, false) {
+                let offered = g.state.suggestion.is_some();
+                prune_offer(&mut g);
+                let offer_gone = offered && g.state.suggestion.is_none();
+                if after_profile_edit(&mut g, id, false) || offer_gone {
                     let _ =
                         self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 }
@@ -3380,6 +3415,23 @@ impl IpcHandler {
                     Err(e) => Reply::Error { message: e.to_string() },
                 }
             }
+            Method::DisplayOptions { monitor } => {
+                let target = match monitor {
+                    Some(id) => g.last_report.monitors.iter().find(|m| m.id == id),
+                    None => g.last_report.monitors.iter().find(|m| m.primary),
+                }
+                .or_else(|| g.last_report.monitors.first())
+                .cloned();
+                let Some(target) = target else {
+                    return Reply::Error { message: "that monitor is not connected".into() };
+                };
+                let lib = g.library.monitors.iter().find(|m| m.id == target.id).cloned();
+                drop(g);
+                // Off the lock: the reads load NvAPI/ADL and enumerate modes.
+                let live = crate::display_options::read_live(&target.gdi_name);
+                let options = crate::display_options::assemble(&target, lib.as_ref(), live);
+                Reply::DisplayOptions { options: Box::new(options) }
+            }
             Method::ProbeHardware => {
                 let report = g.hardware.probe(true);
                 // Remember what the panels reported: the advertised VCP codes
@@ -3399,6 +3451,12 @@ impl IpcHandler {
                         {
                             if known.ddcci.as_ref() != Some(ddc) {
                                 known.ddcci = Some(ddc.clone());
+                                dirty = true;
+                            }
+                            if probed.color_presets.is_some()
+                                && known.color_presets != probed.color_presets
+                            {
+                                known.color_presets = probed.color_presets.clone();
                                 dirty = true;
                             }
                         }
@@ -3725,6 +3783,14 @@ impl IpcHandler {
             Method::AckCrash => {
                 crate::crash::mark_seen(&crate::crash::dir(&g.paths));
                 g.state.last_crash = None;
+                Reply::Ok
+            }
+            Method::DeclineSuggestion { exe } => {
+                if let Err(e) = g.declined.add(&exe) {
+                    return Reply::Error { message: format!("{e:#}") };
+                }
+                prune_offer(&mut g);
+                let _ = self.events.send(Event::StateChanged { state: Box::new(g.state.clone()) });
                 Reply::Ok
             }
             Method::Shutdown => {

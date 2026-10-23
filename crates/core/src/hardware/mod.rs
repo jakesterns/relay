@@ -88,6 +88,10 @@ pub struct MonitorProbe {
     /// Parsed DDC/CI VCP code list, filled by the full probe only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ddc: Option<Vec<u8>>,
+    /// S52: the colour-preset (VCP 0x14) values the capability string lists,
+    /// filled by the full probe only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_presets: Option<Vec<u16>>,
     /// What the panel reports about its own colour: primaries, white point,
     /// gamma, bit depth, advertised colorimetry and HDR formats. Read from
     /// the same EDID blob the id comes from, so it costs nothing extra.
@@ -256,6 +260,17 @@ pub struct Monitor {
     /// the library screen can show them without a re-probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<edid_color::ColorInfo>,
+    /// S52: colour-preset (VCP 0x14) values the panel lists, once scanned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_presets: Option<Vec<u16>>,
+    /// S52: the user's correction of the panel's best mode, when Windows or
+    /// the EDID gets it wrong. Advice only (recommendations use it); never
+    /// applied by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_override: Option<relay_display::mode::DisplayMode>,
+    /// S52: the user's correction of whether the panel does HDR. Advice only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr_override: Option<bool>,
 }
 
 /// Which vendor-private DDC/CI controls one monitor actually has, decided by
@@ -408,6 +423,9 @@ impl HardwareStore {
                 if monitor.color.is_none() {
                     monitor.color = slot.color.take();
                 }
+                if monitor.color_presets.is_none() {
+                    monitor.color_presets = slot.color_presets.take();
+                }
                 *slot = monitor;
             }
             None => self.monitors.push(monitor),
@@ -544,6 +562,9 @@ mod tests {
             panel: String::new(),
             ddcci,
             color: None,
+            color_presets: None,
+            mode_override: None,
+            hdr_override: None,
         }
     }
 
@@ -633,6 +654,9 @@ mod tests {
             panel: panel.into(),
             ddcci,
             color: None,
+            color_presets: None,
+            mode_override: None,
+            hdr_override: None,
         };
         store.upsert_monitor(mon("", Some(vec![0x10, 0x12])));
         store.upsert_monitor(mon("Nano IPS", None));
@@ -658,6 +682,9 @@ mod tests {
             panel: "Nano IPS".into(),
             ddcci: Some(vec![0x10, 0x12, 0x60]),
             color: None,
+            color_presets: None,
+            mode_override: None,
+            hdr_override: None,
         });
         store.save().unwrap();
 

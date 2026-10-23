@@ -138,6 +138,48 @@ pub fn window_title(hwnd: u64) -> Option<String> {
     }
 }
 
+/// Does this window cover its whole monitor (a full-screen game)? Two
+/// user32/gdi rectangle queries on the window, nothing opened in its
+/// process; the decision itself is `suggest::covers`.
+pub fn window_covers_monitor(hwnd: u64) -> bool {
+    #[cfg(windows)]
+    {
+        use crate::suggest::{covers, Rect};
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        if hwnd == 0 {
+            return false;
+        }
+        let hwnd = HWND(hwnd as *mut _);
+        let mut win = RECT::default();
+        // SAFETY: valid out-pointer; a stale handle just fails.
+        if unsafe { GetWindowRect(hwnd, &mut win) }.is_err() {
+            return false;
+        }
+        // SAFETY: plain query; NULL when the window is on no monitor.
+        let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
+        if mon.is_invalid() {
+            return false;
+        }
+        let mut info =
+            MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        // SAFETY: cbSize set; valid out-pointer.
+        if !unsafe { GetMonitorInfoW(mon, &mut info) }.as_bool() {
+            return false;
+        }
+        let r = |r: RECT| Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+        covers(r(win), r(info.rcMonitor))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = hwnd;
+        false
+    }
+}
+
 pub fn process_image_path(pid: u32) -> Option<String> {
     // SAFETY: only limited-information access is requested; see `imp::process_image`.
     unsafe { imp::process_image(pid) }

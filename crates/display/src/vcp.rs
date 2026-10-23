@@ -26,6 +26,10 @@ pub const BRIGHTNESS: u8 = 0x10;
 pub const CONTRAST: u8 = 0x12;
 /// MCCS standard: sharpness.
 pub const SHARPNESS: u8 = 0x87;
+/// MCCS standard: select colour preset (S52). Values are the panel's own
+/// list from its capability string (`14(05 08 0B)`): 0x01 sRGB, 0x05
+/// 6500 K, 0x08 9300 K, 0x0B user 1, … — only listed values are written.
+pub const COLOR_PRESET: u8 = 0x14;
 /// MCCS standard: input select. Never written by Relay; listed because the
 /// capability parser and tests reference it.
 pub const INPUT_SELECT: u8 = 0x60;
@@ -326,6 +330,7 @@ pub struct MonitorPlanInput {
     pub black_equalizer: Option<u16>,
     pub response: Option<String>,
     pub sharpness: Option<u16>,
+    pub color_preset: Option<u16>,
 }
 
 /// Which vendor controls this monitor can actually offer, for the UI.
@@ -377,6 +382,7 @@ pub fn plan_writes(
     standard("brightness", BRIGHTNESS, input.brightness);
     standard("contrast", CONTRAST, input.contrast);
     standard("sharpness", SHARPNESS, input.sharpness);
+    standard("color_preset", COLOR_PRESET, input.color_preset);
 
     if let Some(v) = input.black_equalizer {
         match quirks.black_equalizer {
@@ -430,7 +436,24 @@ mod tests {
             black_equalizer: Some(12),
             response: Some("fast".into()),
             sharpness: Some(6),
+            color_preset: None,
         }
+    }
+
+    /// S52: the colour preset is a standard code, planned like brightness —
+    /// written when advertised, reported when not.
+    #[test]
+    fn color_preset_is_a_standard_write() {
+        let input = MonitorPlanInput { color_preset: Some(0x05), ..Default::default() };
+        let (w, u) = plan_writes(&input, Some(&[0x10, 0x14]), &Quirks::default());
+        assert_eq!(w, vec![VcpWrite { code: COLOR_PRESET, value: 0x05 }]);
+        assert!(u.is_empty());
+        let (w, u) = plan_writes(&input, Some(&[0x10]), &Quirks::default());
+        assert!(w.is_empty());
+        assert_eq!(
+            u,
+            vec![Unsupported { field: "color_preset", reason: UnsupportedReason::NotAdvertised }]
+        );
     }
 
     /// A verified row, built the only way one can be built.
