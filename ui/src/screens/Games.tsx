@@ -18,6 +18,7 @@ import { LearnLookCard } from "../components/LearnLookCard";
 import { LearnFromVideoCard } from "../components/LearnFromVideoCard";
 import { GettingStarted, LearnTip, ProfileOffer } from "../components/Onboarding";
 import { useSelected } from "../lib/onboarding";
+import { DisplayOutputCard } from "../components/DisplayOutputCard";
 import { etaText } from "../lib/eta";
 
 export type Section = "audio" | "display" | "sharing";
@@ -875,6 +876,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
           )}
         </Card>
       </div>
+      <DisplayOutputCard draft={draft} update={update} monitor={draft?.monitor ?? null} />
       <LearnLookCard exe={draft?.game.exe ?? null} />
       <LearnTip what="look" />
       <LearnFromVideoCard profileId={draft?.id ?? null} />
@@ -941,6 +943,7 @@ function RampPreview({ gpu }: { gpu: GpuColor }) {
 function appliedViaText(state: ReturnType<typeof useCore>["state"]): string {
   if (state.display_state !== "applied") return "—";
   const parts = [
+    state.display_via.windows && "Windows display settings",
     state.display_via.nvapi && "NvAPI",
     state.display_via.amd && "AMD ADL",
     state.display_via.gamma && "gamma ramp",

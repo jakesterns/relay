@@ -118,6 +118,17 @@ fn profile() -> Profile {
     p.display.monitor.brightness = Some(95);
     p.display.gpu.gamma = 1.2;
     p.display.gpu.vibrance = 75;
+    // S52: the Windows mode and HDR, the colour preset, and (on NVIDIA) the
+    // output colour — all of which must come back after a hard kill too.
+    p.display.mode = Some(relay_display::mode::DisplayMode {
+        width: 1920,
+        height: 1080,
+        refresh_hz: 144,
+    });
+    p.display.hdr = Some(true);
+    p.display.monitor.color_preset = Some(0x05);
+    p.display.nvidia_color.range = Some(relay_display::nvcolor::DynamicRange::Full);
+    p.display.nvidia_color.bpc = Some(10);
     p
 }
 
@@ -155,6 +166,13 @@ async fn crash_and_restore(vendor: GpuVendor, label: &str) -> (Duration, (u32, u
     assert_ne!(applied.vcp[&0x10], before.vcp[&0x10], "[{label}] brightness moved over DDC/CI");
     assert_ne!(applied.ramp, before.ramp, "[{label}] gamma ramp moved");
     assert_ne!(applied.gpu.dvc, before.gpu.dvc, "[{label}] vendor colour moved");
+    assert_ne!(applied.mode, before.mode, "[{label}] display mode moved");
+    assert!(applied.hdr && !before.hdr, "[{label}] HDR switched on");
+    assert_eq!(applied.vcp[&0x14], 0x05, "[{label}] colour preset written");
+    match vendor {
+        GpuVendor::Nvidia => assert_ne!(applied.nv, before.nv, "[{label}] NVIDIA output colour moved"),
+        GpuVendor::Amd => assert_eq!(applied.nv, before.nv, "[{label}] no NvAPI, nothing written"),
+    }
     println!("  [{label}] before   {:?}", before.summary());
     println!("  [{label}] applied  {:?}", applied.summary());
 

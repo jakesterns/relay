@@ -16,6 +16,12 @@
 //!   (`atiadlxx.dll`), loaded the same way. The profile → raw-unit curve is
 //!   *not* NVIDIA's, because the two drivers do not expose the same control;
 //!   the module docs carry the reasoning.
+//! - [`mode`] (S52) — Windows display mode (resolution × refresh) and HDR on
+//!   one display: pure helpers plus the live calls.
+//! - [`nvcolor`] (S52) — NVIDIA output colour (format, dynamic range, bit
+//!   depth) as plain values; the NvAPI calls live in [`nvapi`].
+//! - [`recommend`] (S52) — suggested values per panel kind and GPU vendor,
+//!   each with a one-line reason. Pure; never applies anything.
 //!
 //! This crate deliberately does not depend on `relay-core`: it exposes raw
 //! operations and raw state; the `DisplayControl` adapter in the core is what
@@ -23,6 +29,9 @@
 
 pub mod gamma;
 pub mod learn;
+pub mod mode;
+pub mod nvcolor;
+pub mod recommend;
 pub mod vcp;
 
 #[cfg(windows)]

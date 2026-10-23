@@ -123,8 +123,45 @@ export const GOALS: { key: Goal; label: string; line: string }[] = [
   { key: "immersion", label: "Immersion", line: "A gentle balance that stays close to the game's own mix." },
 ];
 export interface GpuColor { vibrance: number; gamma: number; contrast: number; shadow_lift: number; hue_deg: number }
-export interface MonitorSettings { brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number }
-export interface DisplaySettings { gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean }
+export interface MonitorSettings {
+  brightness?: number; contrast?: number; black_equalizer?: number; response?: string; sharpness?: number;
+  /** S52: MCCS 0x14 colour preset, one of the values the panel lists. */
+  color_preset?: number;
+}
+/** S52: a Windows display mode. Mirrors `relay_display::mode::DisplayMode`. */
+export interface DisplayMode { width: number; height: number; refresh_hz: number }
+export type NvColorFormat = "rgb" | "ycbcr444" | "ycbcr422";
+export type NvDynamicRange = "full" | "limited" | "auto";
+/** S52: NVIDIA output colour; an absent field means "leave as it is". */
+export interface NvColorSettings { format?: NvColorFormat; range?: NvDynamicRange; bpc?: number }
+export interface DisplaySettings {
+  gpu: GpuColor; monitor: MonitorSettings; follow_focus: boolean; leave_other_monitors: boolean; share_true_colors: boolean;
+  /** S52: Windows mode while applied (absent = leave). */
+  mode?: DisplayMode;
+  /** S52: Windows HDR while applied (absent = leave). */
+  hdr?: boolean;
+  nvidia_color?: NvColorSettings;
+}
+export const fmtMode = (m: DisplayMode): string => `${m.width}×${m.height} @ ${m.refresh_hz} Hz`;
+export const sameMode = (a?: DisplayMode | null, b?: DisplayMode | null): boolean =>
+  !!a && !!b && a.width === b.width && a.height === b.height && a.refresh_hz === b.refresh_hz;
+/** MCCS 0x14 colour-preset names (the panel lists which it supports). */
+export const COLOR_PRESET_NAMES: Record<number, string> = {
+  0x01: "sRGB", 0x02: "Native", 0x03: "4000 K", 0x04: "5000 K", 0x05: "6500 K", 0x06: "7500 K",
+  0x07: "8200 K", 0x08: "9300 K", 0x09: "10000 K", 0x0a: "11500 K", 0x0b: "User 1", 0x0c: "User 2", 0x0d: "User 3",
+};
+export const presetName = (v: number): string => COLOR_PRESET_NAMES[v] ?? `Preset 0x${v.toString(16).padStart(2, "0")}`;
+/** S52: one suggested value with its reason. Mirrors `relay_display::recommend::Recommendation`. */
+export interface Recommendation { field: string; value: DisplayMode | boolean | number | string; reason: string }
+/** S52: what one monitor offers right now. Mirrors `display_options::DisplayOptions`. */
+export interface DisplayOptions {
+  monitor: MonitorId; name: string;
+  modes: DisplayMode[]; current_mode?: DisplayMode; native?: [number, number];
+  hdr?: { supported: boolean; enabled: boolean }; hdr_supported: boolean;
+  nvidia_color?: NvColorSettings; vendor: "nvidia" | "amd" | "other";
+  color_presets: number[]; panel_kind: PanelKind; panel_from_user: boolean;
+  recommendations: Recommendation[];
+}
 export type SharePreset = "game" | "daw" | "desktop" | "off";
 export type ProfileStatus = "draft" | "ready";
 
@@ -163,6 +200,11 @@ export interface ColorInfo {
 }
 export interface HardwareMonitor {
   id: MonitorId; name: string; panel: string; ddcci?: number[]; color?: ColorInfo;
+  /** S52: colour-preset values the panel listed, once scanned. */
+  color_presets?: number[];
+  /** S52: the user's correction of the panel's best mode / HDR ability.
+   *  Advice only: recommendations use them; nothing is applied from them. */
+  mode_override?: DisplayMode; hdr_override?: boolean;
 }
 /** One model in the bundled headphone catalogue. Mirrors
  *  `hardware::catalog::CatalogEntry`. */
@@ -211,6 +253,7 @@ export function activeListening(l: EndpointListening | undefined): ListeningDevi
 export interface MonitorProbe {
   id: MonitorId; name: string; native?: [number, number]; refresh_hz?: number;
   primary: boolean; hmonitor: number; gdi_name: string; ddc?: number[]; color?: ColorInfo;
+  color_presets?: number[];
 }
 export interface ProbeReport { endpoints: EndpointInfo[]; monitors: MonitorProbe[] }
 export interface HardwareView {
@@ -293,7 +336,12 @@ export type ShareState =
 export type AudioChainState = "bypass" | "active" | "exclusivebypassed" | "notinstalled" | "notloaded";
 export type DisplayState = "default" | "applied";
 /** Which paths carried the current display apply (`types::DisplayVia`). */
-export interface DisplayVia { nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean; unsupported?: string[] }
+export interface DisplayVia {
+  nvapi: boolean; amd: boolean; gamma: boolean; ddcci: boolean;
+  /** S52: mode or HDR went through Windows' display settings. */
+  windows?: boolean;
+  unsupported?: string[];
+}
 export interface Footprint { rss_bytes: number; cpu_percent: number }
 export interface CoreState {
   active_profile: ProfileSummary | null; foreground: Foreground | null;
@@ -1222,6 +1270,12 @@ export const api = {
   async probeHardware(): Promise<ProbeReport> {
     if (!isTauri()) return structuredClone(mockHardware.connected);
     return invoke<ProbeReport>("probe_hardware");
+  },
+  /** S52: one monitor's modes, HDR, NVIDIA colour, presets and the
+   *  recommendations for it (`null` = the primary). Read-only. */
+  async displayOptions(monitor: MonitorId | null): Promise<DisplayOptions> {
+    if (!isTauri()) throw new Error("Display options need the Relay core");
+    return invoke<DisplayOptions>("display_options", { monitor });
   },
   /** Parse AutoEQ text and attach it to a headset. Returns the parsed points. */
   async importCurve(headset: HeadsetId, csv: string): Promise<[number, number][]> {

@@ -28,6 +28,39 @@ pub fn parse_vcp_codes(caps: &str) -> Vec<u8> {
     codes
 }
 
+/// The allowed values the capability string lists for one code — `14(05 08
+/// 0B)` gives `[0x05, 0x08, 0x0B]` for 0x14. `None` when the code is absent
+/// or lists no values (continuous controls such as brightness).
+pub fn parse_vcp_values(caps: &str, code: u8) -> Option<Vec<u16>> {
+    let group = group_body(caps, "vcp")?;
+    let mut depth = 0usize;
+    let mut current: Option<u8> = None;
+    let mut collecting = false;
+    let mut values = Vec::new();
+    for token in tokens(group) {
+        match token {
+            Token::Open => {
+                depth += 1;
+                collecting = depth == 1 && current == Some(code);
+            }
+            Token::Close => {
+                depth = depth.saturating_sub(1);
+                if collecting && depth == 0 {
+                    break;
+                }
+            }
+            Token::Word(w) if depth == 0 => current = u8::from_str_radix(w, 16).ok(),
+            Token::Word(w) if collecting && depth == 1 => {
+                if let Ok(v) = u16::from_str_radix(w, 16) {
+                    values.push(v);
+                }
+            }
+            Token::Word(_) => {}
+        }
+    }
+    (!values.is_empty()).then_some(values)
+}
+
 /// The `model(...)` body, if present — a nicer display name than EDID gives.
 pub fn parse_model(caps: &str) -> Option<String> {
     group_body(caps, "model").map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
@@ -130,6 +163,17 @@ mccs_ver(2.1)mswhql(1))";
             assert!(!codes.contains(&not), "leaked nested value {not:02X}");
         }
         assert_eq!(parse_model(LG_ULTRAGEAR_LIVE).as_deref(), Some("WK95U"));
+    }
+
+    #[test]
+    fn reads_the_listed_values_of_one_code() {
+        assert_eq!(parse_vcp_values(LG_ULTRAGEAR_LIVE, 0x14), Some(vec![0x05, 0x08, 0x0B]));
+        assert_eq!(parse_vcp_values(LG_ULTRAGEAR_LIVE, 0xF5), Some(vec![1, 2, 3, 4]));
+        // Continuous control: no list.
+        assert_eq!(parse_vcp_values(LG_ULTRAGEAR_LIVE, 0x10), None);
+        // Not advertised at all.
+        assert_eq!(parse_vcp_values(LG_ULTRAGEAR_LIVE, 0xDC), None);
+        assert_eq!(parse_vcp_values(LG_STYLE, 0x60), Some(vec![0x0F, 0x10, 0x11, 0x12]));
     }
 
     #[test]

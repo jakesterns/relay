@@ -179,6 +179,13 @@ pub enum Method {
     /// Full re-probe including the slow DDC/CI capability query; refreshes the
     /// cached connected state and stores VCP lists on known library monitors.
     ProbeHardware,
+    /// S52: one monitor's display options — mode list, HDR, NVIDIA output
+    /// colour, colour presets — and the recommendations for it. Read-only.
+    /// `None` = the primary monitor.
+    DisplayOptions {
+        #[serde(default)]
+        monitor: Option<crate::types::MonitorId>,
+    },
     /// Parse AutoEQ results text (local file contents or paste) and attach it
     /// to a headset as its measured curve.
     ImportCurve {
@@ -465,6 +472,9 @@ pub enum Reply {
     },
     Probe {
         report: Box<ProbeReport>,
+    },
+    DisplayOptions {
+        options: Box<crate::display_options::DisplayOptions>,
     },
     Curve {
         points: Vec<(f32, f32)>,

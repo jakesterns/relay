@@ -304,6 +304,29 @@ describe("the hardware library", () => {
     expect(lit).toEqual([core.hardware.connected.endpoints.find((e) => e.default)!.name]);
   });
 
+  it("S52: corrects a monitor's best mode and HDR ability, as advice only", async () => {
+    const m = core.hardware.monitors[0];
+    const h = await mount();
+    await h.user.click(within(hwRow("Monitors", m.name)).getByRole("button", { name: `Edit ${m.name}` }));
+    await settle();
+    const dialog = card("Edit monitor");
+    // What Windows and the EDID say sits beside each override.
+    expect(dialog).toHaveTextContent("EDID 3840×2160");
+    expect(dialog).toHaveTextContent("Windows says supported");
+    await h.user.selectOptions(within(dialog).getByRole("combobox", { name: "Best mode" }), "2560×1440 @ 240 Hz");
+    await h.user.selectOptions(within(dialog).getByRole("combobox", { name: "HDR capability" }), "no");
+    await h.user.click(within(dialog).getByRole("button", { name: "Save changes" }));
+    await settle();
+    const saved = tauri.lastCall("save_hardware")?.args as { item: { value: Record<string, unknown> } };
+    expect(saved.item.value).toMatchObject({
+      id: m.id,
+      mode_override: { width: 2560, height: 1440, refresh_hz: 240 },
+      hdr_override: false,
+    });
+    // Saving the library changes nothing on screen: no profile was applied.
+    expect(tauri.lastCall("apply_profile")).toBeUndefined();
+  });
+
   it("edits a saved monitor: name and panel type, id and scan kept", async () => {
     const m = core.hardware.monitors[0];
     m.ddcci = [0x10, 0x12];
