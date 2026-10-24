@@ -48,8 +48,39 @@ export interface DynBandParams {
 }
 export interface DynamicsParams { bands: DynBandParams[]; duck_lift?: boolean }
 /** Strengths 0..2 (1 = as learned / imported). */
-export interface DynamicsTuning { enabled: boolean; tame: number; lift: number }
+export interface DynamicsTuning {
+  enabled: boolean; tame: number; lift: number;
+  /** Gunshots strength (owner 2026-10-24). Unset: gun bands follow `tame`. */
+  gun?: number;
+}
 export const MAX_DYN_STRENGTH = 2;
+
+/** Mirror of `relay_audio::learn::dynamics::gunfire_band` at strength 1. */
+export const GUNFIRE_BAND: DynBandParams = {
+  mode: "tame", freq_hz: 3000, q: 0.5, threshold_db: -50, ratio: 6, range_db: 6,
+  floor_db: -100, attack_ms: 1, release_ms: 120, enabled: true,
+};
+
+/** What the stage runs with, as the core computes it
+ *  (`GameEqLayer::effective_dynamics`): strengths applied per part, the caps
+ *  (12 dB cut, 8 dB lift), and the gunfire band when Gunshots is set and no
+ *  gun band was learned. For the browser stand-in and the test fake. */
+export function effectiveDynamics(l: GameEqLayer | undefined): DynamicsParams | null {
+  if (!l) return null;
+  const t = { enabled: true, tame: 1, lift: 1, ...l.dynamics_tuning };
+  if (!t.enabled || (!l.dynamics && t.gun === undefined)) return null;
+  const base = l.dynamics?.bands ?? [];
+  const isGun = (b: DynBandParams) => b.mode === "tame" && b.freq_hz >= 200;
+  const bands = base.map((b) => {
+    const s = b.mode === "lift" ? t.lift : isGun(b) ? (t.gun ?? t.tame) : t.tame;
+    return { ...b, range_db: Math.min(b.mode === "tame" ? 12 : 8, b.range_db * s) };
+  });
+  if (t.gun !== undefined && t.gun > 0 && !base.some(isGun) && bands.length < 4) {
+    bands.push({ ...GUNFIRE_BAND, range_db: Math.min(12, GUNFIRE_BAND.range_db * t.gun) });
+  }
+  const run = bands.filter((b) => b.range_db > 0);
+  return run.length ? { bands: run, duck_lift: true } : null;
+}
 export interface GameEqStatus {
   exe: string; state: LearnStatus;
   learning_on: boolean; needs_goal: boolean; learning_now: boolean;
@@ -77,6 +108,8 @@ export interface GameEqStatus {
   dynamics_tuning?: DynamicsTuning;
   /** What runs now (tuned); null when off or none. */
   dynamics?: DynamicsParams | null;
+  /** The stage as learned or imported, before the strengths. */
+  dynamics_learned?: DynamicsParams | null;
 }
 
 /* ---- S48: learn from a video file. Mirror of crates/core/src/learn_file.rs. ---- */
@@ -112,7 +145,7 @@ export type GameEqAction =
   | { kind: "reset" }
   | { kind: "import"; text: string }
   | { kind: "export"; note: string }
-  | { kind: "set_dynamics"; enabled?: boolean; tame?: number; lift?: number };
+  | { kind: "set_dynamics"; enabled?: boolean; tame?: number; lift?: number; gun?: number };
 export interface GameEqExport { text: string; path: string }
 export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
 
@@ -325,6 +358,8 @@ export interface LearnView {
   exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
   /** The user chose "Learn in HDR" for this game. */
   hdr_ok?: boolean; hdr_notice?: string;
+  /** How strongly the learned look is applied: 0 – 2, 1 = as learned. */
+  strength?: number;
   monitors: MonitorLearnView[]; imported: ImportedLook | null;
   privacy: string; tournament: string;
 }
@@ -1571,6 +1606,10 @@ export const api = {
     if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
     return invoke<LearnView>("learn_display_set", { exe, enabled });
   },
+  async learnDisplayStrength(exe: string, strength: number): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.strength = Math.min(2, Math.max(0, strength)); return structuredClone(v); }
+    return invoke<LearnView>("learn_display_strength", { exe, strength });
+  },
   async learnDisplayHdr(exe: string, enabled: boolean): Promise<LearnView> {
     if (!isTauri()) { const v = mockLearn(exe); v.hdr_ok = enabled; for (const m of v.monitors) m.hdr_skipped = false; if (v.status === "hdr_skipped") v.status = v.enabled ? "learning" : "off"; return structuredClone(v); }
     return invoke<LearnView>("learn_display_hdr", { exe, enabled });
@@ -1635,12 +1674,13 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
   if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
   if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
   if (action.kind === "set_dynamics") {
-    if (!a.game_eq?.dynamics) throw new Error("there is no dynamic stage to tune yet");
-    const t = { enabled: true, tame: 1, lift: 1, ...a.game_eq.dynamics_tuning };
+    if (!a.game_eq || (!a.game_eq.dynamics && action.gun === undefined)) throw new Error("there is no dynamic stage to tune yet");
+    const t: DynamicsTuning = { enabled: true, tame: 1, lift: 1, ...a.game_eq.dynamics_tuning };
     const clamp = (x: number) => Math.min(MAX_DYN_STRENGTH, Math.max(0, x));
     if (action.enabled !== undefined) t.enabled = action.enabled;
     if (action.tame !== undefined) t.tame = clamp(action.tame);
     if (action.lift !== undefined) t.lift = clamp(action.lift);
+    if (action.gun !== undefined) t.gun = clamp(action.gun);
     a.game_eq.dynamics_tuning = t;
   }
   if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
@@ -1656,9 +1696,10 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
       source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
       targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
       exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
-      dynamics_available: !!a.game_eq?.dynamics,
+      dynamics_available: !!a.game_eq,
       dynamics_tuning: { enabled: true, tame: 1, lift: 1, ...a.game_eq?.dynamics_tuning },
-      dynamics: a.game_eq?.dynamics ?? null,
+      dynamics: effectiveDynamics(a.game_eq),
+      dynamics_learned: a.game_eq?.dynamics ?? null,
     },
   };
 }

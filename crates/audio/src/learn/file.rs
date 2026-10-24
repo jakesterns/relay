@@ -100,7 +100,14 @@ impl GameEqLayer {
     /// What the dynamic stage runs with: the stored stage, tuned and
     /// guarded. `None` when there is none, it is off, or it is inert.
     pub fn effective_dynamics(&self) -> Option<DynamicsParams> {
-        super::dynamics::effective(self.dynamics.as_ref()?, &self.tuning())
+        // A Gunshots strength works even where nothing dynamic was learned.
+        let empty = DynamicsParams { bands: Vec::new(), duck_lift: false };
+        let base = match (&self.dynamics, self.tuning().gun) {
+            (Some(d), _) => d,
+            (None, Some(_)) => &empty,
+            (None, None) => return None,
+        };
+        super::dynamics::effective(base, &self.tuning())
     }
 
     /// Imported or tuned: the learned result blends into this one.
@@ -726,7 +733,7 @@ mod tests {
 
     #[test]
     fn dynamics_and_tuning_round_trip_as_schema_2() {
-        let tuning = DynamicsTuning { enabled: true, tame: 1.5, lift: 0.5 };
+        let tuning = DynamicsTuning { enabled: true, tame: 1.5, lift: 0.5, gun: None };
         let mut l = layer().with_dynamics(Some(stage()));
         l.dynamics_tuning = Some(tuning);
         let f = GameEqFile::export("g.exe", "G", &l, Some(Goal::Awareness), "louder steps");

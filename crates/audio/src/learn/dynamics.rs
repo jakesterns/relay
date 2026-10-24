@@ -73,6 +73,45 @@ pub const MIN_STEP_OVER_FLOOR_DB: f32 = 1.0;
 pub const MIN_LIFT_WINDOW_DB: f32 = 4.0;
 /// User strength range (1 = as learned).
 pub const MAX_STRENGTH: f32 = 2.0;
+/// Owner 2026-10-23: "gunshots are still very loud when I shoot them". When
+/// learning finds no gun band (MW4's shots did not stand clear of its
+/// footsteps), the player's Gunshots strength adds this one instead: a wide
+/// band over the crack of a shot that acts only on bursts at least as loud
+/// as the whole mix — mostly the player's own gun, which is the loudest
+/// thing in a shooter. Footsteps sit far under it.
+pub const GUNFIRE_HZ: f32 = 3000.0;
+/// About two and a half octaves (≈ 1.2 – 7 kHz): the crack, not the body.
+pub const GUNFIRE_Q: f32 = 0.5;
+/// Acts on the band only above the program loudness ([`DYN_REF_DB`]).
+pub const GUNFIRE_THRESHOLD_DB: f32 = DYN_REF_DB;
+pub const GUNFIRE_RATIO: f32 = 6.0;
+/// Largest cut at 100 %; 200 % reaches [`MAX_TAME_DB`].
+pub const GUNFIRE_RANGE_DB: f32 = 6.0;
+/// A tame band at or above this is a gun band (body or crack); under it,
+/// an explosion band.
+pub const GUN_MIN_HZ: f32 = GUN_BODY_HZ.0;
+
+/// The gunfire band at strength `s` (1 = [`GUNFIRE_RANGE_DB`]).
+pub fn gunfire_band(s: f32) -> DynBandParams {
+    DynBandParams {
+        mode: DynMode::Tame,
+        freq_hz: GUNFIRE_HZ,
+        q: GUNFIRE_Q,
+        threshold_db: GUNFIRE_THRESHOLD_DB,
+        ratio: GUNFIRE_RATIO,
+        range_db: (GUNFIRE_RANGE_DB * s).min(MAX_TAME_DB),
+        floor_db: -100.0,
+        attack_ms: 1.0,
+        release_ms: 120.0,
+        enabled: true,
+    }
+}
+
+/// Is this a gun band (as opposed to an explosion or footstep band)?
+pub fn is_gun_band(b: &DynBandParams) -> bool {
+    b.mode == DynMode::Tame && b.freq_hz >= GUN_MIN_HZ
+}
+
 /// Where each tame band may sit, Hz.
 pub const GUN_BODY_HZ: (f32, f32) = (200.0, 1000.0);
 pub const GUN_CRACK_HZ: (f32, f32) = (1600.0, 8000.0);
@@ -266,6 +305,12 @@ pub struct DynamicsTuning {
     /// Footstep lift strength, as `tame` (capped at [`MAX_LIFT_DB`]).
     #[serde(default = "one")]
     pub lift: f32,
+    /// Gunshot strength, 0 – [`MAX_STRENGTH`]. `None` (every layer before
+    /// 2026-10-24) = gun bands follow `tame` and no gunfire band is added.
+    /// Set, it scales the learned gun bands, or — when none were learned —
+    /// adds [`gunfire_band`] at that strength. `tame` then covers explosions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gun: Option<f32>,
 }
 
 fn yes() -> bool {
@@ -277,7 +322,7 @@ fn one() -> f32 {
 
 impl Default for DynamicsTuning {
     fn default() -> Self {
-        Self { enabled: true, tame: 1.0, lift: 1.0 }
+        Self { enabled: true, tame: 1.0, lift: 1.0, gun: None }
     }
 }
 
@@ -285,7 +330,7 @@ impl DynamicsTuning {
     /// In range (a hand-edited profile or file can say anything).
     pub fn clamped(self) -> Self {
         let s = |x: f32| if x.is_finite() { x.clamp(0.0, MAX_STRENGTH) } else { 1.0 };
-        Self { enabled: self.enabled, tame: s(self.tame), lift: s(self.lift) }
+        Self { enabled: self.enabled, tame: s(self.tame), lift: s(self.lift), gun: self.gun.map(s) }
     }
 }
 
@@ -324,7 +369,8 @@ pub fn is_guarded(p: &DynamicsParams) -> bool {
 }
 
 /// What the stage runs with: `base` (learned or imported), scaled by the
-/// player's tuning and guarded. `None` when off or inert.
+/// player's tuning and guarded. `None` when off or inert. With a Gunshots
+/// strength set and no gun band in `base`, the [`gunfire_band`] is added.
 pub fn effective(base: &DynamicsParams, tuning: &DynamicsTuning) -> Option<DynamicsParams> {
     let t = tuning.clamped();
     if !t.enabled {
@@ -333,10 +379,17 @@ pub fn effective(base: &DynamicsParams, tuning: &DynamicsTuning) -> Option<Dynam
     let mut p = base.clone();
     for b in &mut p.bands {
         let s = match b.mode {
+            DynMode::Tame if is_gun_band(b) => t.gun.unwrap_or(t.tame),
             DynMode::Tame => t.tame,
             DynMode::Lift => t.lift,
         };
         b.range_db *= s;
+    }
+    if let Some(g) = t.gun.filter(|g| *g > 0.0) {
+        if !base.bands.iter().any(is_gun_band) && p.bands.len() < MAX_DYN_BANDS {
+            p.bands.push(gunfire_band(g));
+            p.duck_lift = true;
+        }
     }
     let p = guard_dynamics(&p);
     (!p.is_inert()).then_some(p)
@@ -369,6 +422,77 @@ mod tests {
         let mut a = Analyzer::new(FS);
         session(0xD1A, |_, b| a.push(b));
         a.into_stats()
+    }
+
+    #[test]
+    fn gunshots_strength_adds_a_gunfire_band_only_when_none_was_learned() {
+        // MW4 on the main PC: one learned band, explosions at 63 Hz.
+        let boom = DynamicsParams {
+            bands: vec![DynBandParams {
+                mode: DynMode::Tame,
+                freq_hz: 63.0,
+                q: 0.7,
+                threshold_db: -54.0,
+                ratio: 6.0,
+                range_db: 10.0,
+                floor_db: -100.0,
+                attack_ms: 1.0,
+                release_ms: 120.0,
+                enabled: true,
+            }],
+            duck_lift: true,
+        };
+        // Before the setting exists: exactly as before.
+        let old = effective(&boom, &DynamicsTuning::default()).unwrap();
+        assert_eq!(old.bands.len(), 1);
+        // Gunshots at 100 %: the gunfire band joins, explosions unchanged.
+        let t = DynamicsTuning { gun: Some(1.0), ..Default::default() };
+        let p = effective(&boom, &t).unwrap();
+        assert_eq!(p.bands.len(), 2);
+        let g = p.bands.iter().find(|b| is_gun_band(b)).unwrap();
+        assert_eq!(
+            (g.freq_hz, g.range_db, g.threshold_db),
+            (GUNFIRE_HZ, GUNFIRE_RANGE_DB, DYN_REF_DB)
+        );
+        assert_eq!(p.bands[0].range_db, 10.0);
+        // 200 % reaches the cap; 0 % adds nothing.
+        let max =
+            effective(&boom, &DynamicsTuning { gun: Some(2.0), ..Default::default() }).unwrap();
+        assert_eq!(max.bands.iter().find(|b| is_gun_band(b)).unwrap().range_db, MAX_TAME_DB);
+        let off =
+            effective(&boom, &DynamicsTuning { gun: Some(0.0), ..Default::default() }).unwrap();
+        assert_eq!(off.bands.len(), 1);
+        // Explosions follow `tame` only.
+        let quiet_boom =
+            effective(&boom, &DynamicsTuning { tame: 0.5, gun: Some(1.0), ..Default::default() })
+                .unwrap();
+        assert_eq!(quiet_boom.bands[0].range_db, 5.0);
+        // From nothing at all, the gunfire band alone.
+        let none = DynamicsParams { bands: vec![], duck_lift: false };
+        assert_eq!(effective(&none, &t).unwrap().bands.len(), 1);
+        assert!(is_guarded(&p));
+    }
+
+    #[test]
+    fn a_learned_gun_band_follows_gunshots_and_gets_no_twin() {
+        let s = learned();
+        let p = derive_dynamics(&s, Goal::Awareness).unwrap();
+        let guns = p.bands.iter().filter(|b| is_gun_band(b)).count();
+        if guns == 0 {
+            return; // this synthetic session learned none; covered above
+        }
+        let t = DynamicsTuning { gun: Some(2.0), tame: 0.0, ..Default::default() };
+        let e = effective(&p, &t).unwrap();
+        assert_eq!(e.bands.iter().filter(|b| is_gun_band(b)).count(), guns, "no extra band");
+        assert!(e.bands.iter().filter(|b| is_gun_band(b)).all(|b| b.range_db > 0.0));
+    }
+
+    #[test]
+    fn old_tunings_still_read() {
+        let t: DynamicsTuning =
+            serde_json::from_str(r#"{"enabled":true,"tame":1.5,"lift":0.5}"#).unwrap();
+        assert_eq!(t.gun, None);
+        assert!(!serde_json::to_string(&t).unwrap().contains("gun"));
     }
 
     #[test]
@@ -407,7 +531,7 @@ mod tests {
         assert_eq!(effective(&base, &off), None);
         let as_learned = effective(&base, &DynamicsTuning::default()).unwrap();
         assert_eq!(as_learned, base);
-        let max = DynamicsTuning { enabled: true, tame: 99.0, lift: f32::NAN };
+        let max = DynamicsTuning { enabled: true, tame: 99.0, lift: f32::NAN, gun: None };
         let m = effective(&base, &max).unwrap();
         for b in &m.bands {
             match b.mode {
@@ -415,7 +539,7 @@ mod tests {
                 DynMode::Lift => assert!(b.range_db <= MAX_LIFT_DB),
             }
         }
-        let none = DynamicsTuning { enabled: true, tame: 0.0, lift: 0.0 };
+        let none = DynamicsTuning { enabled: true, tame: 0.0, lift: 0.0, gun: None };
         assert_eq!(effective(&base, &none), None, "zero strength is inert");
     }
 

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Toggle } from "./Controls";
+import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Slider, Toggle } from "./Controls";
 import { errText } from "../lib/err";
 import { etaText } from "../lib/eta";
-import { api, HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
+import { api, HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LookAdjustments, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
 
 /**
  * Display → "Learn this game's look" (S47).
@@ -16,8 +16,51 @@ import { api, HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LearnView, type 
  * what HDR tuning is and chooses "Learn in HDR". The HDR look is its own
  * row per monitor, kept apart from the SDR one.
  */
+/** How long the strength slider waits after the last move before telling
+ *  the core (a drag re-applies the display once, not per step). */
+export const LOOK_STRENGTH_DEBOUNCE_MS = 300;
+
+/** Where a grey of `input` (0–1) lands after a gamma of `g`: the same curve
+ *  the gamma ramp uses (`y = x^(1/g)`). */
+export function afterGamma(input: number, g: number): number {
+  return input ** (1 / g);
+}
+
+/** Every change a look makes on one panel, in plain words with its numbers.
+ *  Empty when the look changes nothing. */
+export function changeLines(a: LookAdjustments, hdr = false): string[] {
+  const out: string[] = [];
+  const p = (v: number) => `${Math.round(v * 100)}%`;
+  if (Math.abs(a.gamma - 1) >= 0.005) {
+    const g = a.gamma;
+    const way = g > 1 ? "brighter" : "darker";
+    out.push(`Gamma 1.00 → ${g.toFixed(2)}: dark and mid tones ${way}. A 5% grey shows as ${p(afterGamma(0.05, g))}, ` +
+      `10% as ${p(afterGamma(0.1, g))}, 20% as ${p(afterGamma(0.2, g))}. Pure black and pure white do not move.`);
+  }
+  if (a.shadow_lift > 0) {
+    out.push(`Shadow lift 0 → ${a.shadow_lift}: the very darkest tones are raised, so near-black detail shows; black itself turns slightly grey.`);
+  }
+  if (a.vibrance !== 50) {
+    const d = a.vibrance - 50;
+    out.push(`Vibrance 50 → ${a.vibrance} (${d > 0 ? "+" : ""}${d} of 100): colours ${d > 0 ? "richer" : "softer"}; greys and skin tones barely move.`);
+  }
+  if (a.black_equalizer) {
+    out.push(`Monitor black equalizer → ${a.black_equalizer}: the monitor itself brightens shadow detail.`);
+  }
+  if (out.length === 0) {
+    out.push(hdr
+      ? "No vibrance change: this game's HDR colour needs no help on this panel."
+      : "No change: this game's look needs no correction on this panel.");
+  }
+  return out;
+}
+
 export function LearnLookCard({ exe }: { exe: string | null }) {
   const [view, setView] = useState<LearnView | null>(null);
+  const [strength, setStrength] = useState(1);
+  const strengthTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => { setStrength(view?.strength ?? 1); }, [view?.strength]);
+  useEffect(() => () => { if (strengthTimer.current) clearTimeout(strengthTimer.current); }, []);
   const [err, setErr] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [note, setNote] = useState("");
@@ -87,6 +130,12 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
 
   const imported = view?.imported ?? null;
   const enabled = view?.enabled ?? false;
+  const anyLook = view?.monitors.some((m) => m.adjustments || m.offer_adjustments) ?? false;
+  const sendStrength = (v: number) => {
+    setStrength(v);
+    if (strengthTimer.current) clearTimeout(strengthTimer.current);
+    strengthTimer.current = setTimeout(() => void run(() => api.learnDisplayStrength(exe, v)), LOOK_STRENGTH_DEBOUNCE_MS);
+  };
   const anyReady = view?.monitors.some((m) => m.converged !== null) ?? false;
   const hdrOk = view?.hdr_ok ?? false;
   const hdrSeen = (view?.monitors.some((m) => m.hdr_skipped) ?? false) || view?.status === "hdr_skipped";
@@ -116,6 +165,20 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
       {hdrOk && (
         <Toggle on onChange={(v) => void run(() => api.learnDisplayHdr(exe, v), v ? undefined : "HDR learning is off. The HDR look is kept but no longer applied.")}
           label="Learn in HDR" sub={view?.hdr_notice ?? HDR_NOTICE} />
+      )}
+      {anyLook && (
+        <div className="lookstrength" data-testid="look-strength">
+          <Slider label="Look strength" value={strength} min={0} max={2} step={0.05}
+            format={(v) => `${Math.round(v * 100)}%`} disabled={view === null}
+            onChange={sendStrength} />
+          <p className="note">
+            100% is what Relay learned, kept gentle on purpose. Raise it for a stronger change, lower it for less; 0% leaves the
+            screen as Windows set it. The numbers below follow this slider.
+          </p>
+          <p className="note">
+            To see the difference in game, press <b>Ctrl+Alt+G</b>: it switches the whole profile off and on again.
+          </p>
+        </div>
       )}
       {view?.monitors.map((m) => (
         <MonitorRow key={m.monitor + (m.hdr ? "#hdr" : "")} m={m} hdrOk={hdrOk} onPanel={(p) => void setPanel(m.monitor, p)} />
@@ -232,13 +295,26 @@ function MonitorRow({ m, hdrOk, onPanel }: { m: MonitorLearnView; hdrOk: boolean
         <Kv k="So far" v={`shadows ${pct(r.candidate.shadow)} · colour ${pct(r.candidate.saturation)} · highlights ${pct(r.candidate.highlight)}${m.candidate_adjustments ? ` → gamma ${m.candidate_adjustments.gamma.toFixed(2)} · lift ${m.candidate_adjustments.shadow_lift} · vibrance ${m.candidate_adjustments.vibrance}` : ""}`} mono />
       )}
       {m.converged && (
-        <Kv k="Learned" v={`shadows ${pct(m.converged.shadow)} · colour ${pct(m.converged.saturation)} · highlights ${pct(m.converged.highlight)}`} mono />
+        <>
+          <Kv k="Learned" v={`shadows ${pct(m.converged.shadow)} · colour ${pct(m.converged.saturation)} · highlights ${pct(m.converged.highlight)}`} mono />
+          <p className="p small" data-testid="look-learned-why">
+            Shadows {pct(m.converged.shadow)}: how much hidden detail this game keeps in its dark areas (100% = a lot, so shadows are opened most).
+            Colour {pct(m.converged.saturation)}: how washed-out it looks (0% = already vivid).
+            Highlights {pct(m.converged.highlight)}: how often bright areas clip, which holds brightening back.
+          </p>
+        </>
       )}
       {m.offer && (
         <Kv k="Ready to apply" v={`shadows ${pct(m.offer.shadow)} · colour ${pct(m.offer.saturation)}${m.offer_adjustments ? ` → gamma ${m.offer_adjustments.gamma.toFixed(2)} · lift ${m.offer_adjustments.shadow_lift} · vibrance ${m.offer_adjustments.vibrance}` : ""}`} mono />
       )}
       {a && (
         <Kv k="On this panel" v={m.hdr ? `vibrance ${a.vibrance}` : `gamma ${a.gamma.toFixed(2)} · lift ${a.shadow_lift} · vibrance ${a.vibrance}${a.black_equalizer !== undefined ? ` · black eq ${a.black_equalizer}` : ""}`} mono />
+      )}
+      {(a ?? m.offer_adjustments) && (
+        <div className="changes" data-testid="look-changes">
+          <p className="p small"><b>{a ? "What changes on this screen while the game is in front" : "What Apply would change on this screen"}</b></p>
+          <ul>{changeLines((a ?? m.offer_adjustments)!, m.hdr).map((l) => <li key={l}>{l}</li>)}</ul>
+        </div>
       )}
       {m.hdr && !hdrOk && <p className="p small">Not applied while Learn in HDR is off.</p>}
       {a?.notes.map((n) => <p key={n} className="p small">{n}</p>)}

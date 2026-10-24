@@ -106,9 +106,39 @@ pub struct GameRecord {
     /// [`HDR_NOTICE`]. Without it an HDR screen is skipped.
     #[serde(default)]
     pub hdr_ok: bool,
+    /// How strongly the learned look is applied, 0 – [`MAX_LOOK_STRENGTH`]
+    /// (`None` = 1, as learned). Owner 2026-10-24: the learned look was too
+    /// subtle to see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strength: Option<f32>,
+}
+
+/// Look strength range: 0 = off, 1 = as learned, 2 = twice the change.
+pub const MAX_LOOK_STRENGTH: f32 = 2.0;
+
+/// Scale learned adjustments by `s`: every change from neutral (gamma 1,
+/// lift 0, vibrance 50, no black equalizer) grows or shrinks by `s`. The
+/// overlay's own clamps still apply after this.
+pub fn scale_adjustments(a: &Adjustments, s: f32) -> Adjustments {
+    let s = if s.is_finite() { s.clamp(0.0, MAX_LOOK_STRENGTH) } else { 1.0 };
+    Adjustments {
+        gamma: ((1.0 + (a.gamma - 1.0) * s) * 100.0).round() / 100.0,
+        shadow_lift: (a.shadow_lift as f32 * s).round() as i32,
+        vibrance: (50.0 + (a.vibrance - 50) as f32 * s).round().clamp(0.0, 100.0) as i32,
+        black_equalizer: a
+            .black_equalizer
+            .map(|b| (b as f32 * s).round() as u16)
+            .filter(|b| *b > 0),
+        notes: a.notes.clone(),
+    }
 }
 
 impl GameRecord {
+    /// The look strength in use.
+    pub fn strength(&self) -> f32 {
+        self.strength.filter(|s| s.is_finite()).unwrap_or(1.0).clamp(0.0, MAX_LOOK_STRENGTH)
+    }
+
     /// The settled look waiting for Apply on `monitor`, if any. Once a look
     /// is in use the freeze rule decides later changes, so there is no
     /// offer then.
@@ -301,6 +331,10 @@ pub fn caps_for(label: &str, name: &str, id: &str) -> PanelCaps {
     PanelCaps { kind: panel_kind(label, name, id).0, black_equalizer_max: None }
 }
 
+fn one_f32() -> f32 {
+    1.0
+}
+
 /// Look × panel → adjustments, by the rules of the mode it was learned in.
 pub fn realize_for(look: &LookTargets, caps: &PanelCaps, hdr: bool) -> Adjustments {
     if hdr {
@@ -406,6 +440,9 @@ pub struct LearnView {
     /// The user chose HDR learning for this game.
     #[serde(default)]
     pub hdr_ok: bool,
+    /// How strongly the look is applied (1 = as learned).
+    #[serde(default = "one_f32")]
+    pub strength: f32,
     /// What HDR tuning is, for the choice.
     #[serde(default)]
     pub hdr_notice: String,
@@ -458,7 +495,8 @@ pub fn view(
             let (name, panel) = names(&base);
             let (kind, guessed) = panel_kind(&panel, &name, &base.0);
             let fit = |look: &LookTargets| {
-                realize_for(look, &PanelCaps { kind, ..panel_caps(&panel) }, hdr)
+                let caps = PanelCaps { kind, ..panel_caps(&panel) };
+                scale_adjustments(&realize_for(look, &caps, hdr), rec.strength())
             };
             let caps = PanelCaps { kind, ..panel_caps(&panel) };
             let l = &m.learner;
@@ -490,6 +528,7 @@ pub fn view(
         enabled: rec.enabled,
         auto_apply: rec.auto_apply,
         hdr_ok: rec.hdr_ok,
+        strength: rec.strength(),
         hdr_notice: HDR_NOTICE.into(),
         status: overall_status(&rec, &monitors),
         sampling,

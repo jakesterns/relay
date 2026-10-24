@@ -351,6 +351,12 @@ pub enum Method {
         exe: String,
         enabled: bool,
     },
+    /// How strongly the learned look is applied: 0 – 2, 1 = as learned
+    /// (owner 2026-10-24).
+    LearnDisplayStrength {
+        exe: String,
+        strength: f32,
+    },
     /// S47: use the settled look (every monitor that has one).
     LearnDisplayApply {
         exe: String,

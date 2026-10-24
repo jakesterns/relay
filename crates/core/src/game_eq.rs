@@ -71,6 +71,10 @@ pub enum GameEqAction {
         tame: Option<f32>,
         #[serde(default)]
         lift: Option<f32>,
+        /// Gunshots (owner 2026-10-24): scales learned gun bands, or adds
+        /// the gunfire band when none was learned.
+        #[serde(default)]
+        gun: Option<f32>,
     },
 }
 
@@ -131,6 +135,10 @@ pub struct GameEqStatus {
     /// S49: the applied layer has a dynamic stage to tune.
     #[serde(default)]
     pub dynamics_available: bool,
+    /// The dynamic stage as learned or imported, before the player's
+    /// strengths: which parts (gunshots, explosions, footsteps) exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics_learned: Option<relay_audio::params::DynamicsParams>,
     /// The player's tuning of it (the default when none was set).
     #[serde(default)]
     pub dynamics_tuning: DynamicsTuning,
@@ -374,7 +382,9 @@ pub fn status_with(
         excluded,
         convergence,
         eta_secs,
-        dynamics_available: layer.is_some_and(|l| l.dynamics.is_some()),
+        // Any game layer can take a Gunshots strength, learned stage or not.
+        dynamics_available: layer.is_some(),
+        dynamics_learned: layer.and_then(|l| l.dynamics.clone()),
         dynamics_tuning: layer.map(|l| l.tuning()).unwrap_or_default(),
         dynamics: layer.and_then(|l| l.effective_dynamics()),
     }
@@ -532,14 +542,15 @@ pub fn apply_action(
                 ..Default::default()
             })
         }
-        GameEqAction::SetDynamics { enabled, tame, lift } => {
+        GameEqAction::SetDynamics { enabled, tame, lift, gun } => {
+            // Gunshots needs only a game layer; the others tune a stage.
             let layer = profile
                 .audio
                 .game_eq
                 .as_mut()
-                .filter(|l| l.dynamics.is_some())
+                .filter(|l| l.dynamics.is_some() || gun.is_some())
                 .context("there is no dynamic stage to tune yet")?;
-            for x in [tame, lift].into_iter().flatten() {
+            for x in [tame, lift, gun].into_iter().flatten() {
                 if !x.is_finite() {
                     bail!("a strength must be a number");
                 }
@@ -553,6 +564,9 @@ pub fn apply_action(
             }
             if let Some(x) = lift {
                 t.lift = *x;
+            }
+            if let Some(x) = gun {
+                t.gun = Some(*x);
             }
             layer.dynamics_tuning = Some(t.clamped());
             done(true)
@@ -937,7 +951,12 @@ mod tests {
         assert_eq!(s.dynamics_tuning, DynamicsTuning::default());
 
         // The player turns the lift down and the bursts up.
-        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(1.5), lift: Some(0.5) };
+        let tune = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(1.5),
+            lift: Some(0.5),
+            gun: None,
+        };
         assert!(apply_action(&paths, &mut p, &tune).unwrap().changed);
         let s = status(&paths, &p, false);
         assert_eq!((s.dynamics_tuning.tame, s.dynamics_tuning.lift), (1.5, 0.5));
@@ -956,7 +975,8 @@ mod tests {
         assert_eq!(s.dynamics.unwrap().bands[1].range_db, 2.0);
 
         // Off: the stage stays stored but nothing runs.
-        let off = GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None };
+        let off =
+            GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None, gun: None };
         apply_action(&paths, &mut p, &off).unwrap();
         let s = status(&paths, &p, false);
         assert!(s.dynamics_available && s.dynamics.is_none());
@@ -968,20 +988,34 @@ mod tests {
     fn tuning_needs_a_stage_and_numbers() {
         let (paths, dir) = paths();
         let mut p = profile();
-        let tune = GameEqAction::SetDynamics { enabled: Some(true), tame: None, lift: None };
+        let tune =
+            GameEqAction::SetDynamics { enabled: Some(true), tame: None, lift: None, gun: None };
         assert!(apply_action(&paths, &mut p, &tune).is_err(), "nothing to tune");
         p.audio.game_eq =
             Some(GameEqLayer::learned(curve(1.0), None).with_dynamics(Some(stage(6.0))));
-        let nan = GameEqAction::SetDynamics { enabled: None, tame: Some(f32::NAN), lift: None };
+        let nan = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(f32::NAN),
+            lift: None,
+            gun: None,
+        };
         assert!(apply_action(&paths, &mut p, &nan).is_err());
-        let wild = GameEqAction::SetDynamics { enabled: None, tame: Some(-3.0), lift: Some(50.0) };
+        let wild = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(-3.0),
+            lift: Some(50.0),
+            gun: None,
+        };
         apply_action(&paths, &mut p, &wild).unwrap();
         let t = p.audio.game_eq.as_ref().unwrap().tuning();
         assert_eq!((t.tame, t.lift), (0.0, relay_audio::learn::dynamics::MAX_STRENGTH));
         // Wire form, as the UI sends it.
         let a: GameEqAction =
             serde_json::from_str(r#"{"kind":"set_dynamics","lift":0.25}"#).unwrap();
-        assert_eq!(a, GameEqAction::SetDynamics { enabled: None, tame: None, lift: Some(0.25) });
+        assert_eq!(
+            a,
+            GameEqAction::SetDynamics { enabled: None, tame: None, lift: Some(0.25), gun: None }
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -994,7 +1028,12 @@ mod tests {
         save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
             .unwrap();
         apply_action(&paths, &mut maker, &GameEqAction::Apply).unwrap();
-        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(0.5), lift: Some(1.5) };
+        let tune = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(0.5),
+            lift: Some(1.5),
+            gun: None,
+        };
         apply_action(&paths, &mut maker, &tune).unwrap();
         let out = apply_action(&paths, &mut maker, &GameEqAction::Export { note: "x".into() })
             .unwrap()
@@ -1009,7 +1048,8 @@ mod tests {
             status(&paths, &maker, false).dynamics
         );
         // The friend can re-tune from the creator's base.
-        let mine = GameEqAction::SetDynamics { enabled: None, tame: Some(1.0), lift: None };
+        let mine =
+            GameEqAction::SetDynamics { enabled: None, tame: Some(1.0), lift: None, gun: None };
         apply_action(&paths2, &mut friend, &mine).unwrap();
         let d = status(&paths2, &friend, false).dynamics.unwrap();
         assert_eq!(d.bands[0].range_db, 9.0);
