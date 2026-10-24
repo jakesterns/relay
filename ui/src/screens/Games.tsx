@@ -6,8 +6,8 @@ import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
   api, GOALS, isHdrTuned, isTauri, presetAudioLabel,
-  MAX_DYN_STRENGTH,
-  type ApoStatus, type ColorInfo, type DynBandParams, type DynamicsTuning, type EqBand, type GameEqAction,
+  PART_MAX_DB, PART_MIN_DB,
+  type ApoStatus, type ColorInfo, type DynBandParams, type DynPart, type DynamicsTuning, type EqBand, type GameEqAction,
   type GameEqExport, type GameEqStatus,
   type Goal, type GpuColor, type Limiter, type Preview, type Profile,
   type SharePreset, type SharePresetDef,
@@ -469,10 +469,6 @@ export function bandEdges(f0: number, q: number): [number, number] {
   return [f0 * (s - k), f0 * (s + k)];
 }
 
-type Role = "gun" | "boom" | "steps";
-const roleOf = (b: DynBandParams): Role =>
-  b.mode === "lift" ? "steps" : b.freq_hz >= GUN_MIN_HZ ? "gun" : "boom";
-
 /** One band in plain words, with its numbers. */
 export function bandSentence(b: DynBandParams): string {
   const [lo, hi] = bandEdges(b.freq_hz, b.q);
@@ -488,71 +484,98 @@ export function bandSentence(b: DynBandParams): string {
   return `Turns ${span} down by up to ${b.range_db.toFixed(1)} dB, ${when} (ratio ${b.ratio.toFixed(0)}:1, ${timing}). Quieter sounds there are untouched.`;
 }
 
-/** S49 + owner 2026-10-24: the dynamic stage as three named controls —
- *  Gunshots, Explosions, Footsteps — each saying exactly what it turns up or
- *  down, where, and by how much. The bands are learned (or, for Gunshots,
- *  added at your strength when none was learned); the sliders scale them
- *  within the core's caps. */
+/** How a part's level reads next to its slider. */
+export function levelText(v: number): string {
+  if (Math.abs(v) < 0.05) return "0 dB";
+  return `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(Math.abs(v) % 1 ? 1 : 0)} dB`;
+}
+
+/** The level in words, for the line under the slider. */
+export function levelWords(v: number): string {
+  if (Math.abs(v) < 0.05) return "As the game mixes it.";
+  if (v <= -20) return "Near silent.";
+  if (v < 0) return v <= -10 ? "Much quieter." : "Quieter.";
+  return v >= 5 ? "Much louder." : "Louder.";
+}
+
+const PART_TEXT: Record<DynPart, { label: string; what: string; none: string }> = {
+  gun: {
+    label: "Gunshots",
+    what: "Loud shots — mostly your own gun, the loudest thing in the mix.",
+    none: "At 0 dB gunshots are exactly as the game mixes them. Slide left to make them quieter (to near silent), right to make them louder.",
+  },
+  boom: {
+    label: "Explosions",
+    what: "The low rumble of grenades, killstreaks and vehicles.",
+    none: "At 0 dB explosions are exactly as the game mixes them. Slide left for quieter, right for louder.",
+  },
+  steps: {
+    label: "Footsteps",
+    what: "Quiet steps and movement around you.",
+    none: "At 0 dB footsteps are exactly as the game mixes them. Slide right to lift them, left to lower them.",
+  },
+};
+
+/** S49 + owner 2026-10-24: "I want the user to be able to control any range
+ *  of gunshots or explosions or footsteps to their liking." Three sliders in
+ *  dB, −24 (near silent) through 0 (as the game mixes it) to +8 (louder),
+ *  starting where the learned stage put each part. Each says exactly what it
+ *  turns up or down, where, and when. The core builds the bands
+ *  (`learn::dynamics::part_bands`) within its caps. */
 function DynamicsControls({ status, disabled, onTune }: {
   status: GameEqStatus;
   disabled: boolean;
   onTune: (t: Partial<DynamicsTuning>) => void;
 }) {
   const tuning = status.dynamics_tuning ?? { enabled: true, tame: 1, lift: 1 };
-  // What was learned (or imported), before any slider: decides which parts
-  // exist. What runs now (`status.dynamics`) gives the numbers.
-  const learned = (status.dynamics_learned?.bands ?? []).filter((b) => b.enabled !== false);
-  const has = (r: Role) => learned.some((b) => roleOf(b) === r);
-  const gunNow = tuning.gun ?? (has("gun") ? tuning.tame : 0);
-  const [tame, setTame] = useState(tuning.tame);
-  const [lift, setLift] = useState(tuning.lift);
-  const [gun, setGun] = useState(gunNow);
+  const parts = status.dynamics_parts ?? [];
+  const view = (p: DynPart) => parts.find((v) => v.part === p);
+  const key = parts.map((v) => v.level_db).join(",");
+  const [levels, setLevels] = useState<Record<DynPart, number>>({ gun: 0, boom: 0, steps: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => { setTame(tuning.tame); setLift(tuning.lift); setGun(gunNow); }, [tuning.tame, tuning.lift, gunNow]);
+  useEffect(() => {
+    setLevels({ gun: view("gun")?.level_db ?? 0, boom: view("boom")?.level_db ?? 0, steps: view("steps")?.level_db ?? 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const send = (t: Partial<DynamicsTuning>) => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => onTune(t), DYN_TUNE_DEBOUNCE_MS);
   };
-  const bands = (status.dynamics?.bands ?? []).filter((b) => b.enabled !== false);
-  const of = (r: Role) => bands.filter((b) => roleOf(b) === r);
-  const pct = (v: number) => `${Math.round(v * 100)}%`;
   const on = tuning.enabled;
-
-  const describe = (r: Role, none: string) => {
-    const bs = of(r);
-    if (bs.length) return bs.map(bandSentence).join(" ");
-    return has(r) ? "0%: switched off." : none;
-  };
-  const gunSource = of("gun").length === 0 ? null
-    : has("gun") ? "Learned from this game." : "Added by you: Relay did not hear shots clearly louder than footsteps in this game, so it uses a safe default band.";
+  const field: Record<DynPart, "gun_db" | "boom_db" | "steps_db"> = { gun: "gun_db", boom: "boom_db", steps: "steps_db" };
 
   return (
     <div className="dyn" role="group" aria-label="Loud bursts and footsteps">
-      <Toggle on={on} label="Tame loud bursts, lift quiet footsteps"
+      <Toggle on={on} label="Gunshots, explosions and footsteps"
         sub={on
-          ? "Acts only in the moment a burst or step happens; the rest of the time nothing changes."
-          : "Off: the learned EQ curve still applies."}
+          ? "Each acts only in the moment that sound happens; the rest of the time nothing changes."
+          : "Off: the learned EQ curve still applies; these three levels are kept for when you turn it back on."}
         onChange={disabled ? undefined : (v) => onTune({ enabled: v })} />
-      <div className="dynrow" data-testid="dyn-gun">
-        <Slider label="Gunshots" value={gun} min={0} max={MAX_DYN_STRENGTH} step={0.05}
-          format={pct} disabled={disabled || !on}
-          onChange={(v) => { setGun(v); send({ gun: v }); }} />
-        <p className="note">{describe("gun", "0%: gunshots are not touched. Raise it to turn down the crack of loud shots — mostly your own gun, the loudest thing in the mix.")}{gunSource ? ` ${gunSource}` : ""}</p>
-      </div>
-      <div className="dynrow" data-testid="dyn-boom">
-        <Slider label="Explosions" value={tame} min={0} max={MAX_DYN_STRENGTH} step={0.05}
-          format={pct} disabled={disabled || !on || !has("boom")}
-          onChange={(v) => { setTame(v); send({ tame: v }); }} />
-        <p className="note">{describe("boom", "Not learned for this game: Relay heard too few explosions to set a band.")}</p>
-      </div>
-      <div className="dynrow" data-testid="dyn-steps">
-        <Slider label="Footsteps" value={lift} min={0} max={MAX_DYN_STRENGTH} step={0.05}
-          format={pct} disabled={disabled || !on || !has("steps")}
-          onChange={(v) => { setLift(v); send({ lift: v }); }} />
-        <p className="note">{describe("steps", "Not learned for this game: footsteps already stood clear of the background, so there was nothing to lift. The learned EQ curve still brings the footstep range forward.")}</p>
-      </div>
-      <p className="note">100% is as learned; 0% switches that part off; 200% doubles the change, up to 12 dB for cuts and 8 dB for lifts.</p>
+      {(["gun", "boom", "steps"] as DynPart[]).map((p) => {
+        const v = view(p);
+        const txt = PART_TEXT[p];
+        const bands = v?.bands ?? [];
+        const source = !v || Math.abs(levels[p]) < 0.05 ? ""
+          : v.set ? (v.learned ? " Set by you, starting from what Relay learned for this game." : " Set by you; Relay did not learn a band for this in this game, so it uses a safe default.")
+            : " As learned for this game.";
+        return (
+          <div className="dynrow" data-testid={`dyn-${p}`} key={p}>
+            <Slider label={txt.label} value={levels[p]} min={PART_MIN_DB} max={PART_MAX_DB} step={0.5}
+              format={levelText} disabled={disabled || !on}
+              onChange={(x) => { setLevels((l) => ({ ...l, [p]: x })); send({ [field[p]]: x }); }} />
+            <p className="note">
+              <b>{levelWords(levels[p])}</b> {txt.what}{" "}
+              {bands.length ? bands.map(bandSentence).join(" ") : txt.none}
+              {source}
+            </p>
+          </div>
+        );
+      })}
+      <p className="note">
+        −24 dB is near silent, 0 dB is the game's own mix, +8 dB is clearly louder. Cuts act only on the loud
+        moments of that range, so other sounds there are left alone except while it is happening.
+      </p>
     </div>
   );
 }

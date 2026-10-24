@@ -44,10 +44,32 @@ display look made no visible difference and did not say what it changed.
   learned shadow/colour/highlight values, and points to **Ctrl+Alt+G** to
   compare in game.
 
+## Then: a level per part, either way (owner 2026-10-24)
+
+"If they want their gunshots to be near silent, then they should have the
+option to do so. If they somehow want them louder, then they also can."
+
+- `DynamicsTuning::{gun_db, boom_db, steps_db}`: −24 dB (near silent) through
+  0 (as the game mixes it) to +8 dB. A set level replaces that part's
+  strength; unset parts behave exactly as before. `MAX_TAME_DB` is now 24 (the
+  DSP's own limit); lifts stay within 8.
+- `learn::dynamics::part_bands` builds each part: **down** uses the learned
+  cut bands at the new depth, else a default (gunshots: 3 kHz crack *and*
+  500 Hz body, acting on bursts at least as loud as the whole mix);
+  **up** is a lift between the game's average loudness and 10 dB over it
+  (never the bed or quiet sounds), or the learned footstep lift.
+  `effective_parts` keeps which band belongs to which part; `part_level` is
+  what each slider shows. No APO change: the DSP already accepts these bands.
+- `GameEqStatus::dynamics_parts`; `SetDynamics` takes the three levels and
+  works on any game layer. EQ files carry the levels (with or without learned
+  bands), so a profile's sound travels whole.
+- The Audio screen shows three dB sliders, each with what it changes, where
+  and when, and whether it was learned or set by you.
+
 ## Owed (owner present)
 
-- MW4: Gunshots 100 % then 200 %, own gunfire noticeably quieter, footsteps
-  unchanged. Audio changes reach the APO only after MW4 reopens its stream.
+- MW4: Gunshots −12 then −24 dB, own gunfire much quieter; +6 dB louder;
+  footsteps unchanged. Audio changes reach the APO only after MW4 reopens its stream.
 - The APO diagnostic log had filled on 2026-10-21; it was rotated so the next
   stream records `LockForProcess` and the process-call count.
 - Look strength 200 % on the LG: shadows visibly opened, black still black.

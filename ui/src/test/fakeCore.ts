@@ -41,7 +41,7 @@ export function fakeDisplayOptions(): DisplayOptions {
   };
 }
 import type { DynamicsTuning, EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
-import { HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, effectiveDynamics, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import { HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, effectiveDynamics, partViews, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -137,9 +137,9 @@ function profile(
 
 /** S49 status fields from a layer, scaling ranges by the tuning (and the
  *  core's caps: 12 dB tame, 8 dB lift) as the core does. */
-function fakeDynamics(l: GameEqLayer | undefined): Pick<GameEqStatus, "dynamics_available" | "dynamics_tuning" | "dynamics" | "dynamics_learned"> {
+function fakeDynamics(l: GameEqLayer | undefined): Pick<GameEqStatus, "dynamics_available" | "dynamics_tuning" | "dynamics" | "dynamics_learned" | "dynamics_parts"> {
   const t = { enabled: true, tame: 1, lift: 1, ...l?.dynamics_tuning };
-  return { dynamics_available: !!l, dynamics_tuning: t, dynamics: effectiveDynamics(l), dynamics_learned: l?.dynamics ?? null };
+  return { dynamics_available: !!l, dynamics_tuning: t, dynamics: effectiveDynamics(l), dynamics_learned: l?.dynamics ?? null, dynamics_parts: partViews(l) };
 }
 
 export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {}): FakeCore {
@@ -366,13 +366,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           au.game_eq = { curve: rec.candidate, source: au.game_eq && au.game_eq.source !== "learned" ? "tuned" : "learned" };
           break;
         case "set_dynamics": {
-          if (!au.game_eq || (!au.game_eq.dynamics && action.gun === undefined)) throw new Error("there is no dynamic stage to tune yet");
+          if (!au.game_eq) throw new Error("there is no game EQ to tune yet: learn or import one first");
           const t: DynamicsTuning = { enabled: true, tame: 1, lift: 1, ...au.game_eq.dynamics_tuning };
           const clamp = (x: number) => Math.min(2, Math.max(0, x));
           if (action.enabled !== undefined) t.enabled = action.enabled;
           if (action.tame !== undefined) t.tame = clamp(action.tame);
           if (action.lift !== undefined) t.lift = clamp(action.lift);
           if (action.gun !== undefined) t.gun = clamp(action.gun);
+          const db = (x: number) => Math.min(8, Math.max(-24, x));
+          if (action.gun_db !== undefined) t.gun_db = db(action.gun_db);
+          if (action.boom_db !== undefined) t.boom_db = db(action.boom_db);
+          if (action.steps_db !== undefined) t.steps_db = db(action.steps_db);
           au.game_eq = { ...au.game_eq, dynamics_tuning: t };
           break;
         }

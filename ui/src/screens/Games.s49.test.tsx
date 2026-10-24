@@ -43,84 +43,69 @@ const tunes = () =>
     .filter((a): a is Extract<GameEqAction, { kind: "set_dynamics" }> => a.kind === "set_dynamics");
 const layer = () => core.profiles.get("1")!.audio.game_eq!;
 
-describe("the dynamic stage", () => {
+describe("gunshots, explosions and footsteps (owner 2026-10-24)", () => {
+  const group = (eq: () => ReturnType<typeof within>) => within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
+  const boom: DynamicsParams = {
+    bands: [{ mode: "tame", freq_hz: 63, q: 0.7, threshold_db: -54, ratio: 6, range_db: 10 }],
+    duck_lift: true,
+  };
+
   it("is not offered until there is a game layer", async () => {
     const { eq } = await mount();
     expect(eq().queryByRole("group", { name: "Loud bursts and footsteps" })).toBeNull();
   });
 
-  it("says exactly what each part turns up or down, and turns off and on", async () => {
-    core.profiles.get("1")!.audio.game_eq = { curve, source: "learned", dynamics: stage() };
-    const { h, eq } = await mount();
-    const g = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
-    expect(within(g.getByTestId("dyn-gun")).getByText(/Turns .* down by up to 9\.0 dB, only when that range gets 6 dB or more above the game's average loudness \(ratio 6:1/)).toBeInTheDocument();
-    expect(within(g.getByTestId("dyn-gun")).getByText(/Learned from this game/)).toBeInTheDocument();
-    expect(within(g.getByTestId("dyn-steps")).getByText(/Raises .*centred on 4\.0 kHz.* by up to 6\.0 dB while it is quiet/)).toBeInTheDocument();
-    expect(within(g.getByTestId("dyn-boom")).getByText(/Not learned for this game/)).toBeInTheDocument();
-    const sw = g.getByRole("switch", { name: /Tame loud bursts, lift quiet footsteps/ });
-    expect(sw).toHaveAttribute("aria-checked", "true");
-    await h.user.click(sw);
-    await settle();
-    expect(tunes()).toEqual([{ kind: "set_dynamics", enabled: false }]);
-    expect(layer().dynamics_tuning?.enabled).toBe(false);
-    const g2 = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
-    expect(g2.getByText(/Off: the learned EQ curve still applies/)).toBeInTheDocument();
-    // Strengths are locked while it is off.
-    expect(g2.queryByRole("slider", { name: "Gunshots" })).toBeNull();
-  });
-
-  it("sends one change per drag, scaled and capped as the core caps it", async () => {
+  it("starts each part where the learned stage put it, and says what it does", async () => {
     core.profiles.get("1")!.audio.game_eq = { curve, source: "learned", dynamics: stage() };
     const { eq } = await mount();
-    const g = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
-    const guns = g.getByRole("slider", { name: "Gunshots" });
-    for (const v of ["1.1", "1.3", "1.5"]) fireEvent.change(guns, { target: { value: v } });
-    expect(g.getByText("150%")).toBeInTheDocument();
-    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", gun: 1.5 }]));
-    await settle();
-    expect(layer().dynamics_tuning?.gun).toBe(1.5);
-    // 9 dB x 1.5 = 13.5, capped at 12.
-    await waitFor(() => expect(eq().getByText(/down by up to 12\.0 dB/)).toBeInTheDocument());
-
-    const steps = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }))
-      .getByRole("slider", { name: "Footsteps" });
-    fireEvent.change(steps, { target: { value: "0.5" } });
-    await waitFor(() => expect(tunes().at(-1)).toEqual({ kind: "set_dynamics", lift: 0.5 }));
-    await settle();
-    expect(layer().dynamics_tuning?.lift).toBe(0.5);
-    await waitFor(() => expect(eq().getByText(/by up to 3\.0 dB while it is quiet/)).toBeInTheDocument());
+    const g = group(eq);
+    // Learned gun band at 1 kHz cutting 9 dB; footstep lift 6 dB; no explosion band.
+    expect(within(g.getByTestId("dyn-gun")).getByText("−9 dB")).toBeInTheDocument();
+    expect(within(g.getByTestId("dyn-gun")).getByText(/down by up to 9\.0 dB.*As learned for this game/)).toBeInTheDocument();
+    expect(within(g.getByTestId("dyn-steps")).getByText("+6 dB")).toBeInTheDocument();
+    expect(within(g.getByTestId("dyn-boom")).getByText("0 dB")).toBeInTheDocument();
+    expect(within(g.getByTestId("dyn-boom")).getByText(/exactly as the game mixes them/)).toBeInTheDocument();
   });
 
-  it("adds a gunfire band when the game learned none (MW4 on the main PC)", async () => {
-    const boom: DynamicsParams = {
-      bands: [{ mode: "tame", freq_hz: 63, q: 0.7, threshold_db: -54, ratio: 6, range_db: 10 }],
-      duck_lift: true,
-    };
+  it("takes gunshots to near silent, one change per drag", async () => {
     core.profiles.get("1")!.audio.game_eq = { curve, source: "learned", dynamics: boom };
     const { eq } = await mount();
-    const g = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
-    // Nothing on guns yet, and it says so.
-    expect(within(g.getByTestId("dyn-gun")).getByText("0%")).toBeInTheDocument();
-    expect(within(g.getByTestId("dyn-gun")).getByText(/gunshots are not touched/)).toBeInTheDocument();
-    expect(within(g.getByTestId("dyn-boom")).getByText(/centred on 63 Hz.*down by up to 10\.0 dB/)).toBeInTheDocument();
-    // No footstep band was learned: its slider is locked.
-    expect(within(g.getByTestId("dyn-steps")).queryByRole("slider")).toBeNull();
-
-    fireEvent.change(g.getByRole("slider", { name: "Gunshots" }), { target: { value: "1" } });
-    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", gun: 1 }]));
+    const s = group(eq).getByRole("slider", { name: "Gunshots" });
+    for (const v of ["-6", "-15", "-24"]) fireEvent.change(s, { target: { value: v } });
+    expect(group(eq).getByText("−24 dB")).toBeInTheDocument();
+    expect(within(group(eq).getByTestId("dyn-gun")).getByText("Near silent.")).toBeInTheDocument();
+    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", gun_db: -24 }]));
     await settle();
-    const gun = within(within(eq().getByRole("group", { name: "Loud bursts and footsteps" })).getByTestId("dyn-gun"));
-    await waitFor(() => expect(gun.getByText(/centred on 3\.0 kHz.*down by up to 6\.0 dB, only when that range gets 0 dB or more above/)).toBeInTheDocument());
-    expect(gun.getByText(/Added by you/)).toBeInTheDocument();
+    expect(layer().dynamics_tuning?.gun_db).toBe(-24);
+    const gun = within(group(eq).getByTestId("dyn-gun"));
+    await waitFor(() => expect(gun.getByText(/centred on 3\.0 kHz.*down by up to 24\.0 dB.*centred on 500 Hz.*down by up to 24\.0 dB/)).toBeInTheDocument());
+    expect(gun.getByText(/safe default/)).toBeInTheDocument();
+    // Explosions keep their learned 10 dB.
+    expect(within(group(eq).getByTestId("dyn-boom")).getByText(/centred on 63 Hz.*down by up to 10\.0 dB/)).toBeInTheDocument();
   });
 
-  it("works on a layer with no learned stage at all", async () => {
-    core.profiles.get("1")!.audio.game_eq = { curve, source: "learned" };
+  it("makes a part louder too", async () => {
+    core.profiles.get("1")!.audio.game_eq = { curve, source: "learned", dynamics: boom };
     const { eq } = await mount();
-    const g = within(eq().getByRole("group", { name: "Loud bursts and footsteps" }));
-    fireEvent.change(g.getByRole("slider", { name: "Gunshots" }), { target: { value: "2" } });
-    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", gun: 2 }]));
+    fireEvent.change(group(eq).getByRole("slider", { name: "Explosions" }), { target: { value: "6" } });
+    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", boom_db: 6 }]));
     await settle();
-    await waitFor(() => expect(eq().getByText(/down by up to 12\.0 dB/)).toBeInTheDocument());
+    await waitFor(() => expect(within(group(eq).getByTestId("dyn-boom")).getByText(/Raises .*centred on 63 Hz.* by up to 6\.0 dB/)).toBeInTheDocument());
+    fireEvent.change(group(eq).getByRole("slider", { name: "Footsteps" }), { target: { value: "8" } });
+    await waitFor(() => expect(tunes().at(-1)).toEqual({ kind: "set_dynamics", steps_db: 8 }));
+  });
+
+  it("works on a layer with nothing dynamic learned, and turns off and on", async () => {
+    core.profiles.get("1")!.audio.game_eq = { curve, source: "learned" };
+    const { h, eq } = await mount();
+    fireEvent.change(group(eq).getByRole("slider", { name: "Footsteps" }), { target: { value: "-10" } });
+    await waitFor(() => expect(tunes()).toEqual([{ kind: "set_dynamics", steps_db: -10 }]));
+    await settle();
+    await waitFor(() => expect(within(group(eq).getByTestId("dyn-steps")).getByText(/down by up to 10\.0 dB/)).toBeInTheDocument());
+    await h.user.click(group(eq).getByRole("switch", { name: /Gunshots, explosions and footsteps/ }));
+    await settle();
+    expect(tunes().at(-1)).toEqual({ kind: "set_dynamics", enabled: false });
+    await waitFor(() => expect(group(eq).queryByRole("slider", { name: "Gunshots" })).toBeNull());
+    expect(group(eq).getByText(/levels are kept for when you turn it back on/)).toBeInTheDocument();
   });
 });

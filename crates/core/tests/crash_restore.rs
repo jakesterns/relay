@@ -267,8 +267,24 @@ async fn tuning_the_applied_game_eq_takes_effect_at_once() {
     assert_eq!(count("audio.apply"), 1, "{:?}", recording(&rec));
 
     for action in [
-        GameEqAction::SetDynamics { enabled: None, tame: Some(0.5), lift: None, gun: None },
-        GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None, gun: None },
+        GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(0.5),
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        },
+        GameEqAction::SetDynamics {
+            enabled: Some(false),
+            tame: None,
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        },
     ] {
         let r = c.call(Method::GameEq { id, action }).await.unwrap();
         assert!(matches!(r, Reply::GameEq { .. }), "{r:?}");
