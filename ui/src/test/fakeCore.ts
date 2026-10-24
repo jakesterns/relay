@@ -373,7 +373,7 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           if (action.tame !== undefined) t.tame = clamp(action.tame);
           if (action.lift !== undefined) t.lift = clamp(action.lift);
           if (action.gun !== undefined) t.gun = clamp(action.gun);
-          const db = (x: number) => Math.min(8, Math.max(-24, x));
+          const db = (x: number) => Math.min(12, Math.max(-24, x));
           if (action.gun_db !== undefined) t.gun_db = db(action.gun_db);
           if (action.boom_db !== undefined) t.boom_db = db(action.boom_db);
           if (action.steps_db !== undefined) t.steps_db = db(action.steps_db);

@@ -43,7 +43,9 @@ use crate::params::{DynBandParams, DynMode, DynamicsParams, DYN_REF_DB, MAX_DYN_
 /// silent, they should have the option"); the DSP accepts up to 24.
 pub const MAX_TAME_DB: f32 = 24.0;
 /// Largest lift, dB.
-pub const MAX_LIFT_DB: f32 = 8.0;
+/// 12 since 2026-10-24 (owner: footsteps still not loud enough next to his
+/// own gun at +8); the DSP accepts up to 24.
+pub const MAX_LIFT_DB: f32 = 12.0;
 /// Steepest ratio a learned, tuned or imported band may use.
 pub const MAX_SAFE_RATIO: f32 = 8.0;
 /// A tame threshold never sits this far under the program loudness (so a
@@ -584,7 +586,13 @@ pub fn effective(base: &DynamicsParams, tuning: &DynamicsTuning) -> Option<Dynam
         effective_parts(base, tuning).into_iter().map(|(_, b)| b).collect();
     let has_tame = bands.iter().any(|b| b.mode == DynMode::Tame);
     let has_lift = bands.iter().any(|b| b.mode == DynMode::Lift);
-    let p = DynamicsParams { bands, duck_lift: base.duck_lift || (has_tame && has_lift) };
+    // Lifts wait for cuts (so a gun's tail is never lifted) — except a
+    // Footsteps level the player set: the DSP's duck listens to *every* cut,
+    // and on the main PC a learned 50 Hz explosion band reacting to MW4's
+    // constant bass held the footstep lift off most of the time (2026-10-24).
+    let steps_set = tuning.clamped().steps_db.is_some_and(|l| l > 0.0);
+    let duck = (base.duck_lift || (has_tame && has_lift)) && !steps_set;
+    let p = DynamicsParams { bands, duck_lift: duck };
     let p = guard_dynamics(&p);
     (!p.is_inert()).then_some(p)
 }
@@ -706,8 +714,8 @@ mod tests {
         );
         // Explosions untouched (as learned).
         assert!(p.iter().any(|(k, b)| *k == DynPart::Boom && b.range_db == 10.0));
-        // +8 dB: a lift on the loud part of the gun range only.
-        let up = effective_parts(&mw4(), &lvl(Some(8.0), None, None));
+        // The top of the range: a lift on the loud part of the gun range only.
+        let up = effective_parts(&mw4(), &lvl(Some(PART_MAX_DB), None, None));
         let g = up.iter().find(|(k, _)| *k == DynPart::Gun).unwrap().1;
         assert_eq!((g.mode, g.range_db, g.floor_db), (DynMode::Lift, MAX_LIFT_DB, DYN_REF_DB));
         assert!(g.threshold_db <= MAX_LIFT_THRESHOLD_DB);
@@ -743,7 +751,9 @@ mod tests {
         let all = effective(&mw4(), &lvl(Some(-24.0), Some(-24.0), Some(8.0))).unwrap();
         assert!(all.bands.len() <= MAX_DYN_BANDS);
         assert!(is_guarded(&all));
-        assert!(all.duck_lift, "a lift is held back while a cut acts");
+        assert!(!all.duck_lift, "footsteps set by the player are not held back by cuts");
+        let learned = effective(&mw4(), &lvl(Some(-24.0), None, None)).unwrap();
+        assert!(learned.duck_lift, "otherwise lifts still wait for cuts, as learned");
     }
 
     #[test]
