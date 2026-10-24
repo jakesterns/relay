@@ -4,13 +4,13 @@
  * always shown; an import reads "Applied (imported)" with learning off.
  */
 import { beforeEach, describe, expect, it } from "vitest";
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
 import type { LearnView, MonitorLearnView } from "../lib/ipc";
 import { HDR_NOTICE, TOURNAMENT_NOTICE } from "../lib/ipc";
-import { LearnLookCard } from "./LearnLookCard";
+import { LearnLookCard, changeLines } from "./LearnLookCard";
 
 let core: FakeCore;
 
@@ -229,5 +229,37 @@ describe("HDR learning (owner 2026-10-23)", () => {
     expect(rows[1]).toHaveTextContent("vibrance 54");
     expect(rows[1]).not.toHaveTextContent("gamma");
     expect(rows[1]).toHaveTextContent(/HDR black level/);
+  });
+});
+
+describe("exact changes and look strength (owner 2026-10-24)", () => {
+  const adj = { gamma: 1.14, shadow_lift: 0, vibrance: 52, notes: [] };
+
+  it("spells out every change with its numbers", () => {
+    const lines = changeLines(adj);
+    expect(lines[0]).toMatch(/^Gamma 1\.00 → 1\.14: dark and mid tones brighter\. A 5% grey shows as 7%, 10% as 13%, 20% as 24%\./);
+    expect(lines[1]).toBe("Vibrance 50 → 52 (+2 of 100): colours richer; greys and skin tones barely move.");
+    expect(changeLines({ gamma: 1, shadow_lift: 0, vibrance: 50, notes: [] })[0]).toMatch(/^No change/);
+    expect(changeLines({ gamma: 1, shadow_lift: 12, vibrance: 50, notes: [] })[0]).toMatch(/^Shadow lift 0 → 12/);
+  });
+
+  it("shows what changes on the screen and sends the strength once per drag", async () => {
+    seed({ status: "applied", monitors: [monitor({ status: "applied", use_learned: true, adjustments: adj })] });
+    const user = await mount();
+    void user;
+    expect(screen.getByTestId("look-changes")).toHaveTextContent("What changes on this screen while the game is in front");
+    expect(screen.getByTestId("look-changes")).toHaveTextContent("Gamma 1.00 → 1.14");
+    expect(screen.getByTestId("look-strength")).toHaveTextContent("Ctrl+Alt+G");
+    const s = screen.getByRole("slider", { name: "Look strength" });
+    for (const v of ["1.2", "1.6", "2"]) fireEvent.change(s, { target: { value: v } });
+    expect(screen.getByText("200%")).toBeInTheDocument();
+    await waitFor(() => expect(tauri.calls.filter((c) => c.cmd === "learn_display_strength").map((c) => c.args))
+      .toEqual([{ exe: "game.exe", strength: 2 }]), { timeout: 2000 });
+  });
+
+  it("has no strength slider before there is a look", async () => {
+    seed({ monitors: [monitor()] });
+    await mount();
+    expect(screen.queryByTestId("look-strength")).toBeNull();
   });
 });

@@ -12,7 +12,7 @@ import { push, renderScreen, settle } from "../test/render";
 import { card, inCard, kv, slider } from "../test/dom";
 import { makeFakeCore, type FakeCore } from "../test/fakeCore";
 import * as tauri from "../test/tauriMock";
-import { Games } from "./Games";
+import { Games, curveDb } from "./Games";
 import type { Profile } from "../lib/ipc";
 
 let core: FakeCore;
@@ -418,5 +418,39 @@ describe("the display A/B preview", () => {
   it("says plainly that vibrance and hue are not previewed", async () => {
     await mount("display");
     expect(screen.getByText(/Vibrance and hue are applied by the graphics driver and are not shown here/)).toBeInTheDocument();
+  });
+});
+
+describe("the EQ graph's layers and measurements (owner 2026-10-24)", () => {
+  const d = (id: string) => screen.queryByTestId(id)?.getAttribute("d") ?? null;
+
+  it("draws the learned game EQ and what you hear, and tabulates every layer", async () => {
+    core.profiles.get("1")!.audio.game_eq = { curve: [[20, -3.4], [125, -1.1], [2000, 2.4], [8000, -0.7], [16000, -0.9]], source: "learned" };
+    await mount();
+    expect(d("eq-game")).not.toBeNull();
+    expect(d("eq-total")).not.toBeNull();
+    expect(screen.getByText("Game EQ · learned", { selector: ".eq .leg span" })).toBeInTheDocument();
+    const t = screen.getByTestId("eq-table");
+    expect(t).toHaveTextContent(/raises 2\.0 kHz by 2\.4 dB \(presence: footsteps, reloads, the crack of a shot\)/);
+    expect(t).toHaveTextContent(/lowers 20 Hz by 3\.4 dB \(sub-bass/);
+    const row = [...t.querySelectorAll("tr")].find((r) => r.textContent?.startsWith("Game EQ"))!;
+    // 2 kHz column: exactly the learned point.
+    expect(row.textContent).toContain("+2.4");
+  });
+
+  it("has no game line before anything is learned", async () => {
+    await mount();
+    expect(d("eq-game")).toBeNull();
+    expect(screen.getByTestId("eq-table")).not.toHaveTextContent("Game EQ");
+  });
+});
+
+describe("curveDb", () => {
+  it("interpolates on a log axis and holds the ends", () => {
+    const c: [number, number][] = [[100, 0], [1000, 6]];
+    expect(curveDb(c, 50)).toBe(0);
+    expect(curveDb(c, 2000)).toBe(6);
+    expect(curveDb(c, Math.sqrt(100 * 1000))).toBeCloseTo(3, 5);
+    expect(curveDb(null, 500)).toBe(0);
   });
 });

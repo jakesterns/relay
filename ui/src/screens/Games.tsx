@@ -6,8 +6,8 @@ import { clearDraft, getDraft, setDraft, useDraft } from "../lib/drafts";
 import { errText } from "../lib/err";
 import {
   api, GOALS, isHdrTuned, isTauri, presetAudioLabel,
-  MAX_DYN_STRENGTH,
-  type ApoStatus, type ColorInfo, type DynamicsTuning, type EqBand, type GameEqAction,
+  PART_MAX_DB, PART_MIN_DB,
+  type ApoStatus, type ColorInfo, type DynBandParams, type DynPart, type DynamicsTuning, type EqBand, type GameEqAction,
   type GameEqExport, type GameEqStatus,
   type Goal, type GpuColor, type Limiter, type Preview, type Profile,
   type SharePreset, type SharePresetDef,
@@ -211,7 +211,9 @@ function AudioSection({ draft, update, onGameEq }: {
     <>
       <ExclusiveBanner />
       <EqGraph bands={draft?.audio.bands ?? []} correction={headset?.curve ?? null}
-        correctionOn={draft?.audio.headset_correction ?? false} />
+        correctionOn={draft?.audio.headset_correction ?? false} gameCurve={draft?.audio.game_eq?.curve ?? null} />
+      <EqTable bands={draft?.audio.bands ?? []} correction={headset?.curve ?? null}
+        correctionOn={draft?.audio.headset_correction ?? false} gameCurve={draft?.audio.game_eq?.curve ?? null} />
       <div className="two">
         <Card title="Bands" action="Reset"
           onAction={() => update((p) => { p.audio.bands = []; })}>
@@ -452,47 +454,128 @@ function GameEqCard({ profileId, onChanged }: {
  *  core (a drag is one change, not dozens). */
 export const DYN_TUNE_DEBOUNCE_MS = 250;
 
-/** S49: the learned dynamic stage's two strengths and its switch. The stage
- *  itself is learned (or imported); these only scale it, within the core's
- *  caps. */
+/** The level scale the dynamic bands use: a band's threshold minus this is
+ *  how far over the game's average loudness it starts acting. Mirrors
+ *  `relay_audio::params::DYN_REF_DB`. */
+export const DYN_REF_DB = -50;
+/** A tame band at or above this is a gun band; under it, explosions.
+ *  Mirrors `relay_audio::learn::dynamics::GUN_MIN_HZ`. */
+export const GUN_MIN_HZ = 200;
+
+/** The -3 dB edges of a band-pass at `f0` with `q`. */
+export function bandEdges(f0: number, q: number): [number, number] {
+  const k = 1 / (2 * q);
+  const s = Math.sqrt(1 + k * k);
+  return [f0 * (s - k), f0 * (s + k)];
+}
+
+/** One band in plain words, with its numbers. */
+export function bandSentence(b: DynBandParams): string {
+  const [lo, hi] = bandEdges(b.freq_hz, b.q);
+  const span = `${hzText(lo)}–${hzText(hi)} (centred on ${hzText(b.freq_hz)})`;
+  const over = b.threshold_db - DYN_REF_DB;
+  const when = over >= 0
+    ? `only when that range gets ${over.toFixed(0)} dB or more above the game's average loudness`
+    : `only when that range gets louder than ${Math.abs(over).toFixed(0)} dB under the game's average loudness`;
+  const timing = `reacts in ${(b.attack_ms ?? 3).toFixed(0)} ms, lets go over ${(b.release_ms ?? 100).toFixed(0)} ms`;
+  if (b.mode === "lift") {
+    return `Raises ${span} by up to ${b.range_db.toFixed(1)} dB while it is quiet, ${timing}. Louder sounds there are left alone.`;
+  }
+  return `Turns ${span} down by up to ${b.range_db.toFixed(1)} dB, ${when} (ratio ${b.ratio.toFixed(0)}:1, ${timing}). Quieter sounds there are untouched.`;
+}
+
+/** How a part's level reads next to its slider. */
+export function levelText(v: number): string {
+  if (Math.abs(v) < 0.05) return "0 dB";
+  return `${v > 0 ? "+" : "−"}${Math.abs(v).toFixed(Math.abs(v) % 1 ? 1 : 0)} dB`;
+}
+
+/** The level in words, for the line under the slider. */
+export function levelWords(v: number): string {
+  if (Math.abs(v) < 0.05) return "As the game mixes it.";
+  if (v <= -20) return "Near silent.";
+  if (v < 0) return v <= -10 ? "Much quieter." : "Quieter.";
+  return v >= 5 ? "Much louder." : "Louder.";
+}
+
+const PART_TEXT: Record<DynPart, { label: string; what: string; none: string }> = {
+  gun: {
+    label: "Gunshots",
+    what: "Loud shots — mostly your own gun, the loudest thing in the mix.",
+    none: "At 0 dB gunshots are exactly as the game mixes them. Slide left to make them quieter (to near silent), right to make them louder.",
+  },
+  boom: {
+    label: "Explosions",
+    what: "The low rumble of grenades, killstreaks and vehicles.",
+    none: "At 0 dB explosions are exactly as the game mixes them. Slide left for quieter, right for louder.",
+  },
+  steps: {
+    label: "Footsteps",
+    what: "Quiet steps and movement around you.",
+    none: "At 0 dB footsteps are exactly as the game mixes them. Slide right to lift them, left to lower them.",
+  },
+};
+
+/** S49 + owner 2026-10-24: "I want the user to be able to control any range
+ *  of gunshots or explosions or footsteps to their liking." Three sliders in
+ *  dB, −24 (near silent) through 0 (as the game mixes it) to +8 (louder),
+ *  starting where the learned stage put each part. Each says exactly what it
+ *  turns up or down, where, and when. The core builds the bands
+ *  (`learn::dynamics::part_bands`) within its caps. */
 function DynamicsControls({ status, disabled, onTune }: {
   status: GameEqStatus;
   disabled: boolean;
   onTune: (t: Partial<DynamicsTuning>) => void;
 }) {
   const tuning = status.dynamics_tuning ?? { enabled: true, tame: 1, lift: 1 };
-  const [tame, setTame] = useState(tuning.tame);
-  const [lift, setLift] = useState(tuning.lift);
+  const parts = status.dynamics_parts ?? [];
+  const view = (p: DynPart) => parts.find((v) => v.part === p);
+  const key = parts.map((v) => v.level_db).join(",");
+  const [levels, setLevels] = useState<Record<DynPart, number>>({ gun: 0, boom: 0, steps: 0 });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => { setTame(tuning.tame); setLift(tuning.lift); }, [tuning.tame, tuning.lift]);
+  useEffect(() => {
+    setLevels({ gun: view("gun")?.level_db ?? 0, boom: view("boom")?.level_db ?? 0, steps: view("steps")?.level_db ?? 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
   useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const send = (t: Partial<DynamicsTuning>) => {
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => onTune(t), DYN_TUNE_DEBOUNCE_MS);
   };
-  const bands = status.dynamics?.bands ?? [];
-  const most = (mode: "tame" | "lift") =>
-    bands.filter((b) => b.mode === mode && b.enabled !== false)
-      .reduce((m, b) => Math.max(m, b.range_db), 0);
-  const hasLift = bands.some((b) => b.mode === "lift") || tuning.lift !== 1;
-  const pct = (v: number) => `${Math.round(v * 100)}%`;
   const on = tuning.enabled;
+  const field: Record<DynPart, "gun_db" | "boom_db" | "steps_db"> = { gun: "gun_db", boom: "boom_db", steps: "steps_db" };
+
   return (
     <div className="dyn" role="group" aria-label="Loud bursts and footsteps">
-      <Toggle on={on} label="Tame loud bursts, lift quiet footsteps"
+      <Toggle on={on} label="Gunshots, explosions and footsteps"
         sub={on
-          ? `Acts only while it happens: guns and explosions down by up to ${most("tame").toFixed(0)} dB` +
-            (hasLift ? `, footsteps up by up to ${most("lift").toFixed(0)} dB.` : ".")
-          : "Off: the learned curve still applies."}
+          ? "Each acts only in the moment that sound happens; the rest of the time nothing changes."
+          : "Off: the learned EQ curve still applies; these three levels are kept for when you turn it back on."}
         onChange={disabled ? undefined : (v) => onTune({ enabled: v })} />
-      <Slider label="Gunshots & explosions" value={tame} min={0} max={MAX_DYN_STRENGTH} step={0.05}
-        format={pct} disabled={disabled || !on}
-        onChange={(v) => { setTame(v); send({ tame: v }); }} />
-      {hasLift && (
-        <Slider label="Footsteps" value={lift} min={0} max={MAX_DYN_STRENGTH} step={0.05}
-          format={pct} disabled={disabled || !on}
-          onChange={(v) => { setLift(v); send({ lift: v }); }} />
-      )}
+      {(["gun", "boom", "steps"] as DynPart[]).map((p) => {
+        const v = view(p);
+        const txt = PART_TEXT[p];
+        const bands = v?.bands ?? [];
+        const source = !v || Math.abs(levels[p]) < 0.05 ? ""
+          : v.set ? (v.learned ? " Set by you, starting from what Relay learned for this game." : " Set by you; Relay did not learn a band for this in this game, so it uses a safe default.")
+            : " As learned for this game.";
+        return (
+          <div className="dynrow" data-testid={`dyn-${p}`} key={p}>
+            <Slider label={txt.label} value={levels[p]} min={PART_MIN_DB} max={PART_MAX_DB} step={0.5}
+              format={levelText} disabled={disabled || !on}
+              onChange={(x) => { setLevels((l) => ({ ...l, [p]: x })); send({ [field[p]]: x }); }} />
+            <p className="note">
+              <b>{levelWords(levels[p])}</b> {txt.what}{" "}
+              {bands.length ? bands.map(bandSentence).join(" ") : txt.none}
+              {source}
+            </p>
+          </div>
+        );
+      })}
+      <p className="note">
+        −24 dB is near silent, 0 dB is the game's own mix, +8 dB is clearly louder. Cuts act only on the loud
+        moments of that range, so other sounds there are left alone except while it is happening.
+      </p>
     </div>
   );
 }
@@ -658,29 +741,102 @@ const pct = (x: number) => `${(x / 900) * 100}%`;
 const pathOf = (pts: [number, number][]) =>
   pts.map(([x, y], i) => `${i ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`).join(" ");
 
-/** The profile's EQ as the DSP will shape it, and the headset's measured
- *  correction behind it.
+/** A measured or learned curve's level at `hz`, interpolated on a log
+ *  frequency axis and held flat past its ends. 0 for an empty curve. */
+export function curveDb(points: [number, number][] | null | undefined, hz: number): number {
+  if (!points || points.length === 0) return 0;
+  const pts = [...points].sort((a, b) => a[0] - b[0]);
+  if (hz <= pts[0][0]) return pts[0][1];
+  const last = pts[pts.length - 1];
+  if (hz >= last[0]) return last[1];
+  for (let i = 1; i < pts.length; i++) {
+    const [h1, d1] = pts[i];
+    if (hz <= h1) {
+      const [h0, d0] = pts[i - 1];
+      const t = Math.log(hz / h0) / Math.log(h1 / h0);
+      return d0 + (d1 - d0) * t;
+    }
+  }
+  return last[1];
+}
+
+/** What a frequency range is, in game terms, for the readouts. */
+export function regionOf(hz: number): string {
+  if (hz < 120) return "sub-bass: explosions, engines, rumble";
+  if (hz < 500) return "bass: weight and body";
+  if (hz < 1500) return "low mids: voices, the body of a gunshot";
+  if (hz < 5000) return "presence: footsteps, reloads, the crack of a shot";
+  if (hz < 10000) return "treble: detail and direction";
+  return "air: sparkle and space";
+}
+
+/** "+2.4 dB" / "−3.4 dB" / "0.0 dB", with a real minus sign. */
+export function dbText(v: number): string {
+  const r = Math.round(v * 10) / 10;
+  return `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r).toFixed(1)} dB`;
+}
+
+export function hzText(hz: number): string {
+  return hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 0 : 1)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+/** The frequencies the measurement table reads off, low to high. */
+export const EQ_TABLE_HZ = [60, 125, 250, 500, 1000, 2000, 3000, 4000, 8000, 12000];
+
+/** The learned curve in one sentence: its biggest boost and biggest cut. */
+export function describeGameCurve(curve: [number, number][] | null | undefined): string | null {
+  if (!curve || curve.length < 2) return null;
+  const up = curve.reduce((m, p) => (p[1] > m[1] ? p : m), curve[0]);
+  const down = curve.reduce((m, p) => (p[1] < m[1] ? p : m), curve[0]);
+  const parts: string[] = [];
+  if (up[1] >= 0.5) parts.push(`raises ${hzText(up[0])} by ${dbText(up[1]).slice(1)} (${regionOf(up[0])})`);
+  if (down[1] <= -0.5) parts.push(`lowers ${hzText(down[0])} by ${dbText(down[1]).slice(1)} (${regionOf(down[0])})`);
+  return parts.length ? `The learned game EQ ${parts.join(" and ")}.` : "The learned game EQ is close to flat.";
+}
+
+/** Every layer of the sound, drawn on one frequency axis, with a readout
+ *  under the pointer.
  *
- *  Both lines are data. The gold line is the actual response of the band
- *  cascade (the same peaking design the DSP uses), not straight segments
- *  between slider values; the dashed line is the imported correction curve,
- *  point for point, and is absent when the headset has none. What is stored
- *  is AutoEQ's *correction*, not the headset's raw response, so that is what
- *  the legend calls it. */
-export function EqGraph({ bands, correction, correctionOn }: {
+ *  All lines are data. Gold is the response of your own five bands (the
+ *  same peaking design the DSP uses); green is the curve Relay learned for
+ *  this game; the dashed line is the headset's imported correction, point
+ *  for point, absent when the headset has none; ivory is what you hear —
+ *  the three added together (the correction only while it is switched on).
+ *  The correction drawn is the measured target; the DSP fits it with at most
+ *  eight filters, so the real result is within a fraction of a dB of it. */
+export function EqGraph({ bands, correction, correctionOn, gameCurve = null }: {
   bands: EqBand[];
   correction: [number, number][] | null;
   correctionOn: boolean;
+  gameCurve?: [number, number][] | null;
 }) {
+  const [hover, setHover] = useState<number | null>(null);
   const samples = Array.from({ length: 121 }, (_, i) => 20 * 1000 ** (i / 120));
+  const hasCorrection = !!correction && correction.length > 1;
+  const hasGame = !!gameCurve && gameCurve.length > 1;
+  const total = (hz: number) =>
+    cascadeDb(bands, hz) + (hasGame ? curveDb(gameCurve, hz) : 0) +
+    (hasCorrection && correctionOn ? curveDb(correction, hz) : 0);
   const profile = pathOf(samples.map((hz) => [eqX(hz), eqY(cascadeDb(bands, hz))]));
   const dots = UI_BANDS.map((u) => [eqX(u.freq), eqY(cascadeDb(bands, u.freq))] as const);
-  const measured = correction && correction.length > 1
-    ? pathOf(correction.filter(([hz]) => hz >= 20 && hz <= 20000).map(([hz, db]) => [eqX(hz), eqY(db)]))
+  const measured = hasCorrection
+    ? pathOf(correction!.filter(([hz]) => hz >= 20 && hz <= 20000).map(([hz, db]) => [eqX(hz), eqY(db)]))
     : null;
+  const game = hasGame ? pathOf(samples.map((hz) => [eqX(hz), eqY(curveDb(gameCurve, hz))])) : null;
+  const layered = hasGame || (hasCorrection && correctionOn);
+  const sum = layered ? pathOf(samples.map((hz) => [eqX(hz), eqY(total(hz))])) : null;
   const [fs0, fs1] = FOOTSTEPS.map(eqX);
+
+  const onMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    if (r.width <= 0) return;
+    const x = ((e.clientX - r.left) / r.width) * 900;
+    const t = (x - EQ_X0) / (EQ_X1 - EQ_X0);
+    setHover(t < 0 || t > 1 ? null : 20 * 1000 ** t);
+  };
+
   return (
-    <div className="eq">
+    <div className="eq" onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
       <svg viewBox="0 0 900 270" preserveAspectRatio="none">
         <g stroke="rgba(255,255,255,.06)">
           <line x1={EQ_X0} y1="55" x2={EQ_X1} y2="55" /><line x1={EQ_X0} y1="135" x2={EQ_X1} y2="135" stroke="rgba(255,255,255,.12)" /><line x1={EQ_X0} y1="215" x2={EQ_X1} y2="215" />
@@ -693,19 +849,80 @@ export function EqGraph({ bands, correction, correctionOn }: {
         {measured && (
           <path data-testid="eq-correction" d={measured} fill="none" stroke="#5A544C" strokeWidth="1.5" strokeDasharray="4 4" />
         )}
+        {game && <path data-testid="eq-game" d={game} fill="none" stroke="#9FB98A" strokeWidth="1.75" />}
         <path data-testid="eq-profile" d={profile} fill="none" stroke="#C9A96A" strokeWidth="2" strokeLinejoin="round" />
+        {sum && <path data-testid="eq-total" d={sum} fill="none" stroke="#ECE6DC" strokeWidth="1.25" strokeOpacity=".85" />}
         <g fill="#ECE6DC">{dots.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="4" />)}</g>
+        {hover !== null && <line x1={eqX(hover)} y1={EQ_Y0} x2={eqX(hover)} y2={EQ_Y1} stroke="rgba(236,230,220,.35)" />}
       </svg>
       <div className="leg">
-        <span><i style={{ background: "#C9A96A" }} />Profile</span>
+        <span><i style={{ background: "#C9A96A" }} />Your bands</span>
+        {hasGame && <span><i style={{ background: "#9FB98A" }} />Game EQ · learned</span>}
         {measured && (
           <span><i style={{ background: "#5A544C" }} />Headset correction · measured{correctionOn ? "" : " (off)"}</span>
         )}
+        {sum && <span><i style={{ background: "#ECE6DC" }} />What you hear</span>}
       </div>
       <div className="band" style={{ left: pct(fs0) }}>Footsteps · 1.8–4.5 kHz</div>
+      {hover !== null && (
+        <div className="readout" data-testid="eq-readout" style={{ left: pct(eqX(hover)) }}>
+          <b>{hzText(hover)}</b> <small>{regionOf(hover)}</small>
+          {hasCorrection && <span>Headset {dbText(correctionOn ? curveDb(correction, hover) : 0)}{correctionOn ? "" : " (off)"}</span>}
+          {hasGame && <span>Game EQ {dbText(curveDb(gameCurve, hover))}</span>}
+          <span>Your bands {dbText(cascadeDb(bands, hover))}</span>
+          <span className="tot">You hear {dbText(total(hover))}</span>
+        </div>
+      )}
       <div className="lbl">
         {EQ_TICKS.map(([hz, t]) => <span key={hz} style={{ left: pct(eqX(hz)) }}>{t}</span>)}
       </div>
+    </div>
+  );
+}
+
+/** The same layers as numbers, at fixed frequencies, plus what the learned
+ *  curve does in a sentence. Under the graph, so nothing has to be read off
+ *  a line. */
+export function EqTable({ bands, correction, correctionOn, gameCurve }: {
+  bands: EqBand[];
+  correction: [number, number][] | null;
+  correctionOn: boolean;
+  gameCurve: [number, number][] | null;
+}) {
+  const hasCorrection = !!correction && correction.length > 1;
+  const hasGame = !!gameCurve && gameCurve.length > 1;
+  const rows: [string, (hz: number) => number, string][] = [];
+  if (hasCorrection) {
+    rows.push([correctionOn ? "Headset correction" : "Headset correction (off)",
+      (hz) => (correctionOn ? curveDb(correction, hz) : 0),
+      "Flattens your headset's own colouring, from its measured curve."]);
+  }
+  if (hasGame) rows.push(["Game EQ · learned", (hz) => curveDb(gameCurve, hz), "What Relay learned for this game and your goal."]);
+  rows.push(["Your bands", (hz) => cascadeDb(bands, hz), "The five sliders on the left: your taste on top."]);
+  const total = (hz: number) => rows.reduce((s, [, f]) => s + f(hz), 0);
+  const summary = describeGameCurve(gameCurve);
+  const cls = (v: number) => (v >= 0.05 ? "up" : v <= -0.05 ? "down" : "");
+  return (
+    <div className="eqtable" data-testid="eq-table">
+      {summary && <p className="note">{summary} Hover the graph for any frequency.</p>}
+      <table className="tbl mono">
+        <thead>
+          <tr><th>Layer</th>{EQ_TABLE_HZ.map((hz) => <th key={hz} title={regionOf(hz)}>{hzText(hz)}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map(([name, f, why]) => (
+            <tr key={name} title={why}>
+              <td>{name}</td>
+              {EQ_TABLE_HZ.map((hz) => <td key={hz} className={cls(f(hz))}>{dbText(f(hz)).replace(" dB", "")}</td>)}
+            </tr>
+          ))}
+          <tr className="sum" title="All layers added: the change you actually hear at each frequency.">
+            <td>You hear</td>
+            {EQ_TABLE_HZ.map((hz) => <td key={hz} className={cls(total(hz))}>{dbText(total(hz)).replace(" dB", "")}</td>)}
+          </tr>
+        </tbody>
+      </table>
+      <p className="note">Change in dB at each frequency: + is louder, − is quieter. About 3 dB is a clear step; 10 dB sounds roughly twice (or half) as loud.</p>
     </div>
   );
 }

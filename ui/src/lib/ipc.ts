@@ -48,8 +48,96 @@ export interface DynBandParams {
 }
 export interface DynamicsParams { bands: DynBandParams[]; duck_lift?: boolean }
 /** Strengths 0..2 (1 = as learned / imported). */
-export interface DynamicsTuning { enabled: boolean; tame: number; lift: number }
+export interface DynamicsTuning {
+  enabled: boolean; tame: number; lift: number;
+  /** Gunshots strength (owner 2026-10-24). Unset: gun bands follow `tame`. */
+  gun?: number;
+  /** Per-part levels in dB, −24 (near silent) … 0 (as mixed) … +8 (louder). */
+  gun_db?: number; boom_db?: number; steps_db?: number;
+}
+export type DynPart = "gun" | "boom" | "steps";
+/** Mirror of `game_eq::PartView`. */
+export interface PartView { part: DynPart; level_db: number; set: boolean; learned: boolean; bands: DynBandParams[] }
+export const PART_MIN_DB = -24;
+export const PART_MAX_DB = 8;
 export const MAX_DYN_STRENGTH = 2;
+
+/** Mirror of `relay_audio::learn::dynamics::gunfire_band` at strength 1. */
+export const GUNFIRE_BAND: DynBandParams = {
+  mode: "tame", freq_hz: 3000, q: 0.5, threshold_db: -50, ratio: 6, range_db: 6,
+  floor_db: -100, attack_ms: 1, release_ms: 120, enabled: true,
+};
+
+const partOf = (b: DynBandParams): DynPart =>
+  b.mode === "lift" ? "steps" : b.freq_hz >= 200 ? "gun" : "boom";
+const PARTS: DynPart[] = ["gun", "boom", "steps"];
+const clampDb = (x: number) => Math.min(PART_MAX_DB, Math.max(PART_MIN_DB, x));
+
+/** Mirror of `relay_audio::learn::dynamics::part_bands`. */
+function partBands(part: DynPart, level: number, learned: DynBandParams[]): DynBandParams[] {
+  const lv = clampDb(level);
+  if (Math.abs(lv) < 0.05) return [];
+  const mine = learned.filter((b) => partOf(b) === part);
+  const def: Record<DynPart, [number, number]> = { gun: [3000, 0.5], boom: [63, 0.7], steps: [3000, 0.7] };
+  const [f0, q] = mine[0] ? [mine[0].freq_hz, mine[0].q] : def[part];
+  const band = (mode: DynMode, freq_hz: number, q: number, threshold_db: number, ratio: number, range_db: number, floor_db: number): DynBandParams => ({
+    mode, freq_hz, q, threshold_db, ratio, range_db, floor_db,
+    attack_ms: mode === "tame" ? 1 : 3, release_ms: mode === "tame" ? 120 : 80, enabled: true,
+  });
+  const cut = Math.min(24, -lv), boost = Math.min(8, lv);
+  if (part !== "steps" && lv < 0) {
+    const tames = mine.filter((b) => b.mode === "tame");
+    if (tames.length) return tames.map((b) => ({ ...b, range_db: cut }));
+    const v = [band("tame", f0, q, -50, 6, cut, -100)];
+    if (part === "gun") v.push(band("tame", 500, 0.7, -50, 6, cut, -100));
+    return v;
+  }
+  if (part !== "steps") return [band("lift", f0, q, -40, 2.5, boost, -50)];
+  if (lv > 0) {
+    const lifts = mine.filter((b) => b.mode === "lift");
+    if (lifts.length) return lifts.map((b) => ({ ...b, range_db: boost }));
+    return [band("lift", f0, q, -55, 2.5, boost, -75)];
+  }
+  return [band("tame", f0, q, -70, 4, cut, -100)];
+}
+
+/** Mirror of `effective_parts` + `part_level` (`game_eq::part_views`): each
+ *  part's level and running bands. For the browser stand-in and the test
+ *  fake; the core computes the real thing. */
+export function partViews(l: GameEqLayer | undefined): PartView[] {
+  if (!l) return [];
+  const t: DynamicsTuning = { enabled: true, tame: 1, lift: 1, ...l.dynamics_tuning };
+  const base = l.dynamics?.bands ?? [];
+  const lvlOf = (p: DynPart) => (p === "gun" ? t.gun_db : p === "boom" ? t.boom_db : t.steps_db);
+  const most = (p: DynPart, mode: DynMode) =>
+    base.filter((b) => partOf(b) === p && b.mode === mode).reduce((m, b) => Math.max(m, b.range_db), 0);
+  return PARTS.map((part) => {
+    const set = lvlOf(part);
+    let bands: DynBandParams[];
+    if (!t.enabled) bands = [];
+    else if (set !== undefined) bands = partBands(part, set, base);
+    else {
+      const s = part === "gun" ? (t.gun ?? t.tame) : part === "boom" ? t.tame : t.lift;
+      const mine = base.filter((b) => partOf(b) === part);
+      bands = part === "gun" && mine.length === 0
+        ? (t.gun ? [{ ...GUNFIRE_BAND, range_db: Math.min(24, 6 * t.gun) }] : [])
+        : mine.map((b) => ({ ...b, range_db: Math.min(b.mode === "tame" ? 24 : 8, b.range_db * s) }));
+    }
+    bands = bands.filter((b) => b.range_db > 0);
+    const derived = part === "gun"
+      ? (most("gun", "tame") > 0 ? -most("gun", "tame") * (t.gun ?? t.tame) : -(t.gun ?? 0) * 6)
+      : part === "boom" ? -most("boom", "tame") * t.tame : most("steps", "lift") * t.lift;
+    const level = set !== undefined ? clampDb(set) : Math.round(clampDb(derived) * 10) / 10;
+    return { part, level_db: level, set: set !== undefined, learned: base.some((b) => partOf(b) === part), bands };
+  });
+}
+
+/** What the stage runs with, as the core computes it
+ *  (`GameEqLayer::effective_dynamics`). */
+export function effectiveDynamics(l: GameEqLayer | undefined): DynamicsParams | null {
+  const run = partViews(l).flatMap((v) => v.bands);
+  return run.length ? { bands: run, duck_lift: true } : null;
+}
 export interface GameEqStatus {
   exe: string; state: LearnStatus;
   learning_on: boolean; needs_goal: boolean; learning_now: boolean;
@@ -77,6 +165,10 @@ export interface GameEqStatus {
   dynamics_tuning?: DynamicsTuning;
   /** What runs now (tuned); null when off or none. */
   dynamics?: DynamicsParams | null;
+  /** The stage as learned or imported, before the strengths. */
+  dynamics_learned?: DynamicsParams | null;
+  /** Each part's level now and its running bands. */
+  dynamics_parts?: PartView[];
 }
 
 /* ---- S48: learn from a video file. Mirror of crates/core/src/learn_file.rs. ---- */
@@ -112,7 +204,8 @@ export type GameEqAction =
   | { kind: "reset" }
   | { kind: "import"; text: string }
   | { kind: "export"; note: string }
-  | { kind: "set_dynamics"; enabled?: boolean; tame?: number; lift?: number };
+  | { kind: "set_dynamics"; enabled?: boolean; tame?: number; lift?: number; gun?: number;
+      gun_db?: number; boom_db?: number; steps_db?: number };
 export interface GameEqExport { text: string; path: string }
 export interface GameEqReply { status: GameEqStatus; export?: GameEqExport }
 
@@ -325,6 +418,8 @@ export interface LearnView {
   exe: string; enabled: boolean; status: LookStatus; sampling: boolean; auto_apply?: boolean;
   /** The user chose "Learn in HDR" for this game. */
   hdr_ok?: boolean; hdr_notice?: string;
+  /** How strongly the learned look is applied: 0 – 2, 1 = as learned. */
+  strength?: number;
   monitors: MonitorLearnView[]; imported: ImportedLook | null;
   privacy: string; tournament: string;
 }
@@ -1571,6 +1666,10 @@ export const api = {
     if (!isTauri()) { const v = mockLearn(exe); v.enabled = enabled; if (v.status === "off" && enabled) v.status = "learning"; if (!enabled && v.status === "learning") v.status = "off"; return structuredClone(v); }
     return invoke<LearnView>("learn_display_set", { exe, enabled });
   },
+  async learnDisplayStrength(exe: string, strength: number): Promise<LearnView> {
+    if (!isTauri()) { const v = mockLearn(exe); v.strength = Math.min(2, Math.max(0, strength)); return structuredClone(v); }
+    return invoke<LearnView>("learn_display_strength", { exe, strength });
+  },
   async learnDisplayHdr(exe: string, enabled: boolean): Promise<LearnView> {
     if (!isTauri()) { const v = mockLearn(exe); v.hdr_ok = enabled; for (const m of v.monitors) m.hdr_skipped = false; if (v.status === "hdr_skipped") v.status = v.enabled ? "learning" : "off"; return structuredClone(v); }
     return invoke<LearnView>("learn_display_hdr", { exe, enabled });
@@ -1635,12 +1734,16 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
   if (action.kind === "set_auto_apply") a.game_eq_auto_apply = action.enabled;
   if (action.kind === "reset") { delete a.game_eq; delete a.learn_game_eq; }
   if (action.kind === "set_dynamics") {
-    if (!a.game_eq?.dynamics) throw new Error("there is no dynamic stage to tune yet");
-    const t = { enabled: true, tame: 1, lift: 1, ...a.game_eq.dynamics_tuning };
+    if (!a.game_eq) throw new Error("there is no game EQ to tune yet: learn or import one first");
+    const t: DynamicsTuning = { enabled: true, tame: 1, lift: 1, ...a.game_eq.dynamics_tuning };
     const clamp = (x: number) => Math.min(MAX_DYN_STRENGTH, Math.max(0, x));
     if (action.enabled !== undefined) t.enabled = action.enabled;
     if (action.tame !== undefined) t.tame = clamp(action.tame);
     if (action.lift !== undefined) t.lift = clamp(action.lift);
+    if (action.gun !== undefined) t.gun = clamp(action.gun);
+    if (action.gun_db !== undefined) t.gun_db = clampDb(action.gun_db);
+    if (action.boom_db !== undefined) t.boom_db = clampDb(action.boom_db);
+    if (action.steps_db !== undefined) t.steps_db = clampDb(action.steps_db);
     a.game_eq.dynamics_tuning = t;
   }
   if (action.kind === "import" || action.kind === "export" || action.kind === "apply") {
@@ -1656,9 +1759,11 @@ function mockGameEq(id: string, action: GameEqAction): GameEqReply {
       source: a.game_eq?.source ?? null, progress: 0, active_minutes: 0,
       targets: 0, maskers: 0, min_targets: 300, min_maskers: 60, distinct_voices: 0,
       exe_version: null, applied: a.game_eq?.curve ?? null, offer: null, note: "", last_error: null,
-      dynamics_available: !!a.game_eq?.dynamics,
+      dynamics_available: !!a.game_eq,
       dynamics_tuning: { enabled: true, tame: 1, lift: 1, ...a.game_eq?.dynamics_tuning },
-      dynamics: a.game_eq?.dynamics ?? null,
+      dynamics: effectiveDynamics(a.game_eq),
+      dynamics_learned: a.game_eq?.dynamics ?? null,
+      dynamics_parts: partViews(a.game_eq),
     },
   };
 }

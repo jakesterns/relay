@@ -523,6 +523,52 @@ fn applied(l: &Learner) -> MonitorRecord {
 }
 
 #[test]
+fn look_strength_scales_every_change_from_neutral() {
+    let a = Adjustments {
+        gamma: 1.14,
+        shadow_lift: 10,
+        vibrance: 52,
+        black_equalizer: Some(4),
+        notes: vec![],
+    };
+    let same = scale_adjustments(&a, 1.0);
+    assert_eq!(
+        (same.gamma, same.shadow_lift, same.vibrance, same.black_equalizer),
+        (1.14, 10, 52, Some(4))
+    );
+    let twice = scale_adjustments(&a, 2.0);
+    assert_eq!(
+        (twice.gamma, twice.shadow_lift, twice.vibrance, twice.black_equalizer),
+        (1.28, 20, 54, Some(8))
+    );
+    let off = scale_adjustments(&a, 0.0);
+    assert_eq!((off.gamma, off.shadow_lift, off.vibrance, off.black_equalizer), (1.0, 0, 50, None));
+    // Out of range or nonsense is clamped, never applied as given.
+    assert_eq!(scale_adjustments(&a, 9.0), twice);
+    assert_eq!(scale_adjustments(&a, f32::NAN), same);
+    let mut g = GameRecord::default();
+    assert_eq!(g.strength(), 1.0, "a new record is as learned");
+    g.strength = Some(-1.0);
+    assert_eq!(g.strength(), 0.0);
+}
+
+#[test]
+fn the_view_shows_the_scaled_adjustments() {
+    let mut s = tmp_store("strength-view");
+    let g = s.game_mut("mw4.exe");
+    let mut l = converged_learner();
+    l.apply();
+    g.monitors.insert(mon().0, MonitorRecord { learner: l, hdr_skipped: false });
+    let names = |_: &MonitorId| ("LG".to_string(), "WOLED".to_string());
+    let one = view(&s, "mw4.exe", false, &names).monitors[0].adjustments.clone().unwrap();
+    s.game_mut("mw4.exe").strength = Some(2.0);
+    let v = view(&s, "mw4.exe", false, &names);
+    assert_eq!(v.strength, 2.0);
+    let two = v.monitors[0].adjustments.clone().unwrap();
+    assert!((two.gamma - 1.0) > (one.gamma - 1.0) * 1.9, "{} vs {}", two.gamma, one.gamma);
+}
+
+#[test]
 fn hdr_records_have_their_own_key() {
     let k = record_key(&mon(), true);
     assert_eq!(k.0, "GSM5C7C-abc#hdr");

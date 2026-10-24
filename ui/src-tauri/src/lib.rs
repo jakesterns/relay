@@ -230,6 +230,14 @@ async fn learn_display_hdr(
 }
 
 #[tauri::command]
+async fn learn_display_strength(
+    exe: String,
+    strength: f32,
+) -> CmdResult<relay_core::learned_display::LearnView> {
+    learn_call(Method::LearnDisplayStrength { exe, strength }).await
+}
+
+#[tauri::command]
 async fn learn_display_apply(exe: String) -> CmdResult<relay_core::learned_display::LearnView> {
     learn_call(Method::LearnDisplayApply { exe }).await
 }
@@ -1412,6 +1420,7 @@ pub fn run() {
             learn_display_status,
             learn_display_set,
             learn_display_hdr,
+            learn_display_strength,
             learn_display_apply,
             learn_display_relearn,
             learn_display_auto_apply,

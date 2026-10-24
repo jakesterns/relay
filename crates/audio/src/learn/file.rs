@@ -100,7 +100,18 @@ impl GameEqLayer {
     /// What the dynamic stage runs with: the stored stage, tuned and
     /// guarded. `None` when there is none, it is off, or it is inert.
     pub fn effective_dynamics(&self) -> Option<DynamicsParams> {
-        super::dynamics::effective(self.dynamics.as_ref()?, &self.tuning())
+        // A Gunshots strength or any part level works even where nothing
+        // dynamic was learned.
+        let empty = DynamicsParams { bands: Vec::new(), duck_lift: false };
+        let t = self.tuning();
+        let player_set =
+            t.gun.is_some() || t.gun_db.is_some() || t.boom_db.is_some() || t.steps_db.is_some();
+        let base = match &self.dynamics {
+            Some(d) => d,
+            None if player_set => &empty,
+            None => return None,
+        };
+        super::dynamics::effective(base, &self.tuning())
     }
 
     /// Imported or tuned: the learned result blends into this one.
@@ -356,7 +367,8 @@ impl GameEqFile {
             return Err(invalid("the file has no curve, bands or dynamics"));
         }
         if let Some(d) = &self.dynamics {
-            if d.bands.is_empty() || d.bands.len() > MAX_DYN_BANDS {
+            // No bands is fine when the file carries the player's levels.
+            if (d.bands.is_empty() && d.tuning.is_none()) || d.bands.len() > MAX_DYN_BANDS {
                 return Err(invalid(format!("dynamics needs 1 to {MAX_DYN_BANDS} bands")));
             }
             if let Err(e) = d.params().check() {
@@ -452,12 +464,15 @@ impl GameEqFile {
             Vec::new()
         };
         let round = |x: f32| (x * 100.0).round() / 100.0;
-        let dynamics =
-            layer.dynamics.as_ref().filter(|d| !d.bands.is_empty()).map(|d| FileDynamics {
-                bands: d.bands.iter().map(Into::into).collect(),
-                duck_lift: d.duck_lift,
-                tuning: layer.dynamics_tuning.map(|t| t.clamped()),
-            });
+        // The learned stage and the player's levels travel together; levels
+        // alone (nothing learned) travel too.
+        let learned = layer.dynamics.as_ref().filter(|d| !d.bands.is_empty());
+        let tuning = layer.dynamics_tuning.map(|t| t.clamped());
+        let dynamics = (learned.is_some() || tuning.is_some()).then(|| FileDynamics {
+            bands: learned.map(|d| d.bands.iter().map(Into::into).collect()).unwrap_or_default(),
+            duck_lift: learned.is_some_and(|d| d.duck_lift),
+            tuning,
+        });
         Self {
             format: FORMAT.into(),
             schema: if dynamics.is_some() { SCHEMA } else { 1 },
@@ -536,6 +551,30 @@ mod tests {
             dynamics: None,
             dynamics_tuning: None,
         }
+    }
+
+    #[test]
+    fn part_levels_travel_in_the_file_even_with_nothing_learned() {
+        let layer = GameEqLayer {
+            curve: vec![(20.0, -3.0), (2000.0, 2.4), (16000.0, -1.0)],
+            source: LayerSource::Learned,
+            exe_version: None,
+            note: String::new(),
+            base: None,
+            dynamics: None,
+            dynamics_tuning: Some(DynamicsTuning {
+                gun_db: Some(-24.0),
+                steps_db: Some(4.0),
+                ..Default::default()
+            }),
+        };
+        assert!(layer.effective_dynamics().is_some(), "levels alone run");
+        let f = GameEqFile::export("cod.exe", "MW4", &layer, None, "");
+        let text = serde_json::to_string(&f).unwrap();
+        let back = GameEqFile::parse(&text).unwrap().to_layer();
+        assert_eq!(back.tuning().gun_db, Some(-24.0));
+        assert_eq!(back.tuning().steps_db, Some(4.0));
+        assert_eq!(back.effective_dynamics(), layer.effective_dynamics());
     }
 
     #[test]
@@ -726,7 +765,15 @@ mod tests {
 
     #[test]
     fn dynamics_and_tuning_round_trip_as_schema_2() {
-        let tuning = DynamicsTuning { enabled: true, tame: 1.5, lift: 0.5 };
+        let tuning = DynamicsTuning {
+            enabled: true,
+            tame: 1.5,
+            lift: 0.5,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         let mut l = layer().with_dynamics(Some(stage()));
         l.dynamics_tuning = Some(tuning);
         let f = GameEqFile::export("g.exe", "G", &l, Some(Goal::Awareness), "louder steps");

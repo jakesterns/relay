@@ -39,7 +39,9 @@ use super::{BANDS_HZ, NBANDS};
 use crate::params::{DynBandParams, DynMode, DynamicsParams, DYN_REF_DB, MAX_DYN_BANDS};
 
 /// Deepest cut any dynamic band may make, dB (learned, tuned or imported).
-pub const MAX_TAME_DB: f32 = 12.0;
+/// 24 since 2026-10-24 (owner: "if they want their gunshots to be near
+/// silent, they should have the option"); the DSP accepts up to 24.
+pub const MAX_TAME_DB: f32 = 24.0;
 /// Largest lift, dB.
 pub const MAX_LIFT_DB: f32 = 8.0;
 /// Steepest ratio a learned, tuned or imported band may use.
@@ -73,6 +75,138 @@ pub const MIN_STEP_OVER_FLOOR_DB: f32 = 1.0;
 pub const MIN_LIFT_WINDOW_DB: f32 = 4.0;
 /// User strength range (1 = as learned).
 pub const MAX_STRENGTH: f32 = 2.0;
+/// Owner 2026-10-23: "gunshots are still very loud when I shoot them". When
+/// learning finds no gun band (MW4's shots did not stand clear of its
+/// footsteps), the player's Gunshots strength adds this one instead: a wide
+/// band over the crack of a shot that acts only on bursts at least as loud
+/// as the whole mix — mostly the player's own gun, which is the loudest
+/// thing in a shooter. Footsteps sit far under it.
+pub const GUNFIRE_HZ: f32 = 3000.0;
+/// About two and a half octaves (≈ 1.2 – 7 kHz): the crack, not the body.
+pub const GUNFIRE_Q: f32 = 0.5;
+/// Acts on the band only above the program loudness ([`DYN_REF_DB`]).
+pub const GUNFIRE_THRESHOLD_DB: f32 = DYN_REF_DB;
+pub const GUNFIRE_RATIO: f32 = 6.0;
+/// Largest cut at 100 %; 200 % reaches [`MAX_TAME_DB`].
+pub const GUNFIRE_RANGE_DB: f32 = 6.0;
+/// A tame band at or above this is a gun band (body or crack); under it,
+/// an explosion band.
+pub const GUN_MIN_HZ: f32 = GUN_BODY_HZ.0;
+
+/// The gunfire band at strength `s` (1 = [`GUNFIRE_RANGE_DB`]).
+pub fn gunfire_band(s: f32) -> DynBandParams {
+    DynBandParams {
+        mode: DynMode::Tame,
+        freq_hz: GUNFIRE_HZ,
+        q: GUNFIRE_Q,
+        threshold_db: GUNFIRE_THRESHOLD_DB,
+        ratio: GUNFIRE_RATIO,
+        range_db: (GUNFIRE_RANGE_DB * s).min(MAX_TAME_DB),
+        floor_db: -100.0,
+        attack_ms: 1.0,
+        release_ms: 120.0,
+        enabled: true,
+    }
+}
+
+/// The three parts a player sets a level for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DynPart {
+    Gun,
+    Boom,
+    Steps,
+}
+
+/// A part's level range, dB: −24 is near silent, 0 is as the game mixes it,
+/// +8 is louder.
+pub const PART_MIN_DB: f32 = -MAX_TAME_DB;
+pub const PART_MAX_DB: f32 = MAX_LIFT_DB;
+
+/// Which part a learned or imported band belongs to.
+pub fn part_of(b: &DynBandParams) -> DynPart {
+    match b.mode {
+        DynMode::Lift => DynPart::Steps,
+        DynMode::Tame if b.freq_hz >= GUN_MIN_HZ => DynPart::Gun,
+        DynMode::Tame => DynPart::Boom,
+    }
+}
+
+/// Where a part's default band sits when nothing was learned for it.
+fn default_at(part: DynPart) -> (f32, f32) {
+    match part {
+        DynPart::Gun => (GUNFIRE_HZ, GUNFIRE_Q),
+        DynPart::Boom => (63.0, 0.7),
+        DynPart::Steps => (3000.0, 0.7),
+    }
+}
+
+/// The bands that set `part` to `level` dB.
+///
+/// - **Down** (gunshots, explosions): the part's learned tame bands with
+///   their range set to the cut, or a default band acting on bursts at least
+///   as loud as the whole mix. Gunshots also get a body band (500 Hz) so a
+///   deep cut takes the thump down with the crack. Footsteps down: a band at
+///   the footstep range acting on anything above the quiet bed.
+/// - **Up**: a lift band acting between the game's average loudness and
+///   10 dB over it for gunshots and explosions (the loud parts only; the bed
+///   and quiet sounds are never raised), or the learned footstep lift.
+///
+/// Each cut stays within [`MAX_TAME_DB`], each boost within [`MAX_LIFT_DB`].
+pub fn part_bands(part: DynPart, level: f32, learned: &[DynBandParams]) -> Vec<DynBandParams> {
+    let level = if level.is_finite() { level.clamp(PART_MIN_DB, PART_MAX_DB) } else { 0.0 };
+    if level.abs() < 0.05 {
+        return Vec::new();
+    }
+    let mine: Vec<DynBandParams> = learned.iter().filter(|b| part_of(b) == part).copied().collect();
+    let (f0, q) = mine.first().map(|b| (b.freq_hz, b.q)).unwrap_or(default_at(part));
+    let band = |mode, freq_hz, q, threshold_db, ratio, range_db, floor_db| DynBandParams {
+        mode,
+        freq_hz,
+        q,
+        threshold_db,
+        ratio,
+        range_db,
+        floor_db,
+        attack_ms: if mode == DynMode::Tame { 1.0 } else { 3.0 },
+        release_ms: if mode == DynMode::Tame { 120.0 } else { 80.0 },
+        enabled: true,
+    };
+    let cut = (-level).min(MAX_TAME_DB);
+    let boost = level.min(MAX_LIFT_DB);
+    match (part, level < 0.0) {
+        (DynPart::Gun | DynPart::Boom, true) => {
+            let tames: Vec<_> = mine.iter().filter(|b| b.mode == DynMode::Tame).collect();
+            if !tames.is_empty() {
+                return tames.iter().map(|b| DynBandParams { range_db: cut, ..**b }).collect();
+            }
+            let mut v = vec![band(DynMode::Tame, f0, q, DYN_REF_DB, GUNFIRE_RATIO, cut, -100.0)];
+            if part == DynPart::Gun {
+                v.push(band(DynMode::Tame, 500.0, 0.7, DYN_REF_DB, GUNFIRE_RATIO, cut, -100.0));
+            }
+            v
+        }
+        (DynPart::Gun | DynPart::Boom, false) => {
+            vec![band(DynMode::Lift, f0, q, MAX_LIFT_THRESHOLD_DB, 2.5, boost, DYN_REF_DB)]
+        }
+        (DynPart::Steps, false) => {
+            let lifts: Vec<_> = mine.iter().filter(|b| b.mode == DynMode::Lift).collect();
+            if !lifts.is_empty() {
+                return lifts.iter().map(|b| DynBandParams { range_db: boost, ..**b }).collect();
+            }
+            vec![band(DynMode::Lift, f0, q, DYN_REF_DB - 5.0, 2.5, boost, DYN_REF_DB - 25.0)]
+        }
+        (DynPart::Steps, true) => {
+            vec![band(DynMode::Tame, f0, q, MIN_TAME_THRESHOLD_DB, 4.0, cut, -100.0)]
+        }
+    }
+}
+
+/// Is this a gun band (as opposed to an explosion or footstep band)?
+pub fn is_gun_band(b: &DynBandParams) -> bool {
+    b.mode == DynMode::Tame && b.freq_hz >= GUN_MIN_HZ
+}
+
 /// Where each tame band may sit, Hz.
 pub const GUN_BODY_HZ: (f32, f32) = (200.0, 1000.0);
 pub const GUN_CRACK_HZ: (f32, f32) = (1600.0, 8000.0);
@@ -266,6 +400,21 @@ pub struct DynamicsTuning {
     /// Footstep lift strength, as `tame` (capped at [`MAX_LIFT_DB`]).
     #[serde(default = "one")]
     pub lift: f32,
+    /// Gunshot strength, 0 – [`MAX_STRENGTH`]. `None` (every layer before
+    /// 2026-10-24) = gun bands follow `tame` and no gunfire band is added.
+    /// Set, it scales the learned gun bands, or — when none were learned —
+    /// adds [`gunfire_band`] at that strength. `tame` then covers explosions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gun: Option<f32>,
+    /// Owner 2026-10-24: a level per part, in dB, from [`PART_MIN_DB`]
+    /// (near silent) through 0 (as the game mixes it) to [`PART_MAX_DB`]
+    /// (louder). A level that is set replaces that part's strength above.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gun_db: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boom_db: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps_db: Option<f32>,
 }
 
 fn yes() -> bool {
@@ -277,7 +426,15 @@ fn one() -> f32 {
 
 impl Default for DynamicsTuning {
     fn default() -> Self {
-        Self { enabled: true, tame: 1.0, lift: 1.0 }
+        Self {
+            enabled: true,
+            tame: 1.0,
+            lift: 1.0,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        }
     }
 }
 
@@ -285,7 +442,25 @@ impl DynamicsTuning {
     /// In range (a hand-edited profile or file can say anything).
     pub fn clamped(self) -> Self {
         let s = |x: f32| if x.is_finite() { x.clamp(0.0, MAX_STRENGTH) } else { 1.0 };
-        Self { enabled: self.enabled, tame: s(self.tame), lift: s(self.lift) }
+        let db = |x: f32| if x.is_finite() { x.clamp(PART_MIN_DB, PART_MAX_DB) } else { 0.0 };
+        Self {
+            enabled: self.enabled,
+            tame: s(self.tame),
+            lift: s(self.lift),
+            gun: self.gun.map(s),
+            gun_db: self.gun_db.map(db),
+            boom_db: self.boom_db.map(db),
+            steps_db: self.steps_db.map(db),
+        }
+    }
+
+    /// The level set for `part`, if one is.
+    pub fn level(&self, part: DynPart) -> Option<f32> {
+        match part {
+            DynPart::Gun => self.gun_db,
+            DynPart::Boom => self.boom_db,
+            DynPart::Steps => self.steps_db,
+        }
     }
 }
 
@@ -323,21 +498,93 @@ pub fn is_guarded(p: &DynamicsParams) -> bool {
     guard_dynamics(p) == *p
 }
 
-/// What the stage runs with: `base` (learned or imported), scaled by the
-/// player's tuning and guarded. `None` when off or inert.
-pub fn effective(base: &DynamicsParams, tuning: &DynamicsTuning) -> Option<DynamicsParams> {
+/// What the stage runs with, part by part: `base` (learned or imported)
+/// scaled by the player's strengths, or — for a part with a level set —
+/// replaced by [`part_bands`]. Guarded; at most [`MAX_DYN_BANDS`] bands,
+/// gunshots first. Empty when off.
+pub fn effective_parts(
+    base: &DynamicsParams,
+    tuning: &DynamicsTuning,
+) -> Vec<(DynPart, DynBandParams)> {
     let t = tuning.clamped();
     if !t.enabled {
-        return None;
+        return Vec::new();
     }
-    let mut p = base.clone();
-    for b in &mut p.bands {
-        let s = match b.mode {
-            DynMode::Tame => t.tame,
-            DynMode::Lift => t.lift,
+    let mut out = Vec::new();
+    for part in [DynPart::Gun, DynPart::Boom, DynPart::Steps] {
+        if let Some(level) = t.level(part) {
+            out.extend(part_bands(part, level, &base.bands).into_iter().map(|b| (part, b)));
+            continue;
+        }
+        let s = match part {
+            DynPart::Gun => t.gun.unwrap_or(t.tame),
+            DynPart::Boom => t.tame,
+            DynPart::Steps => t.lift,
         };
-        b.range_db *= s;
+        let mine: Vec<DynBandParams> =
+            base.bands.iter().filter(|b| part_of(b) == part).copied().collect();
+        if part == DynPart::Gun && mine.is_empty() {
+            if let Some(g) = t.gun.filter(|g| *g > 0.0) {
+                out.push((part, gunfire_band(g)));
+            }
+            continue;
+        }
+        out.extend(
+            mine.into_iter().map(|b| (part, DynBandParams { range_db: b.range_db * s, ..b })),
+        );
     }
+    let guarded = guard_dynamics(&DynamicsParams {
+        bands: out.iter().map(|(_, b)| *b).collect(),
+        duck_lift: false,
+    });
+    // Keep each surviving band's part (guarding may drop or trim, never reorder).
+    let mut parts = Vec::new();
+    let mut it = out.into_iter();
+    for g in guarded.bands {
+        for (part, b) in it.by_ref() {
+            if b.freq_hz == g.freq_hz && b.mode == g.mode && b.q == g.q {
+                parts.push((part, g));
+                break;
+            }
+        }
+    }
+    parts.retain(|(_, b)| b.range_db > 0.0);
+    parts
+}
+
+/// The level a part is at now, dB: the player's level when set, else what
+/// the learned band and its strength amount to (a cut reads negative, a
+/// lift positive), else 0 — as the game mixes it. What the slider shows.
+pub fn part_level(base: &DynamicsParams, tuning: &DynamicsTuning, part: DynPart) -> f32 {
+    let t = tuning.clamped();
+    if let Some(l) = t.level(part) {
+        return l;
+    }
+    let most = |mode: DynMode| {
+        base.bands
+            .iter()
+            .filter(|b| part_of(b) == part && b.mode == mode)
+            .map(|b| b.range_db)
+            .fold(0.0f32, f32::max)
+    };
+    let v = match part {
+        DynPart::Gun if most(DynMode::Tame) > 0.0 => -most(DynMode::Tame) * t.gun.unwrap_or(t.tame),
+        DynPart::Gun => -t.gun.unwrap_or(0.0) * GUNFIRE_RANGE_DB,
+        DynPart::Boom => -most(DynMode::Tame) * t.tame,
+        DynPart::Steps => most(DynMode::Lift) * t.lift,
+    };
+    (v.clamp(PART_MIN_DB, PART_MAX_DB) * 10.0).round() / 10.0
+}
+
+/// What the stage runs with: [`effective_parts`] as one stage. `None` when
+/// off or inert. Lift bands are held back while a cut acts (`duck_lift`),
+/// as learned, so a gun's tail is never lifted.
+pub fn effective(base: &DynamicsParams, tuning: &DynamicsTuning) -> Option<DynamicsParams> {
+    let bands: Vec<DynBandParams> =
+        effective_parts(base, tuning).into_iter().map(|(_, b)| b).collect();
+    let has_tame = bands.iter().any(|b| b.mode == DynMode::Tame);
+    let has_lift = bands.iter().any(|b| b.mode == DynMode::Lift);
+    let p = DynamicsParams { bands, duck_lift: base.duck_lift || (has_tame && has_lift) };
     let p = guard_dynamics(&p);
     (!p.is_inert()).then_some(p)
 }
@@ -369,6 +616,165 @@ mod tests {
         let mut a = Analyzer::new(FS);
         session(0xD1A, |_, b| a.push(b));
         a.into_stats()
+    }
+
+    #[test]
+    fn gunshots_strength_adds_a_gunfire_band_only_when_none_was_learned() {
+        // MW4 on the main PC: one learned band, explosions at 63 Hz.
+        let boom = DynamicsParams {
+            bands: vec![DynBandParams {
+                mode: DynMode::Tame,
+                freq_hz: 63.0,
+                q: 0.7,
+                threshold_db: -54.0,
+                ratio: 6.0,
+                range_db: 10.0,
+                floor_db: -100.0,
+                attack_ms: 1.0,
+                release_ms: 120.0,
+                enabled: true,
+            }],
+            duck_lift: true,
+        };
+        // Before the setting exists: exactly as before.
+        let old = effective(&boom, &DynamicsTuning::default()).unwrap();
+        assert_eq!(old.bands.len(), 1);
+        // Gunshots at 100 %: the gunfire band joins, explosions unchanged.
+        let t = DynamicsTuning { gun: Some(1.0), ..Default::default() };
+        let p = effective(&boom, &t).unwrap();
+        assert_eq!(p.bands.len(), 2);
+        let g = p.bands.iter().find(|b| is_gun_band(b)).unwrap();
+        assert_eq!(
+            (g.freq_hz, g.range_db, g.threshold_db),
+            (GUNFIRE_HZ, GUNFIRE_RANGE_DB, DYN_REF_DB)
+        );
+        let boom_of =
+            |p: &DynamicsParams| p.bands.iter().find(|b| b.freq_hz == 63.0).unwrap().range_db;
+        assert_eq!(boom_of(&p), 10.0);
+        // 200 % doubles it; 0 % adds nothing.
+        let max =
+            effective(&boom, &DynamicsTuning { gun: Some(2.0), ..Default::default() }).unwrap();
+        assert_eq!(
+            max.bands.iter().find(|b| is_gun_band(b)).unwrap().range_db,
+            2.0 * GUNFIRE_RANGE_DB
+        );
+        let off =
+            effective(&boom, &DynamicsTuning { gun: Some(0.0), ..Default::default() }).unwrap();
+        assert_eq!(off.bands.len(), 1);
+        // Explosions follow `tame` only.
+        let quiet_boom =
+            effective(&boom, &DynamicsTuning { tame: 0.5, gun: Some(1.0), ..Default::default() })
+                .unwrap();
+        assert_eq!(boom_of(&quiet_boom), 5.0);
+        // From nothing at all, the gunfire band alone.
+        let none = DynamicsParams { bands: vec![], duck_lift: false };
+        assert_eq!(effective(&none, &t).unwrap().bands.len(), 1);
+        assert!(is_guarded(&p));
+    }
+
+    fn mw4() -> DynamicsParams {
+        DynamicsParams {
+            bands: vec![DynBandParams {
+                mode: DynMode::Tame,
+                freq_hz: 63.0,
+                q: 0.7,
+                threshold_db: -54.0,
+                ratio: 6.0,
+                range_db: 10.0,
+                floor_db: -100.0,
+                attack_ms: 1.0,
+                release_ms: 120.0,
+                enabled: true,
+            }],
+            duck_lift: true,
+        }
+    }
+
+    fn lvl(gun: Option<f32>, boom: Option<f32>, steps: Option<f32>) -> DynamicsTuning {
+        DynamicsTuning { gun_db: gun, boom_db: boom, steps_db: steps, ..Default::default() }
+    }
+
+    #[test]
+    fn gunshots_can_go_near_silent_or_louder() {
+        // −24 dB: the crack and the body, both cut by 24 dB on loud bursts.
+        let p = effective_parts(&mw4(), &lvl(Some(-24.0), None, None));
+        let gun: Vec<_> = p.iter().filter(|(k, _)| *k == DynPart::Gun).map(|(_, b)| *b).collect();
+        assert_eq!(gun.len(), 2);
+        assert!(gun.iter().all(|b| b.mode == DynMode::Tame && b.range_db == MAX_TAME_DB));
+        assert!(
+            gun.iter().any(|b| b.freq_hz == GUNFIRE_HZ) && gun.iter().any(|b| b.freq_hz == 500.0)
+        );
+        // Explosions untouched (as learned).
+        assert!(p.iter().any(|(k, b)| *k == DynPart::Boom && b.range_db == 10.0));
+        // +8 dB: a lift on the loud part of the gun range only.
+        let up = effective_parts(&mw4(), &lvl(Some(8.0), None, None));
+        let g = up.iter().find(|(k, _)| *k == DynPart::Gun).unwrap().1;
+        assert_eq!((g.mode, g.range_db, g.floor_db), (DynMode::Lift, MAX_LIFT_DB, DYN_REF_DB));
+        assert!(g.threshold_db <= MAX_LIFT_THRESHOLD_DB);
+        // 0 dB: as the game mixes it — no gun band at all.
+        assert!(!effective_parts(&mw4(), &lvl(Some(0.0), None, None))
+            .iter()
+            .any(|(k, _)| *k == DynPart::Gun));
+        // Beyond the range is clamped, never applied as given.
+        let wild = effective_parts(&mw4(), &lvl(Some(-99.0), Some(99.0), None));
+        assert!(wild.iter().all(|(_, b)| b.range_db <= MAX_TAME_DB));
+        assert!(wild
+            .iter()
+            .filter(|(_, b)| b.mode == DynMode::Lift)
+            .all(|(_, b)| b.range_db <= MAX_LIFT_DB));
+    }
+
+    #[test]
+    fn explosions_and_footsteps_take_a_level_too() {
+        // Explosions at −20 reuse the learned 63 Hz band at a 20 dB cut.
+        let p = effective_parts(&mw4(), &lvl(None, Some(-20.0), None));
+        let b = p.iter().find(|(k, _)| *k == DynPart::Boom).unwrap().1;
+        assert_eq!((b.freq_hz, b.threshold_db, b.range_db), (63.0, -54.0, 20.0));
+        // Footsteps up with nothing learned: a default lift over the bed.
+        let s = effective_parts(&mw4(), &lvl(None, None, Some(6.0)));
+        let st = s.iter().find(|(k, _)| *k == DynPart::Steps).unwrap().1;
+        assert_eq!((st.mode, st.range_db), (DynMode::Lift, 6.0));
+        assert!(st.floor_db < st.threshold_db);
+        // Footsteps down: a cut over the footstep range.
+        let d = effective_parts(&mw4(), &lvl(None, None, Some(-10.0)));
+        let sd = d.iter().find(|(k, _)| *k == DynPart::Steps).unwrap().1;
+        assert_eq!((sd.mode, sd.range_db), (DynMode::Tame, 10.0));
+        // All three at once fit the band budget and the caps.
+        let all = effective(&mw4(), &lvl(Some(-24.0), Some(-24.0), Some(8.0))).unwrap();
+        assert!(all.bands.len() <= MAX_DYN_BANDS);
+        assert!(is_guarded(&all));
+        assert!(all.duck_lift, "a lift is held back while a cut acts");
+    }
+
+    #[test]
+    fn levels_round_trip_and_old_files_read() {
+        let t = lvl(Some(-12.5), None, Some(3.0));
+        let back: DynamicsTuning =
+            serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+        assert_eq!(back.level(DynPart::Boom), None);
+    }
+
+    #[test]
+    fn a_learned_gun_band_follows_gunshots_and_gets_no_twin() {
+        let s = learned();
+        let p = derive_dynamics(&s, Goal::Awareness).unwrap();
+        let guns = p.bands.iter().filter(|b| is_gun_band(b)).count();
+        if guns == 0 {
+            return; // this synthetic session learned none; covered above
+        }
+        let t = DynamicsTuning { gun: Some(2.0), tame: 0.0, ..Default::default() };
+        let e = effective(&p, &t).unwrap();
+        assert_eq!(e.bands.iter().filter(|b| is_gun_band(b)).count(), guns, "no extra band");
+        assert!(e.bands.iter().filter(|b| is_gun_band(b)).all(|b| b.range_db > 0.0));
+    }
+
+    #[test]
+    fn old_tunings_still_read() {
+        let t: DynamicsTuning =
+            serde_json::from_str(r#"{"enabled":true,"tame":1.5,"lift":0.5}"#).unwrap();
+        assert_eq!(t.gun, None);
+        assert!(!serde_json::to_string(&t).unwrap().contains("gun"));
     }
 
     #[test]
@@ -407,7 +813,15 @@ mod tests {
         assert_eq!(effective(&base, &off), None);
         let as_learned = effective(&base, &DynamicsTuning::default()).unwrap();
         assert_eq!(as_learned, base);
-        let max = DynamicsTuning { enabled: true, tame: 99.0, lift: f32::NAN };
+        let max = DynamicsTuning {
+            enabled: true,
+            tame: 99.0,
+            lift: f32::NAN,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         let m = effective(&base, &max).unwrap();
         for b in &m.bands {
             match b.mode {
@@ -415,7 +829,15 @@ mod tests {
                 DynMode::Lift => assert!(b.range_db <= MAX_LIFT_DB),
             }
         }
-        let none = DynamicsTuning { enabled: true, tame: 0.0, lift: 0.0 };
+        let none = DynamicsTuning {
+            enabled: true,
+            tame: 0.0,
+            lift: 0.0,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         assert_eq!(effective(&base, &none), None, "zero strength is inert");
     }
 

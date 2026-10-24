@@ -352,9 +352,28 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .eq .lbl span { position: absolute; transform: translateX(-50%); }
 .eq .lbl span:first-child { transform: none; }
 .eq .lbl span:last-child { transform: translateX(-100%); }
-.eq .band { position: absolute; top: 10px; padding: 4px 8px; border-radius: 4px; background: rgba(201,169,106,.12); border: 1px solid rgba(201,169,106,.3); color: var(--brass); font-size: 11.5px; }
+.eq .band { position: absolute; top: 34px; padding: 4px 8px; border-radius: 4px; background: rgba(201,169,106,.12); border: 1px solid rgba(201,169,106,.3); color: var(--brass); font-size: 11.5px; }
 .eq .leg { position: absolute; top: 12px; left: 14px; display: flex; gap: 14px; color: var(--mute); font-size: 11.5px; }
 .eq .leg i { display: inline-block; width: 14px; height: 2px; vertical-align: middle; margin-right: 6px; }
+/* The pointer readout: every layer at the frequency under the cursor. */
+.eq .readout { position: absolute; top: 64px; transform: translateX(-50%); min-width: 170px; max-width: 240px;
+  padding: 8px 10px; border-radius: 6px; background: var(--raised); border: 1px solid var(--line2);
+  color: var(--mute); font-size: 11.5px; line-height: 1.5; pointer-events: none; display: flex; flex-direction: column; }
+.eq .readout b { color: var(--ink); font-family: GeistMono; font-weight: 500; }
+.eq .readout small { color: var(--dim); font-size: 10.5px; margin-bottom: 4px; }
+.eq .readout span { font-family: GeistMono; font-variant-numeric: tabular-nums; }
+.eq .readout .tot { color: var(--ink); border-top: 1px solid var(--line); margin-top: 3px; padding-top: 3px; }
+/* The same layers as numbers, under the graph. */
+.eqtable { flex: none; margin-top: 10px; }
+.eqtable .note { margin: 0 0 6px; }
+.eqtable .tbl th, .eqtable .tbl td { text-align: right; font-size: 11.5px; padding-right: 8px; }
+.eqtable .tbl th:first-child, .eqtable .tbl td:first-child { text-align: left; width: auto; white-space: nowrap; font-family: Geist, sans-serif; }
+.eqtable .tbl td.up { color: var(--ok); }
+.eqtable .tbl td.down { color: var(--brass); }
+.eqtable .tbl tr.sum td { color: var(--ink); border-top: 1px solid var(--line2); }
+.eqtable .tbl tr.sum td.up { color: var(--ok); }
+.eqtable .tbl tr.sum td.down { color: var(--brass); }
+
 .ab { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .ab .btn { flex: 1; }
 .p { color: var(--mute); line-height: 1.55; }
@@ -491,6 +510,13 @@ button .mono, .btn .mono, .chip .mono { cursor: inherit; }
 .warnbanner.offer { align-items: flex-start; }
 .warnbanner.offer .goals { border-top: 0; padding: 0; }
 .warnbanner.hdrask { margin: 4px 0 10px; align-items: flex-start; }
+.lookstrength { margin: 6px 0 10px; }
+.lookstrength .note { margin: 4px 0 0; }
+.look-monitor .changes { margin: 8px 0 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--raised); }
+.look-monitor .changes .p { margin: 0 0 4px; }
+.look-monitor .changes ul { margin: 0; padding-left: 16px; color: var(--mute); font-size: 12px; line-height: 1.55; }
+.dyn .dynrow { margin-top: 6px; }
+.dyn .dynrow .note { margin: 2px 0 6px; }
 .warnbanner.offer .tn { display: block; margin-top: 6px; color: var(--mute); }
 .start .steps { margin: 6px 0 0; padding: 0; list-style: none; counter-reset: step; }
 .start .steps li {

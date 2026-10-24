@@ -71,6 +71,18 @@ pub enum GameEqAction {
         tame: Option<f32>,
         #[serde(default)]
         lift: Option<f32>,
+        /// Gunshots (owner 2026-10-24): scales learned gun bands, or adds
+        /// the gunfire band when none was learned.
+        #[serde(default)]
+        gun: Option<f32>,
+        /// Owner 2026-10-24: a level per part in dB, −24 (near silent) to
+        /// +8 (louder); 0 = as the game mixes it.
+        #[serde(default)]
+        gun_db: Option<f32>,
+        #[serde(default)]
+        boom_db: Option<f32>,
+        #[serde(default)]
+        steps_db: Option<f32>,
     },
 }
 
@@ -131,6 +143,14 @@ pub struct GameEqStatus {
     /// S49: the applied layer has a dynamic stage to tune.
     #[serde(default)]
     pub dynamics_available: bool,
+    /// The dynamic stage as learned or imported, before the player's
+    /// strengths: which parts (gunshots, explosions, footsteps) exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamics_learned: Option<relay_audio::params::DynamicsParams>,
+    /// Owner 2026-10-24: each part's level now and the bands that make it,
+    /// for the three sliders.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dynamics_parts: Vec<PartView>,
     /// The player's tuning of it (the default when none was set).
     #[serde(default)]
     pub dynamics_tuning: DynamicsTuning,
@@ -268,6 +288,38 @@ fn goal_of(profile: &Profile) -> Goal {
     profile.audio.game_eq_goal.unwrap_or_default()
 }
 
+/// One part (gunshots, explosions, footsteps) as the sliders show it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PartView {
+    pub part: relay_audio::learn::dynamics::DynPart,
+    /// dB now: negative = quieter, positive = louder, 0 = as mixed.
+    pub level_db: f32,
+    /// The player set this level (rather than it following what was learned).
+    pub set: bool,
+    /// Something was learned for this part.
+    pub learned: bool,
+    /// The bands that run for it now.
+    pub bands: Vec<relay_audio::params::DynBandParams>,
+}
+
+fn part_views(l: &GameEqLayer) -> Vec<PartView> {
+    use relay_audio::learn::dynamics::{effective_parts, part_level, part_of, DynPart};
+    let empty = relay_audio::params::DynamicsParams { bands: Vec::new(), duck_lift: false };
+    let base = l.dynamics.as_ref().unwrap_or(&empty);
+    let t = l.tuning();
+    let running = effective_parts(base, &t);
+    [DynPart::Gun, DynPart::Boom, DynPart::Steps]
+        .into_iter()
+        .map(|part| PartView {
+            part,
+            level_db: part_level(base, &t, part),
+            set: t.level(part).is_some(),
+            learned: base.bands.iter().any(|b| part_of(b) == part),
+            bands: running.iter().filter(|(p, _)| *p == part).map(|(_, b)| *b).collect(),
+        })
+        .collect()
+}
+
 /// The status of `profile`'s game EQ.
 pub fn status(paths: &Paths, profile: &Profile, learning_now: bool) -> GameEqStatus {
     status_with(load_record(paths, &profile.game.exe).as_ref(), profile, learning_now)
@@ -374,7 +426,10 @@ pub fn status_with(
         excluded,
         convergence,
         eta_secs,
-        dynamics_available: layer.is_some_and(|l| l.dynamics.is_some()),
+        // Any game layer can take a Gunshots strength, learned stage or not.
+        dynamics_available: layer.is_some(),
+        dynamics_learned: layer.and_then(|l| l.dynamics.clone()),
+        dynamics_parts: layer.map(part_views).unwrap_or_default(),
         dynamics_tuning: layer.map(|l| l.tuning()).unwrap_or_default(),
         dynamics: layer.and_then(|l| l.effective_dynamics()),
     }
@@ -532,14 +587,15 @@ pub fn apply_action(
                 ..Default::default()
             })
         }
-        GameEqAction::SetDynamics { enabled, tame, lift } => {
+        GameEqAction::SetDynamics { enabled, tame, lift, gun, gun_db, boom_db, steps_db } => {
+            // Levels need only a game layer (owner 2026-10-24): any part can be
+            // set whether or not the game taught Relay a band for it.
             let layer = profile
                 .audio
                 .game_eq
                 .as_mut()
-                .filter(|l| l.dynamics.is_some())
-                .context("there is no dynamic stage to tune yet")?;
-            for x in [tame, lift].into_iter().flatten() {
+                .context("there is no game EQ to tune yet: learn or import one first")?;
+            for x in [tame, lift, gun, gun_db, boom_db, steps_db].into_iter().flatten() {
                 if !x.is_finite() {
                     bail!("a strength must be a number");
                 }
@@ -553,6 +609,18 @@ pub fn apply_action(
             }
             if let Some(x) = lift {
                 t.lift = *x;
+            }
+            if let Some(x) = gun {
+                t.gun = Some(*x);
+            }
+            if let Some(x) = gun_db {
+                t.gun_db = Some(*x);
+            }
+            if let Some(x) = boom_db {
+                t.boom_db = Some(*x);
+            }
+            if let Some(x) = steps_db {
+                t.steps_db = Some(*x);
             }
             layer.dynamics_tuning = Some(t.clamped());
             done(true)
@@ -925,6 +993,51 @@ mod tests {
     }
 
     #[test]
+    fn part_levels_set_each_part_and_reach_the_chain() {
+        use relay_audio::learn::dynamics::DynPart;
+        let (paths, dir) = paths();
+        let mut p = profile();
+        save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
+            .unwrap();
+        apply_action(&paths, &mut p, &GameEqAction::Apply).unwrap();
+        let set = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: None,
+            lift: None,
+            gun: None,
+            gun_db: Some(-24.0),
+            boom_db: None,
+            steps_db: Some(5.0),
+        };
+        assert!(apply_action(&paths, &mut p, &set).unwrap().changed);
+        let s = status(&paths, &p, false);
+        let part = |k: DynPart| s.dynamics_parts.iter().find(|v| v.part == k).unwrap().clone();
+        let gun = part(DynPart::Gun);
+        assert_eq!((gun.level_db, gun.set), (-24.0, true));
+        assert!(gun.bands.iter().all(|b| b.range_db == 24.0));
+        let steps = part(DynPart::Steps);
+        assert_eq!((steps.level_db, steps.set), (5.0, true));
+        assert_eq!(steps.bands.iter().map(|b| b.range_db).fold(0.0, f32::max), 5.0);
+        assert!(!part(DynPart::Boom).set);
+        // The APO gets exactly these bands.
+        let chain = crate::audio_bridge::chain_params(&p.audio).dynamics.unwrap();
+        assert!(chain.bands.iter().any(|b| b.range_db == 24.0));
+        // A level outside the range is clamped, not refused.
+        let wild = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: None,
+            lift: None,
+            gun: None,
+            gun_db: Some(-80.0),
+            boom_db: None,
+            steps_db: None,
+        };
+        apply_action(&paths, &mut p, &wild).unwrap();
+        assert_eq!(status(&paths, &p, false).dynamics_tuning.gun_db, Some(-24.0));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn apply_takes_the_learned_stage_and_tuning_survives_new_offers() {
         let (paths, dir) = paths();
         let mut p = profile();
@@ -937,12 +1050,20 @@ mod tests {
         assert_eq!(s.dynamics_tuning, DynamicsTuning::default());
 
         // The player turns the lift down and the bursts up.
-        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(1.5), lift: Some(0.5) };
+        let tune = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(1.5),
+            lift: Some(0.5),
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         assert!(apply_action(&paths, &mut p, &tune).unwrap().changed);
         let s = status(&paths, &p, false);
         assert_eq!((s.dynamics_tuning.tame, s.dynamics_tuning.lift), (1.5, 0.5));
         let d = s.dynamics.unwrap();
-        assert_eq!(d.bands[0].range_db, 12.0, "9 dB x 1.5 = 13.5, capped at 12");
+        assert_eq!(d.bands[0].range_db, 13.5, "9 dB x 1.5 (cuts may reach 24 dB since 2026-10-24)");
         assert_eq!(d.bands[1].range_db, 3.0);
         // The chain the APO gets carries the tuned stage.
         assert_eq!(crate::audio_bridge::chain_params(&p.audio).dynamics, Some(d));
@@ -956,7 +1077,15 @@ mod tests {
         assert_eq!(s.dynamics.unwrap().bands[1].range_db, 2.0);
 
         // Off: the stage stays stored but nothing runs.
-        let off = GameEqAction::SetDynamics { enabled: Some(false), tame: None, lift: None };
+        let off = GameEqAction::SetDynamics {
+            enabled: Some(false),
+            tame: None,
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         apply_action(&paths, &mut p, &off).unwrap();
         let s = status(&paths, &p, false);
         assert!(s.dynamics_available && s.dynamics.is_none());
@@ -968,20 +1097,55 @@ mod tests {
     fn tuning_needs_a_stage_and_numbers() {
         let (paths, dir) = paths();
         let mut p = profile();
-        let tune = GameEqAction::SetDynamics { enabled: Some(true), tame: None, lift: None };
+        let tune = GameEqAction::SetDynamics {
+            enabled: Some(true),
+            tame: None,
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         assert!(apply_action(&paths, &mut p, &tune).is_err(), "nothing to tune");
         p.audio.game_eq =
             Some(GameEqLayer::learned(curve(1.0), None).with_dynamics(Some(stage(6.0))));
-        let nan = GameEqAction::SetDynamics { enabled: None, tame: Some(f32::NAN), lift: None };
+        let nan = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(f32::NAN),
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         assert!(apply_action(&paths, &mut p, &nan).is_err());
-        let wild = GameEqAction::SetDynamics { enabled: None, tame: Some(-3.0), lift: Some(50.0) };
+        let wild = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(-3.0),
+            lift: Some(50.0),
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         apply_action(&paths, &mut p, &wild).unwrap();
         let t = p.audio.game_eq.as_ref().unwrap().tuning();
         assert_eq!((t.tame, t.lift), (0.0, relay_audio::learn::dynamics::MAX_STRENGTH));
         // Wire form, as the UI sends it.
         let a: GameEqAction =
             serde_json::from_str(r#"{"kind":"set_dynamics","lift":0.25}"#).unwrap();
-        assert_eq!(a, GameEqAction::SetDynamics { enabled: None, tame: None, lift: Some(0.25) });
+        assert_eq!(
+            a,
+            GameEqAction::SetDynamics {
+                enabled: None,
+                tame: None,
+                lift: Some(0.25),
+                gun: None,
+                gun_db: None,
+                boom_db: None,
+                steps_db: None
+            }
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -994,7 +1158,15 @@ mod tests {
         save_record_at(&record_file(&paths, "Game.exe"), &ready_with_stage("Game.exe", 6.0))
             .unwrap();
         apply_action(&paths, &mut maker, &GameEqAction::Apply).unwrap();
-        let tune = GameEqAction::SetDynamics { enabled: None, tame: Some(0.5), lift: Some(1.5) };
+        let tune = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(0.5),
+            lift: Some(1.5),
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         apply_action(&paths, &mut maker, &tune).unwrap();
         let out = apply_action(&paths, &mut maker, &GameEqAction::Export { note: "x".into() })
             .unwrap()
@@ -1009,7 +1181,15 @@ mod tests {
             status(&paths, &maker, false).dynamics
         );
         // The friend can re-tune from the creator's base.
-        let mine = GameEqAction::SetDynamics { enabled: None, tame: Some(1.0), lift: None };
+        let mine = GameEqAction::SetDynamics {
+            enabled: None,
+            tame: Some(1.0),
+            lift: None,
+            gun: None,
+            gun_db: None,
+            boom_db: None,
+            steps_db: None,
+        };
         apply_action(&paths2, &mut friend, &mine).unwrap();
         let d = status(&paths2, &friend, false).dynamics.unwrap();
         assert_eq!(d.bands[0].range_db, 9.0);

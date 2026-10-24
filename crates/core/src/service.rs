@@ -1696,7 +1696,7 @@ fn tray_learning(g: &Inner) -> Option<crate::tray::TrayLearning> {
 /// goes through the ordinary capture → apply → restore path, so restore
 /// covers it exactly like a hand-set value.
 fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) -> Profile {
-    use crate::learned_display::{caps_for, overlay, realize_for, record_key};
+    use crate::learned_display::{caps_for, overlay, realize_for, record_key, scale_adjustments};
     let mut p = profile.clone();
     let Some(t) = target else { return p };
     if !p.display.follow_focus {
@@ -1725,7 +1725,8 @@ fn learned_profile(g: &Inner, profile: &Profile, target: Option<&MonitorProbe>) 
         .map(|m| m.name.clone())
         .unwrap_or_else(|| t.name.clone());
     let adj = realize_for(&look, &caps_for(&panel, &name, &t.id.0), hdr);
-    overlay(&mut p.display, &adj);
+    let strength = g.learn.game(&p.game.exe).map(|r| r.strength()).unwrap_or(1.0);
+    overlay(&mut p.display, &scale_adjustments(&adj, strength));
     p
 }
 
@@ -3182,6 +3183,7 @@ impl IpcHandler {
             Method::LearnDisplayStatus { ref exe }
             | Method::LearnDisplaySet { ref exe, .. }
             | Method::LearnDisplayHdr { ref exe, .. }
+            | Method::LearnDisplayStrength { ref exe, .. }
             | Method::LearnDisplayApply { ref exe }
             | Method::LearnDisplayRelearn { ref exe }
             | Method::LearnDisplayAutoApply { ref exe, .. }
@@ -3199,6 +3201,18 @@ impl IpcHandler {
                     return r;
                 }
                 sync_look(&mut g);
+                learn_reply(&g, &exe)
+            }
+            Method::LearnDisplayStrength { exe, strength } => {
+                if !strength.is_finite() {
+                    return Reply::Error { message: "the strength must be a number".into() };
+                }
+                g.learn.game_mut(&exe).strength =
+                    Some(strength.clamp(0.0, crate::learned_display::MAX_LOOK_STRENGTH));
+                if let Some(r) = save_learn(&mut g) {
+                    return r;
+                }
+                reapply_learned(&mut g);
                 learn_reply(&g, &exe)
             }
             Method::LearnDisplayHdr { exe, enabled } => {

@@ -40,8 +40,8 @@ export function fakeDisplayOptions(): DisplayOptions {
     ],
   };
 }
-import type { EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
-import { HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
+import type { DynamicsTuning, EndpointApo, GameEqAction, GameEqExport, GameEqLayer, GameEqStatus, LearnFileStatus, LearnView, LookTargets, VideoFile } from "../lib/ipc";
+import { HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, effectiveDynamics, partViews, VIDEO_LOCAL_ONLY, VIDEO_PRIVACY, devicePrefKey, newProfile, opEndpoint, opKind, summarize } from "../lib/ipc";
 import type { InvokeHandler } from "./tauriMock";
 
 /** The two render endpoints the fake APO card lists (S42). */
@@ -137,17 +137,9 @@ function profile(
 
 /** S49 status fields from a layer, scaling ranges by the tuning (and the
  *  core's caps: 12 dB tame, 8 dB lift) as the core does. */
-function fakeDynamics(l: GameEqLayer | undefined): Pick<GameEqStatus, "dynamics_available" | "dynamics_tuning" | "dynamics"> {
+function fakeDynamics(l: GameEqLayer | undefined): Pick<GameEqStatus, "dynamics_available" | "dynamics_tuning" | "dynamics" | "dynamics_learned" | "dynamics_parts"> {
   const t = { enabled: true, tame: 1, lift: 1, ...l?.dynamics_tuning };
-  const d = l?.dynamics;
-  const run = d && t.enabled ? {
-    ...d,
-    bands: d.bands.map((b) => ({
-      ...b,
-      range_db: Math.min(b.mode === "tame" ? 12 : 8, b.range_db * (b.mode === "tame" ? t.tame : t.lift)),
-    })),
-  } : null;
-  return { dynamics_available: !!d, dynamics_tuning: t, dynamics: run };
+  return { dynamics_available: !!l, dynamics_tuning: t, dynamics: effectiveDynamics(l), dynamics_learned: l?.dynamics ?? null, dynamics_parts: partViews(l) };
 }
 
 export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {}): FakeCore {
@@ -374,12 +366,17 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
           au.game_eq = { curve: rec.candidate, source: au.game_eq && au.game_eq.source !== "learned" ? "tuned" : "learned" };
           break;
         case "set_dynamics": {
-          if (!au.game_eq?.dynamics) throw new Error("there is no dynamic stage to tune yet");
-          const t = { enabled: true, tame: 1, lift: 1, ...au.game_eq.dynamics_tuning };
+          if (!au.game_eq) throw new Error("there is no game EQ to tune yet: learn or import one first");
+          const t: DynamicsTuning = { enabled: true, tame: 1, lift: 1, ...au.game_eq.dynamics_tuning };
           const clamp = (x: number) => Math.min(2, Math.max(0, x));
           if (action.enabled !== undefined) t.enabled = action.enabled;
           if (action.tame !== undefined) t.tame = clamp(action.tame);
           if (action.lift !== undefined) t.lift = clamp(action.lift);
+          if (action.gun !== undefined) t.gun = clamp(action.gun);
+          const db = (x: number) => Math.min(8, Math.max(-24, x));
+          if (action.gun_db !== undefined) t.gun_db = db(action.gun_db);
+          if (action.boom_db !== undefined) t.boom_db = db(action.boom_db);
+          if (action.steps_db !== undefined) t.steps_db = db(action.steps_db);
           au.game_eq = { ...au.game_eq, dynamics_tuning: t };
           break;
         }
@@ -462,6 +459,11 @@ export function makeFakeCore(overrides: Partial<Omit<FakeCore, "handler">> = {})
       v.enabled = Boolean(a.enabled);
       if (v.status === "off" && v.enabled) v.status = "learning";
       else if (v.status === "learning" && !v.enabled) v.status = "off";
+      return structuredClone(v);
+    },
+    learn_display_strength: (a) => {
+      const v = learnView(String(a.exe));
+      v.strength = Math.min(2, Math.max(0, Number(a.strength)));
       return structuredClone(v);
     },
     learn_display_hdr: (a) => {
@@ -839,7 +841,7 @@ export const KNOWN_COMMANDS: readonly string[] = [
   "update_status", "check_for_updates", "install_update", "update_later", "skip_update",
   "game_eq",
   "list_learn_videos", "pick_video_file", "learn_from_file", "learn_file_status", "learn_file_cancel",
-  "learn_display_status", "learn_display_set", "learn_display_hdr", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
+  "learn_display_status", "learn_display_set", "learn_display_hdr", "learn_display_strength", "learn_display_apply", "learn_display_relearn", "learn_display_auto_apply",
   "learn_display_reset", "learn_display_export", "learn_display_import",
   "start_share", "stop_share", "start_share_preset", "record", "save_replay",
   "switch_source", "set_mixer", "list_audio_devices", "set_audio_device", "list_presets", "save_preset", "delete_preset",
