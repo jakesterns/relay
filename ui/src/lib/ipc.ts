@@ -59,7 +59,7 @@ export type DynPart = "gun" | "boom" | "steps";
 /** Mirror of `game_eq::PartView`. */
 export interface PartView { part: DynPart; level_db: number; set: boolean; learned: boolean; bands: DynBandParams[] }
 export const PART_MIN_DB = -24;
-export const PART_MAX_DB = 8;
+export const PART_MAX_DB = 12;
 export const MAX_DYN_STRENGTH = 2;
 
 /** Mirror of `relay_audio::learn::dynamics::gunfire_band` at strength 1. */
@@ -84,7 +84,7 @@ function partBands(part: DynPart, level: number, learned: DynBandParams[]): DynB
     mode, freq_hz, q, threshold_db, ratio, range_db, floor_db,
     attack_ms: mode === "tame" ? 1 : 3, release_ms: mode === "tame" ? 120 : 80, enabled: true,
   });
-  const cut = Math.min(24, -lv), boost = Math.min(8, lv);
+  const cut = Math.min(24, -lv), boost = Math.min(12, lv);
   if (part !== "steps" && lv < 0) {
     const tames = mine.filter((b) => b.mode === "tame");
     if (tames.length) return tames.map((b) => ({ ...b, range_db: cut }));
@@ -121,7 +121,7 @@ export function partViews(l: GameEqLayer | undefined): PartView[] {
       const mine = base.filter((b) => partOf(b) === part);
       bands = part === "gun" && mine.length === 0
         ? (t.gun ? [{ ...GUNFIRE_BAND, range_db: Math.min(24, 6 * t.gun) }] : [])
-        : mine.map((b) => ({ ...b, range_db: Math.min(b.mode === "tame" ? 24 : 8, b.range_db * s) }));
+        : mine.map((b) => ({ ...b, range_db: Math.min(b.mode === "tame" ? 24 : 12, b.range_db * s) }));
     }
     bands = bands.filter((b) => b.range_db > 0);
     const derived = part === "gun"

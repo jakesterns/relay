@@ -573,7 +573,7 @@ function DynamicsControls({ status, disabled, onTune }: {
         );
       })}
       <p className="note">
-        −24 dB is near silent, 0 dB is the game's own mix, +8 dB is clearly louder. Cuts act only on the loud
+        −24 dB is near silent, 0 dB is the game's own mix, +12 dB is much louder. Cuts act only on the loud
         moments of that range, so other sounds there are left alone except while it is happening.
       </p>
     </div>
