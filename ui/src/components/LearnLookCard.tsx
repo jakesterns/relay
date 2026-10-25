@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Slider, Toggle } from "./Controls";
+import { Card, ConfirmButton, DoneNote, ErrorNote, Kv, Slider, Toggle, parseTyped } from "./Controls";
 import { errText } from "../lib/err";
 import { etaText } from "../lib/eta";
 import { api, HDR_NOTICE, LOOK_PRIVACY, TOURNAMENT_NOTICE, type LookAdjustments, type LearnView, type LookStatus, type MonitorLearnView } from "../lib/ipc";
@@ -170,6 +170,7 @@ export function LearnLookCard({ exe }: { exe: string | null }) {
         <div className="lookstrength" data-testid="look-strength">
           <Slider label="Look strength" value={strength} min={0} max={2} step={0.05}
             format={(v) => `${Math.round(v * 100)}%`} disabled={view === null}
+            parse={(t) => { const n = parseTyped(t); return n === null ? null : n / 100; }}
             onChange={sendStrength} />
           <p className="note">
             100% is what Relay learned, kept gentle on purpose. Raise it for a stronger change, lower it for less; 0% leaves the

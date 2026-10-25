@@ -1079,7 +1079,7 @@ function DisplaySection({ draft, update }: { draft: Profile | null; update: (fn:
               readout falls back to the level the profile stored, by name. */}
           <Slider label="Response" value={responseIx} min={0} max={Math.max(0, responseLevels.length - 1)}
             format={(v) => levelLabel(responseLevels.length ? responseLevels[v] : mon.response)}
-            disabled={off || responseLevels.length < 2}
+            disabled={off || responseLevels.length < 2} typeable={false}
             unset={responseLevels.length === 0 && mon.response === undefined}
             onChange={(v) => update((p) => {
               const level = responseLevels[v];
