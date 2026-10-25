@@ -218,7 +218,7 @@ function AudioSection({ draft, update, onGameEq }: {
         <Card title="Bands" action="Reset"
           onAction={() => update((p) => { p.audio.bands = []; })}>
           {UI_BANDS.map((u, i) => (
-            <Slider key={u.label} label={u.label} value={gains[i]} min={-12} max={12} step={0.5}
+            <Slider key={u.label} label={u.label} value={gains[i]} min={-12} max={12} step={0.1}
               format={dbFmt} disabled={off}
               onChange={(v) => update((p) => setGain(p, i, v))} />
           ))}
@@ -561,7 +561,7 @@ function DynamicsControls({ status, disabled, onTune }: {
             : " As learned for this game.";
         return (
           <div className="dynrow" data-testid={`dyn-${p}`} key={p}>
-            <Slider label={txt.label} value={levels[p]} min={PART_MIN_DB} max={PART_MAX_DB} step={0.5}
+            <Slider label={txt.label} value={levels[p]} min={PART_MIN_DB} max={PART_MAX_DB} step={0.1}
               format={levelText} disabled={disabled || !on}
               onChange={(x) => { setLevels((l) => ({ ...l, [p]: x })); send({ [field[p]]: x }); }} />
             <p className="note">
