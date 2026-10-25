@@ -60,19 +60,55 @@ export function Slider({ label, value, min, max, step = 1, format, onChange, dis
   format?: (v: number) => string; onChange?: (v: number) => void; disabled?: boolean;
   unset?: boolean;
 }) {
-  const pct = ((value - min) / (max - min)) * 100;
+  // Owner 2026-10-24: dragging felt stiff. While the pointer is down the
+  // thumb follows a local value at once, and the caller hears at most one
+  // change per frame (its re-render — graphs, tables — no longer sits between
+  // the pointer and the thumb). Late updates from the core cannot pull the
+  // thumb back mid-drag. Keys and plain change events still report at once.
+  const [live, setLive] = useState<number | null>(null);
+  const dragging = useRef(false);
+  const pending = useRef<number | null>(null);
+  const frame = useRef<number | null>(null);
+  const flush = () => {
+    if (frame.current !== null) { cancelAnimationFrame(frame.current); frame.current = null; }
+    if (pending.current !== null) { const v = pending.current; pending.current = null; onChange?.(v); }
+  };
+  const end = () => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    flush();
+    setLive(null);
+  };
+  useEffect(() => () => { if (frame.current !== null) cancelAnimationFrame(frame.current); }, []);
+  const shown = live ?? value;
+  const pct = ((shown - min) / (max - min)) * 100;
   return (
     <div className={"sl" + (disabled ? " dis" : "")}>
       <span>{label}</span>
       <div className="tr" style={{ "--w": `${pct}%` } as React.CSSProperties}>
         {!disabled && (
-          <input type="range" min={min} max={max} step={step} value={value} aria-label={label}
-            aria-valuetext={format ? format(value) : undefined}
-            onChange={(e) => onChange?.(Number(e.target.value))} />
+          <input type="range" min={min} max={max} step={step} value={shown} aria-label={label}
+            aria-valuetext={format ? format(shown) : undefined}
+            onPointerDown={() => {
+              dragging.current = true;
+              // The pointer may be released outside the track.
+              window.addEventListener("pointerup", end, { once: true });
+              window.addEventListener("pointercancel", end, { once: true });
+            }}
+            onPointerUp={end} onPointerCancel={end} onLostPointerCapture={end} onBlur={end}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (!dragging.current) { onChange?.(v); return; }
+              setLive(v);
+              pending.current = v;
+              if (frame.current === null) {
+                frame.current = requestAnimationFrame(() => { frame.current = null; flush(); });
+              }
+            }} />
         )}
       </div>
       <div className={"val" + (unset ? " unset" : "")}>
-        {unset ? "Not set" : (format ? format(value) : String(value))}
+        {unset ? "Not set" : (format ? format(shown) : String(shown))}
       </div>
     </div>
   );
