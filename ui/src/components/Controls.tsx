@@ -55,10 +55,14 @@ export function Toggle({ on, onChange, label, sub }: {
  * `value` is only where the thumb rests and printing it would claim a setting
  * nobody chose.
  */
-export function Slider({ label, value, min, max, step = 1, format, onChange, disabled, unset }: {
+export function Slider({ label, value, min, max, step = 1, format, parse = parseTyped, typeable = true, onChange, disabled, unset }: {
   label: string; value: number; min: number; max: number; step?: number;
   format?: (v: number) => string; onChange?: (v: number) => void; disabled?: boolean;
   unset?: boolean;
+  /** Typed text to a value, when `format` shows a scaled number (e.g. %). */
+  parse?: (s: string) => number | null;
+  /** False where typing a number makes no sense (a list of named levels). */
+  typeable?: boolean;
 }) {
   // Owner 2026-10-24: dragging felt stiff. While the pointer is down the
   // thumb follows a local value at once, and the caller hears at most one
@@ -81,11 +85,23 @@ export function Slider({ label, value, min, max, step = 1, format, onChange, dis
   };
   useEffect(() => () => { if (frame.current !== null) cancelAnimationFrame(frame.current); }, []);
   const shown = live ?? value;
-  const pct = ((shown - min) / (max - min)) * 100;
+  const frac = Math.min(1, Math.max(0, (shown - min) / (max - min)));
+  // Owner 2026-10-24: type an exact value. Click the number, type, Enter.
+  const [typed, setTyped] = useState<string | null>(null);
+  const editable = typeable && !!onChange && !disabled && !unset;
+  const commit = () => {
+    if (typed === null) return;
+    const v = parse(typed);
+    setTyped(null);
+    if (v === null) return;
+    const snapped = Math.round((Math.min(max, Math.max(min, v)) - min) / step) * step + min;
+    onChange?.(Number(snapped.toFixed(decimalsOf(step))));
+  };
+  const text = unset ? "Not set" : (format ? format(shown) : String(shown));
   return (
     <div className={"sl" + (disabled ? " dis" : "")}>
       <span>{label}</span>
-      <div className="tr" style={{ "--w": `${pct}%` } as React.CSSProperties}>
+      <div className="tr" style={{ "--w": `${frac * 100}%`, "--f": frac } as React.CSSProperties}>
         {!disabled && (
           <input type="range" min={min} max={max} step={step} value={shown} aria-label={label}
             aria-valuetext={format ? format(shown) : undefined}
@@ -107,11 +123,41 @@ export function Slider({ label, value, min, max, step = 1, format, onChange, dis
             }} />
         )}
       </div>
-      <div className={"val" + (unset ? " unset" : "")}>
-        {unset ? "Not set" : (format ? format(shown) : String(shown))}
-      </div>
+      {editable && typed !== null ? (
+        <input className="val num" type="text" inputMode="decimal" autoFocus value={typed}
+          aria-label={`${label}, type a value from ${min} to ${max}`}
+          onFocus={(e) => e.currentTarget.select()}
+          onChange={(e) => setTyped(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            else if (e.key === "Escape") { e.preventDefault(); setTyped(null); }
+          }} />
+      ) : editable ? (
+        <button type="button" className="val edit" title="Click to type an exact value"
+          aria-label={`${label}: ${text}. Type an exact value`}
+          onClick={() => setTyped(format ? text : String(Number(shown.toFixed(decimalsOf(step)))))}>
+          {text}
+        </button>
+      ) : (
+        <div className={"val" + (unset ? " unset" : "")}>{text}</div>
+      )}
     </div>
   );
+}
+
+/** A typed slider value as a number: accepts "+3", "-2.5", "−4 dB", "150%"
+ *  (read as typed). `null` when there is no number in it. */
+export function parseTyped(s: string): number | null {
+  const m = s.replace(/−/g, "-").replace(",", ".").match(/[-+]?\d*\.?\d+/);
+  if (!m) return null;
+  const v = Number(m[0]);
+  return Number.isFinite(v) ? v : null;
+}
+
+function decimalsOf(step: number): number {
+  const s = String(step);
+  return s.includes(".") ? s.length - s.indexOf(".") - 1 : 0;
 }
 
 export function Chips<T extends string>({ label, value, options, onChange }: {
