@@ -90,11 +90,11 @@ first and reapply.)
 
 ## Owner checklist
 
-1. **Before applying:** add Windows version resources (ProductName "Relay",
-   ProductVersion) to `relay-share.exe`, `relay-preview.exe`, `relay_apo.dll`
-   and `relay_vdevice.dll` - today only relay-core's three binaries and
-   relay-ui carry them, and SignPath Foundation enforces product name and
-   version on every signed file. Enable MFA on GitHub if not already on.
+1. **Before applying:** enable MFA on GitHub if not already on. (Version
+   resources - ProductName "Relay", ProductVersion - are on all eight signed
+   files since 7608f73, 2026-09-30, via `build-support/versioninfo.rs`;
+   checked on the installed build 2026-11-10. SignPath Foundation enforces
+   both on every signed file.)
 2. **Apply:** paste the answers above into <https://signpath.org/apply> and submit.
 3. **When approved:** in SignPath, enable MFA; create the project (slug e.g.
    `relay`), link the GitHub repository as a trusted build system, add two

@@ -50,7 +50,8 @@ pub fn covers(window: Rect, monitor: Rect) -> bool {
 /// Never offered, and focusing one keeps the current offer: Relay's own
 /// windows (the user Alt-Tabs to Relay to act on the offer) and the Windows
 /// shell surfaces that come forward on their own — the desktop, Start,
-/// search, the lock screen, the task switcher.
+/// search, the lock screen, the task switcher — and the full-screen overlays
+/// that open over a game (Snipping Tool, Game Bar, GPU overlays).
 const KEEP_OFFER: &[&str] = &[
     "relay-ui.exe",
     "relay-core.exe",
@@ -67,6 +68,25 @@ const KEEP_OFFER: &[&str] = &[
     "textinputhost.exe",
     "applicationframehost.exe",
     "dwm.exe",
+    // Full-screen overlays that open over a game (owner 2026-10-23: the
+    // Snipping Tool was offered a profile). Each covers the monitor while it
+    // is up, so the full-screen test alone would offer it.
+    "screenclippinghost.exe",
+    "snippingtool.exe",
+    "screensketch.exe",
+    "gamebar.exe",
+    "gamebarftserver.exe",
+    "xboxgamebarwidgets.exe",
+    "xboxpcappft.exe",
+    "shellhost.exe",
+    "widgets.exe",
+    "widgetboard.exe",
+    "magnify.exe",
+    "osk.exe",
+    "nvidia overlay.exe",
+    "nvidia share.exe",
+    "radeonsoftware.exe",
+    "amdrsserv.exe",
 ];
 
 fn is_shell_or_relay(exe: &str) -> bool {
@@ -223,6 +243,16 @@ mod tests {
         assert_eq!(decide(None, seen("relay-ui.exe", true), none, &[]), None);
         assert_eq!(decide(None, seen("explorer.exe", true), none, &[]), None);
         assert_eq!(decide(None, seen("", true), none, &[]), None);
+    }
+
+    #[test]
+    fn full_screen_overlays_are_never_offered_and_keep_the_game_offer() {
+        for exe in ["ScreenClippingHost.exe", "SnippingTool.exe", "GameBar.exe", "XboxGameBarWidgets.exe", "NVIDIA Overlay.exe"] {
+            assert_eq!(decide(None, seen(exe, true), none, &[]), None, "{exe}");
+        }
+        let offer = decide(None, seen("cod.exe", true), none, &[]);
+        let kept = decide(offer.as_ref(), seen("ScreenClippingHost.exe", true), none, &[]);
+        assert_eq!(kept.map(|s| s.exe), Some("cod.exe".to_string()));
     }
 
     #[test]
