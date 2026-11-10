@@ -247,7 +247,13 @@ mod tests {
 
     #[test]
     fn full_screen_overlays_are_never_offered_and_keep_the_game_offer() {
-        for exe in ["ScreenClippingHost.exe", "SnippingTool.exe", "GameBar.exe", "XboxGameBarWidgets.exe", "NVIDIA Overlay.exe"] {
+        for exe in [
+            "ScreenClippingHost.exe",
+            "SnippingTool.exe",
+            "GameBar.exe",
+            "XboxGameBarWidgets.exe",
+            "NVIDIA Overlay.exe",
+        ] {
             assert_eq!(decide(None, seen(exe, true), none, &[]), None, "{exe}");
         }
         let offer = decide(None, seen("cod.exe", true), none, &[]);
